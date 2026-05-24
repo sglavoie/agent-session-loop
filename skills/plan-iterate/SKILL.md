@@ -12,10 +12,10 @@ Refine a markdown implementation plan through iterative Q&A. Assess the plan's c
 
 ## Input
 
-The user provides a plan file path. In Claude slash-command usage, this value is `$ARGUMENTS`. Example:
+The user provides a plan file path as the host agent command or skill invocation argument. Example:
 
 ```
-/plan-iterate ~/.claude-personal/plans/tranquil-singing-lantern.md
+plan-iterate /tmp/agent-plans/tranquil-singing-lantern.md
 ```
 
 ## Instructions
@@ -198,7 +198,7 @@ Dimensions improved:
 Remaining gaps (if any):
 - <dimension>: still thin -- consider addressing during execution
 
-Next step: `session-split <plan-path>` (Claude slash command: `/session-split <plan-path>`)
+Next step: `session-split <plan-path>`
 ```
 
 If the plan has session markers, remind the user they can proceed to `session-split`. If the plan does not have session markers, note that `session-split` can propose session boundaries.

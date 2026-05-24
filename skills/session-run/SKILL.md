@@ -12,10 +12,10 @@ Execute the next pending session from a split plan directory. Picks the first se
 
 ## Input
 
-The user provides a plan directory path. In Claude slash-command usage, this value is `$ARGUMENTS`. Example:
+The user provides a plan directory path as the host agent command or skill invocation argument. Example:
 
 ```
-/session-run ~/.claude-personal/plans/tranquil-singing-lantern/
+session-run /tmp/agent-plans/tranquil-singing-lantern-abc123def456/
 ```
 
 ## Instructions

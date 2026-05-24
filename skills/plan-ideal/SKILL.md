@@ -16,10 +16,10 @@ Use before the `plan-iterate` skill to inform what to prioritize, or standalone 
 
 ## Input
 
-The user provides a plan file path. In Claude slash-command usage, this value is `$ARGUMENTS`. Example:
+The user provides a plan file path as the host agent command or skill invocation argument. Example:
 
 ```
-/plan-ideal ~/.claude-personal/plans/tranquil-singing-lantern.md
+plan-ideal /tmp/agent-plans/tranquil-singing-lantern.md
 ```
 
 ## Instructions
@@ -197,7 +197,7 @@ into the codebase. Write this as a compelling description, not a checklist.>
 - What would a phased approach look like if the user wanted to eventually
   reach the ideal?>
 
-Next step: `plan-iterate <plan-path>` (Claude slash command: `/plan-iterate <plan-path>`)
+Next step: `plan-iterate <plan-path>`
 ```
 
 ## Important Notes

@@ -8,19 +8,54 @@ allowed-tools: Bash, Read, Write
 
 ## Purpose
 
-Parse a multi-session plan file and split it into a directory of smaller, self-contained files: shared context, individual session files with handoff templates, and a manifest with ready-to-paste execution commands.
+Parse a multi-session plan file and split it into a collision-safe temporary directory of smaller, self-contained files: shared context, individual session files with handoff templates, and a manifest with ready-to-paste execution commands.
 
 ## Input
 
-The user provides a plan file path. In Claude slash-command usage, this value is `$ARGUMENTS`. Example:
+The user provides a plan file path. In host agent command or skill invocation usage, this value is the command argument. Example:
 
 ```
-/session-split ~/.claude-personal/plans/tranquil-singing-lantern.md
+session-split ./PLAN.md
 ```
 
 ## Instructions
 
-### Step 1: Read and Parse the Plan
+### Step 1: Discover the Resolver
+
+Find the `session-split` skill directory and resolver script before doing any work. Check these locations in order:
+
+1. `~/.codex/skills/session-split`
+2. `~/.copilot/skills/session-split`
+3. `~/.claude/skills/session-split`
+4. `~/.claude-personal/skills/session-split`
+5. `./skills/session-split`
+
+Use this discovery snippet:
+
+```bash
+skill_dir=""
+for candidate in \
+  "$HOME/.codex/skills/session-split" \
+  "$HOME/.copilot/skills/session-split" \
+  "$HOME/.claude/skills/session-split" \
+  "$HOME/.claude-personal/skills/session-split" \
+  "./skills/session-split"
+do
+  if [ -f "$candidate/scripts/resolve-plan-output.py" ]; then
+    skill_dir="$candidate"
+    break
+  fi
+done
+
+if [ -z "$skill_dir" ]; then
+  echo "ERROR: session-split resolver not found. Checked ~/.codex/skills/session-split, ~/.copilot/skills/session-split, ~/.claude/skills/session-split, ~/.claude-personal/skills/session-split, and ./skills/session-split." >&2
+  exit 1
+fi
+```
+
+Stop with that clear error if `scripts/resolve-plan-output.py` cannot be found.
+
+### Step 2: Read and Parse the Plan
 
 Read the entire plan file at the provided path.
 
@@ -39,21 +74,21 @@ Record:
 - **context**: all lines from the start of the file up to (but not including) the first session heading
 - **sessions**: for each session, capture the session number, title (text after the colon if any), heading level, and all lines from that heading until the next session heading or end of file
 
-### Step 2: Surface Scan
+### Step 3: Surface Scan
 
 Extracts file paths from the plan text, checks existence and line counts, and builds a per-session complexity profile.
 
 **Proportionality rule** (keeps small plans fast):
 
 - **< 5 file references total**: Skip this entire step
-- **5–15 references**: Run sub-steps 2a–2b only (defer 2c until sessions are defined)
+- **5–15 references**: Run sub-steps 3a–3b only (defer 3c until sessions are defined)
 - **> 15 references**: Run all sub-steps
 
 **Sub-steps:**
 
-**2a. Extract paths**: Scan the plan for backtick-quoted paths (e.g. `` `src/foo/bar.ts` ``) and bare paths in `**File:**` lines or list items. Deduplicate the results.
+**3a. Extract paths**: Scan the plan for backtick-quoted paths (e.g. `` `src/foo/bar.ts` ``) and bare paths in `**File:**` lines or list items. Deduplicate the results.
 
-**2b. Probe files**: For each extracted path, run:
+**3b. Probe files**: For each extracted path, run:
 
 ```bash
 wc -l <path> 2>/dev/null || echo "NEW"
@@ -61,7 +96,7 @@ wc -l <path> 2>/dev/null || echo "NEW"
 
 Record a tuple for each: `(path, lines | NEW, session_number)` — where `session_number` is the session the reference appeared in (or `0` for context).
 
-**2c. Per-session profile**: For each session compute:
+**3c. Per-session profile**: For each session compute:
 
 - Files touched (count)
 - Existing LoC sum (sum of line counts for existing files)
@@ -70,7 +105,7 @@ Record a tuple for each: `(path, lines | NEW, session_number)` — where `sessio
 
 **Explicit boundary**: Do NOT verify signatures, function names, or code patterns — that is `session-expand`'s job. This step only measures size and spread.
 
-### Step 3: Handle Edge Cases
+### Step 4: Handle Edge Cases
 
 **No session markers found**: Propose session boundaries using concrete data:
 
@@ -80,25 +115,50 @@ Record a tuple for each: `(path, lines | NEW, session_number)` — where `sessio
 4. Present the proposed session structure with per-session summaries: `<Title> -- <N> files, ~<L> existing lines, <subsystem(s)>`
 5. If surface scan was skipped (< 5 file references), fall back to heading/affinity grouping
 6. Ask the user for approval before proceeding
-7. Once approved, restructure the plan content accordingly and continue to Step 4
+7. Once approved, restructure the plan content accordingly and continue to Step 5
 
 **Single session found**: Tell the user: "Only 1 session found — splitting is not needed." Stop.
 
-**Two or more sessions found**: Continue to Step 4.
+**Two or more sessions found**: Continue to Step 5.
 
-### Step 4: Create Output Directory
+### Step 5: Resolve Output Directory
 
-Derive the plan name from the filename (strip the `.md` extension). Create the output directory in the existing shared plan store:
+Run the resolver and use its JSON output as the source of truth for all generated file paths:
 
 ```bash
-mkdir -p ~/.claude-personal/plans/<plan-name>/
+resolver_json="$(python3 "$skill_dir/scripts/resolve-plan-output.py" "<plan-file>")"
 ```
 
-If the directory already exists and contains files, warn the user and ask before overwriting.
+If the user explicitly provides a base directory, pass it through to the resolver with `--base-dir <dir>`.
 
-### Step 5: Write context.md
+The resolver creates a fresh collision-safe directory and never overwrites an existing output directory, so do not ask overwrite prompts.
 
-Write the context lines to `~/.claude-personal/plans/<plan-name>/context.md`.
+Extract these fields from `resolver_json` and keep them available for later steps:
+
+- `output_dir`
+- `source_path`
+- `source_fingerprint`
+- `content_sha256`
+- `slug`
+- `hash_prefix`
+
+If you need to parse fields in shell without extra dependencies, use Python stdlib:
+
+```bash
+output_dir="$(
+  RESOLVER_JSON="$resolver_json" python3 - <<'PY'
+import json
+import os
+print(json.loads(os.environ["RESOLVER_JSON"])["output_dir"])
+PY
+)"
+```
+
+Use `output_dir` for every generated file path. Use `source_path` as the canonical original plan path in generated content. Do not derive an alternate directory from the plan filename.
+
+### Step 6: Write context.md
+
+Write the context lines to `<output_dir>/context.md`.
 
 If context is empty (the plan starts directly with Session 1), write:
 
@@ -107,12 +167,12 @@ If context is empty (the plan starts directly with Session 1), write:
 
 _No shared context section found in the original plan._
 
-**Original plan**: `<original-path>`
+**Original plan**: `<source_path>`
 ```
 
-### Step 6: Write session-N.md Files
+### Step 7: Write session-N.md Files
 
-For each session, write `~/.claude-personal/plans/<plan-name>/session-N.md` where N is the actual session number from the heading.
+For each session, write `<output_dir>/session-N.md` where N is the actual session number from the heading.
 
 **File structure**:
 
@@ -146,14 +206,17 @@ Rules:
 - **Heading normalization**: if the original session heading was `###` level, promote all headings within the session by one level so the file reads naturally as a standalone document (session title becomes `#`, its `####` sub-sections become `##`, etc.)
 - Preserve fenced code blocks verbatim
 
-### Step 7: Write manifest.md
+### Step 8: Write manifest.md
 
-Write `~/.claude-personal/plans/<plan-name>/manifest.md`:
+Write `<output_dir>/manifest.md`:
 
 ````markdown
 # <Plan Title>
 
-**Split from**: `<original-path>`
+**Split from**: `<source_path>`
+**Output directory**: `<output_dir>`
+**Source fingerprint**: `<source_fingerprint>`
+**Content SHA-256**: `<content_sha256>`
 **Sessions**: <N>
 **Split date**: <YYYY-MM-DD>
 
@@ -170,14 +233,10 @@ Write `~/.claude-personal/plans/<plan-name>/manifest.md`:
 Run `session-run` once per session, preferably in a fresh harness conversation for each:
 
 ```text
-session-run ~/.claude-personal/plans/<plan-name>/
+session-run <output_dir>/
 ```
 
-Claude slash-command form:
-
-```markdown
-/session-run ~/.claude-personal/plans/<plan-name>/
-```
+Example rendered command: `session-run /tmp/.../agent-plans/<slug>-<hash>/`
 
 `session-run` auto-advances — it finds the next pending session, implements it, and updates the handoff. No session number needed. Repeat in new conversations until all sessions are complete.
 
@@ -204,7 +263,7 @@ Replace all `<placeholders>` with actual computed values.
 
 **Note**: Omit the Execution Weight section entirely if the surface scan was skipped (< 5 file references).
 
-### Step 8: Report Results
+### Step 9: Report Results
 
 Print a concise summary:
 

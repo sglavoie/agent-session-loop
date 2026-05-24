@@ -12,11 +12,11 @@ Research the actual codebase to validate and expand claims in session files prod
 
 ## Input
 
-The user provides a path. In Claude slash-command usage, this value is `$ARGUMENTS`. Two forms are accepted:
+The user provides a path as the host agent command or skill invocation argument. Two forms are accepted:
 
 ```
-/session-expand ~/.claude-personal/plans/my-plan/
-/session-expand ~/.claude-personal/plans/my-plan/session-2.md
+session-expand /tmp/agent-plans/my-plan-abc123def456/
+session-expand /tmp/agent-plans/my-plan-abc123def456/session-2.md
 ```
 
 - **Directory path**: expand all session files in the directory.
