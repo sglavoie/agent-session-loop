@@ -38,7 +38,7 @@ Run a single grep to extract all status lines (important, use the full path to g
 
 Parse the output to build a list of `(session-number, status)` pairs. Find the first session with status `pending`.
 
-- If **no sessions are pending** (all are `complete`): print "All sessions complete — nothing to run." and stop.
+- If **no sessions are pending** (all are `complete`): print `Next command: All sessions implemented - nothing left to run.` and stop.
 - If **no session files exist**: print an error and stop.
 
 ### Step 4: Load Session
@@ -86,8 +86,17 @@ Print a brief summary:
 
 1. Which session was completed (number and title)
 2. Files modified (short list)
-3. What session comes next, or "All sessions complete" if this was the last one
+3. What session comes next, or "All sessions implemented" if this was the last one
 4. Any blockers or notes for the next session — and, for each, name the file you injected it into (e.g., "Injected note for S3 into session-3.expand.md"). Do not put the note content itself in the report; the report only confirms where it was written.
+
+End every successful report with exactly one `Next command:` line:
+
+- If another pending session remains, print `Next command: session-run <plan-dir>/`
+- If no pending sessions remain, print `Next command: All sessions implemented - nothing left to run.`
+
+Before printing this line, re-check the session statuses after the current handoff update so the next action reflects the actual updated plan directory state.
+
+Use the original plan directory argument provided by the user for `<plan-dir>`, trimmed of whitespace and displayed with a trailing slash for directory readability.
 
 ## Important Notes
 
