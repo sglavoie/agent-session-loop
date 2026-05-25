@@ -15,8 +15,8 @@ Research the actual codebase to validate and expand claims in session files prod
 The user provides a path as the host agent command or skill invocation argument. Two forms are accepted:
 
 ```
-session-expand /tmp/agent-plans/my-plan-abc123def456/
-session-expand /tmp/agent-plans/my-plan-abc123def456/session-2.md
+session-expand ~/.local/share/agent-plans/my-plan-abc123def456/
+session-expand ~/.local/share/agent-plans/my-plan-abc123def456/session-2.md
 ```
 
 - **Directory path**: expand all session files in the directory.

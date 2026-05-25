@@ -17,13 +17,25 @@ HASH_PREFIX_LENGTH = 12
 
 
 def default_base_dir() -> str:
-    """Return the default directory used to store generated session plans."""
+    """Return the default directory used to store generated session plans.
+
+    Persistent by design — macOS purges $TMPDIR on reboot, which would destroy
+    in-flight multi-session plans. Resolution order:
+
+    1. AGENT_PLANS_DIR (explicit override)
+    2. $XDG_DATA_HOME/agent-plans (if set)
+    3. ~/.local/share/agent-plans
+    """
     agent_plans_dir = os.environ.get("AGENT_PLANS_DIR")
     if agent_plans_dir:
         return os.path.realpath(os.path.expanduser(agent_plans_dir))
 
-    tmpdir = os.environ.get("TMPDIR") or "/tmp"
-    return os.path.realpath(os.path.join(os.path.expanduser(tmpdir), DEFAULT_DIR_NAME))
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    if xdg_data_home:
+        base = os.path.join(os.path.expanduser(xdg_data_home), DEFAULT_DIR_NAME)
+    else:
+        base = os.path.join(os.path.expanduser("~/.local/share"), DEFAULT_DIR_NAME)
+    return os.path.realpath(base)
 
 
 def sanitize_slug(source_path: str) -> str:

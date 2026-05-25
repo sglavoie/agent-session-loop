@@ -15,7 +15,7 @@ Execute the next pending session from a split plan directory. Picks the first se
 The user provides a plan directory path as the host agent command or skill invocation argument. Example:
 
 ```
-session-run /tmp/agent-plans/tranquil-singing-lantern-abc123def456/
+session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/
 ```
 
 ## Instructions

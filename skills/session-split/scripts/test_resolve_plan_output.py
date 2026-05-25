@@ -78,6 +78,75 @@ class ResolvePlanOutputTest(unittest.TestCase):
             with self.subTest(filename=filename):
                 self.assertEqual(expected, resolver.sanitize_slug(filename))
 
+    def _swap_env(self, name: str, value: str | None) -> str | None:
+        """Set or unset an env var, returning its prior value for restoration."""
+        original = os.environ.get(name)
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+        return original
+
+    def _restore_env(self, name: str, original: str | None) -> None:
+        if original is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = original
+
+    def test_default_uses_xdg_data_home_when_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            orig_agent = self._swap_env("AGENT_PLANS_DIR", None)
+            orig_xdg = self._swap_env("XDG_DATA_HOME", tmp)
+            try:
+                self.assertEqual(
+                    os.path.realpath(os.path.join(tmp, "agent-plans")),
+                    resolver.default_base_dir(),
+                )
+            finally:
+                self._restore_env("AGENT_PLANS_DIR", orig_agent)
+                self._restore_env("XDG_DATA_HOME", orig_xdg)
+
+    def test_default_falls_back_to_local_share_when_xdg_unset(self) -> None:
+        orig_agent = self._swap_env("AGENT_PLANS_DIR", None)
+        orig_xdg = self._swap_env("XDG_DATA_HOME", None)
+        try:
+            result = resolver.default_base_dir()
+            self.assertTrue(
+                result.endswith(os.path.join(".local", "share", "agent-plans")),
+                f"expected default to end with .local/share/agent-plans, got {result}",
+            )
+        finally:
+            self._restore_env("AGENT_PLANS_DIR", orig_agent)
+            self._restore_env("XDG_DATA_HOME", orig_xdg)
+
+    def test_agent_plans_dir_wins_over_xdg(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent_dir = os.path.join(tmp, "agent")
+            xdg_dir = os.path.join(tmp, "xdg")
+            orig_agent = self._swap_env("AGENT_PLANS_DIR", agent_dir)
+            orig_xdg = self._swap_env("XDG_DATA_HOME", xdg_dir)
+            try:
+                self.assertEqual(os.path.realpath(agent_dir), resolver.default_base_dir())
+            finally:
+                self._restore_env("AGENT_PLANS_DIR", orig_agent)
+                self._restore_env("XDG_DATA_HOME", orig_xdg)
+
+    def test_default_does_not_use_tmpdir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            orig_agent = self._swap_env("AGENT_PLANS_DIR", None)
+            orig_xdg = self._swap_env("XDG_DATA_HOME", None)
+            orig_tmp = self._swap_env("TMPDIR", tmp)
+            try:
+                result = resolver.default_base_dir()
+                self.assertFalse(
+                    result.startswith(os.path.realpath(tmp)),
+                    f"default should ignore TMPDIR but got {result}",
+                )
+            finally:
+                self._restore_env("AGENT_PLANS_DIR", orig_agent)
+                self._restore_env("XDG_DATA_HOME", orig_xdg)
+                self._restore_env("TMPDIR", orig_tmp)
+
     def test_base_dir_overrides_environment_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env_base = os.path.join(tmp, "env-plans")

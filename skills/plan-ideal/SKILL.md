@@ -19,7 +19,7 @@ Use before the `plan-iterate` skill to inform what to prioritize, or standalone 
 The user provides a plan file path as the host agent command or skill invocation argument. Example:
 
 ```
-plan-ideal /tmp/agent-plans/tranquil-singing-lantern.md
+plan-ideal ~/.local/share/agent-plans/tranquil-singing-lantern.md
 ```
 
 ## Instructions

@@ -236,7 +236,7 @@ Run `session-run` once per session, preferably in a fresh harness conversation f
 session-run <output_dir>/
 ```
 
-Example rendered command: `session-run /tmp/.../agent-plans/<slug>-<hash>/`
+Example rendered command: `session-run ~/.local/share/agent-plans/<slug>-<hash>/`
 
 `session-run` auto-advances — it finds the next pending session, implements it, and updates the handoff. No session number needed. Repeat in new conversations until all sessions are complete.
 

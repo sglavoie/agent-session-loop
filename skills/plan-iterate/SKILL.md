@@ -15,7 +15,7 @@ Refine a markdown implementation plan through iterative Q&A. Assess the plan's c
 The user provides a plan file path as the host agent command or skill invocation argument. Example:
 
 ```
-plan-iterate /tmp/agent-plans/tranquil-singing-lantern.md
+plan-iterate ~/.local/share/agent-plans/tranquil-singing-lantern.md
 ```
 
 ## Instructions
