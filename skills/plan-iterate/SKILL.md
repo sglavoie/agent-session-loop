@@ -25,6 +25,7 @@ plan-iterate ~/.local/share/agent-plans/tranquil-singing-lantern.md
 Read the entire plan file at the provided path.
 
 Parse the plan to identify:
+
 - **Title**: the `# H1` heading
 - **Sections**: all `## H2` and `### H3` headings with their content
 - **Line count**: approximate size of the plan
@@ -65,6 +66,7 @@ For plans over ~80 lines: Are risks identified? Is there a rollback strategy or 
 For small plans (< 80 lines): This dimension is automatically adequate (small scope = low risk).
 
 **Scaling rules** — not all dimensions apply to every plan:
+
 - Plans under 30 lines: Only check dimensions 1, 3, and 7. Auto-mark 2, 4, 5, 6, 8 as adequate.
 - Plans 30-80 lines: Check dimensions 1-5 and 7. Auto-mark 6 and 8 as adequate unless the plan has session markers.
 - Plans over 80 lines: Check all 8 dimensions.
@@ -91,6 +93,7 @@ Weak areas: Scope Boundaries, Design Decisions, Edge Cases
 ```
 
 **If all dimensions are adequate**: Tell the user the plan looks solid. Use AskUserQuestion with:
+
 - question: "The plan scores well on all completeness dimensions. Would you like to refine it anyway, or proceed to the next step?"
 - header: "Plan status"
 - options:
@@ -110,6 +113,7 @@ Run up to **4 rounds** of question-and-edit cycles. Each round proceeds as follo
 Select the 2-3 weakest dimensions (prefer "missing" over "thin"). For each selected dimension, formulate one targeted question.
 
 **Question design rules**:
+
 - Reference specific parts of the plan by quoting short excerpts
 - Each question must have 2-3 options; the first option is the recommendation
 - Options must be concrete and plan-specific, not generic
@@ -118,41 +122,50 @@ Select the 2-3 weakest dimensions (prefer "missing" over "thin"). For each selec
 
 **Question templates by dimension** (adapt to the specific plan):
 
-*Context & Problem*:
+_Context & Problem_:
+
 - "The context section is [brief gap]. What is the core reason this change is needed?"
 - Options: 2-3 candidate problem statements derived from the plan content
 
-*Scope Boundaries*:
+_Scope Boundaries_:
+
 - "The plan doesn't clarify what is explicitly out of scope. Which of these should be excluded?"
 - Options: 2-3 plausible out-of-scope items inferred from the plan
 
-*File & Code References*:
+_File & Code References_:
+
 - "Step N mentions [vague reference] without a file path. Which file does this live in?"
 - Options: candidate files found via Grep/Glob, or "I'll specify the path"
 
-*Design Decisions*:
+_Design Decisions_:
+
 - "The plan [does X] but doesn't explain why over [alternative]. What drove this choice?"
 - Options: 2-3 alternative approaches with tradeoff descriptions
 
-*Edge Cases*:
+_Edge Cases_:
+
 - "What should happen when [specific edge case relevant to the plan]?"
 - Options: 2-3 concrete behaviors
 
-*Sequencing*:
+_Sequencing_:
+
 - "Sessions N and M seem to have a dependency on [shared resource]. Should Session N create it, or should it already exist?"
 - Options: reorder, add prerequisite step, or document assumption
 
-*Verification*:
+_Verification_:
+
 - "How should the implementation be verified? The plan currently has no verification section."
 - Options: test command suggestions, manual test steps, or "I'll add verification later"
 
-*Risk & Rollback*:
+_Risk & Rollback_:
+
 - "What is the main risk if this implementation goes wrong? How would you roll back?"
 - Options: specific risk scenarios with mitigation suggestions
 
 #### 4b. Present Questions
 
 Use AskUserQuestion with 2-3 questions. Each question:
+
 - `header`: the dimension name (abbreviated to max 12 chars: "Context", "Scope", "Files", "Decisions", "Edge Cases", "Sequencing", "Verification", "Risk")
 - `question`: the specific question text
 - `options`: 2-3 options, each with a label and description
@@ -167,6 +180,7 @@ Based on the user's answers, use the Edit tool to modify the plan markdown:
 - **Factual correction**: Fix inline (wrong file path, incorrect function name, etc.)
 
 **Edit rules**:
+
 - Preserve all existing content the user did not ask to change
 - Match the plan's existing style (heading levels, bullet format, code block conventions)
 - Keep edits minimal — add what the answer provides, do not generate extra content
@@ -176,6 +190,7 @@ Based on the user's answers, use the Edit tool to modify the plan markdown:
 #### 4d. Re-assess and Continue or Stop
 
 After applying edits, mentally re-assess the affected dimensions. If:
+
 - All dimensions are now adequate: proceed to Step 5 (final report)
 - Some dimensions are still thin/missing AND rounds remain: loop back to 4a
 - Max rounds (4) reached: proceed to Step 5
@@ -198,10 +213,10 @@ Dimensions improved:
 Remaining gaps (if any):
 - <dimension>: still thin -- consider addressing during execution
 
-Next step: `session-split <plan-path>`
+Next step: `/session-split <plan-path>`
 ```
 
-If the plan has session markers, remind the user they can proceed to `session-split`. If the plan does not have session markers, note that `session-split` can propose session boundaries.
+If the plan has session markers, remind the user they can proceed to `/session-split`. If the plan does not have session markers, note that `/session-split` can propose session boundaries.
 
 ## Important Notes
 

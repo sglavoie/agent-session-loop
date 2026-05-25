@@ -15,7 +15,7 @@ Parse a multi-session plan file and split it into a collision-safe temporary dir
 The user provides a plan file path. In host agent command or skill invocation usage, this value is the command argument. Example:
 
 ```
-session-split ./PLAN.md
+/session-split ./PLAN.md
 ```
 
 ## Instructions
@@ -230,15 +230,15 @@ Write `<output_dir>/manifest.md`:
 
 ## Execution
 
-Run `session-run` once per session, preferably in a fresh harness conversation for each:
+Run `/session-run` once per session, preferably in a fresh harness conversation for each:
 
 ```text
-session-run <output_dir>/
+/session-run <output_dir>/
 ```
 
-Example rendered command: `session-run ~/.local/share/agent-plans/<slug>-<hash>/`
+Example rendered command: `/session-run ~/.local/share/agent-plans/<slug>-<hash>/`
 
-`session-run` auto-advances — it finds the next pending session, implements it, and updates the handoff. No session number needed. Repeat in new conversations until all sessions are complete.
+`/session-run` auto-advances — it finds the next pending session, implements it, and updates the handoff. No session number needed. Repeat in new conversations until all sessions are complete.
 
 ## Token Budget
 
@@ -250,10 +250,11 @@ Example rendered command: `session-run ~/.local/share/agent-plans/<slug>-<hash>/
 ## Execution Weight
 
 | Session | Plan Lines | Files | Existing LoC | New Files | Subsystems | Weight |
-|---------|-----------|-------|-------------|-----------|------------|--------|
-| 1       | ~L        | F     | ~E          | N         | S          | W      |
+| ------- | ---------- | ----- | ------------ | --------- | ---------- | ------ |
+| 1       | ~L         | F     | ~E           | N         | S          | W      |
 
 Weight classification:
+
 - **light**: < 500 existing LoC AND <= 3 files
 - **heavy**: > 2000 existing LoC OR > 10 files OR >= 4 subsystems
 - **medium**: everything else
@@ -273,7 +274,7 @@ Print a concise summary:
 4. The ready-to-paste execution command (the "Execute All Sessions" block from manifest.md)
 5. Estimated token savings percentage
 6. If the Execution Weight table was generated, highlight any "heavy" session and suggest the user consider splitting it further
-7. Suggest running `session-expand <output-directory>` as the next step to validate file paths, signatures, and assumptions against the actual codebase before execution
+7. Suggest running `/session-expand <output-directory>` as the next step to validate file paths, signatures, and assumptions against the actual codebase before execution
 
 ## Important Notes
 
@@ -281,4 +282,4 @@ Print a concise summary:
 - Content preservation is paramount — only restructure, never rewrite
 - If a session contains "Exit criteria" or "Verification" sub-sections, they belong to that session (not to context)
 - Content between `---` horizontal rules that appears between context and the first session should go at the end of context.md
-- Always use `session-run` in generated execution instructions — it auto-advances through sessions and runs within the active harness conversation.
+- Always use `/session-run` in generated execution instructions — it auto-advances through sessions and runs within the active harness conversation.
