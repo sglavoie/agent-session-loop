@@ -8,15 +8,15 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 
 ## Purpose
 
-Research the actual codebase to validate and expand claims in session files produced by `/session-split`. For each session, verify that referenced file paths exist, function/struct/class names are correct, code patterns match reality, and inter-session dependencies are satisfiable. Write a concise annotations file alongside each session with findings, corrections, and concrete details (line numbers, exact signatures, patterns to reuse). Optionally fix issues in the session files.
+Research the actual codebase to validate and expand claims in session files produced by `session-split`. For each session, verify that referenced file paths exist, function/struct/class names are correct, code patterns match reality, and inter-session dependencies are satisfiable. Write a concise annotations file alongside each session with findings, corrections, and concrete details (line numbers, exact signatures, patterns to reuse). Optionally fix issues in the session files.
 
 ## Input
 
 The user provides a path as the host agent command or skill invocation argument. Two forms are accepted:
 
 ```
-/session-expand ~/.local/share/agent-plans/my-plan-abc123def456/
-/session-expand ~/.local/share/agent-plans/my-plan-abc123def456/session-2.md
+session-expand ~/.local/share/agent-plans/my-plan-abc123def456/
+session-expand ~/.local/share/agent-plans/my-plan-abc123def456/session-2.md
 ```
 
 - **Directory path**: expand all session files in the directory.
@@ -230,7 +230,7 @@ Print a concise summary:
 - Tell the user the plan is validated and they can proceed to execution
 - Note they can optionally read the `.expand.md` files for concrete line numbers and patterns
 
-**In both cases**, end by printing the ready-to-paste `/session-run <plan-directory>/` command so the user can proceed directly to execution without switching context.
+**In both cases**, end by printing the ready-to-paste `session-run <plan-directory>/` command so the user can proceed directly to execution without switching context.
 
 ## Important Notes
 

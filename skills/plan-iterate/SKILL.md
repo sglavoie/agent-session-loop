@@ -213,10 +213,10 @@ Dimensions improved:
 Remaining gaps (if any):
 - <dimension>: still thin -- consider addressing during execution
 
-Next step: `/session-split <plan-path>`
+Next step: `session-split <plan-path>`
 ```
 
-If the plan has session markers, remind the user they can proceed to `/session-split`. If the plan does not have session markers, note that `/session-split` can propose session boundaries.
+If the plan has session markers, remind the user they can proceed to `session-split`. If the plan does not have session markers, note that `session-split` can propose session boundaries.
 
 ## Important Notes
 

@@ -15,7 +15,7 @@ Execute the next pending session from a split plan directory. Picks the first se
 The user provides a plan directory path as the host agent command or skill invocation argument. Example:
 
 ```
-/session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/
+session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/
 ```
 
 ## Instructions
@@ -69,7 +69,7 @@ Use the Edit tool to update the handoff in place — do not rewrite the entire f
 
 ### Step 6b: Inject Notes for Future Sessions
 
-If during implementation you produced guidance, corrections, or discoveries that a **future** session needs (e.g., "Notes for S3", "Heads-up for S4", "S5 should use the new helper at X"), do **not** leave them inline in your chat response. They must be written into the target session file so the future `/session-run` invocation actually sees them.
+If during implementation you produced guidance, corrections, or discoveries that a **future** session needs (e.g., "Notes for S3", "Heads-up for S4", "S5 should use the new helper at X"), do **not** leave them inline in your chat response. They must be written into the target session file so the future `session-run` invocation actually sees them.
 
 For each note targeted at session M (where M > N):
 
@@ -91,7 +91,7 @@ Print a brief summary:
 
 End every successful report with exactly one `Next command:` line:
 
-- If another pending session remains, print `Next command: /session-run <plan-dir>/`
+- If another pending session remains, print `Next command: session-run <plan-dir>/`
 - If no pending sessions remain, print `Next command: All sessions implemented - nothing left to run.`
 
 Before printing this line, re-check the session statuses after the current handoff update so the next action reflects the actual updated plan directory state.
