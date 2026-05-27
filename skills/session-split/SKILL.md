@@ -12,13 +12,26 @@ Parse a multi-session plan and split it into a collision-safe persistent directo
 
 ## Input
 
-Preferred input is a plan file path. In host agent command or skill invocation usage, this value is the command argument. Example:
+Preferred input is a plan file path. In host agent command or skill invocation usage, this value is the command argument.
+
+Determine `<skill-prefix>` once for the active harness and use it for every user-facing skill invocation you print or write into generated files:
+
+- Codex: `$`
+- Copilot and Claude: `/`
+- Unknown harness: use the prefix from the user's invocation; if no prefix is visible, ask before printing or writing a ready-to-paste skill invocation
+
+Only prefix user-facing skill invocations. Do not prefix YAML names, skill directory paths, filenames, internal prose references to skill names, or shell commands that are not skill invocations.
+
+When printing commands or writing generated files, substitute the resolved prefix; never print or write the literal `<skill-prefix>` placeholder.
+
+Examples:
 
 ```
-session-split ./PLAN.md
+$session-split ./PLAN.md
+/session-split ./PLAN.md
 ```
 
-If the user invokes `session-split` with no readable plan path, use the most recent visible `<proposed_plan>...</proposed_plan>` block in the conversation as inline plan content. If the user pasted markdown with the invocation, use that pasted markdown. If no plan content is visible, ask the user to paste the plan text; do not invent or summarize a plan.
+If the user invokes this skill with no readable plan path, use the most recent visible `<proposed_plan>...</proposed_plan>` block in the conversation as inline plan content. If the user pasted markdown with the invocation, use that pasted markdown. If no plan content is visible, ask the user to paste the plan text; do not invent or summarize a plan.
 
 ## Instructions
 
@@ -93,7 +106,7 @@ PY
 )"
 ```
 
-Report the captured source path in the final summary so the user can reuse it with `plan-iterate`, `plan-ideal`, `session-expand`, or a later `session-split`.
+Report the captured source path in the final summary so the user can reuse it with `plan-iterate`, `plan-ideal`, `<skill-prefix>session-expand`, or a later `<skill-prefix>session-split`.
 
 ### Step 3: Read and Parse the Plan
 
@@ -270,15 +283,15 @@ Write `<output_dir>/manifest.md`:
 
 ## Execution
 
-Run `session-run` once per session, preferably in a fresh harness conversation for each:
+Run `<skill-prefix>session-run` once per session, preferably in a fresh harness conversation for each:
 
 ```text
-session-run <output_dir>/
+<skill-prefix>session-run <output_dir>/
 ```
 
-Example rendered command: `session-run ~/.local/share/agent-plans/<slug>-<hash>/`
+Example rendered command: `<skill-prefix>session-run ~/.local/share/agent-plans/<slug>-<hash>/`
 
-`session-run` auto-advances — it finds the next pending session, implements it, and updates the handoff. No session number needed. Repeat in new conversations until all sessions are complete.
+`<skill-prefix>session-run` auto-advances — it finds the next pending session, implements it, and updates the handoff. No session number needed. Repeat in new conversations until all sessions are complete.
 
 ## Token Budget
 
@@ -315,7 +328,7 @@ Print a concise summary:
 5. The ready-to-paste execution command (the "Execute All Sessions" block from manifest.md)
 6. Estimated token savings percentage
 7. If the Execution Weight table was generated, highlight any "heavy" session and suggest the user consider splitting it further
-8. Suggest running `session-expand <output-directory>` as the next step to validate file paths, signatures, and assumptions against the actual codebase before execution
+8. Suggest running `<skill-prefix>session-expand <output-directory>` as the next step to validate file paths, signatures, and assumptions against the actual codebase before execution
 
 ## Important Notes
 
@@ -324,4 +337,4 @@ Print a concise summary:
 - Content preservation is paramount — only restructure, never rewrite
 - If a session contains "Exit criteria" or "Verification" sub-sections, they belong to that session (not to context)
 - Content between `---` horizontal rules that appears between context and the first session should go at the end of context.md
-- Always use `session-run` in generated execution instructions — it auto-advances through sessions and runs within the active harness conversation.
+- Always use `<skill-prefix>session-run` in generated execution instructions — it auto-advances through sessions and runs within the active harness conversation.

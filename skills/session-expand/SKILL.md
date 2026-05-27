@@ -14,9 +14,23 @@ Research the actual codebase to validate and expand claims in session files prod
 
 The user provides a path as the host agent command or skill invocation argument. Two forms are accepted:
 
+Determine `<skill-prefix>` once for the active harness and use it for every user-facing skill invocation you print:
+
+- Codex: `$`
+- Copilot and Claude: `/`
+- Unknown harness: use the prefix from the user's invocation; if no prefix is visible, ask before printing a ready-to-paste skill invocation
+
+Only prefix user-facing skill invocations. Do not prefix YAML names, skill directory paths, filenames, internal prose references to skill names, or shell commands that are not skill invocations.
+
+When printing commands, substitute the resolved prefix; never print the literal `<skill-prefix>` placeholder.
+
+Examples:
+
 ```
-session-expand ~/.local/share/agent-plans/my-plan-abc123def456/
-session-expand ~/.local/share/agent-plans/my-plan-abc123def456/session-2.md
+$session-expand ~/.local/share/agent-plans/my-plan-abc123def456/
+$session-expand ~/.local/share/agent-plans/my-plan-abc123def456/session-2.md
+/session-expand ~/.local/share/agent-plans/my-plan-abc123def456/
+/session-expand ~/.local/share/agent-plans/my-plan-abc123def456/session-2.md
 ```
 
 - **Directory path**: expand all session files in the directory.
@@ -230,7 +244,7 @@ Print a concise summary:
 - Tell the user the plan is validated and they can proceed to execution
 - Note they can optionally read the `.expand.md` files for concrete line numbers and patterns
 
-**In both cases**, end by printing the ready-to-paste `session-run <plan-directory>/` command so the user can proceed directly to execution without switching context.
+**In both cases**, end by printing the ready-to-paste `<skill-prefix>session-run <plan-directory>/` command so the user can proceed directly to execution without switching context.
 
 ## Important Notes
 
