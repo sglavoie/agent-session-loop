@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config, events, harnesses, plans, responses, state
+from .formatting import format_duration_seconds
 
 
 NOT_IMPLEMENTED_EXIT = 2
@@ -763,14 +764,6 @@ def _append_event(event_path: Path, name: str, payload: dict[str, Any]) -> None:
     events.append_event(event_path, events.Event(name=name, payload=payload))
 
 
-def _format_seconds(value: Any) -> str:
-    try:
-        seconds = float(value)
-    except (TypeError, ValueError):
-        return "unknown"
-    return f"{seconds:.1f}s"
-
-
 def _local_timestamp(moment: datetime | None = None) -> str:
     value = datetime.now().astimezone() if moment is None else moment.astimezone()
     return value.strftime("%Y-%m-%d %H:%M:%S")
@@ -840,8 +833,8 @@ class _ProgressReporter:
         self._emit(
             f"session {heartbeat['session']} heartbeat "
             f"(turn {heartbeat['turn_index']}, "
-            f"elapsed {_format_seconds(heartbeat['elapsed_seconds'])}, "
-            f"idle {_format_seconds(heartbeat['idle_seconds'])}, "
+            f"elapsed {format_duration_seconds(heartbeat['elapsed_seconds'])}, "
+            f"idle {format_duration_seconds(heartbeat['idle_seconds'])}, "
             f"last activity {_format_local_datetime(heartbeat.get('last_activity_at'))}, "
             f"stream {stream})"
         )
@@ -861,7 +854,7 @@ class _ProgressReporter:
             f"(turn {turn['turn_index']}, "
             f"status {turn['status_result']}, "
             f"return code {turn['returncode']}, "
-            f"duration {_format_seconds(turn['duration_seconds'])})"
+            f"duration {format_duration_seconds(turn['duration_seconds'])})"
         )
 
     def commit_started(self, commit: dict[str, Any]) -> None:
@@ -877,7 +870,7 @@ class _ProgressReporter:
             f"({_progress_commit_label(commit)}, "
             f"status {commit['status_result']}, "
             f"sha {sha}, "
-            f"duration {_format_seconds(commit.get('duration_seconds'))})"
+            f"duration {format_duration_seconds(commit.get('duration_seconds'))})"
         )
 
     def run_finished(self, payload: dict[str, Any]) -> None:
@@ -887,7 +880,7 @@ class _ProgressReporter:
             f"{verb}: "
             f"run {payload['run_id']}, "
             f"reason {reason}, "
-            f"duration {_format_seconds(payload['duration_seconds'])}"
+            f"duration {format_duration_seconds(payload['duration_seconds'])}"
         )
 
 

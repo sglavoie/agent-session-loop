@@ -11,6 +11,7 @@ import time
 from typing import Any, TextIO
 
 from . import events, plans, state
+from .formatting import format_duration_seconds
 
 
 DEFAULT_LINES = 40
@@ -101,14 +102,6 @@ def _event_records_for_run(
     return [record for record in records if _matches_run(record, run_id)]
 
 
-def _format_seconds(value: Any) -> str:
-    try:
-        seconds = float(value)
-    except (TypeError, ValueError):
-        return "unknown"
-    return f"{seconds:.1f}s"
-
-
 def _parse_datetime(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
@@ -184,8 +177,8 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
         return (
             f"session {payload.get('session', 'unknown')} heartbeat "
             f"(turn {payload.get('turn_index', 'unknown')}, "
-            f"elapsed {_format_seconds(payload.get('elapsed_seconds'))}, "
-            f"idle {_format_seconds(payload.get('idle_seconds'))}, "
+            f"elapsed {format_duration_seconds(payload.get('elapsed_seconds'))}, "
+            f"idle {format_duration_seconds(payload.get('idle_seconds'))}, "
             f"last activity {_format_local_datetime(payload.get('last_activity_at'))}, "
             f"stream {stream})"
         )
@@ -204,7 +197,7 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
             f"(turn {payload.get('turn_index', 'unknown')}, "
             f"status {payload.get('status_result', 'unknown')}, "
             f"return code {payload.get('returncode', 'unknown')}, "
-            f"duration {_format_seconds(payload.get('duration_seconds'))})"
+            f"duration {format_duration_seconds(payload.get('duration_seconds'))})"
         )
     if name == events.COMMIT_STARTED_EVENT:
         return (
@@ -218,7 +211,7 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
             f"({_progress_commit_label(payload)}, "
             f"status {payload.get('status_result', 'unknown')}, "
             f"sha {sha}, "
-            f"duration {_format_seconds(payload.get('duration_seconds'))})"
+            f"duration {format_duration_seconds(payload.get('duration_seconds'))})"
         )
     if name == events.RUN_PAUSED_EVENT:
         detail = payload.get("message")
@@ -234,7 +227,7 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
         return (
             f"{verb}: run {payload.get('run_id', 'unknown')}, "
             f"reason {reason}, "
-            f"duration {_format_seconds(payload.get('duration_seconds'))}"
+            f"duration {format_duration_seconds(payload.get('duration_seconds'))}"
         )
 
     parts = [f"event {name}"]

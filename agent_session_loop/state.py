@@ -17,6 +17,7 @@ import sys
 from typing import Any
 
 from . import config, events, plans, responses
+from .formatting import format_duration_seconds
 
 
 LOCK_FILE_NAME = "lock.json"
@@ -358,14 +359,6 @@ def status_payload(
     )
 
 
-def _format_seconds(value: Any) -> str:
-    try:
-        seconds = float(value)
-    except (TypeError, ValueError):
-        return "unknown"
-    return f"{seconds:.1f}s"
-
-
 def _print_text_status(payload: dict[str, Any]) -> None:
     print(f"Plan: {payload['plan_dir']}")
     print(f"Plan hash: {payload['plan_hash']}")
@@ -396,8 +389,8 @@ def _print_text_status(payload: dict[str, Any]) -> None:
             "Active turn: "
             f"session {active_turn.get('session')} "
             f"turn {active_turn.get('turn_index')} "
-            f"elapsed {_format_seconds(active_turn.get('elapsed_seconds'))} "
-            f"idle {_format_seconds(active_turn.get('idle_seconds'))}"
+            f"elapsed {format_duration_seconds(active_turn.get('elapsed_seconds'))} "
+            f"idle {format_duration_seconds(active_turn.get('idle_seconds'))}"
         )
         print(f"  Last activity: {active_turn.get('last_activity_at') or 'none'}")
         action_required = active_turn.get("action_required")

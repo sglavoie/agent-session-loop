@@ -15,7 +15,8 @@ import time
 import unittest
 from unittest import mock
 
-from agent_session_loop import cli, config, events, harnesses, plans, runner, state
+from agent_session_loop import cli, config, events, harnesses, plans, runner, state, tail
+from agent_session_loop.formatting import format_duration_seconds
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -162,6 +163,52 @@ def wait_until(predicate, *, timeout: float = 5.0, interval: float = 0.05):
 
 
 class ParserAndStateTests(unittest.TestCase):
+    def test_format_duration_seconds_uses_seconds_minutes_and_hours(self) -> None:
+        cases = [
+            (None, "unknown"),
+            ("not-a-number", "unknown"),
+            (float("nan"), "unknown"),
+            (0, "0.0s"),
+            (12.34, "12.3s"),
+            (59.94, "59.9s"),
+            (59.95, "1m00s"),
+            (60, "1m00s"),
+            (65.4, "1m05s"),
+            (65.5, "1m06s"),
+            (5405, "1h30m05s"),
+        ]
+
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(expected, format_duration_seconds(value))
+
+    def test_tail_event_messages_format_long_durations(self) -> None:
+        heartbeat = tail._event_message(
+            events.TURN_HEARTBEAT_EVENT,
+            {
+                "session": 2,
+                "turn_index": 3,
+                "elapsed_seconds": 5405,
+                "idle_seconds": 65,
+                "last_activity_at": None,
+                "last_activity_stream": "stderr",
+            },
+        )
+        self.assertIn("elapsed 1h30m05s", heartbeat)
+        self.assertIn("idle 1m05s", heartbeat)
+
+        finished = tail._event_message(
+            "turn_finished",
+            {
+                "session": 2,
+                "turn_index": 3,
+                "status_result": "complete",
+                "returncode": 0,
+                "duration_seconds": 90,
+            },
+        )
+        self.assertIn("duration 1m30s", finished)
+
     def test_inspect_plan_sorts_exact_session_files_and_finds_next_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
