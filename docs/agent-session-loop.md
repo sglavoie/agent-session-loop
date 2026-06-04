@@ -84,10 +84,10 @@ a paused run by re-running the same command after fixing the blocker.
 ## Commands
 
 ```text
-agent-session-loop run PLAN_DIR --cwd REPO_ROOT [--harness codex|claude|copilot] [--timeout SEC] [--max-sessions N] [--state-dir DIR] [--unsafe-bypass] [--json] [--dry-run]
+agent-session-loop run PLAN_DIR --cwd REPO_ROOT [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--state-dir DIR] [--unsafe-bypass] [--json] [--dry-run]
 agent-session-loop status PLAN_DIR [--state-dir DIR] [--json]
 agent-session-loop tail PLAN_DIR [--state-dir DIR] [--lines N] [--no-follow]
-agent-session-loop doctor --harness codex|claude|copilot --cwd REPO_ROOT --plan-dir PLAN_DIR [--json]
+agent-session-loop doctor --harness codex|claude|copilot [--model MODEL] [--effort EFFORT] --cwd REPO_ROOT --plan-dir PLAN_DIR [--json]
 agent-session-loop unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
 ```
 
@@ -118,19 +118,19 @@ interpolation.
 Codex:
 
 ```text
-codex exec -C <cwd> --add-dir <plan-dir> -s workspace-write -o <last-message-file> <prompt>
+codex exec -C <cwd> --add-dir <plan-dir> -s workspace-write [--model <model>] [-c model_reasoning_effort="<effort>"] -o <last-message-file> <prompt>
 ```
 
 Claude:
 
 ```text
-claude --print --add-dir <plan-dir> --permission-mode dontAsk <prompt>
+claude --print --add-dir <plan-dir> --permission-mode dontAsk [--model <model>] [--effort <effort>] <prompt>
 ```
 
 Copilot:
 
 ```text
-copilot -C <cwd> --add-dir <plan-dir> --allow-all-tools --allow-all-paths --no-ask-user --silent -p <prompt>
+copilot -C <cwd> --add-dir <plan-dir> --allow-all-tools --allow-all-paths --no-ask-user --silent [--model <model>] [--effort <effort>] -p <prompt>
 ```
 
 Harness prompts use the expected skill prefix:
@@ -141,7 +141,11 @@ $session-run <plan-dir>/
 ```
 
 Codex writes a last-message file with `-o`. Claude and Copilot do not use that
-file, so their last-message capture falls back to stdout.
+file, so their last-message capture falls back to stdout. `--model` and
+`--effort` are passed to the harness only when supplied. Omitting `--model`
+preserves the native CLI default; reporting uses best-effort metadata from
+Codex `~/.codex/config.toml`, Copilot `~/.copilot/settings.json`, or
+`native CLI default` with source `unresolved` when the default cannot be read.
 
 ## Safety Modes
 
@@ -225,14 +229,21 @@ All parsed subcommands that support `--json` print JSON errors to stdout. Common
 error fields are `ok`, `command`, `reason`, `error`, `paused`, and `details`.
 `run --json` preserves its existing fields and adds the common `command` and
 `details` fields; important run fields include `paused`, `reason`,
-`pause_reason`, `pause_details`, `completed_sessions`, `turns`,
-`initial_snapshot`, `final_snapshot`, `state_path`, and `events_path`.
+`pause_reason`, `pause_details`, `model`, `model_source`, `effort`,
+`effort_source`, `completed_sessions`, `turns`, `initial_snapshot`,
+`final_snapshot`, `state_path`, and `events_path`. Dry-run `planned`
+payloads, harness invocation payloads, active turn state, events, and turn
+`result.json` artifacts include the same model and effort metadata. Source
+values are `flag`, `codex_config`, `copilot_settings`, and `unresolved`;
+omitted effort is reported as `null`.
 
 `status --json` reports parsed session state, hashes, state paths, and lock
 state. `doctor --json` reports the resolved harness executable, generated
-prompt, and argv without invoking the harness. `unlock --json` reports whether a
-lock existed, whether it was removed, whether it was active or stale, and the
-lock path.
+prompt, argv, and model/effort metadata without invoking the harness. Text
+`run` and `doctor` output print the selected model after `Harness:` and print
+effort only when an explicit effort was supplied. `unlock --json` reports
+whether a lock existed, whether it was removed, whether it was active or stale,
+and the lock path.
 
 ## Pause Semantics
 
@@ -266,7 +277,7 @@ agent-session-loop status ~/.local/share/agent-plans/example-plan/ --json
 Preview the next command without invoking the harness:
 
 ```bash
-agent-session-loop run ~/.local/share/agent-plans/example-plan/ --cwd "$PWD" --harness codex --dry-run
+agent-session-loop run ~/.local/share/agent-plans/example-plan/ --cwd "$PWD" --harness codex --dry-run --model gpt-5 --effort high
 ```
 
 Inspect the most recent artifacts named in `state.json` or the JSON output:

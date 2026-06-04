@@ -34,6 +34,8 @@ class HarnessInvocation:
     argv: list[str]
     cwd: Path
     last_message_path: Path | None = None
+    model: str | None = None
+    effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +77,8 @@ class HarnessAdapter:
         prompt: str,
         unsafe_bypass: bool = False,
         last_message_path: Path | None = None,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> list[str]:
         raise NotImplementedError
 
@@ -86,6 +90,8 @@ class HarnessAdapter:
         prompt: str,
         unsafe_bypass: bool = False,
         last_message_path: Path | None = None,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> HarnessInvocation:
         return HarnessInvocation(
             name=self.name,
@@ -95,9 +101,13 @@ class HarnessAdapter:
                 prompt=prompt,
                 unsafe_bypass=unsafe_bypass,
                 last_message_path=last_message_path,
+                model=model,
+                effort=effort,
             ),
             cwd=cwd,
             last_message_path=last_message_path,
+            model=model,
+            effort=effort,
         )
 
     def run(
@@ -110,6 +120,8 @@ class HarnessAdapter:
         last_message_path: Path | None = None,
         timeout: int | None = None,
         stream_callback: StreamCallback | None = None,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> HarnessResult:
         invocation = self.build_invocation(
             cwd=cwd,
@@ -117,6 +129,8 @@ class HarnessAdapter:
             prompt=prompt,
             unsafe_bypass=unsafe_bypass,
             last_message_path=last_message_path,
+            model=model,
+            effort=effort,
         )
         if invocation.last_message_path is not None:
             invocation.last_message_path.parent.mkdir(parents=True, exist_ok=True)
@@ -222,6 +236,8 @@ class CodexAdapter(HarnessAdapter):
         prompt: str,
         unsafe_bypass: bool = False,
         last_message_path: Path | None = None,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> list[str]:
         if last_message_path is None:
             raise HarnessError("codex adapter requires a last_message_path")
@@ -238,6 +254,10 @@ class CodexAdapter(HarnessAdapter):
             argv.append("--dangerously-bypass-approvals-and-sandbox")
         else:
             argv.extend(["-s", "workspace-write"])
+        if model is not None:
+            argv.extend(["--model", model])
+        if effort is not None:
+            argv.extend(["-c", f'model_reasoning_effort="{effort}"'])
         argv.extend(["-o", str(last_message_path), prompt])
         return argv
 
@@ -254,18 +274,25 @@ class ClaudeAdapter(HarnessAdapter):
         prompt: str,
         unsafe_bypass: bool = False,
         last_message_path: Path | None = None,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> list[str]:
         del cwd, last_message_path
         permission_mode = "bypassPermissions" if unsafe_bypass else "dontAsk"
-        return [
+        argv = [
             self.executable,
             "--print",
             "--add-dir",
             str(plan_dir),
             "--permission-mode",
             permission_mode,
-            prompt,
         ]
+        if model is not None:
+            argv.extend(["--model", model])
+        if effort is not None:
+            argv.extend(["--effort", effort])
+        argv.append(prompt)
+        return argv
 
 
 class CopilotAdapter(HarnessAdapter):
@@ -280,9 +307,11 @@ class CopilotAdapter(HarnessAdapter):
         prompt: str,
         unsafe_bypass: bool = False,
         last_message_path: Path | None = None,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> list[str]:
         del unsafe_bypass, last_message_path
-        return [
+        argv = [
             self.executable,
             "-C",
             str(cwd),
@@ -292,9 +321,13 @@ class CopilotAdapter(HarnessAdapter):
             "--allow-all-paths",
             "--no-ask-user",
             "--silent",
-            "-p",
-            prompt,
         ]
+        if model is not None:
+            argv.extend(["--model", model])
+        if effort is not None:
+            argv.extend(["--effort", effort])
+        argv.extend(["-p", prompt])
+        return argv
 
 
 def _read_last_message(path: Path | None) -> str:
@@ -327,6 +360,8 @@ def run_harness(
     last_message_path: Path | None = None,
     timeout: int | None = None,
     stream_callback: StreamCallback | None = None,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> HarnessResult:
     """Run one harness turn through the selected adapter."""
     return get_adapter(name).run(
@@ -337,4 +372,6 @@ def run_harness(
         last_message_path=last_message_path,
         timeout=timeout,
         stream_callback=stream_callback,
+        model=model,
+        effort=effort,
     )

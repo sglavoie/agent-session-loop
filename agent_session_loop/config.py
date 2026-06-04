@@ -6,6 +6,7 @@ from collections.abc import Mapping
 import json
 import os
 from pathlib import Path
+import tomllib
 from typing import Any
 
 
@@ -16,6 +17,12 @@ DEFAULT_HARNESS_EXECUTABLES = {
     "claude": "claude",
     "copilot": "copilot",
 }
+NATIVE_MODEL_DEFAULT = "native CLI default"
+MODEL_SOURCE_FLAG = "flag"
+MODEL_SOURCE_UNRESOLVED = "unresolved"
+MODEL_SOURCE_CODEX_CONFIG = "codex_config"
+MODEL_SOURCE_COPILOT_SETTINGS = "copilot_settings"
+EFFORT_SOURCE_FLAG = "flag"
 
 
 class ConfigError(Exception):
@@ -126,4 +133,84 @@ def harness_config_payload(path: str | Path | None = None) -> dict[str, Any]:
         "path": str(config_path),
         "present": config_path.exists(),
         "configured_harnesses": sorted(configured),
+    }
+
+
+def _unresolved_native_model_payload() -> dict[str, str]:
+    return {
+        "model": NATIVE_MODEL_DEFAULT,
+        "model_source": MODEL_SOURCE_UNRESOLVED,
+    }
+
+
+def _string_key(raw: Mapping[str, Any], key: str) -> str | None:
+    value = raw.get(key)
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _codex_native_model_payload() -> dict[str, str]:
+    config_path = Path("~/.codex/config.toml").expanduser()
+    try:
+        raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return _unresolved_native_model_payload()
+    if not isinstance(raw, Mapping):
+        return _unresolved_native_model_payload()
+    model = _string_key(raw, "model")
+    if model is None:
+        return _unresolved_native_model_payload()
+    return {"model": model, "model_source": MODEL_SOURCE_CODEX_CONFIG}
+
+
+def _copilot_native_model_payload() -> dict[str, str]:
+    config_path = Path("~/.copilot/settings.json").expanduser()
+    try:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return _unresolved_native_model_payload()
+    if not isinstance(raw, Mapping):
+        return _unresolved_native_model_payload()
+    model = _string_key(raw, "model")
+    if model is None:
+        return _unresolved_native_model_payload()
+    return {"model": model, "model_source": MODEL_SOURCE_COPILOT_SETTINGS}
+
+
+def native_model_payload(harness: str) -> dict[str, str]:
+    """Return best-effort metadata for the harness native model default."""
+    if harness == "codex":
+        return _codex_native_model_payload()
+    if harness == "copilot":
+        return _copilot_native_model_payload()
+    return _unresolved_native_model_payload()
+
+
+def selected_model_payload(harness: str, model: str | None) -> dict[str, str]:
+    """Return model metadata for a requested or native-default harness model."""
+    if model is not None:
+        return {"model": model, "model_source": MODEL_SOURCE_FLAG}
+    return native_model_payload(harness)
+
+
+def selected_effort_payload(effort: str | None) -> dict[str, str | None]:
+    """Return effort metadata for an explicitly requested harness effort."""
+    return {
+        "effort": effort,
+        "effort_source": EFFORT_SOURCE_FLAG if effort is not None else None,
+    }
+
+
+def model_effort_payload(
+    harness: str,
+    *,
+    model: str | None,
+    effort: str | None,
+) -> dict[str, str | None]:
+    """Return selected model and effort metadata for reporting surfaces."""
+    return {
+        **selected_model_payload(harness, model),
+        **selected_effort_payload(effort),
     }

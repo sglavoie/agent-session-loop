@@ -57,6 +57,8 @@ def build_harness_invocation(
     plan_dir: str | Path,
     unsafe_bypass: bool = False,
     last_message_path: str | Path | None = None,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> harnesses.HarnessInvocation:
     """Build the subprocess command for one pending-session harness turn."""
     canonical_cwd = plans.canonicalize_path(cwd)
@@ -73,6 +75,16 @@ def build_harness_invocation(
             if last_message_path is not None
             else None
         ),
+        model=model,
+        effort=effort,
+    )
+
+
+def _selected_model_effort_payload(args: argparse.Namespace) -> dict[str, str | None]:
+    return config.model_effort_payload(
+        args.harness,
+        model=getattr(args, "model", None),
+        effort=getattr(args, "effort", None),
     )
 
 
@@ -341,7 +353,17 @@ def _turn_paths(run_dir: Path, *, turn_index: int, session_number: int) -> dict[
     }
 
 
-def _build_invocation_payload(invocation: harnesses.HarnessInvocation) -> dict[str, Any]:
+def _build_invocation_payload(
+    invocation: harnesses.HarnessInvocation,
+    *,
+    model_effort: dict[str, str | None] | None = None,
+) -> dict[str, Any]:
+    if model_effort is None:
+        model_effort = config.model_effort_payload(
+            invocation.name,
+            model=invocation.model,
+            effort=invocation.effort,
+        )
     return {
         "name": invocation.name,
         "argv": invocation.argv,
@@ -351,6 +373,7 @@ def _build_invocation_payload(invocation: harnesses.HarnessInvocation) -> dict[s
             if invocation.last_message_path is not None
             else None
         ),
+        **model_effort,
     }
 
 
@@ -420,6 +443,10 @@ def _write_turn_artifacts(
         "session": session_number,
         "artifact_dir": str(paths["artifact_dir"]),
         "harness": result.name,
+        "model": live_turn.get("model"),
+        "model_source": live_turn.get("model_source"),
+        "effort": live_turn.get("effort"),
+        "effort_source": live_turn.get("effort_source"),
         "argv": result.argv,
         "returncode": result.returncode,
         "timed_out": result.timed_out,
@@ -780,6 +807,7 @@ def _initial_payload(
     cwd: Path,
     run_id: str,
 ) -> dict[str, Any]:
+    model_effort = _selected_model_effort_payload(args)
     return responses.success_payload(
         "run",
         paused=False,
@@ -799,6 +827,7 @@ def _initial_payload(
         plan_dir=str(snapshot.plan_dir),
         cwd=str(cwd),
         harness=args.harness,
+        **model_effort,
         state_dir=str(state_dir),
         run_dir=str(run_dir),
         event_path=str(event_path),
@@ -820,12 +849,14 @@ def _dry_run_payload(
     cwd: Path,
     run_dir: Path,
 ) -> dict[str, Any]:
+    model_effort = _selected_model_effort_payload(args)
     next_pending = snapshot.next_pending
     if next_pending is None:
         return {
             "next_pending": None,
             "prompt": None,
             "invocation": None,
+            **model_effort,
         }
 
     paths = _turn_paths(run_dir, turn_index=1, session_number=next_pending.number)
@@ -835,11 +866,17 @@ def _dry_run_payload(
         plan_dir=snapshot.plan_dir,
         unsafe_bypass=args.unsafe_bypass,
         last_message_path=paths["last_message"],
+        model=args.model,
+        effort=args.effort,
     )
     return {
         "next_pending": next_pending.number,
         "prompt": build_session_prompt(args.harness, snapshot.plan_dir),
-        "invocation": _build_invocation_payload(invocation),
+        "invocation": _build_invocation_payload(
+            invocation,
+            model_effort=model_effort,
+        ),
+        **model_effort,
     }
 
 
@@ -875,6 +912,10 @@ def _run_locked(
         {
             "plan_dir": str(snapshot.plan_dir),
             "harness": args.harness,
+            "model": payload["model"],
+            "model_source": payload["model_source"],
+            "effort": payload["effort"],
+            "effort_source": payload["effort_source"],
             "dry_run": args.dry_run,
             "max_sessions": max_sessions,
             "run_id": run_id,
@@ -960,6 +1001,10 @@ def _run_locked(
             "session": pending_session.number,
             "artifact_dir": str(paths["artifact_dir"]),
             "prompt": prompt,
+            "model": payload["model"],
+            "model_source": payload["model_source"],
+            "effort": payload["effort"],
+            "effort_source": payload["effort_source"],
             "stdout_path": str(paths["stdout"]),
             "stderr_path": str(paths["stderr"]),
             "last_message_path": str(paths["last_message"]),
@@ -1003,6 +1048,8 @@ def _run_locked(
                 last_message_path=paths["last_message"],
                 timeout=timeout,
                 stream_callback=stream_callback,
+                model=args.model,
+                effort=args.effort,
             )
         except Exception:
             live_turn.stop()
@@ -1225,6 +1272,7 @@ def _error_payload(
         completed_sessions=[],
         turns=[],
     )
+    payload.update(_selected_model_effort_payload(args))
     if snapshot is not None:
         state_dir = state.plan_state_dir(snapshot.plan_dir, args.state_dir)
         payload["state_dir"] = str(state_dir)
@@ -1239,10 +1287,26 @@ def _error_payload(
     return payload
 
 
+def _print_model_effort_lines(payload: dict[str, Any]) -> None:
+    model = payload.get("model")
+    model_source = payload.get("model_source")
+    if model is not None and model_source is not None:
+        print(f"Model: {model} ({model_source})")
+
+    effort = payload.get("effort")
+    if effort is not None:
+        effort_source = payload.get("effort_source")
+        if effort_source is None:
+            print(f"Effort: {effort}")
+        else:
+            print(f"Effort: {effort} ({effort_source})")
+
+
 def _print_text_outcome(payload: dict[str, Any]) -> None:
     print(f"Plan: {payload['plan_dir']}")
     if payload.get("harness") is not None:
         print(f"Harness: {payload['harness']}")
+        _print_model_effort_lines(payload)
     if payload.get("run_dir") is not None:
         print(f"Run dir: {payload['run_dir']}")
     if payload.get("state_path") is not None:
@@ -1393,18 +1457,18 @@ def _print_doctor_error(
     details: dict[str, Any] | None = None,
 ) -> int:
     if args.json:
-        responses.print_json(
-            responses.error_payload(
-                "doctor",
-                reason=reason,
-                error=str(error),
-                paused=False,
-                details=details,
-                harness=args.harness,
-                cwd=str(cwd) if cwd is not None else str(args.cwd),
-                plan_dir=str(plan_dir) if plan_dir is not None else str(args.plan_dir),
-            )
+        payload = responses.error_payload(
+            "doctor",
+            reason=reason,
+            error=str(error),
+            paused=False,
+            details=details,
+            harness=args.harness,
+            cwd=str(cwd) if cwd is not None else str(args.cwd),
+            plan_dir=str(plan_dir) if plan_dir is not None else str(args.plan_dir),
         )
+        payload.update(_selected_model_effort_payload(args))
+        responses.print_json(payload)
     else:
         print(f"agent-session-loop doctor: {error}", file=sys.stderr)
     return 1
@@ -1441,11 +1505,14 @@ def doctor_from_args(args: argparse.Namespace) -> int:
         last_message_path = (
             state.plan_state_dir(snapshot.plan_dir) / "last-message-doctor.txt"
         )
+        model_effort = _selected_model_effort_payload(args)
         invocation = build_harness_invocation(
             args.harness,
             cwd=cwd,
             plan_dir=snapshot.plan_dir,
             last_message_path=last_message_path,
+            model=args.model,
+            effort=args.effort,
         )
     except config.ConfigError as error:
         return _print_doctor_error(
@@ -1479,6 +1546,7 @@ def doctor_from_args(args: argparse.Namespace) -> int:
                 "doctor",
                 reason="ok",
                 harness=adapter.name,
+                **model_effort,
                 harness_config=harness_config,
                 executable=str(executable_path),
                 resolved_executable=str(executable_path),
@@ -1490,13 +1558,17 @@ def doctor_from_args(args: argparse.Namespace) -> int:
                     else None
                 ),
                 prompt=prompt,
-                invocation=_build_invocation_payload(invocation),
+                invocation=_build_invocation_payload(
+                    invocation,
+                    model_effort=model_effort,
+                ),
                 invocation_argv=invocation.argv,
             )
         )
         return 0
 
     print(f"Harness: {adapter.name}")
+    _print_model_effort_lines(model_effort)
     print(f"Harness config: {harness_config['path']}")
     configured_harnesses = harness_config["configured_harnesses"]
     if configured_harnesses:

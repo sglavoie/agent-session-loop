@@ -243,6 +243,30 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", unsafe)
         self.assertNotIn("workspace-write", unsafe)
 
+    def test_codex_command_includes_model_and_reasoning_effort_config(self) -> None:
+        adapter = harnesses.CodexAdapter(executable="codex")
+        cwd = Path("/tmp/repo")
+        plan_dir = Path("/tmp/plan")
+        prompt = "$session-run /tmp/plan/"
+        last_message = Path("/tmp/state/last-message-1.txt")
+
+        argv = adapter.build_argv(
+            cwd=cwd,
+            plan_dir=plan_dir,
+            prompt=prompt,
+            last_message_path=last_message,
+            model="gpt-5",
+            effort="high",
+        )
+
+        output_index = argv.index("-o")
+        self.assertEqual("gpt-5", argv[argv.index("--model") + 1])
+        self.assertEqual('model_reasoning_effort="high"', argv[argv.index("-c") + 1])
+        self.assertLess(argv.index("--model"), output_index)
+        self.assertLess(argv.index("-c"), output_index)
+        self.assertEqual(str(last_message), argv[output_index + 1])
+        self.assertEqual(prompt, argv[-1])
+
     def test_adapter_command_shapes_for_claude_and_copilot(self) -> None:
         cwd = Path("/tmp/repo")
         plan_dir = Path("/tmp/plan")
@@ -264,6 +288,37 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertIn("--allow-all-paths", copilot)
         self.assertEqual(str(cwd), copilot[copilot.index("-C") + 1])
 
+    def test_adapter_model_and_effort_flags_for_claude_and_copilot(self) -> None:
+        cwd = Path("/tmp/repo")
+        plan_dir = Path("/tmp/plan")
+
+        claude = harnesses.ClaudeAdapter(executable="claude").build_argv(
+            cwd=cwd,
+            plan_dir=plan_dir,
+            prompt="/session-run /tmp/plan/",
+            model="claude-opus-4",
+            effort="medium",
+        )
+        self.assertEqual("claude-opus-4", claude[claude.index("--model") + 1])
+        self.assertEqual("medium", claude[claude.index("--effort") + 1])
+        self.assertLess(claude.index("--model"), len(claude) - 1)
+        self.assertLess(claude.index("--effort"), len(claude) - 1)
+        self.assertEqual("/session-run /tmp/plan/", claude[-1])
+
+        copilot = harnesses.CopilotAdapter(executable="copilot").build_argv(
+            cwd=cwd,
+            plan_dir=plan_dir,
+            prompt="/session-run /tmp/plan/",
+            model="gpt-5",
+            effort="low",
+        )
+        prompt_index = copilot.index("-p")
+        self.assertEqual("gpt-5", copilot[copilot.index("--model") + 1])
+        self.assertEqual("low", copilot[copilot.index("--effort") + 1])
+        self.assertLess(copilot.index("--model"), prompt_index)
+        self.assertLess(copilot.index("--effort"), prompt_index)
+        self.assertEqual("/session-run /tmp/plan/", copilot[prompt_index + 1])
+
     def test_custom_harness_config_accepts_supported_shapes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "harnesses.json"
@@ -281,6 +336,48 @@ class CommandAndConfigTests(unittest.TestCase):
                         config.load_harness_config(config_path),
                     )
                     self.assertEqual(expected, config.configured_harness_executable("codex", config_path))
+
+    def test_native_model_payload_reads_codex_toml_and_copilot_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            codex_config = home / ".codex" / "config.toml"
+            copilot_settings = home / ".copilot" / "settings.json"
+            codex_config.parent.mkdir(parents=True)
+            copilot_settings.parent.mkdir(parents=True)
+            codex_config.write_text('model = "gpt-5-codex"\n', encoding="utf-8")
+            copilot_settings.write_text(
+                json.dumps({"model": "gpt-5-copilot"}),
+                encoding="utf-8",
+            )
+
+            with patched_env(HOME=str(home)):
+                self.assertEqual(
+                    {"model": "gpt-5-codex", "model_source": config.MODEL_SOURCE_CODEX_CONFIG},
+                    config.native_model_payload("codex"),
+                )
+                self.assertEqual(
+                    {
+                        "model": "gpt-5-copilot",
+                        "model_source": config.MODEL_SOURCE_COPILOT_SETTINGS,
+                    },
+                    config.native_model_payload("copilot"),
+                )
+
+    def test_native_model_payload_falls_back_when_missing_or_unreadable(self) -> None:
+        expected = {
+            "model": config.NATIVE_MODEL_DEFAULT,
+            "model_source": config.MODEL_SOURCE_UNRESOLVED,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            with patched_env(HOME=str(home)):
+                self.assertEqual(expected, config.native_model_payload("codex"))
+                self.assertEqual(expected, config.native_model_payload("copilot"))
+                self.assertEqual(expected, config.native_model_payload("claude"))
+
+                with mock.patch.object(Path, "read_text", side_effect=OSError("denied")):
+                    self.assertEqual(expected, config.native_model_payload("codex"))
+                    self.assertEqual(expected, config.native_model_payload("copilot"))
 
     def test_build_session_prompt_uses_harness_skill_prefix(self) -> None:
         self.assertTrue(runner.build_session_prompt("codex", "/tmp/plan").startswith("$session-run "))
@@ -318,6 +415,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         config_home: Path,
         timeout: int | None = None,
         max_sessions: int | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
         command = [
             sys.executable,
@@ -337,12 +437,18 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             command.extend(["--timeout", str(timeout)])
         if max_sessions is not None:
             command.extend(["--max-sessions", str(max_sessions)])
+        if model is not None:
+            command.extend(["--model", model])
+        if effort is not None:
+            command.extend(["--effort", effort])
 
         env = os.environ.copy()
         env["XDG_CONFIG_HOME"] = str(config_home)
         env["FAKE_CODEX_MODE"] = mode
         env["FAKE_CODEX_SLEEP"] = "5"
         env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+        if extra_env is not None:
+            env.update(extra_env)
 
         completed = subprocess.run(
             command,
@@ -362,6 +468,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         statuses: tuple[str, ...],
         timeout: int | None = None,
         max_sessions: int | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, object], Path, Path, Path]:
         plan_dir, state_dir, config_home, fake_codex = self.setup_loop(statuses=statuses)
         completed, payload = self.run_loop_command(
@@ -371,6 +480,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             config_home=config_home,
             timeout=timeout,
             max_sessions=max_sessions,
+            model=model,
+            effort=effort,
+            extra_env=extra_env,
         )
         return completed, payload, plan_dir, state_dir, fake_codex
 
@@ -396,6 +508,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         state_dir: Path,
         json_output: bool = False,
         max_sessions: int | None = None,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> list[str]:
         command = [
             sys.executable,
@@ -412,6 +526,10 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         ]
         if max_sessions is not None:
             command.extend(["--max-sessions", str(max_sessions)])
+        if model is not None:
+            command.extend(["--model", model])
+        if effort is not None:
+            command.extend(["--effort", effort])
         if json_output:
             command.append("--json")
         return command
@@ -486,6 +604,83 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             "- **Status**: pending",
             (plan_dir / "session-2.md").read_text(encoding="utf-8"),
         )
+
+    def test_json_run_reports_explicit_model_effort_metadata_and_argv(self) -> None:
+        completed, payload, _plan_dir, _state_dir, _fake_codex = self.run_loop(
+            mode="success",
+            statuses=("pending",),
+            max_sessions=1,
+            model="gpt-5",
+            effort="high",
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("gpt-5", payload["model"])
+        self.assertEqual(config.MODEL_SOURCE_FLAG, payload["model_source"])
+        self.assertEqual("high", payload["effort"])
+        self.assertEqual(config.EFFORT_SOURCE_FLAG, payload["effort_source"])
+
+        turn = payload["turns"][0]
+        self.assertEqual("gpt-5", turn["model"])
+        self.assertEqual(config.MODEL_SOURCE_FLAG, turn["model_source"])
+        self.assertEqual("high", turn["effort"])
+        self.assertEqual(config.EFFORT_SOURCE_FLAG, turn["effort_source"])
+        self.assertEqual("gpt-5", turn["argv"][turn["argv"].index("--model") + 1])
+        self.assertEqual(
+            'model_reasoning_effort="high"',
+            turn["argv"][turn["argv"].index("-c") + 1],
+        )
+
+        result_payload = json.loads(Path(turn["result_path"]).read_text(encoding="utf-8"))
+        self.assertEqual("gpt-5", result_payload["model"])
+        self.assertEqual(config.MODEL_SOURCE_FLAG, result_payload["model_source"])
+        self.assertEqual("high", result_payload["effort"])
+        self.assertEqual(config.EFFORT_SOURCE_FLAG, result_payload["effort_source"])
+
+        event_payloads = [
+            json.loads(line)
+            for line in Path(payload["events_path"]).read_text(encoding="utf-8").splitlines()
+        ]
+        for event_name in ("run_started", "turn_started", "turn_finished"):
+            with self.subTest(event_name=event_name):
+                event_payload = next(
+                    event["payload"] for event in event_payloads if event["name"] == event_name
+                )
+                self.assertEqual("gpt-5", event_payload["model"])
+                self.assertEqual(config.MODEL_SOURCE_FLAG, event_payload["model_source"])
+                self.assertEqual("high", event_payload["effort"])
+                self.assertEqual(config.EFFORT_SOURCE_FLAG, event_payload["effort_source"])
+
+    def test_json_run_reports_native_model_metadata_without_argv_flags(self) -> None:
+        home_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(home_tmp.cleanup)
+        home = Path(home_tmp.name)
+        codex_config = home / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text('model = "gpt-5-codex"\n', encoding="utf-8")
+
+        completed, payload, _plan_dir, _state_dir, _fake_codex = self.run_loop(
+            mode="success",
+            statuses=("pending",),
+            max_sessions=1,
+            extra_env={"HOME": str(home)},
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("gpt-5-codex", payload["model"])
+        self.assertEqual(config.MODEL_SOURCE_CODEX_CONFIG, payload["model_source"])
+        self.assertIsNone(payload["effort"])
+        self.assertIsNone(payload["effort_source"])
+
+        turn = payload["turns"][0]
+        self.assertEqual("gpt-5-codex", turn["model"])
+        self.assertEqual(config.MODEL_SOURCE_CODEX_CONFIG, turn["model_source"])
+        self.assertIsNone(turn["effort"])
+        self.assertIsNone(turn["effort_source"])
+        self.assertNotIn("--model", turn["argv"])
+        self.assertNotIn("-c", turn["argv"])
 
     def test_text_run_emits_human_progress_to_stderr(self) -> None:
         plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
@@ -925,7 +1120,78 @@ class JsonCliTests(unittest.TestCase):
             self.assertTrue(status_payload["state_path"].endswith("/state.json"))
             self.assertTrue(status_payload["events_path"].endswith("/events.jsonl"))
 
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(tmp_dir / "config")
+            env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
             run_completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_session_loop",
+                    "run",
+                    str(plan_dir),
+                    "--cwd",
+                    str(REPO_ROOT),
+                    "--state-dir",
+                    str(state_dir),
+                    "--dry-run",
+                    "--json",
+                    "--model",
+                    "gpt-5",
+                    "--effort",
+                    "high",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            run_payload = json.loads(run_completed.stdout)
+            self.assertTrue(run_payload["ok"])
+            self.assertEqual("run", run_payload["command"])
+            self.assertEqual({}, run_payload["details"])
+            self.assertEqual("dry-run", run_payload["reason"])
+            self.assertIn("harness_config", run_payload)
+            self.assertEqual("gpt-5", run_payload["model"])
+            self.assertEqual(config.MODEL_SOURCE_FLAG, run_payload["model_source"])
+            self.assertEqual("high", run_payload["effort"])
+            self.assertEqual(config.EFFORT_SOURCE_FLAG, run_payload["effort_source"])
+            self.assertEqual(1, run_payload["planned"]["next_pending"])
+            planned = run_payload["planned"]
+            invocation = planned["invocation"]
+            self.assertEqual("gpt-5", planned["model"])
+            self.assertEqual(config.MODEL_SOURCE_FLAG, planned["model_source"])
+            self.assertEqual("high", planned["effort"])
+            self.assertEqual(config.EFFORT_SOURCE_FLAG, planned["effort_source"])
+            self.assertEqual("gpt-5", invocation["model"])
+            self.assertEqual(config.MODEL_SOURCE_FLAG, invocation["model_source"])
+            self.assertEqual("high", invocation["effort"])
+            self.assertEqual(config.EFFORT_SOURCE_FLAG, invocation["effort_source"])
+            self.assertEqual("gpt-5", invocation["argv"][invocation["argv"].index("--model") + 1])
+            self.assertEqual(
+                'model_reasoning_effort="high"',
+                invocation["argv"][invocation["argv"].index("-c") + 1],
+            )
+            self.assertTrue(run_payload["state_path"].endswith("/state.json"))
+            self.assertTrue(run_payload["events_path"].endswith("/events.jsonl"))
+
+    def test_dry_run_json_reports_native_model_metadata_without_argv_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            home = tmp_dir / "home"
+            codex_config = home / ".codex" / "config.toml"
+            codex_config.parent.mkdir(parents=True)
+            codex_config.write_text('model = "gpt-5-codex"\n', encoding="utf-8")
+            write_plan(plan_dir, ("pending",))
+
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+            env["XDG_CONFIG_HOME"] = str(tmp_dir / "config")
+            env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+            completed = subprocess.run(
                 [
                     sys.executable,
                     "-m",
@@ -940,19 +1206,30 @@ class JsonCliTests(unittest.TestCase):
                     "--json",
                 ],
                 cwd=REPO_ROOT,
+                env=env,
                 text=True,
                 capture_output=True,
                 check=True,
             )
-            run_payload = json.loads(run_completed.stdout)
-            self.assertTrue(run_payload["ok"])
-            self.assertEqual("run", run_payload["command"])
-            self.assertEqual({}, run_payload["details"])
-            self.assertEqual("dry-run", run_payload["reason"])
-            self.assertIn("harness_config", run_payload)
-            self.assertEqual(1, run_payload["planned"]["next_pending"])
-            self.assertTrue(run_payload["state_path"].endswith("/state.json"))
-            self.assertTrue(run_payload["events_path"].endswith("/events.jsonl"))
+
+            payload = json.loads(completed.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertEqual("gpt-5-codex", payload["model"])
+            self.assertEqual(config.MODEL_SOURCE_CODEX_CONFIG, payload["model_source"])
+            self.assertIsNone(payload["effort"])
+            self.assertIsNone(payload["effort_source"])
+            planned = payload["planned"]
+            invocation = planned["invocation"]
+            self.assertEqual("gpt-5-codex", planned["model"])
+            self.assertEqual(config.MODEL_SOURCE_CODEX_CONFIG, planned["model_source"])
+            self.assertIsNone(planned["effort"])
+            self.assertIsNone(planned["effort_source"])
+            self.assertEqual("gpt-5-codex", invocation["model"])
+            self.assertEqual(config.MODEL_SOURCE_CODEX_CONFIG, invocation["model_source"])
+            self.assertIsNone(invocation["effort"])
+            self.assertIsNone(invocation["effort_source"])
+            self.assertNotIn("--model", invocation["argv"])
+            self.assertNotIn("-c", invocation["argv"])
 
     def test_status_json_error_goes_to_stdout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1009,6 +1286,10 @@ class JsonCliTests(unittest.TestCase):
                     "doctor",
                     "--harness",
                     "codex",
+                    "--model",
+                    "gpt-5",
+                    "--effort",
+                    "high",
                     "--cwd",
                     str(REPO_ROOT),
                     "--plan-dir",
@@ -1030,10 +1311,76 @@ class JsonCliTests(unittest.TestCase):
             self.assertEqual(str(REPO_ROOT), payload["cwd"])
             self.assertEqual(str(plans.canonicalize_path(plan_dir)), payload["plan_dir"])
             self.assertEqual(1, payload["next_pending"])
+            self.assertEqual("gpt-5", payload["model"])
+            self.assertEqual(config.MODEL_SOURCE_FLAG, payload["model_source"])
+            self.assertEqual("high", payload["effort"])
+            self.assertEqual(config.EFFORT_SOURCE_FLAG, payload["effort_source"])
             self.assertTrue(payload["prompt"].startswith("$session-run "))
             self.assertEqual(["codex"], payload["harness_config"]["configured_harnesses"])
             self.assertEqual(str(fake_codex), payload["invocation"]["argv"][0])
             self.assertEqual(payload["invocation"]["argv"], payload["invocation_argv"])
+            self.assertEqual("gpt-5", payload["invocation"]["model"])
+            self.assertEqual(config.MODEL_SOURCE_FLAG, payload["invocation"]["model_source"])
+            self.assertEqual("high", payload["invocation"]["effort"])
+            self.assertEqual(config.EFFORT_SOURCE_FLAG, payload["invocation"]["effort_source"])
+            self.assertEqual(
+                "gpt-5",
+                payload["invocation_argv"][payload["invocation_argv"].index("--model") + 1],
+            )
+            self.assertEqual(
+                'model_reasoning_effort="high"',
+                payload["invocation_argv"][payload["invocation_argv"].index("-c") + 1],
+            )
+
+    def test_doctor_text_outputs_model_effort_and_argv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            config_home = tmp_dir / "config"
+            config_path = config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            fake_codex = install_fake_codex(tmp_dir)
+            config_path.write_text(
+                json.dumps({"codex": {"executable": str(fake_codex)}}),
+                encoding="utf-8",
+            )
+            write_plan(plan_dir, ("pending",))
+
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(config_home)
+            env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_session_loop",
+                    "doctor",
+                    "--harness",
+                    "codex",
+                    "--model",
+                    "gpt-5",
+                    "--effort",
+                    "high",
+                    "--cwd",
+                    str(REPO_ROOT),
+                    "--plan-dir",
+                    str(plan_dir),
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            lines = completed.stdout.splitlines()
+            self.assertIn("Model: gpt-5 (flag)", lines)
+            self.assertIn("Effort: high (flag)", lines)
+            self.assertIn("Argv:", lines)
+            model_index = lines.index("  --model")
+            effort_index = lines.index("  -c")
+            self.assertEqual("  gpt-5", lines[model_index + 1])
+            self.assertEqual('  model_reasoning_effort="high"', lines[effort_index + 1])
 
     def test_doctor_json_error_goes_to_stdout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

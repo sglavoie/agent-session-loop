@@ -33,6 +33,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Agent harness to invoke",
     )
     run_parser.add_argument(
+        "--model",
+        help="Harness model to request",
+    )
+    run_parser.add_argument(
+        "--effort",
+        help="Harness reasoning effort to request",
+    )
+    run_parser.add_argument(
         "--timeout",
         type=int,
         help="Per-session harness timeout in seconds",
@@ -110,6 +118,14 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         choices=harnesses.HARNESS_NAMES,
         help="Agent harness to check",
+    )
+    doctor_parser.add_argument(
+        "--model",
+        help="Harness model to request",
+    )
+    doctor_parser.add_argument(
+        "--effort",
+        help="Harness reasoning effort to request",
     )
     doctor_parser.add_argument(
         "--cwd",
