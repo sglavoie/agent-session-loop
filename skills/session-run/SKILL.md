@@ -156,6 +156,14 @@ Print a brief summary:
 3. What session comes next, or "All sessions implemented" if this was the last one
 4. Any blockers or notes for the next session — and, for each, name the file you injected it into (e.g., "Injected note for S3 into session-3.expand.md"). Do not put the note content itself in the report; the report only confirms where it was written.
 
+For runner-friendly output, you may print one or more machine-readable lines immediately before the final `Next command:` line:
+
+- `Runner status: complete` after a successful session handoff update.
+- `Runner status: paused` when stopping without completing the selected session because user input, validation, plan repair, dependency resolution, or another recoverable intervention is required.
+- `RUNNER_PAUSE: <reason> - <short detail>` to describe a pause in a stable, grep-friendly form. Prefer existing fail-closed vocabulary such as `malformed-plan`, `unknown-status`, `lock-contention`, `blocked`, `unsafe`, `dependent`, or `unresolved-prerequisite` when it applies.
+
+These runner-readable lines are optional for manual use and must not replace the final `Next command:` line when that line is part of the report.
+
 End every successful report with exactly one `Next command:` line:
 
 - In directory auto-advance mode, if another pending session remains, print `Next command: <skill-prefix>session-run <plan-dir>/`
