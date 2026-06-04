@@ -5,17 +5,21 @@ Adapters construct argv lists and run harnesses without shell interpolation.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 import shutil
 import subprocess
-from typing import Literal
+import threading
+from typing import IO, Literal
 
 from . import config
 
 
 HarnessName = Literal["codex", "claude", "copilot"]
 HARNESS_NAMES: tuple[HarnessName, ...] = ("codex", "claude", "copilot")
+StreamName = Literal["stdout", "stderr"]
+StreamCallback = Callable[[StreamName, str], None]
 
 
 class HarnessError(Exception):
@@ -105,6 +109,7 @@ class HarnessAdapter:
         unsafe_bypass: bool = False,
         last_message_path: Path | None = None,
         timeout: int | None = None,
+        stream_callback: StreamCallback | None = None,
     ) -> HarnessResult:
         invocation = self.build_invocation(
             cwd=cwd,
@@ -117,25 +122,80 @@ class HarnessAdapter:
             invocation.last_message_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 invocation.argv,
                 cwd=invocation.cwd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout,
-                check=False,
+                bufsize=1,
             )
         except FileNotFoundError as error:
             raise HarnessError(
                 f"{self.name} executable not found: {self.executable}"
             ) from error
-        except subprocess.TimeoutExpired as error:
+
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+        reader_errors: list[BaseException] = []
+
+        def read_stream(
+            stream_name: StreamName,
+            chunks: list[str],
+            pipe: IO[str],
+        ) -> None:
+            try:
+                for chunk in iter(pipe.readline, ""):
+                    chunks.append(chunk)
+                    if stream_callback is not None:
+                        try:
+                            stream_callback(stream_name, chunk)
+                        except Exception as error:
+                            reader_errors.append(error)
+            except Exception as error:
+                reader_errors.append(error)
+            finally:
+                pipe.close()
+
+        if process.stdout is None or process.stderr is None:
+            raise HarnessError(f"{self.name} did not expose stdout/stderr pipes")
+
+        stdout_thread = threading.Thread(
+            target=read_stream,
+            args=("stdout", stdout_chunks, process.stdout),
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=read_stream,
+            args=("stderr", stderr_chunks, process.stderr),
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+
+        timed_out = False
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            process.kill()
+            process.wait()
+
+        stdout_thread.join()
+        stderr_thread.join()
+
+        if reader_errors:
+            raise HarnessError("stream callback failed") from reader_errors[0]
+
+        stdout = "".join(stdout_chunks)
+        stderr = "".join(stderr_chunks)
+        if timed_out:
             return HarnessResult(
                 name=self.name,
                 argv=invocation.argv,
                 returncode=124,
-                stdout=_coerce_timeout_text(error.stdout),
-                stderr=_coerce_timeout_text(error.stderr),
+                stdout=stdout,
+                stderr=stderr,
                 last_message=_read_last_message(invocation.last_message_path),
                 timed_out=True,
             )
@@ -143,10 +203,10 @@ class HarnessAdapter:
         return HarnessResult(
             name=self.name,
             argv=invocation.argv,
-            returncode=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-            last_message=_read_last_message(invocation.last_message_path) or completed.stdout,
+            returncode=process.returncode,
+            stdout=stdout,
+            stderr=stderr,
+            last_message=_read_last_message(invocation.last_message_path) or stdout,
         )
 
 
@@ -237,14 +297,6 @@ class CopilotAdapter(HarnessAdapter):
         ]
 
 
-def _coerce_timeout_text(value: str | bytes | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "replace")
-    return value
-
-
 def _read_last_message(path: Path | None) -> str:
     if path is None or not path.exists():
         return ""
@@ -274,6 +326,7 @@ def run_harness(
     unsafe_bypass: bool = False,
     last_message_path: Path | None = None,
     timeout: int | None = None,
+    stream_callback: StreamCallback | None = None,
 ) -> HarnessResult:
     """Run one harness turn through the selected adapter."""
     return get_adapter(name).run(
@@ -283,4 +336,5 @@ def run_harness(
         unsafe_bypass=unsafe_bypass,
         last_message_path=last_message_path,
         timeout=timeout,
+        stream_callback=stream_callback,
     )

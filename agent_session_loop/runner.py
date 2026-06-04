@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,17 @@ from . import config, events, harnesses, plans, responses, state
 
 
 NOT_IMPLEMENTED_EXIT = 2
+HEARTBEAT_INTERVAL_SECONDS = 30.0
+APPROVAL_SIGNAL_PATTERNS: tuple[str, ...] = (
+    "approval required",
+    "requires approval",
+    "waiting for approval",
+    "requesting approval",
+    "needs approval",
+    "approve this",
+    "allow this command",
+    "permission to proceed",
+)
 
 
 class RunError(Exception):
@@ -67,6 +79,34 @@ def build_harness_invocation(
 def _utc_run_id() -> str:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     return f"{timestamp}-{os.getpid()}"
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _isoformat(moment: datetime) -> str:
+    return moment.isoformat()
+
+
+def _duration_seconds(started_at: datetime, finished_at: datetime) -> float:
+    return round(max(0.0, (finished_at - started_at).total_seconds()), 3)
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _approval_mode(args: argparse.Namespace) -> str:
+    return "unsafe-bypass" if args.unsafe_bypass else "harness-default"
 
 
 def _status_map(snapshot: plans.PlanSnapshot) -> dict[int, plans.StatusValue]:
@@ -207,6 +247,48 @@ def _runner_signals(result: harnesses.HarnessResult) -> dict[str, Any]:
     return signals
 
 
+def _preview_text(text: str, *, limit: int = 160) -> str:
+    collapsed = " ".join(text.strip().split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return f"{collapsed[: limit - 3]}..."
+
+
+def _live_action_signal(
+    stream_name: harnesses.StreamName,
+    text: str,
+) -> dict[str, Any] | None:
+    pause = _extract_prefixed_line(text, events.RUNNER_PAUSE_PREFIX)
+    if pause is not None:
+        return {
+            "reason": "runner-pause",
+            "message": pause,
+            "source": stream_name,
+            "matched": events.RUNNER_PAUSE_PREFIX,
+        }
+
+    status = _extract_prefixed_line(text, events.RUNNER_STATUS_PREFIX)
+    if status is not None and status.strip().lower() in {"pause", "paused"}:
+        return {
+            "reason": "runner-status-paused",
+            "message": status,
+            "source": stream_name,
+            "matched": events.RUNNER_STATUS_PREFIX,
+        }
+
+    lowered = text.lower()
+    for pattern in APPROVAL_SIGNAL_PATTERNS:
+        if pattern in lowered:
+            return {
+                "reason": "approval-required",
+                "message": _preview_text(text),
+                "source": stream_name,
+                "matched": pattern,
+            }
+
+    return None
+
+
 def _all_sessions_complete(snapshot: plans.PlanSnapshot) -> bool:
     return all(session.status == "complete" for session in snapshot.sessions)
 
@@ -230,6 +312,22 @@ def _validate_run_inputs(args: argparse.Namespace) -> tuple[Path, int | None, in
 def _write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _append_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+def _prepare_stream_logs(paths: dict[str, Path]) -> harnesses.StreamCallback:
+    _write_text(paths["stdout"], "")
+    _write_text(paths["stderr"], "")
+
+    def stream_callback(stream_name: harnesses.StreamName, text: str) -> None:
+        _append_text(paths[stream_name], text)
+
+    return stream_callback
 
 
 def _turn_paths(run_dir: Path, *, turn_index: int, session_number: int) -> dict[str, Path]:
@@ -256,6 +354,39 @@ def _build_invocation_payload(invocation: harnesses.HarnessInvocation) -> dict[s
     }
 
 
+def _turn_status_result(
+    *,
+    result: harnesses.HarnessResult,
+    status_changes: tuple[dict[str, Any], ...],
+    pending_completed: tuple[int, ...],
+    session_number: int,
+    runner_signals: dict[str, Any],
+    plan_error: str | None,
+) -> str:
+    if result.timed_out:
+        return "timeout"
+    if plan_error is not None:
+        return "malformed-plan"
+    if runner_signals.get("runner_pause") is not None:
+        return "runner-pause"
+    if result.returncode != 0:
+        return "nonzero-exit"
+    if not status_changes:
+        return "no-status-change"
+    if len(status_changes) > 1:
+        return "multiple-status-changes"
+    expected_change = {
+        "number": session_number,
+        "before": "pending",
+        "after": "complete",
+    }
+    if status_changes != (expected_change,):
+        return "unexpected-status-change"
+    if pending_completed == (session_number,):
+        return "complete"
+    return "unknown"
+
+
 def _write_turn_artifacts(
     *,
     paths: dict[str, Path],
@@ -265,6 +396,7 @@ def _write_turn_artifacts(
     run_id: str,
     turn_index: int,
     session_number: int,
+    live_turn: dict[str, Any],
     plan_error: str | None = None,
 ) -> dict[str, Any]:
     _write_text(paths["stdout"], result.stdout)
@@ -274,6 +406,14 @@ def _write_turn_artifacts(
     status_changes = _status_changes(before, after) if after is not None else ()
     pending_completed = _pending_completed(before, after) if after is not None else ()
     runner_signals = _runner_signals(result)
+    status_result = _turn_status_result(
+        result=result,
+        status_changes=status_changes,
+        pending_completed=pending_completed,
+        session_number=session_number,
+        runner_signals=runner_signals,
+        plan_error=plan_error,
+    )
     payload = {
         "run_id": run_id,
         "turn_index": turn_index,
@@ -289,9 +429,23 @@ def _write_turn_artifacts(
         "result_path": str(paths["result"]),
         "status_changes": list(status_changes),
         "pending_completed": list(pending_completed),
+        "status_result": status_result,
+        "started_at": live_turn["started_at"],
+        "finished_at": live_turn["finished_at"],
+        "duration_seconds": live_turn["duration_seconds"],
+        "idle_seconds_since_previous_turn": live_turn[
+            "idle_seconds_since_previous_turn"
+        ],
+        "last_activity_at": live_turn.get("last_activity_at"),
+        "last_activity_stream": live_turn.get("last_activity_stream"),
+        "last_activity_preview": live_turn.get("last_activity_preview"),
+        "last_heartbeat_at": live_turn.get("last_heartbeat_at"),
+        "heartbeat_count": live_turn.get("heartbeat_count", 0),
         "before": _snapshot_payload(before),
         "after": _snapshot_payload(after) if after is not None else None,
     }
+    if live_turn.get("action_required") is not None:
+        payload["action_required"] = live_turn["action_required"]
     if plan_error is not None:
         payload["plan_error"] = plan_error
     payload.update(runner_signals)
@@ -320,9 +474,260 @@ def _append_event(event_path: Path, name: str, payload: dict[str, Any]) -> None:
     events.append_event(event_path, events.Event(name=name, payload=payload))
 
 
-def _finish_run(event_path: Path, payload: dict[str, Any]) -> None:
+def _format_seconds(value: Any) -> str:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return "unknown"
+    return f"{seconds:.1f}s"
+
+
+class _ProgressReporter:
+    """Human-facing progress output for non-JSON runs."""
+
+    def __init__(self, *, enabled: bool) -> None:
+        self.enabled = enabled
+        self._lock = threading.Lock()
+
+    def _emit(self, message: str) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            print(f"agent-session-loop: {message}", file=sys.stderr, flush=True)
+
+    def run_started(self, payload: dict[str, Any]) -> None:
+        snapshot = payload["initial_snapshot"]
+        counts = snapshot["counts"]
+        total = sum(counts.values())
+        next_pending = snapshot["next_pending"]
+        next_label = "none" if next_pending is None else f"session {next_pending}"
+        self._emit(
+            "run started "
+            f"run_id={payload['run_id']} "
+            f"harness={payload['harness']} "
+            f"sessions={counts['complete']}/{total} complete "
+            f"pending={counts['pending']} "
+            f"next={next_label} "
+            f"approval={payload['approval_mode']}"
+        )
+
+    def turn_started(self, active_turn: dict[str, Any]) -> None:
+        self._emit(
+            "turn started "
+            f"turn={active_turn['turn_index']} "
+            f"session={active_turn['session']} "
+            f"stdout={active_turn['stdout_path']} "
+            f"stderr={active_turn['stderr_path']} "
+            f"last_message={active_turn['last_message_path']} "
+            f"result={active_turn['result_path']}"
+        )
+
+    def heartbeat(self, heartbeat: dict[str, Any]) -> None:
+        self._emit(
+            "turn heartbeat "
+            f"turn={heartbeat['turn_index']} "
+            f"session={heartbeat['session']} "
+            f"elapsed={_format_seconds(heartbeat['elapsed_seconds'])} "
+            f"idle={_format_seconds(heartbeat['idle_seconds'])} "
+            f"last_activity={heartbeat['last_activity_at']}"
+        )
+
+    def action_required(self, signal: dict[str, Any]) -> None:
+        self._emit(
+            "action required "
+            f"turn={signal['turn_index']} "
+            f"session={signal['session']} "
+            f"reason={signal['reason']} "
+            f"source={signal['source']} "
+            f"detail={signal['message']}"
+        )
+
+    def turn_finished(self, turn: dict[str, Any]) -> None:
+        self._emit(
+            "turn finished "
+            f"turn={turn['turn_index']} "
+            f"session={turn['session']} "
+            f"status={turn['status_result']} "
+            f"duration={_format_seconds(turn['duration_seconds'])} "
+            f"returncode={turn['returncode']} "
+            f"stdout={turn['stdout_path']} "
+            f"stderr={turn['stderr_path']} "
+            f"result={turn['result_path']}"
+        )
+
+    def run_finished(self, payload: dict[str, Any]) -> None:
+        status = "ok" if payload["ok"] else "paused"
+        self._emit(
+            "run finished "
+            f"run_id={payload['run_id']} "
+            f"status={status} "
+            f"reason={payload['reason']} "
+            f"duration={_format_seconds(payload['duration_seconds'])}"
+        )
+
+
+class _LiveTurn:
+    """Thread-safe live state and heartbeat manager for one harness turn."""
+
+    def __init__(
+        self,
+        *,
+        payload: dict[str, Any],
+        event_path: Path,
+        progress: _ProgressReporter,
+        active_turn: dict[str, Any],
+        heartbeat_interval: float = HEARTBEAT_INTERVAL_SECONDS,
+    ) -> None:
+        self._payload = payload
+        self._event_path = event_path
+        self._progress = progress
+        self._active_turn = dict(active_turn)
+        self._heartbeat_interval = heartbeat_interval
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._started_at = _parse_datetime(active_turn["started_at"]) or _utc_now()
+        self._last_activity_at = self._started_at
+
+    def start(self) -> None:
+        with self._lock:
+            self._payload["active_turn"] = dict(self._active_turn)
+            _write_state_payload(self._payload)
+        self._progress.turn_started(self._active_turn)
+        self._thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self._thread.start()
+
+    def record_activity(self, stream_name: harnesses.StreamName, text: str) -> None:
+        signal_to_report: dict[str, Any] | None = None
+        now = _utc_now()
+        with self._lock:
+            self._last_activity_at = now
+            self._active_turn["last_activity_at"] = _isoformat(now)
+            self._active_turn["last_activity_stream"] = stream_name
+            self._active_turn["last_activity_preview"] = _preview_text(text)
+            self._active_turn["elapsed_seconds"] = _duration_seconds(
+                self._started_at,
+                now,
+            )
+            self._active_turn["idle_seconds"] = 0.0
+            char_key = f"{stream_name}_chars"
+            self._active_turn[char_key] = int(self._active_turn.get(char_key, 0)) + len(text)
+
+            signal = _live_action_signal(stream_name, text)
+            if signal is not None and self._active_turn.get("action_required") is None:
+                signal_to_report = self._action_required_payload(signal, now)
+                self._active_turn["action_required"] = signal_to_report
+                self._payload["action_required"] = signal_to_report
+                _append_event(
+                    self._event_path,
+                    events.ACTION_REQUIRED_EVENT,
+                    signal_to_report,
+                )
+
+            self._payload["active_turn"] = dict(self._active_turn)
+            _write_state_payload(self._payload)
+
+        if signal_to_report is not None:
+            self._progress.action_required(signal_to_report)
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join(timeout=1)
+
+    def finish(self, finished_at: datetime) -> dict[str, Any]:
+        with self._lock:
+            active_turn = dict(self._active_turn)
+            active_turn["finished_at"] = _isoformat(finished_at)
+            active_turn["duration_seconds"] = _duration_seconds(
+                self._started_at,
+                finished_at,
+            )
+            active_turn["idle_seconds"] = _duration_seconds(
+                self._last_activity_at,
+                finished_at,
+            )
+            self._payload["active_turn"] = None
+            _write_state_payload(self._payload)
+            return active_turn
+
+    def _heartbeat_loop(self) -> None:
+        while not self._stop.wait(self._heartbeat_interval):
+            heartbeat = self._record_heartbeat()
+            self._progress.heartbeat(heartbeat)
+
+    def _record_heartbeat(self) -> dict[str, Any]:
+        now = _utc_now()
+        with self._lock:
+            heartbeat_count = int(self._active_turn.get("heartbeat_count", 0)) + 1
+            heartbeat = {
+                "run_id": self._active_turn["run_id"],
+                "turn_index": self._active_turn["turn_index"],
+                "session": self._active_turn["session"],
+                "artifact_dir": self._active_turn["artifact_dir"],
+                "stdout_path": self._active_turn["stdout_path"],
+                "stderr_path": self._active_turn["stderr_path"],
+                "last_message_path": self._active_turn["last_message_path"],
+                "result_path": self._active_turn["result_path"],
+                "started_at": self._active_turn["started_at"],
+                "created_at": _isoformat(now),
+                "elapsed_seconds": _duration_seconds(self._started_at, now),
+                "last_activity_at": self._active_turn.get("last_activity_at"),
+                "last_activity_stream": self._active_turn.get("last_activity_stream"),
+                "idle_seconds": _duration_seconds(self._last_activity_at, now),
+                "heartbeat_count": heartbeat_count,
+            }
+            self._active_turn["last_heartbeat_at"] = heartbeat["created_at"]
+            self._active_turn["heartbeat_count"] = heartbeat_count
+            self._active_turn["elapsed_seconds"] = heartbeat["elapsed_seconds"]
+            self._active_turn["idle_seconds"] = heartbeat["idle_seconds"]
+            self._payload["active_turn"] = dict(self._active_turn)
+            _append_event(
+                self._event_path,
+                events.TURN_HEARTBEAT_EVENT,
+                heartbeat,
+            )
+            _write_state_payload(self._payload)
+            return heartbeat
+
+    def _action_required_payload(
+        self,
+        signal: dict[str, Any],
+        now: datetime,
+    ) -> dict[str, Any]:
+        return {
+            "run_id": self._active_turn["run_id"],
+            "turn_index": self._active_turn["turn_index"],
+            "session": self._active_turn["session"],
+            "artifact_dir": self._active_turn["artifact_dir"],
+            "stdout_path": self._active_turn["stdout_path"],
+            "stderr_path": self._active_turn["stderr_path"],
+            "last_message_path": self._active_turn["last_message_path"],
+            "result_path": self._active_turn["result_path"],
+            "created_at": _isoformat(now),
+            "reason": signal["reason"],
+            "message": signal["message"],
+            "source": signal["source"],
+            "matched": signal["matched"],
+        }
+
+
+def _finish_run(
+    event_path: Path,
+    payload: dict[str, Any],
+    progress: _ProgressReporter | None = None,
+) -> None:
+    finished_at = _utc_now()
+    payload["run_finished_at"] = _isoformat(finished_at)
+    started_at = _parse_datetime(payload.get("run_started_at"))
+    payload["duration_seconds"] = (
+        _duration_seconds(started_at, finished_at) if started_at is not None else None
+    )
+    payload["active_turn"] = None
     _append_event(event_path, "run_finished", payload)
     _write_state_payload(payload)
+    if progress is not None:
+        progress.run_finished(payload)
 
 
 def _set_pause(
@@ -354,6 +759,8 @@ def _pause_run(
         event_path,
         events.RUN_PAUSED_EVENT,
         {
+            "run_id": payload.get("run_id"),
+            "run_dir": payload.get("run_dir"),
             "reason": reason,
             "message": message,
             "details": {} if details is None else details,
@@ -383,6 +790,12 @@ def _initial_payload(
         pause_message="",
         pause_details={},
         run_id=run_id,
+        run_started_at=_isoformat(_utc_now()),
+        run_finished_at=None,
+        duration_seconds=None,
+        active_turn=None,
+        action_required=None,
+        approval_mode=_approval_mode(args),
         plan_dir=str(snapshot.plan_dir),
         cwd=str(cwd),
         harness=args.harness,
@@ -455,6 +868,7 @@ def _run_locked(
         cwd=cwd,
         run_id=run_id,
     )
+    progress = _ProgressReporter(enabled=not args.json)
     _append_event(
         event_path,
         "run_started",
@@ -465,9 +879,14 @@ def _run_locked(
             "max_sessions": max_sessions,
             "run_id": run_id,
             "run_dir": str(run_dir),
+            "run_started_at": payload["run_started_at"],
+            "approval_mode": payload["approval_mode"],
+            "counts": payload["initial_snapshot"]["counts"],
+            "next_pending": payload["initial_snapshot"]["next_pending"],
         },
     )
     _write_state_payload(payload)
+    progress.run_started(payload)
 
     invalid_pause = _invalid_status_pause(snapshot)
     if invalid_pause is not None:
@@ -480,7 +899,7 @@ def _run_locked(
             message=message,
             details=details,
         )
-        _finish_run(event_path, payload)
+        _finish_run(event_path, payload, progress)
         return 1, payload
 
     if snapshot.next_pending is None:
@@ -492,10 +911,10 @@ def _run_locked(
                 message="no pending session was found, but not every session is complete",
                 details={"snapshot": _snapshot_payload(snapshot)},
             )
-            _finish_run(event_path, payload)
+            _finish_run(event_path, payload, progress)
             return 1, payload
         payload["reason"] = "all-complete"
-        _finish_run(event_path, payload)
+        _finish_run(event_path, payload, progress)
         return 0, payload
 
     if args.dry_run:
@@ -506,10 +925,11 @@ def _run_locked(
             cwd=cwd,
             run_dir=run_dir,
         )
-        _finish_run(event_path, payload)
+        _finish_run(event_path, payload, progress)
         return 0, payload
 
     completed_count = 0
+    previous_turn_finished_at: datetime | None = None
     while snapshot.next_pending is not None:
         if max_sessions is not None and completed_count >= max_sessions:
             payload["reason"] = "max-sessions"
@@ -527,30 +947,71 @@ def _run_locked(
             session_number=pending_session.number,
         )
         prompt = build_session_prompt(args.harness, before.plan_dir)
-        _append_event(
-            event_path,
-            "turn_started",
-            {
-                "run_id": run_id,
-                "turn_index": turn_index,
-                "session": pending_session.number,
-                "artifact_dir": str(paths["artifact_dir"]),
-                "prompt": prompt,
-                "stdout_path": str(paths["stdout"]),
-                "stderr_path": str(paths["stderr"]),
-                "last_message_path": str(paths["last_message"]),
-                "result_path": str(paths["result"]),
-            },
+        turn_started_at = _utc_now()
+        turn_started_at_text = _isoformat(turn_started_at)
+        idle_seconds_since_previous_turn = (
+            0.0
+            if previous_turn_finished_at is None
+            else _duration_seconds(previous_turn_finished_at, turn_started_at)
         )
-        result = harnesses.run_harness(
-            args.harness,
-            cwd=cwd,
-            plan_dir=before.plan_dir,
-            prompt=prompt,
-            unsafe_bypass=args.unsafe_bypass,
-            last_message_path=paths["last_message"],
-            timeout=timeout,
+        active_turn = {
+            "run_id": run_id,
+            "turn_index": turn_index,
+            "session": pending_session.number,
+            "artifact_dir": str(paths["artifact_dir"]),
+            "prompt": prompt,
+            "stdout_path": str(paths["stdout"]),
+            "stderr_path": str(paths["stderr"]),
+            "last_message_path": str(paths["last_message"]),
+            "result_path": str(paths["result"]),
+            "started_at": turn_started_at_text,
+            "finished_at": None,
+            "duration_seconds": None,
+            "idle_seconds_since_previous_turn": idle_seconds_since_previous_turn,
+            "last_activity_at": turn_started_at_text,
+            "last_activity_stream": None,
+            "last_activity_preview": "",
+            "last_heartbeat_at": None,
+            "elapsed_seconds": 0.0,
+            "idle_seconds": 0.0,
+            "heartbeat_count": 0,
+            "stdout_chars": 0,
+            "stderr_chars": 0,
+            "action_required": None,
+        }
+        log_stream_callback = _prepare_stream_logs(paths)
+        live_turn = _LiveTurn(
+            payload=payload,
+            event_path=event_path,
+            progress=progress,
+            active_turn=active_turn,
         )
+
+        def stream_callback(stream_name: harnesses.StreamName, text: str) -> None:
+            log_stream_callback(stream_name, text)
+            live_turn.record_activity(stream_name, text)
+
+        _append_event(event_path, "turn_started", active_turn)
+        live_turn.start()
+        try:
+            result = harnesses.run_harness(
+                args.harness,
+                cwd=cwd,
+                plan_dir=before.plan_dir,
+                prompt=prompt,
+                unsafe_bypass=args.unsafe_bypass,
+                last_message_path=paths["last_message"],
+                timeout=timeout,
+                stream_callback=stream_callback,
+            )
+        except Exception:
+            live_turn.stop()
+            live_turn.finish(_utc_now())
+            raise
+        live_turn.stop()
+        turn_finished_at = _utc_now()
+        live_turn_payload = live_turn.finish(turn_finished_at)
+        previous_turn_finished_at = turn_finished_at
         plan_error = None
         try:
             after = plans.inspect_plan(before.plan_dir)
@@ -565,11 +1026,13 @@ def _run_locked(
             run_id=run_id,
             turn_index=turn_index,
             session_number=pending_session.number,
+            live_turn=live_turn_payload,
             plan_error=plan_error,
         )
         payload["turns"].append(turn_payload)
         _append_event(event_path, "turn_finished", turn_payload)
         _write_state_payload(payload)
+        progress.turn_finished(turn_payload)
 
         if result.timed_out:
             payload["final_snapshot"] = (
@@ -717,7 +1180,7 @@ def _run_locked(
         else:
             payload["reason"] = "stopped"
 
-    _finish_run(event_path, payload)
+    _finish_run(event_path, payload, progress)
     return (0 if payload["ok"] else 1), payload
 
 

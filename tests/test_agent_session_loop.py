@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 import errno
+import io
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -81,6 +83,16 @@ def fail_open_for_path(target: Path):
         return original_open(path, *args, **kwargs)
 
     return mock.patch.object(Path, "open", failing_open)
+
+
+def wait_until(predicate, *, timeout: float = 5.0, interval: float = 0.05):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(interval)
+    raise AssertionError("condition was not met before timeout")
 
 
 class ParserAndStateTests(unittest.TestCase):
@@ -362,6 +374,48 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         )
         return completed, payload, plan_dir, state_dir, fake_codex
 
+    def loop_env(
+        self,
+        *,
+        config_home: Path,
+        mode: str,
+        extra: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        env = os.environ.copy()
+        env["XDG_CONFIG_HOME"] = str(config_home)
+        env["FAKE_CODEX_MODE"] = mode
+        env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+        if extra is not None:
+            env.update(extra)
+        return env
+
+    def run_command(
+        self,
+        *,
+        plan_dir: Path,
+        state_dir: Path,
+        json_output: bool = False,
+        max_sessions: int | None = None,
+    ) -> list[str]:
+        command = [
+            sys.executable,
+            "-m",
+            "agent_session_loop",
+            "run",
+            str(plan_dir),
+            "--cwd",
+            str(REPO_ROOT),
+            "--harness",
+            "codex",
+            "--state-dir",
+            str(state_dir),
+        ]
+        if max_sessions is not None:
+            command.extend(["--max-sessions", str(max_sessions)])
+        if json_output:
+            command.append("--json")
+        return command
+
     def test_successful_fake_harness_turn_persists_state_and_artifacts(self) -> None:
         completed, payload, plan_dir, _state_dir, fake_codex = self.run_loop(
             mode="success",
@@ -432,6 +486,241 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             "- **Status**: pending",
             (plan_dir / "session-2.md").read_text(encoding="utf-8"),
         )
+
+    def test_text_run_emits_human_progress_to_stderr(self) -> None:
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+            statuses=("pending",)
+        )
+
+        completed = subprocess.run(
+            self.run_command(plan_dir=plan_dir, state_dir=state_dir),
+            cwd=REPO_ROOT,
+            env=self.loop_env(
+                config_home=config_home,
+                mode="streaming-success",
+                extra={"FAKE_CODEX_STEP_SLEEP": "0.05"},
+            ),
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn("Plan:", completed.stdout)
+        self.assertIn("Completed session 1", completed.stdout)
+        self.assertIn("Run complete: 1 session(s) completed", completed.stdout)
+        self.assertIn("agent-session-loop: run started", completed.stderr)
+        self.assertIn("agent-session-loop: turn started turn=1 session=1", completed.stderr)
+        self.assertIn("agent-session-loop: turn finished turn=1 session=1 status=complete", completed.stderr)
+        self.assertIn("agent-session-loop: run finished", completed.stderr)
+        self.assertIn("duration=", completed.stderr)
+        self.assertIn("stdout=", completed.stderr)
+        self.assertIn("stderr=", completed.stderr)
+        self.assertIn("result=", completed.stderr)
+
+    def test_json_run_stays_quiet_and_status_reports_active_turn(self) -> None:
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+            statuses=("pending",)
+        )
+        run_process = subprocess.Popen(
+            self.run_command(plan_dir=plan_dir, state_dir=state_dir, json_output=True),
+            cwd=REPO_ROOT,
+            env=self.loop_env(
+                config_home=config_home,
+                mode="streaming-success",
+                extra={"FAKE_CODEX_STEP_SLEEP": "0.8"},
+            ),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.addCleanup(lambda: run_process.kill() if run_process.poll() is None else None)
+
+        state_path = state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
+
+        def active_turn_payload():
+            if not state_path.exists():
+                return None
+            raw = json.loads(state_path.read_text(encoding="utf-8"))
+            active_turn = raw.get("active_turn")
+            return active_turn if isinstance(active_turn, dict) else None
+
+        active_turn = wait_until(active_turn_payload)
+        self.assertEqual(1, active_turn["session"])
+        self.assertEqual(1, active_turn["turn_index"])
+        self.assertTrue(active_turn["stdout_path"].endswith("/stdout.log"))
+        self.assertTrue(active_turn["stderr_path"].endswith("/stderr.log"))
+
+        status_completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "agent_session_loop",
+                "status",
+                str(plan_dir),
+                "--state-dir",
+                str(state_dir),
+                "--json",
+            ],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        status_payload = json.loads(status_completed.stdout)
+        self.assertTrue(status_payload["ok"])
+        self.assertEqual(1, status_payload["active_turn"]["session"])
+        self.assertIn("elapsed_seconds", status_payload["active_turn"])
+        self.assertIn("stdout_path", status_payload["active_turn"])
+
+        status_text = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "agent_session_loop",
+                "status",
+                str(plan_dir),
+                "--state-dir",
+                str(state_dir),
+            ],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        self.assertIn("Active turn: session 1 turn 1", status_text.stdout)
+        self.assertIn("Stdout:", status_text.stdout)
+        self.assertIn("Stderr:", status_text.stdout)
+
+        run_stdout, run_stderr = run_process.communicate(timeout=10)
+        self.assertEqual("", run_stderr)
+        run_payload = json.loads(run_stdout)
+        self.assertTrue(run_payload["ok"])
+        self.assertEqual([1], run_payload["completed_sessions"])
+
+    def test_tail_follows_streaming_logs_across_sessions(self) -> None:
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+            statuses=("pending", "pending")
+        )
+        run_process = subprocess.Popen(
+            self.run_command(plan_dir=plan_dir, state_dir=state_dir, json_output=True),
+            cwd=REPO_ROOT,
+            env=self.loop_env(
+                config_home=config_home,
+                mode="streaming-success",
+                extra={"FAKE_CODEX_STEP_SLEEP": "0.15"},
+            ),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.addCleanup(lambda: run_process.kill() if run_process.poll() is None else None)
+
+        events_path = state.plan_state_dir(plan_dir, state_dir) / events.EVENTS_FILE_NAME
+
+        def has_first_turn_started():
+            if not events_path.exists():
+                return False
+            return "turn_started" in events_path.read_text(encoding="utf-8")
+
+        wait_until(has_first_turn_started)
+        tail_process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "agent_session_loop",
+                "tail",
+                str(plan_dir),
+                "--state-dir",
+                str(state_dir),
+                "--lines",
+                "200",
+            ],
+            cwd=REPO_ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.addCleanup(lambda: tail_process.kill() if tail_process.poll() is None else None)
+
+        run_stdout, run_stderr = run_process.communicate(timeout=10)
+        tail_stdout, tail_stderr = tail_process.communicate(timeout=10)
+        self.assertEqual("", run_stderr)
+        run_payload = json.loads(run_stdout)
+        self.assertTrue(run_payload["ok"])
+        self.assertEqual([1, 2], run_payload["completed_sessions"])
+
+        self.assertEqual(0, tail_process.returncode, tail_stderr)
+        self.assertEqual("", tail_stderr)
+        self.assertIn("event turn_started", tail_stdout)
+        self.assertIn("event turn_finished", tail_stdout)
+        self.assertIn("event run_finished", tail_stdout)
+        self.assertIn("stdout session=1 turn=1 | session 1 stdout before completion", tail_stdout)
+        self.assertIn("stderr session=1 turn=1 | session 1 stderr before completion", tail_stdout)
+        self.assertIn("stdout session=2 turn=2 | session 2 stdout before completion", tail_stdout)
+        self.assertIn("stderr session=2 turn=2 | session 2 stderr after completion", tail_stdout)
+
+    def test_live_turn_heartbeat_updates_state_events_and_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            event_path = tmp_dir / events.EVENTS_FILE_NAME
+            state_path = tmp_dir / events.STATE_FILE_NAME
+            payload = {"state_path": str(state_path), "active_turn": None}
+            active_turn = {
+                "run_id": "run-1",
+                "turn_index": 1,
+                "session": 1,
+                "artifact_dir": str(tmp_dir / "turn"),
+                "stdout_path": str(tmp_dir / "stdout.log"),
+                "stderr_path": str(tmp_dir / "stderr.log"),
+                "last_message_path": str(tmp_dir / "last-message.txt"),
+                "result_path": str(tmp_dir / "result.json"),
+                "started_at": runner._isoformat(runner._utc_now()),
+                "finished_at": None,
+                "duration_seconds": None,
+                "idle_seconds_since_previous_turn": 0.0,
+                "last_activity_at": None,
+                "last_activity_stream": None,
+                "last_activity_preview": "",
+                "last_heartbeat_at": None,
+                "elapsed_seconds": 0.0,
+                "idle_seconds": 0.0,
+                "heartbeat_count": 0,
+                "stdout_chars": 0,
+                "stderr_chars": 0,
+                "action_required": None,
+            }
+            progress = runner._ProgressReporter(enabled=True)
+            stderr = io.StringIO()
+
+            live_turn = runner._LiveTurn(
+                payload=payload,
+                event_path=event_path,
+                progress=progress,
+                active_turn=active_turn,
+                heartbeat_interval=0.01,
+            )
+            with redirect_stderr(stderr):
+                live_turn.start()
+                wait_until(
+                    lambda: event_path.exists()
+                    and events.TURN_HEARTBEAT_EVENT
+                    in event_path.read_text(encoding="utf-8")
+                )
+                live_turn.stop()
+                live_turn.finish(runner._utc_now())
+
+            state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+            event_records = [
+                json.loads(line)
+                for line in event_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertIsNone(state_payload["active_turn"])
+            self.assertTrue(
+                any(record["name"] == events.TURN_HEARTBEAT_EVENT for record in event_records)
+            )
+            self.assertIn("agent-session-loop: turn heartbeat", stderr.getvalue())
 
     def test_retry_after_failed_turn_keeps_first_run_artifacts(self) -> None:
         plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(

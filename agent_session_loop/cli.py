@@ -6,7 +6,7 @@ import argparse
 import sys
 from collections.abc import Sequence
 
-from . import harnesses, runner, state
+from . import harnesses, runner, state, tail
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -78,6 +78,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print machine-readable JSON output",
     )
     status_parser.set_defaults(handler=state.status_from_args)
+
+    tail_parser = subparsers.add_parser(
+        "tail",
+        help="Show and follow live run events and harness logs.",
+    )
+    tail_parser.add_argument("plan_dir", help="Split plan directory to tail")
+    tail_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    tail_parser.add_argument(
+        "--lines",
+        type=int,
+        default=tail.DEFAULT_LINES,
+        help="Recent activity lines to show before following",
+    )
+    tail_parser.add_argument(
+        "--no-follow",
+        action="store_true",
+        help="Print recent activity and exit without waiting",
+    )
+    tail_parser.set_defaults(handler=tail.tail_from_args)
 
     doctor_parser = subparsers.add_parser(
         "doctor",

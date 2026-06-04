@@ -53,6 +53,10 @@ def _write_last_message(text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def _step_sleep() -> None:
+    time.sleep(float(os.environ.get("FAKE_CODEX_STEP_SLEEP", "0.1")))
+
+
 def main() -> int:
     plan_dir_arg = _arg_value("--add-dir")
     if plan_dir_arg is None:
@@ -109,6 +113,30 @@ def main() -> int:
             _mark_complete(pending[0])
         _write_last_message("Runner status: complete\nNext command: $session-run plan/\n")
         print("completed one session")
+        return 0
+
+    if mode == "streaming-success":
+        if not pending:
+            _write_last_message("Runner status: complete\n")
+            print("no pending sessions", flush=True)
+            return 0
+
+        session_number = _session_number(pending[0])
+        print(f"session {session_number} stdout before completion", flush=True)
+        print(
+            f"session {session_number} stderr before completion",
+            file=sys.stderr,
+            flush=True,
+        )
+        _step_sleep()
+        _mark_complete(pending[0])
+        _write_last_message("Runner status: complete\nNext command: $session-run plan/\n")
+        print(f"session {session_number} stdout after completion", flush=True)
+        print(
+            f"session {session_number} stderr after completion",
+            file=sys.stderr,
+            flush=True,
+        )
         return 0
 
     print(f"unsupported fake codex mode: {mode}", file=sys.stderr)

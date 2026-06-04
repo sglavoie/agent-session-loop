@@ -267,14 +267,63 @@ def _lock_payload(lock_info: LockInfo | None, lock_path: Path) -> dict[str, Any]
     }
 
 
+def _runner_state_payload(state_path: Path) -> dict[str, Any]:
+    if not state_path.exists():
+        return {
+            "present": False,
+            "path": str(state_path),
+            "error": None,
+            "active_turn": None,
+        }
+
+    try:
+        raw = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        return {
+            "present": True,
+            "path": str(state_path),
+            "error": str(error),
+            "active_turn": None,
+        }
+
+    if not isinstance(raw, dict):
+        return {
+            "present": True,
+            "path": str(state_path),
+            "error": "state file did not contain a JSON object",
+            "active_turn": None,
+        }
+
+    active_turn = raw.get("active_turn")
+    if not isinstance(active_turn, dict):
+        active_turn = None
+
+    return {
+        "present": True,
+        "path": str(state_path),
+        "error": None,
+        "run_id": raw.get("run_id"),
+        "harness": raw.get("harness"),
+        "ok": raw.get("ok"),
+        "paused": raw.get("paused"),
+        "reason": raw.get("reason"),
+        "run_started_at": raw.get("run_started_at"),
+        "run_finished_at": raw.get("run_finished_at"),
+        "duration_seconds": raw.get("duration_seconds"),
+        "active_turn": active_turn,
+    }
+
+
 def status_payload(
     snapshot: plans.PlanSnapshot,
     state_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     plan_state = plan_state_dir(snapshot.plan_dir, state_dir)
+    state_path = plan_state / events.STATE_FILE_NAME
     lock_path = lock_path_for_plan(snapshot.plan_dir, state_dir)
     lock_info = _read_lock_path(lock_path, snapshot.plan_dir)
     next_pending = snapshot.next_pending
+    runner_state = _runner_state_payload(state_path)
     return responses.success_payload(
         "status",
         plan_dir=str(snapshot.plan_dir),
@@ -289,8 +338,10 @@ def status_payload(
         path_hash=snapshot.path_hash,
         plan_hash=snapshot.plan_hash,
         state_dir=str(plan_state),
-        state_path=str(plan_state / events.STATE_FILE_NAME),
+        state_path=str(state_path),
         events_path=str(plan_state / events.EVENTS_FILE_NAME),
+        runner_state=runner_state,
+        active_turn=runner_state.get("active_turn"),
         counts=_status_counts(snapshot),
         next_pending=next_pending.number if next_pending is not None else None,
         sessions=[
@@ -305,6 +356,14 @@ def status_payload(
         ],
         lock=_lock_payload(lock_info, lock_path),
     )
+
+
+def _format_seconds(value: Any) -> str:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return "unknown"
+    return f"{seconds:.1f}s"
 
 
 def _print_text_status(payload: dict[str, Any]) -> None:
@@ -322,6 +381,36 @@ def _print_text_status(payload: dict[str, Any]) -> None:
         print(f"Lock: active pid {lock['pid']} ({lock['path']})")
     else:
         print(f"Lock: stale ({lock['reason']}) ({lock['path']})")
+
+    runner_state = payload.get("runner_state", {})
+    if runner_state.get("present") and runner_state.get("error"):
+        print(f"Run state: unreadable ({runner_state['error']})")
+    elif runner_state.get("present"):
+        run_id = runner_state.get("run_id") or "unknown"
+        run_started_at = runner_state.get("run_started_at") or "unknown"
+        print(f"Run state: run {run_id} started {run_started_at}")
+
+    active_turn = payload.get("active_turn")
+    if isinstance(active_turn, dict):
+        print(
+            "Active turn: "
+            f"session {active_turn.get('session')} "
+            f"turn {active_turn.get('turn_index')} "
+            f"elapsed {_format_seconds(active_turn.get('elapsed_seconds'))} "
+            f"idle {_format_seconds(active_turn.get('idle_seconds'))}"
+        )
+        print(f"  Last activity: {active_turn.get('last_activity_at') or 'none'}")
+        action_required = active_turn.get("action_required")
+        if isinstance(action_required, dict):
+            print(
+                "  Action required: "
+                f"{action_required.get('reason')} "
+                f"({action_required.get('source')})"
+            )
+        print(f"  Stdout: {active_turn.get('stdout_path')}")
+        print(f"  Stderr: {active_turn.get('stderr_path')}")
+        print(f"  Last message: {active_turn.get('last_message_path')}")
+        print(f"  Result: {active_turn.get('result_path')}")
 
     print("Sessions:")
     for session in payload["sessions"]:

@@ -16,6 +16,8 @@ from typing import Any
 RUNNER_STATUS_PREFIX = "Runner status:"
 RUNNER_PAUSE_PREFIX = "RUNNER_PAUSE:"
 RUN_PAUSED_EVENT = "run_paused"
+TURN_HEARTBEAT_EVENT = "turn_heartbeat"
+ACTION_REQUIRED_EVENT = "action_required"
 STATE_FILE_NAME = "state.json"
 EVENTS_FILE_NAME = "events.jsonl"
 PAUSE_REASONS: tuple[str, ...] = (

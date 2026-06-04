@@ -10,6 +10,7 @@ bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ -
 bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --cwd "$PWD" --harness codex --max-sessions 1
 bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --cwd "$PWD" --harness codex --dry-run
 bin/.local/bin/agent-session-loop status ~/.local/share/agent-plans/example-plan/
+bin/.local/bin/agent-session-loop tail ~/.local/share/agent-plans/example-plan/
 ```
 
 The package is stdlib-only and lives in `agent_session_loop/`. The executable
@@ -85,6 +86,7 @@ a paused run by re-running the same command after fixing the blocker.
 ```text
 agent-session-loop run PLAN_DIR --cwd REPO_ROOT [--harness codex|claude|copilot] [--timeout SEC] [--max-sessions N] [--state-dir DIR] [--unsafe-bypass] [--json] [--dry-run]
 agent-session-loop status PLAN_DIR [--state-dir DIR] [--json]
+agent-session-loop tail PLAN_DIR [--state-dir DIR] [--lines N] [--no-follow]
 agent-session-loop doctor --harness codex|claude|copilot --cwd REPO_ROOT --plan-dir PLAN_DIR [--json]
 agent-session-loop unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
 ```
@@ -94,7 +96,12 @@ selected harness, records turn artifacts, and verifies that exactly the expected
 session changed from `pending` to `complete`.
 
 `status` reads durable plan files and prints session counts, the next pending
-session, content hashes, state paths, and lock state. Use `--json` for scripts.
+session, content hashes, state paths, lock state, and any active harness turn.
+Use `--json` for scripts.
+
+`tail` prints recent activity for the latest run and follows `events.jsonl`
+plus live harness stdout/stderr logs until the observed run finishes. Use
+`--no-follow` to print recent activity and exit.
 
 `doctor` performs a non-mutating harness and path check. Use `--json` for
 scriptable prerequisite checks.
@@ -191,6 +198,18 @@ Runtime files include:
 `last_message_path`, and `result_path`. Failed-run artifacts remain in their
 original `runs/<run_id>/` directory when a later retry succeeds.
 
+While a harness turn is active, `state.json` also includes `active_turn` with
+the run id, turn index, session number, artifact paths, elapsed and idle
+seconds, last activity metadata, heartbeat count, and any best-effort
+action-required signal. `events.jsonl` records `turn_started`,
+`turn_heartbeat`, `action_required`, `turn_finished`, `run_paused`, and
+`run_finished` events as they happen.
+
+For normal text runs, live progress is printed to stderr so stdout remains the
+final human summary. For `run --json`, stdout remains the final JSON payload and
+stderr stays quiet; live monitoring should read `state.json`, `events.jsonl`,
+or use `tail`.
+
 ## JSON Output
 
 Use `--json` for runner integrations:
@@ -256,6 +275,13 @@ Inspect the most recent artifacts named in `state.json` or the JSON output:
 jq '.turns[-1] | {stdout_path, stderr_path, last_message_path, result_path}' ~/.local/state/agent-session-loop/<plan-path-hash>/state.json
 jq -r '.turns[-1].artifact_dir' ~/.local/state/agent-session-loop/<plan-path-hash>/state.json
 jq -r '.turns[-1].result_path' ~/.local/state/agent-session-loop/<plan-path-hash>/state.json | xargs jq '{session, returncode, status_changes, runner_pause, plan_error}'
+```
+
+Follow the active or latest run:
+
+```bash
+agent-session-loop tail ~/.local/share/agent-plans/example-plan/
+agent-session-loop tail ~/.local/share/agent-plans/example-plan/ --lines 80 --no-follow
 ```
 
 Remove a stale lock:
