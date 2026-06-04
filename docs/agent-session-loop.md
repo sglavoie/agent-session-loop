@@ -235,10 +235,16 @@ Commit events include the commit index, scope, session number for per-session
 commits, argv, cwd, artifact paths, status result, duration, and commit SHA when
 one was created.
 
-For normal text runs, live progress is printed to stderr so stdout remains the
-final human summary. For `run --json`, stdout remains the final JSON payload and
-stderr stays quiet; live monitoring should read `state.json`, `events.jsonl`,
-or use `tail`.
+For normal text runs, live progress is printed to stderr with local compact
+timestamps, for example `[2026-06-04 14:32:10] agent-session-loop: session 2
+started (turn 2)`, so stdout remains the final human summary. The live lines
+cover run start, session starts and finishes, periodic 30-second heartbeats,
+action-required signals, commits, pauses, and run finish. Detailed artifact
+paths remain in the final summary, `status`, `state.json`, and `events.jsonl`
+instead of being repeated on every turn line.
+
+For `run --json`, stdout remains the final JSON payload and stderr stays quiet;
+live monitoring should read `state.json`, `events.jsonl`, or use `tail`.
 
 ## JSON Output
 

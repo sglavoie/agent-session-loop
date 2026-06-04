@@ -1097,14 +1097,52 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertIn("Plan:", completed.stdout)
         self.assertIn("Completed session 1", completed.stdout)
         self.assertIn("Run complete: 1 session(s) completed", completed.stdout)
-        self.assertIn("agent-session-loop: run started", completed.stderr)
-        self.assertIn("agent-session-loop: turn started turn=1 session=1", completed.stderr)
-        self.assertIn("agent-session-loop: turn finished turn=1 session=1 status=complete", completed.stderr)
-        self.assertIn("agent-session-loop: run finished", completed.stderr)
-        self.assertIn("duration=", completed.stderr)
-        self.assertIn("stdout=", completed.stderr)
-        self.assertIn("stderr=", completed.stderr)
-        self.assertIn("result=", completed.stderr)
+        timestamp = r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] "
+        self.assertRegex(
+            completed.stderr,
+            timestamp + r"agent-session-loop: run started: harness codex; run ",
+        )
+        self.assertIn("run dir ", completed.stderr)
+        self.assertIn("state ", completed.stderr)
+        self.assertIn("events ", completed.stderr)
+        self.assertRegex(
+            completed.stderr,
+            timestamp + r"agent-session-loop: session 1 started \(turn 1\)",
+        )
+        self.assertIn(
+            "agent-session-loop: session 1 finished "
+            "(turn 1, status complete, return code 0, duration ",
+            completed.stderr,
+        )
+        self.assertIn("agent-session-loop: run finished: run ", completed.stderr)
+        self.assertIn("reason all-complete", completed.stderr)
+        self.assertNotIn("stdout=", completed.stderr)
+        self.assertNotIn("stderr=", completed.stderr)
+        self.assertNotIn("result=", completed.stderr)
+
+    def test_text_run_emits_final_paused_progress_line(self) -> None:
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+            statuses=("pending",)
+        )
+
+        completed = subprocess.run(
+            self.run_command(plan_dir=plan_dir, state_dir=state_dir),
+            cwd=REPO_ROOT,
+            env=self.loop_env(config_home=config_home, mode="failure"),
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+
+        self.assertEqual(1, completed.returncode)
+        self.assertIn("Run paused: nonzero-exit", completed.stderr)
+        self.assertRegex(
+            completed.stderr,
+            r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] "
+            r"agent-session-loop: run paused: run [^,]+, "
+            r"reason nonzero-exit, duration \d+\.\ds",
+        )
 
     def test_json_run_stays_quiet_and_status_reports_active_turn(self) -> None:
         plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
@@ -1240,9 +1278,15 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
 
         self.assertEqual(0, tail_process.returncode, tail_stderr)
         self.assertEqual("", tail_stderr)
-        self.assertIn("event turn_started", tail_stdout)
-        self.assertIn("event turn_finished", tail_stdout)
-        self.assertIn("event run_finished", tail_stdout)
+        timestamp = r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] "
+        self.assertRegex(
+            tail_stdout,
+            timestamp + r"agent-session-loop: session 1 started \(turn 1\)",
+        )
+        self.assertIn("agent-session-loop: session 1 finished", tail_stdout)
+        self.assertIn("agent-session-loop: session 2 started (turn 2)", tail_stdout)
+        self.assertIn("agent-session-loop: run finished: run ", tail_stdout)
+        self.assertNotIn("event turn_started", tail_stdout)
         self.assertIn("stdout session=1 turn=1 | session 1 stdout before completion", tail_stdout)
         self.assertIn("stderr session=1 turn=1 | session 1 stderr before completion", tail_stdout)
         self.assertIn("stdout session=2 turn=2 | session 2 stdout before completion", tail_stdout)
@@ -1307,7 +1351,16 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertTrue(
                 any(record["name"] == events.TURN_HEARTBEAT_EVENT for record in event_records)
             )
-            self.assertIn("agent-session-loop: turn heartbeat", stderr.getvalue())
+            stderr_text = stderr.getvalue()
+            timestamp = r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] "
+            self.assertRegex(
+                stderr_text,
+                timestamp + r"agent-session-loop: session 1 started \(turn 1\)",
+            )
+            self.assertRegex(
+                stderr_text,
+                timestamp + r"agent-session-loop: session 1 heartbeat \(turn 1,",
+            )
 
     def test_retry_after_failed_turn_keeps_first_run_artifacts(self) -> None:
         plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(

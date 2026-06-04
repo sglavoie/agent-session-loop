@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 from pathlib import Path
 import sys
@@ -108,71 +109,152 @@ def _format_seconds(value: Any) -> str:
     return f"{seconds:.1f}s"
 
 
+def _parse_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _format_local_datetime(value: Any) -> str:
+    parsed = _parse_datetime(value)
+    if parsed is None:
+        return "none"
+    return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _progress_commit_label(payload: dict[str, Any]) -> str:
+    scope = payload.get("scope")
+    session = payload.get("session")
+    if scope == "session" and session is not None:
+        return f"session {session}"
+    if scope == "end":
+        return "end"
+    return str(scope or "unknown")
+
+
+def _run_started_message(payload: dict[str, Any]) -> str:
+    run_id = payload.get("run_id", "unknown")
+    harness = payload.get("harness", "unknown")
+    next_pending = payload.get("next_pending")
+    next_label = "none" if next_pending is None else f"session {next_pending}"
+    parts = [
+        f"run started: harness {harness}",
+        f"run {run_id}",
+    ]
+
+    counts = payload.get("counts")
+    if isinstance(counts, dict):
+        total = 0
+        for value in counts.values():
+            try:
+                total += int(value)
+            except (TypeError, ValueError):
+                pass
+        complete = counts.get("complete", "unknown")
+        pending = counts.get("pending", "unknown")
+        parts.append(f"{complete}/{total} sessions complete")
+        parts.append(f"{pending} pending")
+
+    parts.append(f"next {next_label}")
+
+    approval = payload.get("approval_mode")
+    if approval is not None:
+        parts.append(f"approval {approval}")
+
+    run_dir = payload.get("run_dir")
+    if run_dir is not None:
+        parts.append(f"run dir {run_dir}")
+
+    return "; ".join(str(part) for part in parts)
+
+
+def _event_message(name: str, payload: dict[str, Any]) -> str:
+    if name == "run_started":
+        return _run_started_message(payload)
+    if name == "turn_started":
+        return (
+            f"session {payload.get('session', 'unknown')} started "
+            f"(turn {payload.get('turn_index', 'unknown')})"
+        )
+    if name == events.TURN_HEARTBEAT_EVENT:
+        stream = payload.get("last_activity_stream") or "none"
+        return (
+            f"session {payload.get('session', 'unknown')} heartbeat "
+            f"(turn {payload.get('turn_index', 'unknown')}, "
+            f"elapsed {_format_seconds(payload.get('elapsed_seconds'))}, "
+            f"idle {_format_seconds(payload.get('idle_seconds'))}, "
+            f"last activity {_format_local_datetime(payload.get('last_activity_at'))}, "
+            f"stream {stream})"
+        )
+    if name == events.ACTION_REQUIRED_EVENT:
+        message = payload.get("message") or ""
+        return (
+            f"action required in session {payload.get('session', 'unknown')} "
+            f"(turn {payload.get('turn_index', 'unknown')}, "
+            f"reason {payload.get('reason', 'unknown')}, "
+            f"source {payload.get('source', 'unknown')}): "
+            f"{message}"
+        )
+    if name == "turn_finished":
+        return (
+            f"session {payload.get('session', 'unknown')} finished "
+            f"(turn {payload.get('turn_index', 'unknown')}, "
+            f"status {payload.get('status_result', 'unknown')}, "
+            f"return code {payload.get('returncode', 'unknown')}, "
+            f"duration {_format_seconds(payload.get('duration_seconds'))})"
+        )
+    if name == events.COMMIT_STARTED_EVENT:
+        return (
+            f"commit {payload.get('commit_index', 'unknown')} started "
+            f"({_progress_commit_label(payload)})"
+        )
+    if name == events.COMMIT_FINISHED_EVENT:
+        sha = payload.get("commit_sha") or "none"
+        return (
+            f"commit {payload.get('commit_index', 'unknown')} finished "
+            f"({_progress_commit_label(payload)}, "
+            f"status {payload.get('status_result', 'unknown')}, "
+            f"sha {sha}, "
+            f"duration {_format_seconds(payload.get('duration_seconds'))})"
+        )
+    if name == events.RUN_PAUSED_EVENT:
+        detail = payload.get("message")
+        suffix = "" if not detail else f": {detail}"
+        return (
+            f"run paused: run {payload.get('run_id', 'unknown')}, "
+            f"reason {payload.get('reason', 'unknown')}"
+            f"{suffix}"
+        )
+    if name == "run_finished":
+        verb = "run finished" if payload.get("ok") else "run paused"
+        reason = payload.get("pause_reason") or payload.get("reason") or "unknown"
+        return (
+            f"{verb}: run {payload.get('run_id', 'unknown')}, "
+            f"reason {reason}, "
+            f"duration {_format_seconds(payload.get('duration_seconds'))}"
+        )
+
+    parts = [f"event {name}"]
+    run_id = payload.get("run_id")
+    if run_id is not None:
+        parts.append(f"run {run_id}")
+    session = payload.get("session")
+    if session is not None:
+        parts.append(f"session {session}")
+    turn_index = payload.get("turn_index")
+    if turn_index is not None:
+        parts.append(f"turn {turn_index}")
+    return ", ".join(str(part) for part in parts)
+
+
 def _event_line(record: dict[str, Any]) -> str:
     name = str(record.get("name") or "unknown")
     payload = _payload(record)
-    parts = [f"event {name}"]
-
-    run_id = payload.get("run_id")
-    if run_id is not None:
-        parts.append(f"run={run_id}")
-    session = payload.get("session")
-    if session is not None:
-        parts.append(f"session={session}")
-    turn_index = payload.get("turn_index")
-    if turn_index is not None:
-        parts.append(f"turn={turn_index}")
-
-    if name == "run_started":
-        parts.append(f"harness={payload.get('harness', 'unknown')}")
-        parts.append(f"next={payload.get('next_pending', 'none')}")
-    elif name == "turn_started":
-        parts.append(f"stdout={payload.get('stdout_path', 'unknown')}")
-        parts.append(f"stderr={payload.get('stderr_path', 'unknown')}")
-    elif name == events.TURN_HEARTBEAT_EVENT:
-        parts.append(f"elapsed={_format_seconds(payload.get('elapsed_seconds'))}")
-        parts.append(f"idle={_format_seconds(payload.get('idle_seconds'))}")
-        parts.append(f"last_activity={payload.get('last_activity_at') or 'none'}")
-    elif name == events.ACTION_REQUIRED_EVENT:
-        parts.append(f"reason={payload.get('reason', 'unknown')}")
-        parts.append(f"source={payload.get('source', 'unknown')}")
-        message = payload.get("message")
-        if message:
-            parts.append(f"detail={message}")
-    elif name == "turn_finished":
-        parts.append(f"status={payload.get('status_result', 'unknown')}")
-        parts.append(f"duration={_format_seconds(payload.get('duration_seconds'))}")
-    elif name == events.COMMIT_STARTED_EVENT:
-        parts.append(f"commit={payload.get('commit_index', 'unknown')}")
-        parts.append(f"scope={payload.get('scope', 'unknown')}")
-        parts.append(f"stdout={payload.get('stdout_path', 'unknown')}")
-        parts.append(f"stderr={payload.get('stderr_path', 'unknown')}")
-        parts.append(f"result={payload.get('result_path', 'unknown')}")
-    elif name == events.COMMIT_FINISHED_EVENT:
-        parts.append(f"commit={payload.get('commit_index', 'unknown')}")
-        parts.append(f"scope={payload.get('scope', 'unknown')}")
-        parts.append(f"status={payload.get('status_result', 'unknown')}")
-        sha = payload.get("commit_sha") or "none"
-        parts.append(f"sha={sha}")
-        parts.append(f"duration={_format_seconds(payload.get('duration_seconds'))}")
-        parts.append(f"stdout={payload.get('stdout_path', 'unknown')}")
-        parts.append(f"stderr={payload.get('stderr_path', 'unknown')}")
-        parts.append(f"result={payload.get('result_path', 'unknown')}")
-    elif name == events.RUN_PAUSED_EVENT:
-        parts.append(f"reason={payload.get('reason', 'unknown')}")
-        message = payload.get("message")
-        if message:
-            parts.append(f"detail={message}")
-    elif name == "run_finished":
-        status = "ok" if payload.get("ok") else "paused"
-        parts.append(f"status={status}")
-        parts.append(f"reason={payload.get('reason', 'unknown')}")
-        parts.append(f"duration={_format_seconds(payload.get('duration_seconds'))}")
-
-    created_at = record.get("created_at")
-    if created_at is not None:
-        parts.append(f"time={created_at}")
-    return " ".join(str(part) for part in parts)
+    timestamp = _format_local_datetime(record.get("created_at"))
+    return f"[{timestamp}] agent-session-loop: {_event_message(name, payload)}"
 
 
 def _target_key(path: Path) -> str:

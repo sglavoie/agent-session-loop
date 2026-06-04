@@ -771,6 +771,28 @@ def _format_seconds(value: Any) -> str:
     return f"{seconds:.1f}s"
 
 
+def _local_timestamp(moment: datetime | None = None) -> str:
+    value = datetime.now().astimezone() if moment is None else moment.astimezone()
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _format_local_datetime(value: Any) -> str:
+    parsed = _parse_datetime(value)
+    if parsed is None:
+        return "none"
+    return _local_timestamp(parsed)
+
+
+def _progress_commit_label(commit: dict[str, Any]) -> str:
+    scope = commit.get("scope")
+    session = commit.get("session")
+    if scope == "session" and session is not None:
+        return f"session {session}"
+    if scope == "end":
+        return "end"
+    return str(scope or "unknown")
+
+
 class _ProgressReporter:
     """Human-facing progress output for non-JSON runs."""
 
@@ -782,7 +804,11 @@ class _ProgressReporter:
         if not self.enabled:
             return
         with self._lock:
-            print(f"agent-session-loop: {message}", file=sys.stderr, flush=True)
+            print(
+                f"[{_local_timestamp()}] agent-session-loop: {message}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     def run_started(self, payload: dict[str, Any]) -> None:
         snapshot = payload["initial_snapshot"]
@@ -791,97 +817,77 @@ class _ProgressReporter:
         next_pending = snapshot["next_pending"]
         next_label = "none" if next_pending is None else f"session {next_pending}"
         self._emit(
-            "run started "
-            f"run_id={payload['run_id']} "
-            f"harness={payload['harness']} "
-            f"sessions={counts['complete']}/{total} complete "
-            f"pending={counts['pending']} "
-            f"next={next_label} "
-            f"approval={payload['approval_mode']}"
+            "run started: "
+            f"harness {payload['harness']}; "
+            f"run {payload['run_id']}; "
+            f"{counts['complete']}/{total} sessions complete; "
+            f"{counts['pending']} pending; "
+            f"next {next_label}; "
+            f"approval {payload['approval_mode']}; "
+            f"run dir {payload['run_dir']}; "
+            f"state {payload['state_path']}; "
+            f"events {payload['events_path']}"
         )
 
     def turn_started(self, active_turn: dict[str, Any]) -> None:
         self._emit(
-            "turn started "
-            f"turn={active_turn['turn_index']} "
-            f"session={active_turn['session']} "
-            f"stdout={active_turn['stdout_path']} "
-            f"stderr={active_turn['stderr_path']} "
-            f"last_message={active_turn['last_message_path']} "
-            f"result={active_turn['result_path']}"
+            f"session {active_turn['session']} started "
+            f"(turn {active_turn['turn_index']})"
         )
 
     def heartbeat(self, heartbeat: dict[str, Any]) -> None:
+        stream = heartbeat.get("last_activity_stream") or "none"
         self._emit(
-            "turn heartbeat "
-            f"turn={heartbeat['turn_index']} "
-            f"session={heartbeat['session']} "
-            f"elapsed={_format_seconds(heartbeat['elapsed_seconds'])} "
-            f"idle={_format_seconds(heartbeat['idle_seconds'])} "
-            f"last_activity={heartbeat['last_activity_at']}"
+            f"session {heartbeat['session']} heartbeat "
+            f"(turn {heartbeat['turn_index']}, "
+            f"elapsed {_format_seconds(heartbeat['elapsed_seconds'])}, "
+            f"idle {_format_seconds(heartbeat['idle_seconds'])}, "
+            f"last activity {_format_local_datetime(heartbeat.get('last_activity_at'))}, "
+            f"stream {stream})"
         )
 
     def action_required(self, signal: dict[str, Any]) -> None:
         self._emit(
-            "action required "
-            f"turn={signal['turn_index']} "
-            f"session={signal['session']} "
-            f"reason={signal['reason']} "
-            f"source={signal['source']} "
-            f"detail={signal['message']}"
+            f"action required in session {signal['session']} "
+            f"(turn {signal['turn_index']}, "
+            f"reason {signal['reason']}, "
+            f"source {signal['source']}): "
+            f"{signal['message']}"
         )
 
     def turn_finished(self, turn: dict[str, Any]) -> None:
         self._emit(
-            "turn finished "
-            f"turn={turn['turn_index']} "
-            f"session={turn['session']} "
-            f"status={turn['status_result']} "
-            f"duration={_format_seconds(turn['duration_seconds'])} "
-            f"returncode={turn['returncode']} "
-            f"stdout={turn['stdout_path']} "
-            f"stderr={turn['stderr_path']} "
-            f"result={turn['result_path']}"
+            f"session {turn['session']} finished "
+            f"(turn {turn['turn_index']}, "
+            f"status {turn['status_result']}, "
+            f"return code {turn['returncode']}, "
+            f"duration {_format_seconds(turn['duration_seconds'])})"
         )
 
     def commit_started(self, commit: dict[str, Any]) -> None:
-        session = commit.get("session")
-        session_text = "" if session is None else f" session={session}"
         self._emit(
-            "commit started "
-            f"commit={commit['commit_index']} "
-            f"scope={commit['scope']}"
-            f"{session_text} "
-            f"stdout={commit['stdout_path']} "
-            f"stderr={commit['stderr_path']} "
-            f"result={commit['result_path']}"
+            f"commit {commit['commit_index']} started "
+            f"({_progress_commit_label(commit)})"
         )
 
     def commit_finished(self, commit: dict[str, Any]) -> None:
-        session = commit.get("session")
-        session_text = "" if session is None else f" session={session}"
         sha = commit.get("commit_sha") or "none"
         self._emit(
-            "commit finished "
-            f"commit={commit['commit_index']} "
-            f"scope={commit['scope']}"
-            f"{session_text} "
-            f"status={commit['status_result']} "
-            f"sha={sha} "
-            f"duration={_format_seconds(commit.get('duration_seconds'))} "
-            f"stdout={commit['stdout_path']} "
-            f"stderr={commit['stderr_path']} "
-            f"result={commit['result_path']}"
+            f"commit {commit['commit_index']} finished "
+            f"({_progress_commit_label(commit)}, "
+            f"status {commit['status_result']}, "
+            f"sha {sha}, "
+            f"duration {_format_seconds(commit.get('duration_seconds'))})"
         )
 
     def run_finished(self, payload: dict[str, Any]) -> None:
-        status = "ok" if payload["ok"] else "paused"
+        verb = "run finished" if payload["ok"] else "run paused"
+        reason = payload.get("pause_reason") or payload.get("reason") or "unknown"
         self._emit(
-            "run finished "
-            f"run_id={payload['run_id']} "
-            f"status={status} "
-            f"reason={payload['reason']} "
-            f"duration={_format_seconds(payload['duration_seconds'])}"
+            f"{verb}: "
+            f"run {payload['run_id']}, "
+            f"reason {reason}, "
+            f"duration {_format_seconds(payload['duration_seconds'])}"
         )
 
 
