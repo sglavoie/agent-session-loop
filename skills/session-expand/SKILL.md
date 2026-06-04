@@ -1,6 +1,6 @@
 ---
 name: session-expand
-description: Validate and expand split session files against the actual codebase. Verifies file paths, signatures, and assumptions. Takes a plan directory or single session file path.
+description: Validate and expand split session files against the actual codebase. Verifies file paths, signatures, assumptions, and parallel-safety metadata. Takes a plan directory or single session file path.
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 ---
 
@@ -8,7 +8,7 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 
 ## Purpose
 
-Research the actual codebase to validate and expand claims in session files produced by `session-split`. For each session, verify that referenced file paths exist, function/struct/class names are correct, code patterns match reality, and inter-session dependencies are satisfiable. Write a concise annotations file alongside each session with findings, corrections, and concrete details (line numbers, exact signatures, patterns to reuse). Optionally fix issues in the session files.
+Research the actual codebase to validate and expand claims in session files produced by `session-split`. For each session, verify that referenced file paths exist, function/struct/class names are correct, code patterns match reality, and inter-session dependencies are satisfiable. In directory mode, validate parallel metadata across all sessions and write authoritative safety findings that `session-run` can use to override manifest guidance. Write a concise annotations file alongside each session with findings, corrections, concrete details (line numbers, exact signatures, patterns to reuse), and parallel-safety notes when cross-session context is available. Optionally fix issues in the session files.
 
 ## Input
 
@@ -43,7 +43,7 @@ $session-expand ~/.local/share/agent-plans/my-plan-abc123def456/session-2.md
 **Directory mode** (path ends with `/` or is a directory):
 
 1. Read `context.md` to understand the project scope, target repository, and files listed.
-2. Read `manifest.md` to get the session list and titles.
+2. Read `manifest.md` to get the session list, titles, and optional `## Parallel Execution` scheduling guidance.
 3. Collect all `session-*.md` files (sorted numerically by session number).
 
 **Single file mode** (path ends with `.md`):
@@ -80,6 +80,18 @@ For each claim, record:
 - Claim type (P/S/F/D/B/N)
 - The exact text from the session
 - The session section it appears in
+
+Separately collect each session's `## Parallel Metadata` block when present:
+
+- Safety classification
+- Required prior sessions
+- Allowed concurrent sessions
+- Owned write paths
+- Forbidden/shared paths
+- Serial blockers
+- Optional internal tracks
+
+Treat these as scheduling claims to validate during the directory-mode cross-session check. Do not count missing parallel metadata as a path/signature/field/dependency/behavior/naming issue.
 
 ### Step 3: Research the Codebase
 
@@ -127,7 +139,7 @@ Verify each claim using the most efficient tool:
 - Stop researching a file after confirming all claims about it.
 - For large sessions (>200 lines), prioritize Path and Signature claims first — these cause the most execution failures.
 
-### Step 4: Cross-Session Dependency Check
+### Step 4: Cross-Session Dependency and Parallel Metadata Check
 
 **Skip this step when processing a single session file.**
 
@@ -136,6 +148,27 @@ When processing all sessions, verify:
 1. **Creation order**: If session N references a file or function that session M (M < N) is supposed to create, confirm session M's scope actually covers that creation.
 2. **Handoff consistency**: If a completed session has a filled Handoff section, check whether its "Files modified" list matches what later sessions assume exists.
 3. **Missing gaps**: Flag anything that no session creates but a later session depends on.
+
+Then validate parallel metadata using all session files, `manifest.md`, and the verified claim results:
+
+1. **Metadata completeness**: Confirm each `## Parallel Metadata` block uses known fields and one of these classifications: `parallel-safe`, `parallel-candidate`, or `serial-required`. Flag unknown classifications or missing required fields.
+2. **Required prior sessions**: Check whether implementation instructions, generated-output usage, handoff references, or verified dependencies imply prior sessions that are absent from `Required prior sessions`. Record the added required prior sessions.
+3. **Allowed concurrency**: For each session listed in `Allowed concurrent sessions`, confirm neither session requires the other, neither shares overlapping write ownership, and neither touches a forbidden/shared path owned by the other.
+4. **Owned write paths**: Treat exact path overlap, parent/child path overlap, broad directory ownership, generated-output directories, shared configs, schemas, migrations, lockfiles, package-manager metadata, build-system files, and repo-wide rewrite instructions as unsafe unless the plan assigns a single clear owner and the other sessions avoid that path.
+5. **Forbidden/shared paths**: Confirm forbidden/shared paths are not also listed as owned write paths by the same session and are not claimed as allowed concurrent write scope by another session.
+6. **Safety classification**: Keep `parallel-safe` only when ownership is concrete, dependencies are satisfied by prior sessions or absent, and allowed concurrent sessions are demonstrably disjoint. Treat `parallel-candidate` and `serial-required` as not safe for concurrent execution unless validation proves narrower ownership and dependency boundaries. Flag uncertain or broad ownership as unsafe instead of inferring safety.
+7. **Internal tracks**: If `Optional internal tracks` are present, validate that track-owned paths are disjoint and do not include handoff files, `manifest.md`, `context.md`, or files outside the session's owned write paths.
+
+Record these outcomes:
+
+- Unsafe overlaps
+- Dependency violations
+- Ambiguous or broad ownership
+- Sessions that must be treated serially
+- Sessions that are blocked, unsafe to run now, ownership-conflicted, or dependent on unresolved work
+- Any required prior sessions added by validation
+
+`serial-required` means "not safe for concurrent execution"; it does not by itself block explicit serial execution after all required prior sessions are complete. Only mark a session blocked when validation identifies an unresolved dependency, ownership conflict, or unsafe run condition.
 
 ### Step 5: Identify Patterns to Reuse
 
@@ -206,7 +239,64 @@ For each session file `session-N.md`, write `session-N.expand.md` in the same di
 
 - **Requires from session <M>**: <what this session assumes session M created>
 - **Provides for session <M>**: <what this session creates that session M needs>
+
+## Parallel Safety
+
+<!-- Only for directory-mode expansion when cross-session context is available -->
+
+- **Validated classification**: <parallel-safe | parallel-candidate | serial-required | blocked>
+- **Required prior sessions**: <none | session numbers and reasons, including validation-added requirements>
+- **Allowed concurrent sessions**: <none | session numbers validated as disjoint>
+- **Ownership findings**: <none | unsafe overlaps, broad ownership, ambiguous ownership, forbidden/shared path conflicts>
+- **Session-run markers**: <none | blocked | unsafe to run now | ownership-conflicted | dependent on unresolved work>
 ```
+
+**Directory-mode parallel validation file**:
+
+When processing a full plan directory and cross-session context is available, also write `<plan-dir>/parallel-validation.md`. Do not write this file in single-session mode.
+
+Use this structure:
+
+```markdown
+# Parallel Validation
+
+**Expanded**: <YYYY-MM-DD>
+**Scope**: <all session files checked>
+
+## Summary
+
+- **Safe concurrent sessions**: <none | validated sets>
+- **Serial-only sessions**: <none | sessions and reasons>
+- **Blocked sessions**: <none | sessions and reasons>
+
+## Session Results
+
+### Session <N>: <title>
+
+- **Validated classification**: <parallel-safe | parallel-candidate | serial-required | blocked>
+- **Required prior sessions**: <none | session numbers and reasons>
+- **Allowed concurrent sessions**: <none | session numbers>
+- **Run condition**: <safe to run now | unsafe to run now | blocked | ownership-conflicted | dependent on unresolved work>
+- **Findings**: <none | concise findings>
+
+## Unsafe Overlaps
+
+- <none | session/path/reason>
+
+## Dependency Violations
+
+- <none | session/reason/added required prior sessions>
+
+## Ambiguous Ownership
+
+- <none | session/path/reason>
+
+## Session-Run Precedence
+
+`session-run` must treat this file as authoritative over manifest and session-file parallel metadata for dependency, ownership, and safety claims. Handoff status lines in session files remain the source of truth for completion.
+```
+
+Use explicit blocking language in `parallel-validation.md` when `session-run` should fail closed for explicit-mode execution: `blocked`, `unsafe to run now`, `ownership-conflicted`, `dependent on unresolved work`, or `required prior sessions`.
 
 **After writing each annotation file**, edit the corresponding `session-N.md` to add a reference. Insert a new blockquote line immediately after the `> **Before starting**:` line:
 
@@ -222,6 +312,8 @@ Rules:
 - The Concrete Details section should provide just enough information that the executor can work without re-reading source files — include only what is needed.
 - Claims about code to be _created_ (new files, new functions) should be marked "N/A — to be created" in the Verified Claims table, not flagged as issues. Only flag them if they conflict with something already existing (e.g., a function name already taken with a different signature).
 - Omit empty sections entirely (e.g., if no issues, omit `## Issues`; if no dependencies, omit `## Session Dependencies`).
+- Include `## Parallel Safety` only when directory-mode expansion had enough cross-session context to validate the selected session against the rest of the plan.
+- Do not rewrite `manifest.md`; `parallel-validation.md` and `## Parallel Safety` sections are authoritative corrections to manifest/session parallel guidance.
 
 ### Step 7: Report and Offer Fixes
 
@@ -231,7 +323,8 @@ Print a concise summary:
 2. Total claims checked and total issues found
 3. Per-session one-liner: `session-N: <claims> checked / <issues> issues — <worst issue description or "clean">`
 4. Blocking issues highlighted prominently (wrong file paths, missing dependencies)
-5. List of annotation files created
+5. Parallel validation summary when directory-mode validation was performed
+6. List of annotation files created and whether `parallel-validation.md` was written
 
 **If issues were found**:
 
@@ -243,6 +336,7 @@ Print a concise summary:
 
 - Tell the user the plan is validated and they can proceed to execution
 - Note they can optionally read the `.expand.md` files for concrete line numbers and patterns
+- If directory-mode parallel validation found no unsafe overlaps or unresolved dependencies, report the validated concurrent sets; otherwise recommend the serial fallback or explicit sessions that remain safe.
 
 **In both cases**, end by printing the ready-to-paste `<skill-prefix>session-run <plan-directory>/` command so the user can proceed directly to execution without switching context.
 
@@ -251,6 +345,10 @@ Print a concise summary:
 - Never modify `context.md` or `manifest.md`
 - The `.expand.md` suffix keeps annotation files visually grouped with their session files
 - Skip sessions whose Handoff status is not "pending" — the codebase has already been modified by that session's execution, so checking stale claims would be misleading. Note skipped sessions in the summary.
+- Generate `parallel-validation.md` only in directory mode, after all session files and manifest guidance are available. In single-session mode, mention that complete cross-session parallel validation requires directory-mode expansion.
+- Treat `parallel-validation.md` and `## Parallel Safety` expansion sections as authoritative corrections for `session-run`; do not change the manifest to reflect validation results.
+- When parallel safety is uncertain, broad, or ownership-conflicted, prefer `serial-required` or blocked validation language over optimistic concurrency.
+- `serial-required` restricts concurrent execution. It does not block explicit serial execution after required prior sessions are complete unless validation records an unresolved dependency or ownership conflict.
 - New code claims (files or functions to be created) are valid and should not be flagged unless they conflict with existing code
 - If the codebase root is a different repository from the current working directory, `cd` to it before running Glob/Grep/Read operations
 - When applying fixes to session files, only correct factual errors — never rewrite implementation logic, change the approach, or restructure the plan

@@ -1,6 +1,6 @@
 ---
 name: session-split
-description: Split a multi-session plan into per-session files for token-efficient execution. Accepts a plan file path or captured inline plan text. Also proposes session boundaries if the plan lacks session structure.
+description: Split a multi-session plan into per-session files with conservative parallel-safety metadata and scheduling guidance. Accepts a plan file path or captured inline plan text. Also proposes session boundaries if the plan lacks session structure.
 allowed-tools: Bash, Read, Write
 ---
 
@@ -8,7 +8,7 @@ allowed-tools: Bash, Read, Write
 
 ## Purpose
 
-Parse a multi-session plan and split it into a collision-safe persistent directory of smaller, self-contained files: shared context, individual session files with handoff templates, and a manifest with ready-to-paste execution commands.
+Parse a multi-session plan and split it into a collision-safe persistent directory of smaller, self-contained files: shared context, individual session files with handoff templates and parallel-safety metadata, and a manifest with ready-to-paste serial and parallel-aware execution commands.
 
 ## Input
 
@@ -134,14 +134,14 @@ Extracts file paths from the plan text, checks existence and line counts, and bu
 **Proportionality rule** (keeps small plans fast):
 
 - **< 5 file references total**: Skip this entire step
-- **5–15 references**: Run sub-steps 3a–3b only (defer 3c until sessions are defined)
+- **5–15 references**: Run sub-steps 4a–4b only (defer 4c until sessions are defined)
 - **> 15 references**: Run all sub-steps
 
 **Sub-steps:**
 
-**3a. Extract paths**: Scan the plan for backtick-quoted paths (e.g. `` `src/foo/bar.ts` ``) and bare paths in `**File:**` lines or list items. Deduplicate the results.
+**4a. Extract paths**: Scan the plan for backtick-quoted paths (e.g. `` `src/foo/bar.ts` ``) and bare paths in `**File:**` lines or list items. Deduplicate the results.
 
-**3b. Probe files**: For each extracted path, run:
+**4b. Probe files**: For each extracted path, run:
 
 ```bash
 wc -l <path> 2>/dev/null || echo "NEW"
@@ -149,7 +149,7 @@ wc -l <path> 2>/dev/null || echo "NEW"
 
 Record a tuple for each: `(path, lines | NEW, session_number)` — where `session_number` is the session the reference appeared in (or `0` for context).
 
-**3c. Per-session profile**: For each session compute:
+**4c. Per-session profile**: For each session compute:
 
 - Files touched (count)
 - Existing LoC sum (sum of line counts for existing files)
@@ -158,7 +158,52 @@ Record a tuple for each: `(path, lines | NEW, session_number)` — where `sessio
 
 **Explicit boundary**: Do NOT verify signatures, function names, or code patterns — that is `session-expand`'s job. This step only measures size and spread.
 
-### Step 5: Handle Edge Cases
+### Step 5: Parallel Safety Analysis
+
+Build conservative parallel metadata after the surface scan and before any generated files are written. Parallelism is optional guidance; architectural correctness and collision avoidance always win.
+
+**Inputs to consider:**
+
+- Parsed session order, titles, and content
+- Surface scan path references when available
+- Explicit dependency language such as "depends on", "requires", "after", "before", "blocks", "unblocks", "handoff from", or "must run after"
+- Shared context contracts and global invariants
+- Write-path ownership claims in the plan, especially words such as "edit", "update", "modify", "create", "delete", "own", "owns", "scope", or "files modified"
+
+**Build dependency edges:**
+
+- Add an edge from session A to session B when B explicitly depends on A or must run after A.
+- Add an edge when B consumes generated output, APIs, schemas, contracts, or helper code produced by A.
+- Add an edge for overlapping write ownership, including exact path overlap and parent/child path overlap.
+- Add an edge for shared risky files unless the plan clearly assigns one session exclusive ownership.
+- Do not treat numeric session order alone as a dependency; use the plan text and shared context.
+
+**Classify each session:**
+
+- `parallel-safe`: concrete owned write paths, no broad or risky shared writes, and no dependency edge against any other session in the same wave.
+- `parallel-candidate`: likely separable, but ownership, generated output, or dependency evidence is incomplete and should be validated by `session-expand` before concurrent execution.
+- `serial-required`: has an unresolved dependency, overlapping ownership, broad directory ownership, shared risky files, or global side effects that make concurrent execution unsafe.
+
+Treat these as not parallel-safe by default: unknown ownership, broad directory edits, shared configs, schemas, migrations, lockfiles, generated files, package-manager metadata, build-system files, parent/child path overlap, repo-wide rewrites, and instructions that ask workers to clean up or refactor outside their owned paths.
+
+**Build dependency waves:**
+
+- Topologically group sessions into waves using dependency edges.
+- Sessions inside the same wave may be listed as safe to run together only when every session is `parallel-safe`, all owned write paths are disjoint, and no risky shared path appears in more than one session.
+- Keep `parallel-candidate` sessions out of safe concurrent sets; list them separately as candidates that need manual confirmation or `session-expand` validation.
+- Put any session with `serial-required` in its own wave unless a later validation step proves a narrower boundary.
+
+Record for each session:
+
+- Safety classification
+- Required prior sessions
+- Allowed concurrent sessions
+- Owned write paths
+- Forbidden/shared paths
+- Serial blockers or uncertainty reasons
+- Optional intra-session tracks, but only when the session itself contains disjoint sub-work with clear ownership
+
+### Step 6: Handle Edge Cases
 
 **No session markers found**: Propose session boundaries using concrete data:
 
@@ -168,13 +213,13 @@ Record a tuple for each: `(path, lines | NEW, session_number)` — where `sessio
 4. Present the proposed session structure with per-session summaries: `<Title> -- <N> files, ~<L> existing lines, <subsystem(s)>`
 5. If surface scan was skipped (< 5 file references), fall back to heading/affinity grouping
 6. Ask the user for approval before proceeding
-7. Once approved, restructure the plan content accordingly and continue to Step 6
+7. Once approved, restructure the plan content accordingly and continue to Step 7
 
 **Single session found**: Tell the user: "Only 1 session found — splitting is not needed." Stop.
 
-**Two or more sessions found**: Continue to Step 6.
+**Two or more sessions found**: Continue to Step 7.
 
-### Step 6: Resolve Output Directory
+### Step 7: Resolve Output Directory
 
 Run the resolver and use its JSON output as the source of truth for all generated file paths:
 
@@ -209,7 +254,7 @@ PY
 
 Use `output_dir` for every generated file path. Use `source_path` as the canonical original plan path in generated content. Do not derive an alternate directory from the plan filename.
 
-### Step 7: Write context.md
+### Step 8: Write context.md
 
 Write the context lines to `<output_dir>/context.md`.
 
@@ -223,7 +268,7 @@ _No shared context section found in the original plan._
 **Original plan**: `<source_path>`
 ```
 
-### Step 8: Write session-N.md Files
+### Step 9: Write session-N.md Files
 
 For each session, write `<output_dir>/session-N.md` where N is the actual session number from the heading.
 
@@ -234,6 +279,16 @@ For each session, write `<output_dir>/session-N.md` where N is the actual sessio
 
 > **Before starting**: Read `context.md` in this directory for shared project context.
 > **Previous session**: Read the **Handoff** section at the bottom of `session-<N-1>.md`.
+
+## Parallel Metadata
+
+- **Safety classification**: `<parallel-safe | parallel-candidate | serial-required>`
+- **Required prior sessions**: `<none | session numbers and reasons>`
+- **Allowed concurrent sessions**: `<none | session numbers>`
+- **Owned write paths**: `<paths this session may edit>`
+- **Forbidden/shared paths**: `<paths that must not be edited, or require coordinator ownership>`
+- **Serial blockers**: `<none | dependency or ownership reasons>`
+- **Optional internal tracks**: `<none | disjoint track names and owned paths>`
 
 ---
 
@@ -256,10 +311,13 @@ Rules:
 
 - For Session 1, omit the "Previous session" line
 - Preserve all original content exactly — do not summarize, rewrite, or reformat
+- Insert the Parallel Metadata block above the preserved original session content
 - **Heading normalization**: if the original session heading was `###` level, promote all headings within the session by one level so the file reads naturally as a standalone document (session title becomes `#`, its `####` sub-sections become `##`, etc.)
 - Preserve fenced code blocks verbatim
+- If `Optional internal tracks` is not `none`, add an `### Internal Track Worker Prompts` subsection directly below the metadata with one prompt per track.
+- Emit intra-session worker prompts only when optional internal tracks have disjoint ownership. Track workers must not edit `manifest.md`, `context.md`, session handoffs, or files outside their ownership; the coordinator integrates results and updates the session handoff.
 
-### Step 9: Write manifest.md
+### Step 10: Write manifest.md
 
 Write `<output_dir>/manifest.md`:
 
@@ -293,6 +351,62 @@ Example rendered command: `<skill-prefix>session-run ~/.local/share/agent-plans/
 
 `<skill-prefix>session-run` auto-advances — it finds the next pending session, implements it, and updates the handoff. No session number needed. Repeat in new conversations until all sessions are complete.
 
+## Parallel Execution
+
+Parallel execution is optional. Use it only when the safety analysis marks sessions as `parallel-safe`; otherwise use the serial command above.
+
+Do not run concurrent auto-advance commands:
+
+```text
+<skill-prefix>session-run <output_dir>/
+```
+
+Concurrent auto-picking can race on the same pending session. Explicit session execution is required for parallel workers and depends on `<skill-prefix>session-run <output_dir>/ --session N` support.
+
+### Dependency Waves
+
+| Wave | Sessions | Safe concurrent set | Notes |
+| ---- | -------- | ------------------- | ----- |
+| 1    | <sessions> | <session numbers or none> | <dependency and ownership summary> |
+
+### Session Ownership
+
+| Session | Classification | Owned write paths | Required prior sessions | Allowed concurrent sessions | Serial blockers |
+| ------- | -------------- | ----------------- | ----------------------- | --------------------------- | --------------- |
+| 1       | <classification> | <paths> | <none/session numbers> | <none/session numbers> | <none/reasons> |
+
+### Parallel Worker Commands
+
+Emit one command block per session listed in a safe concurrent set. Use these only for sessions listed in a safe concurrent set:
+
+```text
+<skill-prefix>session-run <output_dir>/ --session <N>
+```
+
+Example:
+
+```text
+<skill-prefix>session-run <output_dir>/ --session 2
+```
+
+### Worker Prompts
+
+Emit one ready-to-use prompt per parallel-safe worker with all placeholders replaced:
+
+```text
+You are implementing Session <N> from <output_dir>/session-<N>.md.
+Read context.md, session-<N>.md, and session-<N>.expand.md if present.
+You own only these write paths: <owned paths>.
+Do not edit these shared or forbidden paths: <forbidden/shared paths>.
+You are not alone in the codebase; do not revert or overwrite changes outside your ownership.
+Run the session verification that applies to your scope.
+Update only the Handoff section of session-<N>.md when complete.
+```
+
+### Serial Blockers
+
+- <session>: <reason, or "none">
+
 ## Token Budget
 
 - Original plan: ~<X> lines
@@ -317,7 +431,7 @@ Replace all `<placeholders>` with actual computed values.
 
 **Note**: Omit the Execution Weight section entirely if the surface scan was skipped (< 5 file references).
 
-### Step 10: Report Results
+### Step 11: Report Results
 
 Print a concise summary:
 
@@ -328,7 +442,8 @@ Print a concise summary:
 5. The ready-to-paste execution command (the "Execute All Sessions" block from manifest.md)
 6. Estimated token savings percentage
 7. If the Execution Weight table was generated, highlight any "heavy" session and suggest the user consider splitting it further
-8. Suggest running `<skill-prefix>session-expand <output-directory>` as the next step to validate file paths, signatures, and assumptions against the actual codebase before execution
+8. Mention whether the manifest includes a Parallel Execution section and whether any sessions are `parallel-safe`
+9. Suggest running `<skill-prefix>session-expand <output-directory>` as the next step to validate file paths, signatures, ownership, dependencies, and assumptions against the actual codebase before execution
 
 ## Important Notes
 
@@ -338,3 +453,5 @@ Print a concise summary:
 - If a session contains "Exit criteria" or "Verification" sub-sections, they belong to that session (not to context)
 - Content between `---` horizontal rules that appears between context and the first session should go at the end of context.md
 - Always use `<skill-prefix>session-run` in generated execution instructions — it auto-advances through sessions and runs within the active harness conversation.
+- Never promote parallel execution above correctness; uncertain ownership or dependencies must become `parallel-candidate` or `serial-required`.
+- Parallel worker commands must use explicit `--session N`; never recommend concurrent auto-advance invocations.
