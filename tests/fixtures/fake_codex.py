@@ -74,11 +74,34 @@ def main() -> int:
         return 7
 
     pending = _pending_sessions(plan_dir)
+    if mode == "no-progress":
+        _write_last_message("Runner status: complete\n")
+        print("left plan unchanged")
+        return 0
+
     if mode == "multiple-progress":
         for path in pending[:2]:
             _mark_complete(path)
         _write_last_message("Runner status: complete\n")
         print("completed multiple sessions")
+        return 0
+
+    if mode == "unexpected-progress":
+        if len(pending) > 1:
+            _mark_complete(pending[1])
+        _write_last_message("Runner status: complete\n")
+        print("completed unexpected session")
+        return 0
+
+    if mode == "runner-pause":
+        _write_last_message("RUNNER_PAUSE: operator requested pause\n")
+        print("runner requested pause")
+        return 0
+
+    if mode == "malformed-after-turn":
+        (plan_dir / "context.md").unlink(missing_ok=True)
+        _write_last_message("Runner status: complete\n")
+        print("mutated plan after turn")
         return 0
 
     if mode == "success":

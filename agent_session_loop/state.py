@@ -16,7 +16,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from . import config, events, plans
+from . import config, events, plans, responses
 
 
 LOCK_FILE_NAME = "lock.json"
@@ -275,24 +275,25 @@ def status_payload(
     lock_path = lock_path_for_plan(snapshot.plan_dir, state_dir)
     lock_info = _read_lock_path(lock_path, snapshot.plan_dir)
     next_pending = snapshot.next_pending
-    return {
-        "plan_dir": str(snapshot.plan_dir),
-        "context_path": str(snapshot.context_path),
-        "manifest_path": str(snapshot.manifest_path),
-        "parallel_validation_path": (
+    return responses.success_payload(
+        "status",
+        plan_dir=str(snapshot.plan_dir),
+        context_path=str(snapshot.context_path),
+        manifest_path=str(snapshot.manifest_path),
+        parallel_validation_path=(
             str(snapshot.parallel_validation_path)
             if snapshot.parallel_validation_path is not None
             else None
         ),
-        "content_sha256": snapshot.content_sha256,
-        "path_hash": snapshot.path_hash,
-        "plan_hash": snapshot.plan_hash,
-        "state_dir": str(plan_state),
-        "state_path": str(plan_state / events.STATE_FILE_NAME),
-        "events_path": str(plan_state / events.EVENTS_FILE_NAME),
-        "counts": _status_counts(snapshot),
-        "next_pending": next_pending.number if next_pending is not None else None,
-        "sessions": [
+        content_sha256=snapshot.content_sha256,
+        path_hash=snapshot.path_hash,
+        plan_hash=snapshot.plan_hash,
+        state_dir=str(plan_state),
+        state_path=str(plan_state / events.STATE_FILE_NAME),
+        events_path=str(plan_state / events.EVENTS_FILE_NAME),
+        counts=_status_counts(snapshot),
+        next_pending=next_pending.number if next_pending is not None else None,
+        sessions=[
             {
                 "number": session.number,
                 "status": session.status,
@@ -302,8 +303,8 @@ def status_payload(
             }
             for session in snapshot.sessions
         ],
-        "lock": _lock_payload(lock_info, lock_path),
-    }
+        lock=_lock_payload(lock_info, lock_path),
+    )
 
 
 def _print_text_status(payload: dict[str, Any]) -> None:
@@ -338,23 +339,100 @@ def status_from_args(args: argparse.Namespace) -> int:
         snapshot = plans.inspect_plan(args.plan_dir)
         payload = status_payload(snapshot, args.state_dir)
     except (plans.PlanError, StateError) as error:
-        print(f"agent-session-loop status: {error}", file=sys.stderr)
+        if args.json:
+            reason = (
+                "malformed-plan"
+                if isinstance(error, plans.PlanError)
+                else "state-error"
+            )
+            responses.print_json(
+                responses.error_payload(
+                    "status",
+                    reason=reason,
+                    error=str(error),
+                    paused=False,
+                    plan_dir=str(args.plan_dir),
+                )
+            )
+        else:
+            print(f"agent-session-loop status: {error}", file=sys.stderr)
         return 1
 
     if args.json:
-        print(json.dumps(payload, sort_keys=True))
+        responses.print_json(payload)
     else:
         _print_text_status(payload)
     return 0
+
+
+def _unlock_payload(
+    result: UnlockResult,
+    *,
+    plan_dir: str | Path,
+    state_dir: str | Path | None,
+) -> dict[str, Any]:
+    canonical_plan_dir = plans.canonicalize_path(plan_dir)
+    return responses.success_payload(
+        "unlock",
+        reason="ok",
+        plan_dir=str(canonical_plan_dir),
+        state_dir=str(plan_state_dir(canonical_plan_dir, state_dir)),
+        lock_path=str(result.path),
+        had_lock=result.had_lock,
+        removed=result.removed,
+        active=result.was_active,
+        stale=result.was_stale,
+        message=result.message,
+    )
+
+
+def _unlock_error_reason(error: Exception) -> str:
+    if isinstance(error, plans.PlanError):
+        return "malformed-plan"
+    if isinstance(error, OSError):
+        return "os-error"
+    if "active lock" in str(error).lower():
+        return "active-lock"
+    return "state-error"
+
+
+def _unlock_error_details(args: argparse.Namespace) -> dict[str, Any]:
+    try:
+        canonical_plan_dir = plans.canonicalize_path(args.plan_dir)
+        return {
+            "plan_dir": str(canonical_plan_dir),
+            "lock_path": str(lock_path_for_plan(canonical_plan_dir, args.state_dir)),
+        }
+    except (plans.PlanError, OSError):
+        return {"plan_dir": str(args.plan_dir)}
 
 
 def unlock_from_args(args: argparse.Namespace) -> int:
     """Remove a plan lock from CLI arguments."""
     try:
         result = unlock_plan(args.plan_dir, args.state_dir, force=args.force)
-    except StateError as error:
-        print(f"agent-session-loop unlock: {error}", file=sys.stderr)
+    except (plans.PlanError, StateError, OSError) as error:
+        if args.json:
+            details = _unlock_error_details(args)
+            responses.print_json(
+                responses.error_payload(
+                    "unlock",
+                    reason=_unlock_error_reason(error),
+                    error=str(error),
+                    paused=False,
+                    details=details,
+                    plan_dir=details.get("plan_dir", str(args.plan_dir)),
+                    lock_path=details.get("lock_path"),
+                )
+            )
+        else:
+            print(f"agent-session-loop unlock: {error}", file=sys.stderr)
         return 1
 
-    print(result.message)
+    if args.json:
+        responses.print_json(
+            _unlock_payload(result, plan_dir=args.plan_dir, state_dir=args.state_dir)
+        )
+    else:
+        print(result.message)
     return 0

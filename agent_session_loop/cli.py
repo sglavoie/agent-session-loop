@@ -99,6 +99,11 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Split plan directory to inspect",
     )
+    doctor_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
     doctor_parser.set_defaults(handler=runner.doctor_from_args)
 
     unlock_parser = subparsers.add_parser(
@@ -114,6 +119,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Remove the lock even when it appears active",
+    )
+    unlock_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
     )
     unlock_parser.set_defaults(handler=state.unlock_from_args)
 

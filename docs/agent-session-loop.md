@@ -85,8 +85,8 @@ a paused run by re-running the same command after fixing the blocker.
 ```text
 agent-session-loop run PLAN_DIR --cwd REPO_ROOT [--harness codex|claude|copilot] [--timeout SEC] [--max-sessions N] [--state-dir DIR] [--unsafe-bypass] [--json] [--dry-run]
 agent-session-loop status PLAN_DIR [--state-dir DIR] [--json]
-agent-session-loop doctor --harness codex|claude|copilot --cwd REPO_ROOT --plan-dir PLAN_DIR
-agent-session-loop unlock PLAN_DIR [--state-dir DIR] [--force]
+agent-session-loop doctor --harness codex|claude|copilot --cwd REPO_ROOT --plan-dir PLAN_DIR [--json]
+agent-session-loop unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
 ```
 
 `run` acquires a per-plan lock, inspects the first pending session, invokes the
@@ -96,10 +96,12 @@ session changed from `pending` to `complete`.
 `status` reads durable plan files and prints session counts, the next pending
 session, content hashes, state paths, and lock state. Use `--json` for scripts.
 
-`doctor` performs a non-mutating harness and path check.
+`doctor` performs a non-mutating harness and path check. Use `--json` for
+scriptable prerequisite checks.
 
 `unlock` removes a stale lock. It refuses to remove an active lock unless
-`--force` is supplied.
+`--force` is supplied. Use `--json` when automation needs the removed lock
+state or an active-lock failure payload.
 
 ## Harness Commands
 
@@ -175,11 +177,19 @@ Runtime files include:
 - `state.json`: latest run payload.
 - `events.jsonl`: append-only run, pause, and turn events.
 - `lock.json`: active per-plan runner lock.
-- `stdout-N.log`: stdout from the harness turn for session `N`.
-- `stderr-N.log`: stderr from the harness turn for session `N`.
-- `last-message-N.txt`: final harness message when available.
-- `result-N.json`: diagnostic result for session `N`, including argv, status
-  changes, runner signals, and artifact paths.
+- `runs/<run_id>/`: immutable artifacts for one runner invocation.
+- `runs/<run_id>/turn-0001-session-N/stdout.log`: stdout from the harness turn.
+- `runs/<run_id>/turn-0001-session-N/stderr.log`: stderr from the harness turn.
+- `runs/<run_id>/turn-0001-session-N/last-message.txt`: final harness message
+  when available.
+- `runs/<run_id>/turn-0001-session-N/result.json`: diagnostic result for the
+  turn, including argv, status changes, runner signals, snapshots, and artifact
+  paths.
+
+`state.json` is updated to the latest run and includes `run_id`, `run_dir`, and
+`turns[*]` entries with `artifact_dir`, `stdout_path`, `stderr_path`,
+`last_message_path`, and `result_path`. Failed-run artifacts remain in their
+original `runs/<run_id>/` directory when a later retry succeeds.
 
 ## JSON Output
 
@@ -188,11 +198,22 @@ Use `--json` for runner integrations:
 ```bash
 agent-session-loop run ~/.local/share/agent-plans/example-plan/ --cwd "$PWD" --harness codex --max-sessions 1 --json
 agent-session-loop status ~/.local/share/agent-plans/example-plan/ --json
+agent-session-loop doctor --harness codex --cwd "$PWD" --plan-dir ~/.local/share/agent-plans/example-plan/ --json
+agent-session-loop unlock ~/.local/share/agent-plans/example-plan/ --json
 ```
 
-Important fields include `ok`, `paused`, `reason`, `pause_reason`,
-`completed_sessions`, `turns`, `initial_snapshot`, `final_snapshot`,
-`state_path`, and `events_path`.
+All parsed subcommands that support `--json` print JSON errors to stdout. Common
+error fields are `ok`, `command`, `reason`, `error`, `paused`, and `details`.
+`run --json` preserves its existing fields and adds the common `command` and
+`details` fields; important run fields include `paused`, `reason`,
+`pause_reason`, `pause_details`, `completed_sessions`, `turns`,
+`initial_snapshot`, `final_snapshot`, `state_path`, and `events_path`.
+
+`status --json` reports parsed session state, hashes, state paths, and lock
+state. `doctor --json` reports the resolved harness executable, generated
+prompt, and argv without invoking the harness. `unlock --json` reports whether a
+lock existed, whether it was removed, whether it was active or stale, and the
+lock path.
 
 ## Pause Semantics
 
@@ -233,19 +254,21 @@ Inspect the most recent artifacts named in `state.json` or the JSON output:
 
 ```bash
 jq '.turns[-1] | {stdout_path, stderr_path, last_message_path, result_path}' ~/.local/state/agent-session-loop/<plan-path-hash>/state.json
+jq -r '.turns[-1].artifact_dir' ~/.local/state/agent-session-loop/<plan-path-hash>/state.json
+jq -r '.turns[-1].result_path' ~/.local/state/agent-session-loop/<plan-path-hash>/state.json | xargs jq '{session, returncode, status_changes, runner_pause, plan_error}'
 ```
 
 Remove a stale lock:
 
 ```bash
-agent-session-loop unlock ~/.local/share/agent-plans/example-plan/
+agent-session-loop unlock ~/.local/share/agent-plans/example-plan/ --json
 ```
 
 Remove an active lock only after verifying the owning process is not a real
 runner you still need:
 
 ```bash
-agent-session-loop unlock ~/.local/share/agent-plans/example-plan/ --force
+agent-session-loop unlock ~/.local/share/agent-plans/example-plan/ --force --json
 ```
 
 If a plan has no pending sessions but is not complete, inspect every
@@ -263,3 +286,17 @@ python3 -m py_compile agent_session_loop/*.py bin/.local/bin/agent-session-loop
 
 Use a synthetic plan directory for manual smoke tests so generated state, locks,
 and logs do not touch an active project plan.
+
+Manual smoke checklist:
+
+- Create a synthetic split plan, run with a fake harness that fails one turn,
+  confirm the run pauses, then rerun successfully and confirm the failed and
+  successful turns are preserved under different `runs/<run_id>/` directories.
+- Make a required plan file unreadable or remove `context.md`, then confirm
+  `run --json`, `status --json`, and `doctor --json` emit JSON failures without
+  Python tracebacks.
+- Run `doctor --json` against a valid synthetic plan and confirm it reports the
+  resolved harness executable, prompt, and invocation argv.
+- Create a synthetic active lock, confirm `unlock --json` reports
+  `reason: active-lock`, then run `unlock --force --json` and confirm the lock
+  is removed.

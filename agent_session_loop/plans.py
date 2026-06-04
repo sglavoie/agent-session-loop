@@ -12,7 +12,7 @@ import hashlib
 import os
 from pathlib import Path
 import re
-from typing import Literal
+from typing import Literal, NoReturn
 
 
 StatusValue = Literal["pending", "complete", "empty", "unknown"]
@@ -87,10 +87,28 @@ def path_sha256(path: str | Path) -> str:
 
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as plan_file:
-        for chunk in iter(lambda: plan_file.read(1024 * 1024), b""):
-            digest.update(chunk)
+    _update_digest_from_file(digest, path)
     return digest.hexdigest()
+
+
+def _raise_read_error(path: Path, error: OSError) -> NoReturn:
+    raise PlanError(f"cannot read {path}: {error}") from error
+
+
+def _update_digest_from_file(digest, path: Path) -> None:
+    try:
+        with path.open("rb") as plan_file:
+            for chunk in iter(lambda: plan_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as error:
+        _raise_read_error(path, error)
+
+
+def _is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except OSError as error:
+        _raise_read_error(path, error)
 
 
 def discover_session_files(plan_dir: str | Path) -> tuple[SessionFile, ...]:
@@ -98,7 +116,12 @@ def discover_session_files(plan_dir: str | Path) -> tuple[SessionFile, ...]:
     canonical_dir = canonicalize_path(plan_dir)
     sessions: list[SessionFile] = []
 
-    for path in canonical_dir.iterdir():
+    try:
+        directory_entries = tuple(canonical_dir.iterdir())
+    except OSError as error:
+        _raise_read_error(canonical_dir, error)
+
+    for path in directory_entries:
         match = SESSION_FILE_RE.match(path.name)
         if match is None:
             continue
@@ -121,7 +144,7 @@ def read_session_status(session: SessionFile) -> SessionStatus:
     try:
         lines = session.path.read_text(encoding="utf-8").splitlines()
     except OSError as error:
-        raise PlanError(f"cannot read {session.path}: {error}") from error
+        _raise_read_error(session.path, error)
 
     for line_number, line in enumerate(lines, start=1):
         if line.startswith(STATUS_PREFIX):
@@ -145,13 +168,13 @@ def plan_content_sha256(
     selected_sessions = discover_session_files(canonical_dir) if sessions is None else sessions
     relative_names = ["context.md", "manifest.md"]
 
-    if (canonical_dir / "parallel-validation.md").exists():
+    if _is_file(canonical_dir / "parallel-validation.md"):
         relative_names.append("parallel-validation.md")
 
     for session in selected_sessions:
         relative_names.append(session.path.name)
         expansion_name = f"session-{session.number}.expand.md"
-        if (canonical_dir / expansion_name).exists():
+        if _is_file(canonical_dir / expansion_name):
             relative_names.append(expansion_name)
 
     digest = hashlib.sha256()
@@ -159,9 +182,7 @@ def plan_content_sha256(
         file_path = canonical_dir / relative_name
         digest.update(relative_name.encode("utf-8"))
         digest.update(b"\0")
-        with file_path.open("rb") as plan_file:
-            for chunk in iter(lambda: plan_file.read(1024 * 1024), b""):
-                digest.update(chunk)
+        _update_digest_from_file(digest, file_path)
         digest.update(b"\0")
     return digest.hexdigest()
 
@@ -183,9 +204,9 @@ def inspect_plan(plan_dir: str | Path) -> PlanSnapshot:
 
     context_path = canonical_dir / "context.md"
     manifest_path = canonical_dir / "manifest.md"
-    if not context_path.is_file():
+    if not _is_file(context_path):
         raise PlanError(f"missing context.md in plan directory: {canonical_dir}")
-    if not manifest_path.is_file():
+    if not _is_file(manifest_path):
         raise PlanError(f"missing manifest.md in plan directory: {canonical_dir}")
 
     sessions = discover_session_files(canonical_dir)
@@ -201,7 +222,7 @@ def inspect_plan(plan_dir: str | Path) -> PlanSnapshot:
         context_path=context_path,
         manifest_path=manifest_path,
         parallel_validation_path=(
-            parallel_validation_path if parallel_validation_path.is_file() else None
+            parallel_validation_path if _is_file(parallel_validation_path) else None
         ),
         sessions=statuses,
         content_sha256=content_hash,

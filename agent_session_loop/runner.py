@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import config, events, harnesses, plans, state
+from . import config, events, harnesses, plans, responses, state
 
 
 NOT_IMPLEMENTED_EXIT = 2
@@ -232,12 +232,14 @@ def _write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _turn_paths(run_dir: Path, session_number: int) -> dict[str, Path]:
+def _turn_paths(run_dir: Path, *, turn_index: int, session_number: int) -> dict[str, Path]:
+    artifact_dir = run_dir / f"turn-{turn_index:04d}-session-{session_number}"
     return {
-        "stdout": run_dir / f"stdout-{session_number}.log",
-        "stderr": run_dir / f"stderr-{session_number}.log",
-        "last_message": run_dir / f"last-message-{session_number}.txt",
-        "result": run_dir / f"result-{session_number}.json",
+        "artifact_dir": artifact_dir,
+        "stdout": artifact_dir / "stdout.log",
+        "stderr": artifact_dir / "stderr.log",
+        "last_message": artifact_dir / "last-message.txt",
+        "result": artifact_dir / "result.json",
     }
 
 
@@ -260,6 +262,9 @@ def _write_turn_artifacts(
     result: harnesses.HarnessResult,
     before: plans.PlanSnapshot,
     after: plans.PlanSnapshot | None,
+    run_id: str,
+    turn_index: int,
+    session_number: int,
     plan_error: str | None = None,
 ) -> dict[str, Any]:
     _write_text(paths["stdout"], result.stdout)
@@ -270,6 +275,10 @@ def _write_turn_artifacts(
     pending_completed = _pending_completed(before, after) if after is not None else ()
     runner_signals = _runner_signals(result)
     payload = {
+        "run_id": run_id,
+        "turn_index": turn_index,
+        "session": session_number,
+        "artifact_dir": str(paths["artifact_dir"]),
         "harness": result.name,
         "argv": result.argv,
         "returncode": result.returncode,
@@ -277,6 +286,7 @@ def _write_turn_artifacts(
         "stdout_path": str(paths["stdout"]),
         "stderr_path": str(paths["stderr"]),
         "last_message_path": str(paths["last_message"]),
+        "result_path": str(paths["result"]),
         "status_changes": list(status_changes),
         "pending_completed": list(pending_completed),
         "before": _snapshot_payload(before),
@@ -285,13 +295,18 @@ def _write_turn_artifacts(
     if plan_error is not None:
         payload["plan_error"] = plan_error
     payload.update(runner_signals)
-    _write_text(paths["result"], json.dumps(payload, sort_keys=True, indent=2) + "\n")
-    payload["result_path"] = str(paths["result"])
+    _write_json_file(paths["result"], payload)
     return payload
 
 
 def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
-    _write_text(path, json.dumps(payload, sort_keys=True, indent=2) + "\n")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary_path.write_text(
+        json.dumps(payload, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary_path, path)
 
 
 def _write_state_payload(payload: dict[str, Any]) -> None:
@@ -323,6 +338,7 @@ def _set_pause(
     payload["pause_reason"] = reason
     payload["pause_message"] = message
     payload["pause_details"] = {} if details is None else details
+    payload["details"] = payload["pause_details"]
 
 
 def _pause_run(
@@ -357,30 +373,31 @@ def _initial_payload(
     cwd: Path,
     run_id: str,
 ) -> dict[str, Any]:
-    return {
-        "ok": True,
-        "paused": False,
-        "dry_run": args.dry_run,
-        "reason": "",
-        "pause_reason": None,
-        "pause_message": "",
-        "pause_details": {},
-        "run_id": run_id,
-        "plan_dir": str(snapshot.plan_dir),
-        "cwd": str(cwd),
-        "harness": args.harness,
-        "state_dir": str(state_dir),
-        "run_dir": str(run_dir),
-        "event_path": str(event_path),
-        "events_path": str(event_path),
-        "state_path": str(state_path),
-        "lock_path": str(lock_info.path),
-        "harness_config": config.harness_config_payload(),
-        "completed_sessions": [],
-        "turns": [],
-        "initial_snapshot": _snapshot_payload(snapshot),
-        "final_snapshot": _snapshot_payload(snapshot),
-    }
+    return responses.success_payload(
+        "run",
+        paused=False,
+        details={},
+        dry_run=args.dry_run,
+        reason="",
+        pause_reason=None,
+        pause_message="",
+        pause_details={},
+        run_id=run_id,
+        plan_dir=str(snapshot.plan_dir),
+        cwd=str(cwd),
+        harness=args.harness,
+        state_dir=str(state_dir),
+        run_dir=str(run_dir),
+        event_path=str(event_path),
+        events_path=str(event_path),
+        state_path=str(state_path),
+        lock_path=str(lock_info.path),
+        harness_config=config.harness_config_payload(),
+        completed_sessions=[],
+        turns=[],
+        initial_snapshot=_snapshot_payload(snapshot),
+        final_snapshot=_snapshot_payload(snapshot),
+    )
 
 
 def _dry_run_payload(
@@ -398,7 +415,7 @@ def _dry_run_payload(
             "invocation": None,
         }
 
-    paths = _turn_paths(run_dir, next_pending.number)
+    paths = _turn_paths(run_dir, turn_index=1, session_number=next_pending.number)
     invocation = build_harness_invocation(
         args.harness,
         cwd=cwd,
@@ -424,9 +441,9 @@ def _run_locked(
 ) -> tuple[int, dict[str, Any]]:
     snapshot = plans.inspect_plan(args.plan_dir)
     state_dir = state.plan_state_dir(snapshot.plan_dir, args.state_dir)
-    run_dir = state_dir
-    event_path = run_dir / events.EVENTS_FILE_NAME
-    state_path = run_dir / events.STATE_FILE_NAME
+    run_dir = state_dir / "runs" / run_id
+    event_path = state_dir / events.EVENTS_FILE_NAME
+    state_path = state_dir / events.STATE_FILE_NAME
     payload = _initial_payload(
         args=args,
         snapshot=snapshot,
@@ -446,6 +463,8 @@ def _run_locked(
             "harness": args.harness,
             "dry_run": args.dry_run,
             "max_sessions": max_sessions,
+            "run_id": run_id,
+            "run_dir": str(run_dir),
         },
     )
     _write_state_payload(payload)
@@ -501,17 +520,26 @@ def _run_locked(
         if pending_session is None:
             break
 
-        paths = _turn_paths(run_dir, pending_session.number)
+        turn_index = len(payload["turns"]) + 1
+        paths = _turn_paths(
+            run_dir,
+            turn_index=turn_index,
+            session_number=pending_session.number,
+        )
         prompt = build_session_prompt(args.harness, before.plan_dir)
         _append_event(
             event_path,
             "turn_started",
             {
+                "run_id": run_id,
+                "turn_index": turn_index,
                 "session": pending_session.number,
+                "artifact_dir": str(paths["artifact_dir"]),
                 "prompt": prompt,
                 "stdout_path": str(paths["stdout"]),
                 "stderr_path": str(paths["stderr"]),
                 "last_message_path": str(paths["last_message"]),
+                "result_path": str(paths["result"]),
             },
         )
         result = harnesses.run_harness(
@@ -534,9 +562,11 @@ def _run_locked(
             result=result,
             before=before,
             after=after,
+            run_id=run_id,
+            turn_index=turn_index,
+            session_number=pending_session.number,
             plan_error=plan_error,
         )
-        turn_payload["session"] = pending_session.number
         payload["turns"].append(turn_payload)
         _append_event(event_path, "turn_finished", turn_payload)
         _write_state_payload(payload)
@@ -716,21 +746,22 @@ def _error_payload(
     except OSError:
         plan_dir = str(args.plan_dir)
 
-    payload: dict[str, Any] = {
-        "ok": False,
-        "paused": paused,
-        "dry_run": getattr(args, "dry_run", False),
-        "reason": reason,
-        "pause_reason": reason if paused else None,
-        "pause_message": message if paused else "",
-        "pause_details": {},
-        "error": message,
-        "plan_dir": plan_dir,
-        "cwd": str(cwd) if cwd is not None else str(getattr(args, "cwd", "")),
-        "harness": getattr(args, "harness", None),
-        "completed_sessions": [],
-        "turns": [],
-    }
+    payload = responses.error_payload(
+        "run",
+        reason=reason,
+        error=message,
+        paused=paused,
+        details={},
+        dry_run=getattr(args, "dry_run", False),
+        pause_reason=reason if paused else None,
+        pause_message=message if paused else "",
+        pause_details={},
+        plan_dir=plan_dir,
+        cwd=str(cwd) if cwd is not None else str(getattr(args, "cwd", "")),
+        harness=getattr(args, "harness", None),
+        completed_sessions=[],
+        turns=[],
+    )
     if snapshot is not None:
         state_dir = state.plan_state_dir(snapshot.plan_dir, args.state_dir)
         payload["state_dir"] = str(state_dir)
@@ -808,7 +839,7 @@ def run_from_args(args: argparse.Namespace) -> int:
             paused=False,
         )
         if args.json:
-            print(json.dumps(payload, sort_keys=True))
+            responses.print_json(payload)
         else:
             _print_text_outcome(payload)
         return 1
@@ -824,7 +855,7 @@ def run_from_args(args: argparse.Namespace) -> int:
             cwd=cwd,
         )
         if args.json:
-            print(json.dumps(payload, sort_keys=True))
+            responses.print_json(payload)
         else:
             _print_text_outcome(payload)
         return 1
@@ -843,7 +874,7 @@ def run_from_args(args: argparse.Namespace) -> int:
             snapshot=initial_snapshot,
         )
         if args.json:
-            print(json.dumps(payload, sort_keys=True))
+            responses.print_json(payload)
         else:
             _print_text_outcome(payload)
         return 1
@@ -877,16 +908,43 @@ def run_from_args(args: argparse.Namespace) -> int:
             snapshot=initial_snapshot,
         )
         if args.json:
-            print(json.dumps(payload, sort_keys=True))
+            responses.print_json(payload)
         else:
             _print_text_outcome(payload)
         return 1
 
     if args.json:
-        print(json.dumps(payload, sort_keys=True))
+        responses.print_json(payload)
     else:
         _print_text_outcome(payload)
     return exit_code
+
+
+def _print_doctor_error(
+    args: argparse.Namespace,
+    *,
+    reason: str,
+    error: Exception,
+    cwd: Path | None = None,
+    plan_dir: Path | None = None,
+    details: dict[str, Any] | None = None,
+) -> int:
+    if args.json:
+        responses.print_json(
+            responses.error_payload(
+                "doctor",
+                reason=reason,
+                error=str(error),
+                paused=False,
+                details=details,
+                harness=args.harness,
+                cwd=str(cwd) if cwd is not None else str(args.cwd),
+                plan_dir=str(plan_dir) if plan_dir is not None else str(args.plan_dir),
+            )
+        )
+    else:
+        print(f"agent-session-loop doctor: {error}", file=sys.stderr)
+    return 1
 
 
 def doctor_from_args(args: argparse.Namespace) -> int:
@@ -895,8 +953,20 @@ def doctor_from_args(args: argparse.Namespace) -> int:
         cwd = plans.canonicalize_path(args.cwd)
         if not cwd.is_dir():
             raise plans.PlanError(f"cwd does not exist or is not a directory: {cwd}")
+    except (plans.PlanError, OSError) as error:
+        return _print_doctor_error(args, reason="input-error", error=error)
 
+    try:
         snapshot = plans.inspect_plan(args.plan_dir)
+    except plans.PlanError as error:
+        return _print_doctor_error(
+            args,
+            reason="malformed-plan",
+            error=error,
+            cwd=cwd,
+        )
+
+    try:
         harness_config = config.harness_config_payload()
         adapter = harnesses.get_adapter(args.harness)
         executable_path = adapter.resolve_executable()
@@ -914,9 +984,54 @@ def doctor_from_args(args: argparse.Namespace) -> int:
             plan_dir=snapshot.plan_dir,
             last_message_path=last_message_path,
         )
-    except (config.ConfigError, harnesses.HarnessError, plans.PlanError, OSError) as error:
-        print(f"agent-session-loop doctor: {error}", file=sys.stderr)
-        return 1
+    except config.ConfigError as error:
+        return _print_doctor_error(
+            args,
+            reason="config-error",
+            error=error,
+            cwd=cwd,
+            plan_dir=snapshot.plan_dir,
+        )
+    except harnesses.HarnessError as error:
+        return _print_doctor_error(
+            args,
+            reason="harness-error",
+            error=error,
+            cwd=cwd,
+            plan_dir=snapshot.plan_dir,
+        )
+    except OSError as error:
+        return _print_doctor_error(
+            args,
+            reason="os-error",
+            error=error,
+            cwd=cwd,
+            plan_dir=snapshot.plan_dir,
+        )
+
+    prompt = build_session_prompt(adapter.name, snapshot.plan_dir)
+    if args.json:
+        responses.print_json(
+            responses.success_payload(
+                "doctor",
+                reason="ok",
+                harness=adapter.name,
+                harness_config=harness_config,
+                executable=str(executable_path),
+                resolved_executable=str(executable_path),
+                cwd=str(cwd),
+                plan_dir=str(snapshot.plan_dir),
+                next_pending=(
+                    snapshot.next_pending.number
+                    if snapshot.next_pending is not None
+                    else None
+                ),
+                prompt=prompt,
+                invocation=_build_invocation_payload(invocation),
+                invocation_argv=invocation.argv,
+            )
+        )
+        return 0
 
     print(f"Harness: {adapter.name}")
     print(f"Harness config: {harness_config['path']}")
@@ -932,7 +1047,7 @@ def doctor_from_args(args: argparse.Namespace) -> int:
         print("Next pending: none")
     else:
         print(f"Next pending: session {snapshot.next_pending.number}")
-    print(f"Prompt: {build_session_prompt(adapter.name, snapshot.plan_dir)}")
+    print(f"Prompt: {prompt}")
     print("Argv:")
     for arg in invocation.argv:
         print(f"  {arg}")

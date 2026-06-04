@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import errno
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from agent_session_loop import config, events, harnesses, plans, runner, state
 
@@ -69,6 +71,18 @@ def install_fake_codex(tmp_dir: Path) -> Path:
     return fake_path
 
 
+def fail_open_for_path(target: Path):
+    canonical_target = plans.canonicalize_path(target)
+    original_open = Path.open
+
+    def failing_open(path: Path, *args, **kwargs):
+        if plans.canonicalize_path(path) == canonical_target:
+            raise PermissionError(errno.EACCES, "permission denied", os.fspath(canonical_target))
+        return original_open(path, *args, **kwargs)
+
+    return mock.patch.object(Path, "open", failing_open)
+
+
 class ParserAndStateTests(unittest.TestCase):
     def test_inspect_plan_sorts_exact_session_files_and_finds_next_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -106,6 +120,53 @@ class ParserAndStateTests(unittest.TestCase):
             empty = plans.inspect_plan(plan_dir)
             self.assertEqual("empty", empty.sessions[0].status)
             self.assertEqual("malformed-plan", runner._invalid_status_pause(empty)[0])
+
+    def test_inspect_plan_wraps_plan_file_read_failures(self) -> None:
+        cases = (
+            "context.md",
+            "manifest.md",
+            "parallel-validation.md",
+            "session-1.expand.md",
+        )
+
+        for relative_name in cases:
+            with self.subTest(relative_name=relative_name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    plan_dir = Path(tmp) / "plan"
+                    write_plan(plan_dir, ("pending",))
+                    target = plan_dir / relative_name
+                    if not target.exists():
+                        target.write_text("extra plan metadata\n", encoding="utf-8")
+
+                    with fail_open_for_path(target):
+                        with self.assertRaises(plans.PlanError) as raised:
+                            plans.inspect_plan(plan_dir)
+
+                    message = str(raised.exception)
+                    self.assertIn(str(plans.canonicalize_path(target)), message)
+                    self.assertIn("permission denied", message.lower())
+                    self.assertIsInstance(raised.exception.__cause__, PermissionError)
+
+    def test_inspect_plan_wraps_session_discovery_read_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+            canonical_plan_dir = plans.canonicalize_path(plan_dir)
+            original_iterdir = Path.iterdir
+
+            def failing_iterdir(path: Path):
+                if plans.canonicalize_path(path) == canonical_plan_dir:
+                    raise PermissionError(errno.EACCES, "permission denied", os.fspath(canonical_plan_dir))
+                return original_iterdir(path)
+
+            with mock.patch.object(Path, "iterdir", failing_iterdir):
+                with self.assertRaises(plans.PlanError) as raised:
+                    plans.inspect_plan(plan_dir)
+
+            message = str(raised.exception)
+            self.assertIn(str(canonical_plan_dir), message)
+            self.assertIn("permission denied", message.lower())
+            self.assertIsInstance(raised.exception.__cause__, PermissionError)
 
     def test_acquire_lock_rejects_active_lock_and_replaces_stale_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -215,14 +276,11 @@ class CommandAndConfigTests(unittest.TestCase):
 
 
 class FakeHarnessIntegrationTests(unittest.TestCase):
-    def run_loop(
+    def setup_loop(
         self,
         *,
-        mode: str,
         statuses: tuple[str, ...],
-        timeout: int | None = None,
-        max_sessions: int | None = None,
-    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object], Path, Path, Path]:
+    ) -> tuple[Path, Path, Path, Path]:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         tmp_dir = Path(tmp.name)
@@ -237,7 +295,18 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             encoding="utf-8",
         )
         write_plan(plan_dir, statuses)
+        return plan_dir, state_dir, config_home, fake_codex
 
+    def run_loop_command(
+        self,
+        *,
+        mode: str,
+        plan_dir: Path,
+        state_dir: Path,
+        config_home: Path,
+        timeout: int | None = None,
+        max_sessions: int | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
         command = [
             sys.executable,
             "-m",
@@ -272,7 +341,25 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             timeout=15,
             check=False,
         )
-        payload = json.loads(completed.stdout)
+        return completed, json.loads(completed.stdout)
+
+    def run_loop(
+        self,
+        *,
+        mode: str,
+        statuses: tuple[str, ...],
+        timeout: int | None = None,
+        max_sessions: int | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object], Path, Path, Path]:
+        plan_dir, state_dir, config_home, fake_codex = self.setup_loop(statuses=statuses)
+        completed, payload = self.run_loop_command(
+            mode=mode,
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            timeout=timeout,
+            max_sessions=max_sessions,
+        )
         return completed, payload, plan_dir, state_dir, fake_codex
 
     def test_successful_fake_harness_turn_persists_state_and_artifacts(self) -> None:
@@ -292,12 +379,114 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
 
         turn = payload["turns"][0]
         self.assertEqual(str(fake_codex), turn["argv"][0])
+        self.assertEqual(payload["run_id"], turn["run_id"])
+        self.assertEqual(1, turn["turn_index"])
+        self.assertEqual(1, turn["session"])
+        self.assertEqual(
+            Path(payload["state_dir"]) / "runs" / payload["run_id"],
+            Path(payload["run_dir"]),
+        )
+        artifact_dir = Path(turn["artifact_dir"])
+        self.assertEqual(
+            Path(payload["run_dir"]) / "turn-0001-session-1",
+            artifact_dir,
+        )
+        self.assertEqual(artifact_dir / "stdout.log", Path(turn["stdout_path"]))
+        self.assertEqual(artifact_dir / "stderr.log", Path(turn["stderr_path"]))
+        self.assertEqual(
+            artifact_dir / "last-message.txt",
+            Path(turn["last_message_path"]),
+        )
+        self.assertEqual(artifact_dir / "result.json", Path(turn["result_path"]))
         for key in ("stdout_path", "stderr_path", "last_message_path", "result_path"):
             self.assertTrue(Path(turn[key]).exists(), key)
+        events_payloads = [
+            json.loads(line)
+            for line in Path(payload["events_path"])
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        turn_started = next(
+            event for event in events_payloads if event["name"] == "turn_started"
+        )
+        self.assertEqual(payload["run_id"], turn_started["payload"]["run_id"])
+        self.assertEqual(1, turn_started["payload"]["turn_index"])
+        self.assertEqual(str(artifact_dir), turn_started["payload"]["artifact_dir"])
+        turn_finished = next(
+            event for event in events_payloads if event["name"] == "turn_finished"
+        )
+        self.assertEqual(payload["run_id"], turn_finished["payload"]["run_id"])
+        self.assertEqual(1, turn_finished["payload"]["turn_index"])
+        self.assertEqual(1, turn_finished["payload"]["session"])
+        self.assertEqual(str(artifact_dir), turn_finished["payload"]["artifact_dir"])
+        for key in ("stdout_path", "stderr_path", "last_message_path", "result_path"):
+            self.assertEqual(turn[key], turn_finished["payload"][key])
+            self.assertEqual(artifact_dir, Path(turn_finished["payload"][key]).parent)
         self.assertTrue(Path(payload["state_path"]).exists())
         self.assertTrue(Path(payload["events_path"]).exists())
-        self.assertIn("- **Status**: complete", (plan_dir / "session-1.md").read_text(encoding="utf-8"))
-        self.assertIn("- **Status**: pending", (plan_dir / "session-2.md").read_text(encoding="utf-8"))
+        self.assertIn(
+            "- **Status**: complete",
+            (plan_dir / "session-1.md").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "- **Status**: pending",
+            (plan_dir / "session-2.md").read_text(encoding="utf-8"),
+        )
+
+    def test_retry_after_failed_turn_keeps_first_run_artifacts(self) -> None:
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+            statuses=("pending",)
+        )
+
+        first_completed, first_payload = self.run_loop_command(
+            mode="failure",
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+        )
+
+        self.assertEqual(1, first_completed.returncode)
+        self.assertFalse(first_payload["ok"])
+        first_turn = first_payload["turns"][0]
+        first_stderr = Path(first_turn["stderr_path"])
+        first_result = Path(first_turn["result_path"])
+        first_artifact_dir = Path(first_turn["artifact_dir"])
+        self.assertEqual(
+            Path(first_payload["run_dir"]) / "turn-0001-session-1",
+            first_artifact_dir,
+        )
+        self.assertTrue(first_stderr.exists())
+        self.assertTrue(first_result.exists())
+        original_stderr = first_stderr.read_text(encoding="utf-8")
+        original_result = json.loads(first_result.read_text(encoding="utf-8"))
+        self.assertIn("fake codex failure", original_stderr)
+        self.assertEqual(7, original_result["returncode"])
+        self.assertEqual(first_payload["run_id"], original_result["run_id"])
+
+        second_completed, second_payload = self.run_loop_command(
+            mode="success",
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            max_sessions=1,
+        )
+
+        self.assertEqual(0, second_completed.returncode, second_completed.stderr)
+        self.assertTrue(second_payload["ok"])
+        self.assertNotEqual(first_payload["run_id"], second_payload["run_id"])
+        second_turn = second_payload["turns"][0]
+        self.assertNotEqual(first_artifact_dir, Path(second_turn["artifact_dir"]))
+        self.assertTrue(first_stderr.exists())
+        self.assertTrue(first_result.exists())
+        self.assertEqual(original_stderr, first_stderr.read_text(encoding="utf-8"))
+        self.assertEqual(
+            original_result,
+            json.loads(first_result.read_text(encoding="utf-8")),
+        )
+        self.assertIn(
+            "- **Status**: complete",
+            (plan_dir / "session-1.md").read_text(encoding="utf-8"),
+        )
 
     def test_nonzero_fake_harness_pauses_without_status_change(self) -> None:
         completed, payload, _plan_dir, _state_dir, _fake_codex = self.run_loop(
@@ -336,6 +525,85 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual("multiple-status-changes", payload["pause_reason"])
         self.assertEqual(2, len(payload["observed_status_changes"]))
 
+    def test_no_progress_fake_harness_reports_no_status_change(self) -> None:
+        completed, payload, _plan_dir, _state_dir, _fake_codex = self.run_loop(
+            mode="no-progress",
+            statuses=("pending",),
+        )
+
+        expected = [{"number": 1, "before": "pending", "after": "complete"}]
+        self.assertEqual(1, completed.returncode)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["paused"])
+        self.assertEqual("no-status-change", payload["pause_reason"])
+        self.assertEqual("no-status-change", payload["reason"])
+        self.assertEqual(expected, payload["expected_status_changes"])
+        self.assertEqual([], payload["observed_status_changes"])
+        self.assertEqual(payload["pause_details"], payload["details"])
+        self.assertEqual(expected, payload["details"]["expected_status_changes"])
+        self.assertEqual([], payload["details"]["observed_status_changes"])
+
+    def test_unexpected_progress_reports_unexpected_status_change(self) -> None:
+        completed, payload, plan_dir, _state_dir, _fake_codex = self.run_loop(
+            mode="unexpected-progress",
+            statuses=("pending", "pending"),
+        )
+
+        expected = [{"number": 1, "before": "pending", "after": "complete"}]
+        observed = [{"number": 2, "before": "pending", "after": "complete"}]
+        self.assertEqual(1, completed.returncode)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["paused"])
+        self.assertEqual("unexpected-status-change", payload["pause_reason"])
+        self.assertEqual(expected, payload["expected_status_changes"])
+        self.assertEqual(observed, payload["observed_status_changes"])
+        self.assertEqual(observed, payload["details"]["observed_status_changes"])
+        self.assertEqual(1, payload["final_snapshot"]["next_pending"])
+        self.assertIn(
+            "- **Status**: pending",
+            (plan_dir / "session-1.md").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "- **Status**: complete",
+            (plan_dir / "session-2.md").read_text(encoding="utf-8"),
+        )
+
+    def test_runner_pause_signal_reports_runner_pause(self) -> None:
+        completed, payload, _plan_dir, _state_dir, _fake_codex = self.run_loop(
+            mode="runner-pause",
+            statuses=("pending",),
+        )
+
+        self.assertEqual(1, completed.returncode)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["paused"])
+        self.assertEqual("runner-pause", payload["pause_reason"])
+        self.assertEqual("operator requested pause", payload["pause_message"])
+        self.assertEqual({"session": 1, "source": "last_message"}, payload["details"])
+        turn = payload["turns"][0]
+        self.assertEqual("operator requested pause", turn["runner_pause"])
+        self.assertEqual("last_message", turn["runner_pause_source"])
+
+    def test_malformed_after_turn_reports_malformed_plan_pause(self) -> None:
+        completed, payload, _plan_dir, _state_dir, _fake_codex = self.run_loop(
+            mode="malformed-after-turn",
+            statuses=("pending",),
+        )
+
+        self.assertEqual(1, completed.returncode)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["paused"])
+        self.assertEqual("malformed-plan", payload["pause_reason"])
+        self.assertEqual(
+            "plan could not be inspected after the harness turn",
+            payload["pause_message"],
+        )
+        self.assertEqual(1, payload["details"]["session"])
+        self.assertIn("missing context.md", payload["details"]["error"])
+        turn = payload["turns"][0]
+        self.assertIsNone(turn["after"])
+        self.assertIn("missing context.md", turn["plan_error"])
+
 
 class JsonCliTests(unittest.TestCase):
     def test_status_and_dry_run_json_outputs_include_contract_fields(self) -> None:
@@ -362,6 +630,8 @@ class JsonCliTests(unittest.TestCase):
                 check=True,
             )
             status_payload = json.loads(status_completed.stdout)
+            self.assertTrue(status_payload["ok"])
+            self.assertEqual("status", status_payload["command"])
             self.assertEqual(1, status_payload["next_pending"])
             self.assertTrue(status_payload["state_path"].endswith("/state.json"))
             self.assertTrue(status_payload["events_path"].endswith("/events.jsonl"))
@@ -387,11 +657,207 @@ class JsonCliTests(unittest.TestCase):
             )
             run_payload = json.loads(run_completed.stdout)
             self.assertTrue(run_payload["ok"])
+            self.assertEqual("run", run_payload["command"])
+            self.assertEqual({}, run_payload["details"])
             self.assertEqual("dry-run", run_payload["reason"])
             self.assertIn("harness_config", run_payload)
             self.assertEqual(1, run_payload["planned"]["next_pending"])
             self.assertTrue(run_payload["state_path"].endswith("/state.json"))
             self.assertTrue(run_payload["events_path"].endswith("/events.jsonl"))
+
+    def test_status_json_error_goes_to_stdout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_session_loop",
+                    "status",
+                    str(plan_dir),
+                    "--json",
+                ],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(1, completed.returncode)
+            self.assertEqual("", completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertFalse(payload["paused"])
+            self.assertEqual("status", payload["command"])
+            self.assertEqual("malformed-plan", payload["reason"])
+            self.assertIn("missing context.md", payload["error"])
+            self.assertEqual({}, payload["details"])
+
+    def test_doctor_json_outputs_harness_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            config_home = tmp_dir / "config"
+            config_path = config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            fake_codex = install_fake_codex(tmp_dir)
+            config_path.write_text(
+                json.dumps({"codex": {"executable": str(fake_codex)}}),
+                encoding="utf-8",
+            )
+            write_plan(plan_dir, ("pending",))
+
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(config_home)
+            env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_session_loop",
+                    "doctor",
+                    "--harness",
+                    "codex",
+                    "--cwd",
+                    str(REPO_ROOT),
+                    "--plan-dir",
+                    str(plan_dir),
+                    "--json",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            payload = json.loads(completed.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertEqual("doctor", payload["command"])
+            self.assertEqual("codex", payload["harness"])
+            self.assertEqual(str(fake_codex), payload["resolved_executable"])
+            self.assertEqual(str(REPO_ROOT), payload["cwd"])
+            self.assertEqual(str(plans.canonicalize_path(plan_dir)), payload["plan_dir"])
+            self.assertEqual(1, payload["next_pending"])
+            self.assertTrue(payload["prompt"].startswith("$session-run "))
+            self.assertEqual(["codex"], payload["harness_config"]["configured_harnesses"])
+            self.assertEqual(str(fake_codex), payload["invocation"]["argv"][0])
+            self.assertEqual(payload["invocation"]["argv"], payload["invocation_argv"])
+
+    def test_doctor_json_error_goes_to_stdout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_session_loop",
+                    "doctor",
+                    "--harness",
+                    "codex",
+                    "--cwd",
+                    str(REPO_ROOT),
+                    "--plan-dir",
+                    str(plan_dir),
+                    "--json",
+                ],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(1, completed.returncode)
+            self.assertEqual("", completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertFalse(payload["paused"])
+            self.assertEqual("doctor", payload["command"])
+            self.assertEqual("malformed-plan", payload["reason"])
+            self.assertIn("missing context.md", payload["error"])
+            self.assertEqual({}, payload["details"])
+            self.assertEqual("codex", payload["harness"])
+            self.assertEqual(str(REPO_ROOT), payload["cwd"])
+            self.assertEqual(str(plan_dir), payload["plan_dir"])
+
+    def test_unlock_json_success_reports_lock_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_session_loop",
+                    "unlock",
+                    str(plan_dir),
+                    "--state-dir",
+                    str(state_dir),
+                    "--json",
+                ],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            payload = json.loads(completed.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertEqual("unlock", payload["command"])
+            self.assertFalse(payload["had_lock"])
+            self.assertFalse(payload["removed"])
+            self.assertFalse(payload["active"])
+            self.assertFalse(payload["stale"])
+            self.assertTrue(payload["lock_path"].endswith("/lock.json"))
+            self.assertIn("no lock present", payload["message"])
+
+    def test_unlock_json_active_lock_failure_goes_to_stdout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            lock_info = state.acquire_lock(plan_dir, state_dir)
+
+            try:
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "agent_session_loop",
+                        "unlock",
+                        str(plan_dir),
+                        "--state-dir",
+                        str(state_dir),
+                        "--json",
+                    ],
+                    cwd=REPO_ROOT,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+            finally:
+                state.release_lock(plan_dir, state_dir)
+
+            self.assertEqual(1, completed.returncode)
+            self.assertEqual("", completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertFalse(payload["paused"])
+            self.assertEqual("unlock", payload["command"])
+            self.assertEqual("active-lock", payload["reason"])
+            self.assertIn("active lock", payload["error"])
+            self.assertEqual(str(lock_info.path), payload["lock_path"])
+            self.assertEqual(str(lock_info.path), payload["details"]["lock_path"])
+            self.assertEqual(
+                str(plans.canonicalize_path(plan_dir)),
+                payload["details"]["plan_dir"],
+            )
 
 
 if __name__ == "__main__":
