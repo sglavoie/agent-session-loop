@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""Fake spec executable used by agent-session-loop integration tests."""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+
+def _append_log(mode: str) -> None:
+    log_path = os.environ.get("FAKE_SPEC_LOG")
+    if log_path is None:
+        return
+    path = Path(log_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "argv": sys.argv,
+                    "cwd": str(Path.cwd()),
+                    "mode": mode,
+                },
+                sort_keys=True,
+            )
+        )
+        handle.write("\n")
+
+
+def _git_commit() -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "Fake spec commit"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def main() -> int:
+    mode = os.environ.get("FAKE_SPEC_MODE", "success")
+    _append_log(mode)
+
+    if sys.argv[1:] != ["commit", "--yes", "--no-verify"]:
+        print(f"unexpected fake spec argv: {sys.argv[1:]}", file=sys.stderr)
+        return 2
+
+    if mode == "failure":
+        print("fake spec failure", file=sys.stderr)
+        return 23
+
+    if mode == "unchanged-head":
+        print("fake spec left HEAD unchanged")
+        return 0
+
+    if mode == "success":
+        result = _git_commit()
+        sys.stdout.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        return result.returncode
+
+    print(f"unsupported fake spec mode: {mode}", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

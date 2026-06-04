@@ -18,6 +18,8 @@ RUNNER_PAUSE_PREFIX = "RUNNER_PAUSE:"
 RUN_PAUSED_EVENT = "run_paused"
 TURN_HEARTBEAT_EVENT = "turn_heartbeat"
 ACTION_REQUIRED_EVENT = "action_required"
+COMMIT_STARTED_EVENT = "commit_started"
+COMMIT_FINISHED_EVENT = "commit_finished"
 STATE_FILE_NAME = "state.json"
 EVENTS_FILE_NAME = "events.jsonl"
 PAUSE_REASONS: tuple[str, ...] = (
@@ -31,6 +33,8 @@ PAUSE_REASONS: tuple[str, ...] = (
     "runner-pause",
     "unexpected-status-change",
     "no-pending-but-incomplete",
+    "commit-preflight",
+    "commit-failed",
 )
 
 

@@ -142,6 +142,22 @@ def _event_line(record: dict[str, Any]) -> str:
     elif name == "turn_finished":
         parts.append(f"status={payload.get('status_result', 'unknown')}")
         parts.append(f"duration={_format_seconds(payload.get('duration_seconds'))}")
+    elif name == events.COMMIT_STARTED_EVENT:
+        parts.append(f"commit={payload.get('commit_index', 'unknown')}")
+        parts.append(f"scope={payload.get('scope', 'unknown')}")
+        parts.append(f"stdout={payload.get('stdout_path', 'unknown')}")
+        parts.append(f"stderr={payload.get('stderr_path', 'unknown')}")
+        parts.append(f"result={payload.get('result_path', 'unknown')}")
+    elif name == events.COMMIT_FINISHED_EVENT:
+        parts.append(f"commit={payload.get('commit_index', 'unknown')}")
+        parts.append(f"scope={payload.get('scope', 'unknown')}")
+        parts.append(f"status={payload.get('status_result', 'unknown')}")
+        sha = payload.get("commit_sha") or "none"
+        parts.append(f"sha={sha}")
+        parts.append(f"duration={_format_seconds(payload.get('duration_seconds'))}")
+        parts.append(f"stdout={payload.get('stdout_path', 'unknown')}")
+        parts.append(f"stderr={payload.get('stderr_path', 'unknown')}")
+        parts.append(f"result={payload.get('result_path', 'unknown')}")
     elif name == events.RUN_PAUSED_EVENT:
         parts.append(f"reason={payload.get('reason', 'unknown')}")
         message = payload.get("message")
@@ -180,6 +196,8 @@ def _add_log_targets(
                 "stream": stream_name,
                 "session": payload.get("session"),
                 "turn_index": payload.get("turn_index"),
+                "commit_index": payload.get("commit_index"),
+                "scope": payload.get("scope"),
             },
         )
 
@@ -206,6 +224,17 @@ def _discover_targets(
 
 
 def _log_prefix(target: dict[str, Any]) -> str:
+    commit_index = target.get("commit_index")
+    if commit_index is not None:
+        parts = [
+            f"{target['stream']} commit={commit_index}",
+            f"scope={target.get('scope', 'unknown')}",
+        ]
+        session = target.get("session")
+        if session is not None:
+            parts.append(f"session={session}")
+        return " ".join(str(part) for part in parts) + " | "
+
     return (
         f"{target['stream']} "
         f"session={target.get('session', 'unknown')} "

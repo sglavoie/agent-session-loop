@@ -15,11 +15,12 @@ import time
 import unittest
 from unittest import mock
 
-from agent_session_loop import config, events, harnesses, plans, runner, state
+from agent_session_loop import cli, config, events, harnesses, plans, runner, state
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_CODEX_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "fake_codex.py"
+FAKE_SPEC_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "fake_spec.py"
 
 
 @contextmanager
@@ -71,6 +72,71 @@ def install_fake_codex(tmp_dir: Path) -> Path:
     shutil.copyfile(FAKE_CODEX_FIXTURE, fake_path)
     fake_path.chmod(fake_path.stat().st_mode | stat.S_IXUSR)
     return fake_path
+
+
+def install_fake_spec(tmp_dir: Path) -> Path:
+    fake_path = tmp_dir / "spec"
+    shutil.copyfile(FAKE_SPEC_FIXTURE, fake_path)
+    fake_path.chmod(fake_path.stat().st_mode | stat.S_IXUSR)
+    return fake_path
+
+
+def init_git_repo(repo_dir: Path) -> None:
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "init"],
+        cwd=repo_dir,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "agent-session-loop@example.com"],
+        cwd=repo_dir,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Agent Session Loop Tests"],
+        cwd=repo_dir,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    (repo_dir / "README.md").write_text("test repo\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "README.md"],
+        cwd=repo_dir,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "Initial commit"],
+        cwd=repo_dir,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+
+def git_stdout(repo_dir: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=repo_dir,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return completed.stdout.strip()
+
+
+def read_jsonl(path: Path) -> list[dict[str, object]]:
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
 
 
 def fail_open_for_path(target: Path):
@@ -383,6 +449,25 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertTrue(runner.build_session_prompt("codex", "/tmp/plan").startswith("$session-run "))
         self.assertTrue(runner.build_session_prompt("claude", "/tmp/plan").startswith("/session-run "))
 
+    def test_commit_flags_are_mutually_exclusive(self) -> None:
+        parser = cli.build_parser()
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            parser.parse_args(
+                [
+                    "run",
+                    "/tmp/plan",
+                    "--cwd",
+                    "/tmp/repo",
+                    "--commit-per-session",
+                    "--commit-at-end",
+                ]
+            )
+
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("not allowed with argument", stderr.getvalue())
+
 
 class FakeHarnessIntegrationTests(unittest.TestCase):
     def setup_loop(
@@ -406,6 +491,38 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         write_plan(plan_dir, statuses)
         return plan_dir, state_dir, config_home, fake_codex
 
+    def setup_fake_spec(
+        self,
+        tmp_dir: Path,
+        *,
+        mode: str = "success",
+    ) -> tuple[Path, Path, dict[str, str]]:
+        fake_spec = install_fake_spec(tmp_dir)
+        log_path = tmp_dir / "fake-spec.jsonl"
+        env = {
+            "PATH": str(tmp_dir) + os.pathsep + os.environ.get("PATH", ""),
+            "FAKE_SPEC_LOG": str(log_path),
+        }
+        if mode != "success":
+            env["FAKE_SPEC_MODE"] = mode
+        return fake_spec, log_path, env
+
+    def event_index(
+        self,
+        records: list[dict[str, object]],
+        name: str,
+        **payload_values: object,
+    ) -> int:
+        for index, record in enumerate(records):
+            if record.get("name") != name:
+                continue
+            payload = record.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            if all(payload.get(key) == value for key, value in payload_values.items()):
+                return index
+        raise AssertionError(f"event not found: {name} {payload_values}")
+
     def run_loop_command(
         self,
         *,
@@ -413,12 +530,15 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         plan_dir: Path,
         state_dir: Path,
         config_home: Path,
+        cwd: Path | None = None,
         timeout: int | None = None,
         max_sessions: int | None = None,
+        commit_mode: str | None = None,
         model: str | None = None,
         effort: str | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+        run_cwd = REPO_ROOT if cwd is None else cwd
         command = [
             sys.executable,
             "-m",
@@ -426,7 +546,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             "run",
             str(plan_dir),
             "--cwd",
-            str(REPO_ROOT),
+            str(run_cwd),
             "--harness",
             "codex",
             "--state-dir",
@@ -437,6 +557,12 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             command.extend(["--timeout", str(timeout)])
         if max_sessions is not None:
             command.extend(["--max-sessions", str(max_sessions)])
+        if commit_mode == runner.COMMIT_MODE_PER_SESSION:
+            command.append("--commit-per-session")
+        elif commit_mode == runner.COMMIT_MODE_END:
+            command.append("--commit-at-end")
+        elif commit_mode is not None:
+            raise ValueError(f"unsupported commit_mode: {commit_mode}")
         if model is not None:
             command.extend(["--model", model])
         if effort is not None:
@@ -466,8 +592,10 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         *,
         mode: str,
         statuses: tuple[str, ...],
+        cwd: Path | None = None,
         timeout: int | None = None,
         max_sessions: int | None = None,
+        commit_mode: str | None = None,
         model: str | None = None,
         effort: str | None = None,
         extra_env: dict[str, str] | None = None,
@@ -478,8 +606,10 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             plan_dir=plan_dir,
             state_dir=state_dir,
             config_home=config_home,
+            cwd=cwd,
             timeout=timeout,
             max_sessions=max_sessions,
+            commit_mode=commit_mode,
             model=model,
             effort=effort,
             extra_env=extra_env,
@@ -506,11 +636,14 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         *,
         plan_dir: Path,
         state_dir: Path,
+        cwd: Path | None = None,
         json_output: bool = False,
         max_sessions: int | None = None,
+        commit_mode: str | None = None,
         model: str | None = None,
         effort: str | None = None,
     ) -> list[str]:
+        run_cwd = REPO_ROOT if cwd is None else cwd
         command = [
             sys.executable,
             "-m",
@@ -518,7 +651,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             "run",
             str(plan_dir),
             "--cwd",
-            str(REPO_ROOT),
+            str(run_cwd),
             "--harness",
             "codex",
             "--state-dir",
@@ -526,6 +659,12 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         ]
         if max_sessions is not None:
             command.extend(["--max-sessions", str(max_sessions)])
+        if commit_mode == runner.COMMIT_MODE_PER_SESSION:
+            command.append("--commit-per-session")
+        elif commit_mode == runner.COMMIT_MODE_END:
+            command.append("--commit-at-end")
+        elif commit_mode is not None:
+            raise ValueError(f"unsupported commit_mode: {commit_mode}")
         if model is not None:
             command.extend(["--model", model])
         if effort is not None:
@@ -681,6 +820,259 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertIsNone(turn["effort_source"])
         self.assertNotIn("--model", turn["argv"])
         self.assertNotIn("-c", turn["argv"])
+
+    def test_commit_preflight_rejects_dirty_initial_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            repo_dir = tmp_dir / "repo"
+            init_git_repo(repo_dir)
+            _fake_spec, spec_log, spec_env = self.setup_fake_spec(tmp_dir)
+            (repo_dir / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+
+            completed, payload, plan_dir, _state_dir, _fake_codex = self.run_loop(
+                mode="success",
+                statuses=("pending",),
+                cwd=repo_dir,
+                commit_mode=runner.COMMIT_MODE_PER_SESSION,
+                extra_env=spec_env,
+            )
+
+            self.assertEqual(1, completed.returncode)
+            self.assertFalse(payload["ok"])
+            self.assertTrue(payload["paused"])
+            self.assertEqual("commit-preflight", payload["pause_reason"])
+            self.assertEqual("commit-preflight", payload["reason"])
+            self.assertIn("git status --porcelain", payload["pause_message"])
+            self.assertEqual([], payload["turns"])
+            self.assertEqual([], payload["commits"])
+            self.assertFalse(spec_log.exists())
+            self.assertIn(
+                "- **Status**: pending",
+                (plan_dir / "session-1.md").read_text(encoding="utf-8"),
+            )
+
+    def test_commit_per_session_commits_after_each_completed_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            repo_dir = tmp_dir / "repo"
+            init_git_repo(repo_dir)
+            _fake_spec, spec_log, spec_env = self.setup_fake_spec(tmp_dir)
+            initial_commit_count = int(git_stdout(repo_dir, "rev-list", "--count", "HEAD"))
+
+            completed, payload, _plan_dir, _state_dir, _fake_codex = self.run_loop(
+                mode="success",
+                statuses=("pending", "pending"),
+                cwd=repo_dir,
+                commit_mode=runner.COMMIT_MODE_PER_SESSION,
+                extra_env=spec_env,
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertTrue(payload["ok"])
+            self.assertFalse(payload["paused"])
+            self.assertEqual("all-complete", payload["reason"])
+            self.assertEqual(runner.COMMIT_MODE_PER_SESSION, payload["commit_mode"])
+            self.assertEqual([1, 2], payload["completed_sessions"])
+            self.assertEqual(
+                initial_commit_count + 2,
+                int(git_stdout(repo_dir, "rev-list", "--count", "HEAD")),
+            )
+
+            expected_cwd = str(plans.canonicalize_path(repo_dir))
+            spec_records = read_jsonl(spec_log)
+            self.assertEqual(2, len(spec_records))
+            for record in spec_records:
+                self.assertEqual(["commit", "--yes", "--no-verify"], record["argv"][1:])
+                self.assertEqual(expected_cwd, record["cwd"])
+
+            self.assertEqual(2, len(payload["commits"]))
+            for expected_session, commit in enumerate(payload["commits"], start=1):
+                self.assertTrue(commit["success"])
+                self.assertEqual("success", commit["status_result"])
+                self.assertEqual("session", commit["scope"])
+                self.assertEqual(expected_session, commit["session"])
+                self.assertEqual(expected_cwd, commit["cwd"])
+                self.assertEqual(
+                    ["spec", "commit", "--yes", "--no-verify"],
+                    commit["argv"],
+                )
+                self.assertTrue(Path(commit["result_path"]).exists())
+
+            event_records = read_jsonl(Path(payload["events_path"]))
+            turn_1_finished = self.event_index(event_records, "turn_finished", session=1)
+            commit_1_started = self.event_index(
+                event_records,
+                events.COMMIT_STARTED_EVENT,
+                session=1,
+                scope="session",
+            )
+            commit_1_finished = self.event_index(
+                event_records,
+                events.COMMIT_FINISHED_EVENT,
+                session=1,
+                scope="session",
+            )
+            turn_2_started = self.event_index(event_records, "turn_started", session=2)
+            self.assertLess(turn_1_finished, commit_1_started)
+            self.assertLess(commit_1_started, commit_1_finished)
+            self.assertLess(commit_1_finished, turn_2_started)
+
+    def test_commit_at_end_commits_once_after_all_sessions_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            repo_dir = tmp_dir / "repo"
+            init_git_repo(repo_dir)
+            _fake_spec, spec_log, spec_env = self.setup_fake_spec(tmp_dir)
+            initial_commit_count = int(git_stdout(repo_dir, "rev-list", "--count", "HEAD"))
+
+            completed, payload, _plan_dir, _state_dir, _fake_codex = self.run_loop(
+                mode="success",
+                statuses=("pending", "pending"),
+                cwd=repo_dir,
+                commit_mode=runner.COMMIT_MODE_END,
+                extra_env=spec_env,
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertTrue(payload["ok"])
+            self.assertEqual("all-complete", payload["reason"])
+            self.assertEqual(runner.COMMIT_MODE_END, payload["commit_mode"])
+            self.assertEqual([1, 2], payload["completed_sessions"])
+            self.assertEqual(1, len(payload["commits"]))
+            self.assertEqual(1, len(read_jsonl(spec_log)))
+            self.assertEqual(
+                initial_commit_count + 1,
+                int(git_stdout(repo_dir, "rev-list", "--count", "HEAD")),
+            )
+
+            commit = payload["commits"][0]
+            self.assertTrue(commit["success"])
+            self.assertEqual("end", commit["scope"])
+            self.assertIsNone(commit["session"])
+
+            event_records = read_jsonl(Path(payload["events_path"]))
+            turn_2_finished = self.event_index(event_records, "turn_finished", session=2)
+            commit_started = self.event_index(
+                event_records,
+                events.COMMIT_STARTED_EVENT,
+                session=None,
+                scope="end",
+            )
+            commit_finished = self.event_index(
+                event_records,
+                events.COMMIT_FINISHED_EVENT,
+                session=None,
+                scope="end",
+            )
+            run_finished = self.event_index(event_records, "run_finished")
+            self.assertLess(turn_2_finished, commit_started)
+            self.assertLess(commit_started, commit_finished)
+            self.assertLess(commit_finished, run_finished)
+
+    def test_commit_failure_pauses_with_failed_commit_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            repo_dir = tmp_dir / "repo"
+            init_git_repo(repo_dir)
+            _fake_spec, spec_log, spec_env = self.setup_fake_spec(
+                tmp_dir,
+                mode="failure",
+            )
+            initial_head = git_stdout(repo_dir, "rev-parse", "HEAD")
+
+            completed, payload, plan_dir, _state_dir, _fake_codex = self.run_loop(
+                mode="success",
+                statuses=("pending", "pending"),
+                cwd=repo_dir,
+                commit_mode=runner.COMMIT_MODE_PER_SESSION,
+                extra_env=spec_env,
+            )
+
+            self.assertEqual(1, completed.returncode)
+            self.assertFalse(payload["ok"])
+            self.assertTrue(payload["paused"])
+            self.assertEqual("commit-failed", payload["pause_reason"])
+            self.assertEqual([], payload["completed_sessions"])
+            self.assertEqual(1, len(payload["turns"]))
+            self.assertEqual(1, len(payload["commits"]))
+            self.assertEqual(1, len(read_jsonl(spec_log)))
+            self.assertEqual(initial_head, git_stdout(repo_dir, "rev-parse", "HEAD"))
+
+            commit = payload["commits"][0]
+            self.assertFalse(commit["success"])
+            self.assertEqual("nonzero-exit", commit["status_result"])
+            self.assertEqual(23, commit["returncode"])
+            self.assertEqual(commit, payload["pause_details"]["commit"])
+            self.assertIn(
+                "- **Status**: complete",
+                (plan_dir / "session-1.md").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "- **Status**: pending",
+                (plan_dir / "session-2.md").read_text(encoding="utf-8"),
+            )
+
+    def test_unchanged_head_commit_pauses_with_commit_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            repo_dir = tmp_dir / "repo"
+            init_git_repo(repo_dir)
+            _fake_spec, spec_log, spec_env = self.setup_fake_spec(
+                tmp_dir,
+                mode="unchanged-head",
+            )
+            initial_head = git_stdout(repo_dir, "rev-parse", "HEAD")
+
+            completed, payload, _plan_dir, _state_dir, _fake_codex = self.run_loop(
+                mode="success",
+                statuses=("pending",),
+                cwd=repo_dir,
+                commit_mode=runner.COMMIT_MODE_PER_SESSION,
+                extra_env=spec_env,
+            )
+
+            self.assertEqual(1, completed.returncode)
+            self.assertFalse(payload["ok"])
+            self.assertTrue(payload["paused"])
+            self.assertEqual("commit-failed", payload["pause_reason"])
+            self.assertEqual([], payload["completed_sessions"])
+            self.assertEqual(1, len(payload["commits"]))
+            self.assertEqual(1, len(read_jsonl(spec_log)))
+
+            commit = payload["commits"][0]
+            self.assertFalse(commit["success"])
+            self.assertEqual("unchanged-head", commit["status_result"])
+            self.assertEqual(0, commit["returncode"])
+            self.assertEqual(initial_head, commit["head_before"])
+            self.assertEqual(initial_head, commit["head_after"])
+            self.assertIsNone(commit["commit_sha"])
+
+    def test_default_run_does_not_require_or_create_commits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp) / "repo"
+            init_git_repo(repo_dir)
+            initial_commit_count = int(git_stdout(repo_dir, "rev-list", "--count", "HEAD"))
+
+            completed, payload, _plan_dir, _state_dir, _fake_codex = self.run_loop(
+                mode="success",
+                statuses=("pending",),
+                cwd=repo_dir,
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertTrue(payload["ok"])
+            self.assertEqual("all-complete", payload["reason"])
+            self.assertIsNone(payload["commit_mode"])
+            self.assertEqual([], payload["commits"])
+            self.assertEqual([1], payload["completed_sessions"])
+            self.assertEqual(
+                initial_commit_count,
+                int(git_stdout(repo_dir, "rev-list", "--count", "HEAD")),
+            )
+
+            event_names = [record["name"] for record in read_jsonl(Path(payload["events_path"]))]
+            self.assertNotIn(events.COMMIT_STARTED_EVENT, event_names)
+            self.assertNotIn(events.COMMIT_FINISHED_EVENT, event_names)
 
     def test_text_run_emits_human_progress_to_stderr(self) -> None:
         plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(

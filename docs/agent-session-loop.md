@@ -8,6 +8,8 @@ deciding whether to continue.
 ```bash
 bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --cwd "$PWD" --harness codex
 bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --cwd "$PWD" --harness codex --max-sessions 1
+bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --cwd "$PWD" --harness codex --commit-per-session
+bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --cwd "$PWD" --harness codex --commit-at-end
 bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --cwd "$PWD" --harness codex --dry-run
 bin/.local/bin/agent-session-loop status ~/.local/share/agent-plans/example-plan/
 bin/.local/bin/agent-session-loop tail ~/.local/share/agent-plans/example-plan/
@@ -81,10 +83,16 @@ The runner stops when every `session-N.md` handoff status is `complete`, when
 `--max-sessions` is reached, or when a pause condition requires review. Resume
 a paused run by re-running the same command after fixing the blocker.
 
+Optional auto-commit modes require `--cwd` to be a clean git worktree before
+the first harness turn starts, and require `spec` on `PATH`. Use
+`--commit-per-session` to commit after each verified completed session, or
+`--commit-at-end` to commit once after all pending sessions complete in the
+same run. Both modes always invoke `spec commit --yes --no-verify`.
+
 ## Commands
 
 ```text
-agent-session-loop run PLAN_DIR --cwd REPO_ROOT [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--state-dir DIR] [--unsafe-bypass] [--json] [--dry-run]
+agent-session-loop run PLAN_DIR --cwd REPO_ROOT [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass] [--json] [--dry-run]
 agent-session-loop status PLAN_DIR [--state-dir DIR] [--json]
 agent-session-loop tail PLAN_DIR [--state-dir DIR] [--lines N] [--no-follow]
 agent-session-loop doctor --harness codex|claude|copilot [--model MODEL] [--effort EFFORT] --cwd REPO_ROOT --plan-dir PLAN_DIR [--json]
@@ -93,15 +101,20 @@ agent-session-loop unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
 
 `run` acquires a per-plan lock, inspects the first pending session, invokes the
 selected harness, records turn artifacts, and verifies that exactly the expected
-session changed from `pending` to `complete`.
+session changed from `pending` to `complete`. `--commit-per-session` then runs
+`spec commit --yes --no-verify` before the next harness turn starts.
+`--commit-at-end` runs the same command once after all pending sessions finish
+successfully in that runner invocation. `--commit-at-end` cannot be combined
+with `--max-sessions` unless `--max-sessions` is high enough to complete every
+session that was pending at the start of the run.
 
 `status` reads durable plan files and prints session counts, the next pending
 session, content hashes, state paths, lock state, and any active harness turn.
 Use `--json` for scripts.
 
 `tail` prints recent activity for the latest run and follows `events.jsonl`
-plus live harness stdout/stderr logs until the observed run finishes. Use
-`--no-follow` to print recent activity and exit.
+plus live harness and commit stdout/stderr logs until the observed run
+finishes. Use `--no-follow` to print recent activity and exit.
 
 `doctor` performs a non-mutating harness and path check. Use `--json` for
 scriptable prerequisite checks.
@@ -186,7 +199,7 @@ so logs and locks remain stable as session files change.
 Runtime files include:
 
 - `state.json`: latest run payload.
-- `events.jsonl`: append-only run, pause, and turn events.
+- `events.jsonl`: append-only run, pause, turn, and commit events.
 - `lock.json`: active per-plan runner lock.
 - `runs/<run_id>/`: immutable artifacts for one runner invocation.
 - `runs/<run_id>/turn-0001-session-N/stdout.log`: stdout from the harness turn.
@@ -196,18 +209,31 @@ Runtime files include:
 - `runs/<run_id>/turn-0001-session-N/result.json`: diagnostic result for the
   turn, including argv, status changes, runner signals, snapshots, and artifact
   paths.
+- `runs/<run_id>/commit-0001-session-N/stdout.log`: stdout from an automatic
+  per-session `spec commit --yes --no-verify` invocation.
+- `runs/<run_id>/commit-0001-session-N/stderr.log`: stderr from that commit.
+- `runs/<run_id>/commit-0001-session-N/result.json`: diagnostic commit result,
+  including argv, cwd, return code, HEAD before/after, status result, commit
+  SHA when one was created, and artifact paths.
+- `runs/<run_id>/commit-0001-end/...`: equivalent artifacts for
+  `--commit-at-end`.
 
 `state.json` is updated to the latest run and includes `run_id`, `run_dir`, and
 `turns[*]` entries with `artifact_dir`, `stdout_path`, `stderr_path`,
-`last_message_path`, and `result_path`. Failed-run artifacts remain in their
-original `runs/<run_id>/` directory when a later retry succeeds.
+`last_message_path`, and `result_path`. It also includes `commit_mode`,
+`commits`, and, after successful auto-commit preflight, `commit_preflight`.
+Failed-run artifacts remain in their original `runs/<run_id>/` directory when a
+later retry succeeds.
 
 While a harness turn is active, `state.json` also includes `active_turn` with
 the run id, turn index, session number, artifact paths, elapsed and idle
 seconds, last activity metadata, heartbeat count, and any best-effort
 action-required signal. `events.jsonl` records `turn_started`,
-`turn_heartbeat`, `action_required`, `turn_finished`, `run_paused`, and
-`run_finished` events as they happen.
+`turn_heartbeat`, `action_required`, `turn_finished`, `commit_started`,
+`commit_finished`, `run_paused`, and `run_finished` events as they happen.
+Commit events include the commit index, scope, session number for per-session
+commits, argv, cwd, artifact paths, status result, duration, and commit SHA when
+one was created.
 
 For normal text runs, live progress is printed to stderr so stdout remains the
 final human summary. For `run --json`, stdout remains the final JSON payload and
@@ -230,12 +256,23 @@ error fields are `ok`, `command`, `reason`, `error`, `paused`, and `details`.
 `run --json` preserves its existing fields and adds the common `command` and
 `details` fields; important run fields include `paused`, `reason`,
 `pause_reason`, `pause_details`, `model`, `model_source`, `effort`,
-`effort_source`, `completed_sessions`, `turns`, `initial_snapshot`,
-`final_snapshot`, `state_path`, and `events_path`. Dry-run `planned`
-payloads, harness invocation payloads, active turn state, events, and turn
-`result.json` artifacts include the same model and effort metadata. Source
-values are `flag`, `codex_config`, `copilot_settings`, and `unresolved`;
-omitted effort is reported as `null`.
+`effort_source`, `commit_mode`, `commits`, `completed_sessions`, `turns`,
+`initial_snapshot`, `final_snapshot`, `state_path`, and `events_path`. Runs
+without commit flags report `commit_mode: null` and `commits: []`.
+
+Commit payloads include `commit_index`, `scope`, `session`, `artifact_dir`,
+`stdout_path`, `stderr_path`, `result_path`, `argv`, `cwd`, `returncode`,
+`success`, `status_result`, `head_before`, `head_after`, `commit_sha`,
+`started_at`, `finished_at`, `duration_seconds`, `stdout_chars`, and
+`stderr_chars`. `status_result` is `success` only when the command exits zero
+and changes `HEAD`; nonzero exits, missing `HEAD`, and unchanged `HEAD` are
+recorded as failed commit attempts. A failed commit is also copied into
+`pause_details.commit`.
+
+Dry-run `planned` payloads, harness invocation payloads, active turn state,
+events, and turn `result.json` artifacts include the same model and effort
+metadata. Source values are `flag`, `codex_config`, `copilot_settings`, and
+`unresolved`; omitted effort is reported as `null`.
 
 `status --json` reports parsed session state, hashes, state paths, and lock
 state. `doctor --json` reports the resolved harness executable, generated
@@ -265,6 +302,12 @@ Common pause reasons:
   runner status signal.
 - `no-pending-but-incomplete`: no pending session exists, but not all sessions
   are complete.
+- `commit-preflight`: auto-commit setup failed before the first harness turn,
+  such as a dirty initial worktree, missing `spec`, non-git `--cwd`, or an
+  incompatible `--commit-at-end` and `--max-sessions` combination.
+- `commit-failed`: `spec commit --yes --no-verify` ran but did not create a new
+  commit, including nonzero exits and zero-exit no-op commits that leave `HEAD`
+  unchanged.
 
 ## Troubleshooting
 

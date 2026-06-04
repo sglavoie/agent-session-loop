@@ -50,6 +50,22 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Maximum sessions to complete before stopping",
     )
+    commit_group = run_parser.add_mutually_exclusive_group()
+    commit_group.add_argument(
+        "--commit-per-session",
+        dest="commit_mode",
+        action="store_const",
+        const="per-session",
+        default=None,
+        help="Run 'spec commit --yes --no-verify' after each completed session",
+    )
+    commit_group.add_argument(
+        "--commit-at-end",
+        dest="commit_mode",
+        action="store_const",
+        const="end",
+        help="Run 'spec commit --yes --no-verify' once after all sessions complete",
+    )
     run_parser.add_argument(
         "--state-dir",
         help="Override operational state directory",

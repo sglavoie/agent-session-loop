@@ -6,6 +6,8 @@ import argparse
 from datetime import datetime, timezone
 import json
 import os
+import shutil
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -16,6 +18,10 @@ from . import config, events, harnesses, plans, responses, state
 
 NOT_IMPLEMENTED_EXIT = 2
 HEARTBEAT_INTERVAL_SECONDS = 30.0
+COMMIT_MODE_PER_SESSION = "per-session"
+COMMIT_MODE_END = "end"
+COMMIT_MODES = (COMMIT_MODE_PER_SESSION, COMMIT_MODE_END)
+COMMIT_ARGV: tuple[str, ...] = ("spec", "commit", "--yes", "--no-verify")
 APPROVAL_SIGNAL_PATTERNS: tuple[str, ...] = (
     "approval required",
     "requires approval",
@@ -119,6 +125,20 @@ def _parse_datetime(value: Any) -> datetime | None:
 
 def _approval_mode(args: argparse.Namespace) -> str:
     return "unsafe-bypass" if args.unsafe_bypass else "harness-default"
+
+
+def _commit_mode(args: argparse.Namespace) -> str | None:
+    value = getattr(args, "commit_mode", None)
+    if value is None or value in COMMIT_MODES:
+        return value
+    raise RunError(
+        "commit_mode must be None, 'per-session', or 'end'"
+    )
+
+
+def _commit_mode_payload(args: argparse.Namespace) -> str | None:
+    value = getattr(args, "commit_mode", None)
+    return value if value in COMMIT_MODES else None
 
 
 def _status_map(snapshot: plans.PlanSnapshot) -> dict[int, plans.StatusValue]:
@@ -305,10 +325,14 @@ def _all_sessions_complete(snapshot: plans.PlanSnapshot) -> bool:
     return all(session.status == "complete" for session in snapshot.sessions)
 
 
-def _validate_run_inputs(args: argparse.Namespace) -> tuple[Path, int | None, int | None]:
+def _validate_run_inputs(
+    args: argparse.Namespace,
+) -> tuple[Path, int | None, int | None, str | None]:
     cwd = plans.canonicalize_path(args.cwd)
     if not cwd.is_dir():
         raise plans.PlanError(f"cwd does not exist or is not a directory: {cwd}")
+
+    commit_mode = _commit_mode(args)
 
     timeout = args.timeout
     if timeout is not None and timeout <= 0:
@@ -318,7 +342,85 @@ def _validate_run_inputs(args: argparse.Namespace) -> tuple[Path, int | None, in
     if max_sessions is not None and max_sessions <= 0:
         raise RunError("--max-sessions must be a positive integer")
 
-    return cwd, timeout, max_sessions
+    return cwd, timeout, max_sessions, commit_mode
+
+
+def _run_git(
+    cwd: Path,
+    args: list[str],
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(cwd), *args],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        raise RunError("git executable not found on PATH") from error
+    except OSError as error:
+        raise RunError(f"could not run git {' '.join(args)}: {error}") from error
+
+
+def _read_git_head(cwd: Path) -> dict[str, Any]:
+    result = _run_git(cwd, ["rev-parse", "--verify", "HEAD"])
+    head = result.stdout.strip() if result.returncode == 0 else None
+    return {
+        "head": head,
+        "returncode": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+
+
+def _validate_git_worktree(cwd: Path) -> None:
+    result = _run_git(cwd, ["rev-parse", "--is-inside-work-tree"])
+    if result.returncode != 0 or result.stdout.strip() != "true":
+        detail = result.stderr.strip() or result.stdout.strip()
+        if detail:
+            raise RunError(f"cwd is not inside a git repository: {detail}")
+        raise RunError("cwd is not inside a git repository")
+
+
+def _validate_clean_git_status(cwd: Path) -> None:
+    result = _run_git(cwd, ["status", "--porcelain"])
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        if detail:
+            raise RunError(f"could not inspect git status: {detail}")
+        raise RunError("could not inspect git status")
+    if result.stdout:
+        raise RunError("git status --porcelain must be empty before auto-commit")
+
+
+def _validate_spec_available() -> str:
+    spec_path = shutil.which("spec")
+    if spec_path is None:
+        raise RunError("spec executable not found on PATH")
+    return spec_path
+
+
+def _validate_commit_preflight(cwd: Path) -> dict[str, Any]:
+    _validate_git_worktree(cwd)
+    spec_path = _validate_spec_available()
+    _validate_clean_git_status(cwd)
+    return {"spec_path": spec_path}
+
+
+def _validate_commit_at_end_scope(
+    *,
+    snapshot: plans.PlanSnapshot,
+    max_sessions: int | None,
+) -> None:
+    if max_sessions is None:
+        return
+    pending_count = _status_counts(snapshot)["pending"]
+    if max_sessions < pending_count:
+        raise RunError(
+            "--commit-at-end cannot be combined with --max-sessions when "
+            "not all currently pending sessions can complete in one invocation"
+        )
 
 
 def _write_text(path: Path, text: str) -> None:
@@ -349,6 +451,26 @@ def _turn_paths(run_dir: Path, *, turn_index: int, session_number: int) -> dict[
         "stdout": artifact_dir / "stdout.log",
         "stderr": artifact_dir / "stderr.log",
         "last_message": artifact_dir / "last-message.txt",
+        "result": artifact_dir / "result.json",
+    }
+
+
+def _commit_paths(
+    run_dir: Path,
+    *,
+    commit_index: int,
+    session_number: int | None,
+) -> dict[str, Path]:
+    if commit_index <= 0:
+        raise RunError("commit_index must be a positive integer")
+    if session_number is not None and session_number <= 0:
+        raise RunError("session_number must be a positive integer")
+    suffix = f"session-{session_number}" if session_number is not None else "end"
+    artifact_dir = run_dir / f"commit-{commit_index:04d}-{suffix}"
+    return {
+        "artifact_dir": artifact_dir,
+        "stdout": artifact_dir / "stdout.log",
+        "stderr": artifact_dir / "stderr.log",
         "result": artifact_dir / "result.json",
     }
 
@@ -490,6 +612,146 @@ def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
     os.replace(temporary_path, path)
 
 
+def _commit_status_result(
+    *,
+    returncode: int,
+    head_before: str | None,
+    head_after: str | None,
+) -> str:
+    if returncode != 0:
+        return "nonzero-exit"
+    if head_after is None:
+        return "missing-head"
+    if head_before == head_after:
+        return "unchanged-head"
+    return "success"
+
+
+def _write_commit_artifacts(
+    *,
+    paths: dict[str, Path],
+    stdout: str,
+    stderr: str,
+    payload: dict[str, Any],
+) -> None:
+    _write_text(paths["stdout"], stdout)
+    _write_text(paths["stderr"], stderr)
+    _write_json_file(paths["result"], payload)
+
+
+def _run_spec_commit(
+    *,
+    cwd: Path,
+    run_dir: Path,
+    commit_index: int,
+    session_number: int | None,
+) -> dict[str, Any]:
+    canonical_cwd = plans.canonicalize_path(cwd)
+    paths = _commit_paths(
+        run_dir,
+        commit_index=commit_index,
+        session_number=session_number,
+    )
+    argv = list(COMMIT_ARGV)
+    head_before_payload = _read_git_head(canonical_cwd)
+    started_at = _utc_now()
+    exec_error = None
+    try:
+        result = subprocess.run(
+            argv,
+            cwd=canonical_cwd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        exec_error = str(error)
+        result = subprocess.CompletedProcess(
+            argv,
+            127,
+            stdout="",
+            stderr=exec_error,
+        )
+    except OSError as error:
+        exec_error = str(error)
+        result = subprocess.CompletedProcess(
+            argv,
+            1,
+            stdout="",
+            stderr=exec_error,
+        )
+    finished_at = _utc_now()
+    head_after_payload = _read_git_head(canonical_cwd)
+    head_before = head_before_payload["head"]
+    head_after = head_after_payload["head"]
+    status_result = _commit_status_result(
+        returncode=result.returncode,
+        head_before=head_before,
+        head_after=head_after,
+    )
+    payload = {
+        "commit_index": commit_index,
+        "scope": "session" if session_number is not None else "end",
+        "session": session_number,
+        "artifact_dir": str(paths["artifact_dir"]),
+        "stdout_path": str(paths["stdout"]),
+        "stderr_path": str(paths["stderr"]),
+        "result_path": str(paths["result"]),
+        "argv": argv,
+        "cwd": str(canonical_cwd),
+        "returncode": result.returncode,
+        "success": status_result == "success",
+        "status_result": status_result,
+        "head_before": head_before,
+        "head_after": head_after,
+        "head_before_result": head_before_payload,
+        "head_after_result": head_after_payload,
+        "commit_sha": head_after if status_result == "success" else None,
+        "started_at": _isoformat(started_at),
+        "finished_at": _isoformat(finished_at),
+        "duration_seconds": _duration_seconds(started_at, finished_at),
+        "stdout_chars": len(result.stdout),
+        "stderr_chars": len(result.stderr),
+    }
+    if exec_error is not None:
+        payload["exec_error"] = exec_error
+    _write_commit_artifacts(
+        paths=paths,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        payload=payload,
+    )
+    return payload
+
+
+def _commit_started_payload(
+    *,
+    run_id: str,
+    cwd: Path,
+    run_dir: Path,
+    commit_index: int,
+    session_number: int | None,
+) -> dict[str, Any]:
+    paths = _commit_paths(
+        run_dir,
+        commit_index=commit_index,
+        session_number=session_number,
+    )
+    return {
+        "run_id": run_id,
+        "commit_index": commit_index,
+        "scope": "session" if session_number is not None else "end",
+        "session": session_number,
+        "artifact_dir": str(paths["artifact_dir"]),
+        "stdout_path": str(paths["stdout"]),
+        "stderr_path": str(paths["stderr"]),
+        "result_path": str(paths["result"]),
+        "argv": list(COMMIT_ARGV),
+        "cwd": str(cwd),
+    }
+
+
 def _write_state_payload(payload: dict[str, Any]) -> None:
     state_path = payload.get("state_path")
     if not isinstance(state_path, str) or not state_path:
@@ -580,6 +842,36 @@ class _ProgressReporter:
             f"stdout={turn['stdout_path']} "
             f"stderr={turn['stderr_path']} "
             f"result={turn['result_path']}"
+        )
+
+    def commit_started(self, commit: dict[str, Any]) -> None:
+        session = commit.get("session")
+        session_text = "" if session is None else f" session={session}"
+        self._emit(
+            "commit started "
+            f"commit={commit['commit_index']} "
+            f"scope={commit['scope']}"
+            f"{session_text} "
+            f"stdout={commit['stdout_path']} "
+            f"stderr={commit['stderr_path']} "
+            f"result={commit['result_path']}"
+        )
+
+    def commit_finished(self, commit: dict[str, Any]) -> None:
+        session = commit.get("session")
+        session_text = "" if session is None else f" session={session}"
+        sha = commit.get("commit_sha") or "none"
+        self._emit(
+            "commit finished "
+            f"commit={commit['commit_index']} "
+            f"scope={commit['scope']}"
+            f"{session_text} "
+            f"status={commit['status_result']} "
+            f"sha={sha} "
+            f"duration={_format_seconds(commit.get('duration_seconds'))} "
+            f"stdout={commit['stdout_path']} "
+            f"stderr={commit['stderr_path']} "
+            f"result={commit['result_path']}"
         )
 
     def run_finished(self, payload: dict[str, Any]) -> None:
@@ -739,6 +1031,42 @@ class _LiveTurn:
         }
 
 
+def _run_auto_commit(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    progress: _ProgressReporter,
+    cwd: Path,
+    run_dir: Path,
+    run_id: str,
+    session_number: int | None,
+) -> dict[str, Any]:
+    commit_index = len(payload["commits"]) + 1
+    commit_started = _commit_started_payload(
+        run_id=run_id,
+        cwd=cwd,
+        run_dir=run_dir,
+        commit_index=commit_index,
+        session_number=session_number,
+    )
+    _append_event(event_path, events.COMMIT_STARTED_EVENT, commit_started)
+    _write_state_payload(payload)
+    progress.commit_started(commit_started)
+
+    commit_payload = _run_spec_commit(
+        cwd=cwd,
+        run_dir=run_dir,
+        commit_index=commit_index,
+        session_number=session_number,
+    )
+    payload["commits"].append(commit_payload)
+    commit_finished = {"run_id": run_id, **commit_payload}
+    _append_event(event_path, events.COMMIT_FINISHED_EVENT, commit_finished)
+    _write_state_payload(payload)
+    progress.commit_finished(commit_finished)
+    return commit_payload
+
+
 def _finish_run(
     event_path: Path,
     payload: dict[str, Any],
@@ -806,6 +1134,7 @@ def _initial_payload(
     lock_info: state.LockInfo,
     cwd: Path,
     run_id: str,
+    commit_mode: str | None,
 ) -> dict[str, Any]:
     model_effort = _selected_model_effort_payload(args)
     return responses.success_payload(
@@ -824,6 +1153,7 @@ def _initial_payload(
         active_turn=None,
         action_required=None,
         approval_mode=_approval_mode(args),
+        commit_mode=commit_mode,
         plan_dir=str(snapshot.plan_dir),
         cwd=str(cwd),
         harness=args.harness,
@@ -836,6 +1166,7 @@ def _initial_payload(
         lock_path=str(lock_info.path),
         harness_config=config.harness_config_payload(),
         completed_sessions=[],
+        commits=[],
         turns=[],
         initial_snapshot=_snapshot_payload(snapshot),
         final_snapshot=_snapshot_payload(snapshot),
@@ -886,6 +1217,7 @@ def _run_locked(
     cwd: Path,
     timeout: int | None,
     max_sessions: int | None,
+    commit_mode: str | None,
     lock_info: state.LockInfo,
     run_id: str,
 ) -> tuple[int, dict[str, Any]]:
@@ -904,6 +1236,7 @@ def _run_locked(
         lock_info=lock_info,
         cwd=cwd,
         run_id=run_id,
+        commit_mode=commit_mode,
     )
     progress = _ProgressReporter(enabled=not args.json)
     _append_event(
@@ -918,6 +1251,7 @@ def _run_locked(
             "effort_source": payload["effort_source"],
             "dry_run": args.dry_run,
             "max_sessions": max_sessions,
+            "commit_mode": commit_mode,
             "run_id": run_id,
             "run_dir": str(run_dir),
             "run_started_at": payload["run_started_at"],
@@ -968,6 +1302,30 @@ def _run_locked(
         )
         _finish_run(event_path, payload, progress)
         return 0, payload
+
+    try:
+        if commit_mode == COMMIT_MODE_END:
+            _validate_commit_at_end_scope(
+                snapshot=snapshot,
+                max_sessions=max_sessions,
+            )
+        if commit_mode is not None:
+            payload["commit_preflight"] = _validate_commit_preflight(cwd)
+    except RunError as error:
+        payload["final_snapshot"] = _snapshot_payload(snapshot)
+        _pause_run(
+            event_path,
+            payload,
+            reason="commit-preflight",
+            message=str(error),
+            details={
+                "commit_mode": commit_mode,
+                "max_sessions": max_sessions,
+                "pending_sessions": _status_counts(snapshot)["pending"],
+            },
+        )
+        _finish_run(event_path, payload, progress)
+        return 1, payload
 
     completed_count = 0
     previous_turn_finished_at: datetime | None = None
@@ -1207,6 +1565,33 @@ def _run_locked(
             )
             break
 
+        if commit_mode == COMMIT_MODE_PER_SESSION:
+            commit_payload = _run_auto_commit(
+                event_path=event_path,
+                payload=payload,
+                progress=progress,
+                cwd=cwd,
+                run_dir=run_dir,
+                run_id=run_id,
+                session_number=pending_session.number,
+            )
+            if not commit_payload["success"]:
+                payload["final_snapshot"] = _snapshot_payload(after)
+                _pause_run(
+                    event_path,
+                    payload,
+                    reason="commit-failed",
+                    message=(
+                        "auto-commit failed after session "
+                        f"{pending_session.number} completed"
+                    ),
+                    details={
+                        "session": pending_session.number,
+                        "commit": commit_payload,
+                    },
+                )
+                break
+
         payload["completed_sessions"].append(pending_session.number)
         completed_count += 1
         snapshot = after
@@ -1215,7 +1600,32 @@ def _run_locked(
     if payload["ok"] and payload["reason"] == "":
         if snapshot.next_pending is None:
             if _all_sessions_complete(snapshot):
-                payload["reason"] = "all-complete"
+                payload["final_snapshot"] = _snapshot_payload(snapshot)
+                if commit_mode == COMMIT_MODE_END:
+                    commit_payload = _run_auto_commit(
+                        event_path=event_path,
+                        payload=payload,
+                        progress=progress,
+                        cwd=cwd,
+                        run_dir=run_dir,
+                        run_id=run_id,
+                        session_number=None,
+                    )
+                    if not commit_payload["success"]:
+                        _pause_run(
+                            event_path,
+                            payload,
+                            reason="commit-failed",
+                            message=(
+                                "final auto-commit failed after all sessions "
+                                "completed"
+                            ),
+                            details={"commit": commit_payload},
+                        )
+                    else:
+                        payload["reason"] = "all-complete"
+                else:
+                    payload["reason"] = "all-complete"
             else:
                 _pause_run(
                     event_path,
@@ -1266,6 +1676,8 @@ def _error_payload(
         pause_reason=reason if paused else None,
         pause_message=message if paused else "",
         pause_details={},
+        commit_mode=_commit_mode_payload(args),
+        commits=[],
         plan_dir=plan_dir,
         cwd=str(cwd) if cwd is not None else str(getattr(args, "cwd", "")),
         harness=getattr(args, "harness", None),
@@ -1302,11 +1714,48 @@ def _print_model_effort_lines(payload: dict[str, Any]) -> None:
             print(f"Effort: {effort} ({effort_source})")
 
 
+def _commit_scope_label(commit: dict[str, Any]) -> str:
+    scope = commit.get("scope")
+    session = commit.get("session")
+    if scope == "session" and session is not None:
+        return f"session {session}"
+    if scope == "end":
+        return "end"
+    return str(scope or "unknown")
+
+
+def _print_commit_outcome_lines(payload: dict[str, Any]) -> None:
+    commits = payload.get("commits")
+    if not isinstance(commits, list):
+        return
+    for commit in commits:
+        if not isinstance(commit, dict):
+            continue
+        label = _commit_scope_label(commit)
+        index = commit.get("commit_index", "?")
+        if commit.get("success"):
+            sha = commit.get("commit_sha") or "unknown"
+            print(f"Created commit {sha} ({label})")
+        else:
+            status = commit.get("status_result", "unknown")
+            print(f"Commit {index} failed ({label}): {status}")
+
+
+def _last_commit(payload: dict[str, Any]) -> dict[str, Any] | None:
+    commits = payload.get("commits")
+    if not isinstance(commits, list) or not commits:
+        return None
+    commit = commits[-1]
+    return commit if isinstance(commit, dict) else None
+
+
 def _print_text_outcome(payload: dict[str, Any]) -> None:
     print(f"Plan: {payload['plan_dir']}")
     if payload.get("harness") is not None:
         print(f"Harness: {payload['harness']}")
         _print_model_effort_lines(payload)
+    if "commit_mode" in payload:
+        print(f"Commit mode: {payload.get('commit_mode') or 'none'}")
     if payload.get("run_dir") is not None:
         print(f"Run dir: {payload['run_dir']}")
     if payload.get("state_path") is not None:
@@ -1330,6 +1779,7 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
 
     for session_number in payload["completed_sessions"]:
         print(f"Completed session {session_number}")
+    _print_commit_outcome_lines(payload)
 
     if not payload["ok"]:
         if payload.get("paused"):
@@ -1343,6 +1793,11 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
             print(f"Stdout: {turn['stdout_path']}", file=sys.stderr)
             print(f"Stderr: {turn['stderr_path']}", file=sys.stderr)
             print(f"Last message: {turn['last_message_path']}", file=sys.stderr)
+        commit = _last_commit(payload)
+        if commit is not None:
+            print(f"Commit stdout: {commit['stdout_path']}", file=sys.stderr)
+            print(f"Commit stderr: {commit['stderr_path']}", file=sys.stderr)
+            print(f"Commit result: {commit['result_path']}", file=sys.stderr)
         return
 
     final_snapshot = payload["final_snapshot"]
@@ -1357,7 +1812,7 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
 def run_from_args(args: argparse.Namespace) -> int:
     """Run one or more pending sessions from CLI arguments."""
     try:
-        cwd, timeout, max_sessions = _validate_run_inputs(args)
+        cwd, timeout, max_sessions, commit_mode = _validate_run_inputs(args)
     except (plans.PlanError, RunError) as error:
         payload = _error_payload(
             args,
@@ -1413,6 +1868,7 @@ def run_from_args(args: argparse.Namespace) -> int:
                 cwd=cwd,
                 timeout=timeout,
                 max_sessions=max_sessions,
+                commit_mode=commit_mode,
                 lock_info=lock_info,
                 run_id=run_id,
             )
