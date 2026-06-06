@@ -1218,10 +1218,10 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertIn("events ", completed.stderr)
         self.assertRegex(
             completed.stderr,
-            timestamp + r"session 1 started \(turn 1\)",
+            timestamp + r"session 1/1 started",
         )
         self.assertIn(
-            "session 1 finished (turn 1, status complete, return code 0, duration ",
+            "session 1/1 finished (status complete, return code 0, duration ",
             completed.stderr,
         )
         self.assertIn("run finished: run ", completed.stderr)
@@ -1399,10 +1399,10 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         timestamp = r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] "
         self.assertRegex(
             tail_stdout,
-            timestamp + r"session 1 started \(turn 1\)",
+            timestamp + r"session 1/2 started",
         )
-        self.assertIn("session 1 finished", tail_stdout)
-        self.assertIn("session 2 started (turn 2)", tail_stdout)
+        self.assertIn("session 1/2 finished", tail_stdout)
+        self.assertIn("session 2/2 started", tail_stdout)
         self.assertIn("run finished: run ", tail_stdout)
         self.assertNotIn("event turn_started", tail_stdout)
         self.assertIn(
@@ -1428,6 +1428,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "run_id": "run-1",
                 "turn_index": 1,
                 "session": 1,
+                "total_sessions": 3,
                 "artifact_dir": str(tmp_dir / "turn"),
                 "stdout_path": str(tmp_dir / "stdout.log"),
                 "stderr_path": str(tmp_dir / "stderr.log"),
@@ -1486,11 +1487,11 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             timestamp = r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] "
             self.assertRegex(
                 stderr_text,
-                timestamp + r"session 1 started \(turn 1\)",
+                timestamp + r"session 1/3 started",
             )
             self.assertRegex(
                 stderr_text,
-                timestamp + r"session 1 heartbeat \(turn 1,",
+                timestamp + r"session 1/3 heartbeat \(elapsed",
             )
 
     def test_retry_after_failed_turn_keeps_first_run_artifacts(self) -> None:

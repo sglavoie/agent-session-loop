@@ -564,6 +564,7 @@ def _write_turn_artifacts(
         "run_id": run_id,
         "turn_index": turn_index,
         "session": session_number,
+        "total_sessions": live_turn.get("total_sessions"),
         "artifact_dir": str(paths["artifact_dir"]),
         "harness": result.name,
         "model": live_turn.get("model"),
@@ -776,6 +777,14 @@ def _format_local_datetime(value: Any) -> str:
     return _local_timestamp(parsed)
 
 
+def _format_session_label(payload: dict[str, Any]) -> str:
+    session = payload.get("session")
+    total = payload.get("total_sessions")
+    if total is None:
+        return str(session)
+    return f"{session}/{total}"
+
+
 def _progress_commit_label(commit: dict[str, Any]) -> str:
     scope = commit.get("scope")
     session = commit.get("session")
@@ -823,17 +832,13 @@ class _ProgressReporter:
         )
 
     def turn_started(self, active_turn: dict[str, Any]) -> None:
-        self._emit(
-            f"session {active_turn['session']} started "
-            f"(turn {active_turn['turn_index']})"
-        )
+        self._emit(f"session {_format_session_label(active_turn)} started")
 
     def heartbeat(self, heartbeat: dict[str, Any]) -> None:
         stream = heartbeat.get("last_activity_stream") or "none"
         self._emit(
-            f"session {heartbeat['session']} heartbeat "
-            f"(turn {heartbeat['turn_index']}, "
-            f"elapsed {format_duration_seconds(heartbeat['elapsed_seconds'])}, "
+            f"session {_format_session_label(heartbeat)} heartbeat "
+            f"(elapsed {format_duration_seconds(heartbeat['elapsed_seconds'])}, "
             f"idle {format_duration_seconds(heartbeat['idle_seconds'])}, "
             f"last activity {_format_local_datetime(heartbeat.get('last_activity_at'))}, "
             f"stream {stream})"
@@ -841,18 +846,16 @@ class _ProgressReporter:
 
     def action_required(self, signal: dict[str, Any]) -> None:
         self._emit(
-            f"action required in session {signal['session']} "
-            f"(turn {signal['turn_index']}, "
-            f"reason {signal['reason']}, "
+            f"action required in session {_format_session_label(signal)} "
+            f"(reason {signal['reason']}, "
             f"source {signal['source']}): "
             f"{signal['message']}"
         )
 
     def turn_finished(self, turn: dict[str, Any]) -> None:
         self._emit(
-            f"session {turn['session']} finished "
-            f"(turn {turn['turn_index']}, "
-            f"status {turn['status_result']}, "
+            f"session {_format_session_label(turn)} finished "
+            f"(status {turn['status_result']}, "
             f"return code {turn['returncode']}, "
             f"duration {format_duration_seconds(turn['duration_seconds'])})"
         )
@@ -984,6 +987,7 @@ class _LiveTurn:
                 "run_id": self._active_turn["run_id"],
                 "turn_index": self._active_turn["turn_index"],
                 "session": self._active_turn["session"],
+                "total_sessions": self._active_turn.get("total_sessions"),
                 "artifact_dir": self._active_turn["artifact_dir"],
                 "stdout_path": self._active_turn["stdout_path"],
                 "stderr_path": self._active_turn["stderr_path"],
@@ -1019,6 +1023,7 @@ class _LiveTurn:
             "run_id": self._active_turn["run_id"],
             "turn_index": self._active_turn["turn_index"],
             "session": self._active_turn["session"],
+            "total_sessions": self._active_turn.get("total_sessions"),
             "artifact_dir": self._active_turn["artifact_dir"],
             "stdout_path": self._active_turn["stdout_path"],
             "stderr_path": self._active_turn["stderr_path"],
@@ -1330,6 +1335,7 @@ def _run_locked(
 
     completed_count = 0
     previous_turn_finished_at: datetime | None = None
+    total_sessions = sum(payload["initial_snapshot"]["counts"].values())
     while snapshot.next_pending is not None:
         if max_sessions is not None and completed_count >= max_sessions:
             payload["reason"] = "max-sessions"
@@ -1358,6 +1364,7 @@ def _run_locked(
             "run_id": run_id,
             "turn_index": turn_index,
             "session": pending_session.number,
+            "total_sessions": total_sessions,
             "artifact_dir": str(paths["artifact_dir"]),
             "prompt": prompt,
             "model": payload["model"],

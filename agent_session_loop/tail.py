@@ -128,6 +128,14 @@ def _progress_commit_label(payload: dict[str, Any]) -> str:
     return str(scope or "unknown")
 
 
+def _format_session_label(payload: dict[str, Any]) -> str:
+    session = payload.get("session", "unknown")
+    total = payload.get("total_sessions")
+    if total is None:
+        return str(session)
+    return f"{session}/{total}"
+
+
 def _run_started_message(payload: dict[str, Any]) -> str:
     run_id = payload.get("run_id", "unknown")
     harness = payload.get("harness", "unknown")
@@ -168,16 +176,12 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
     if name == "run_started":
         return _run_started_message(payload)
     if name == "turn_started":
-        return (
-            f"session {payload.get('session', 'unknown')} started "
-            f"(turn {payload.get('turn_index', 'unknown')})"
-        )
+        return f"session {_format_session_label(payload)} started"
     if name == events.TURN_HEARTBEAT_EVENT:
         stream = payload.get("last_activity_stream") or "none"
         return (
-            f"session {payload.get('session', 'unknown')} heartbeat "
-            f"(turn {payload.get('turn_index', 'unknown')}, "
-            f"elapsed {format_duration_seconds(payload.get('elapsed_seconds'))}, "
+            f"session {_format_session_label(payload)} heartbeat "
+            f"(elapsed {format_duration_seconds(payload.get('elapsed_seconds'))}, "
             f"idle {format_duration_seconds(payload.get('idle_seconds'))}, "
             f"last activity {_format_local_datetime(payload.get('last_activity_at'))}, "
             f"stream {stream})"
@@ -185,17 +189,15 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
     if name == events.ACTION_REQUIRED_EVENT:
         message = payload.get("message") or ""
         return (
-            f"action required in session {payload.get('session', 'unknown')} "
-            f"(turn {payload.get('turn_index', 'unknown')}, "
-            f"reason {payload.get('reason', 'unknown')}, "
+            f"action required in session {_format_session_label(payload)} "
+            f"(reason {payload.get('reason', 'unknown')}, "
             f"source {payload.get('source', 'unknown')}): "
             f"{message}"
         )
     if name == "turn_finished":
         return (
-            f"session {payload.get('session', 'unknown')} finished "
-            f"(turn {payload.get('turn_index', 'unknown')}, "
-            f"status {payload.get('status_result', 'unknown')}, "
+            f"session {_format_session_label(payload)} finished "
+            f"(status {payload.get('status_result', 'unknown')}, "
             f"return code {payload.get('returncode', 'unknown')}, "
             f"duration {format_duration_seconds(payload.get('duration_seconds'))})"
         )
