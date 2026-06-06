@@ -15,7 +15,16 @@ import time
 import unittest
 from unittest import mock
 
-from agent_session_loop import cli, config, events, harnesses, plans, runner, state, tail
+from agent_session_loop import (
+    cli,
+    config,
+    events,
+    harnesses,
+    plans,
+    runner,
+    state,
+    tail,
+)
 from agent_session_loop.formatting import format_duration_seconds
 
 
@@ -134,10 +143,7 @@ def git_stdout(repo_dir: Path, *args: str) -> str:
 
 
 def read_jsonl(path: Path) -> list[dict[str, object]]:
-    return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-    ]
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
 def fail_open_for_path(target: Path):
@@ -146,7 +152,9 @@ def fail_open_for_path(target: Path):
 
     def failing_open(path: Path, *args, **kwargs):
         if plans.canonicalize_path(path) == canonical_target:
-            raise PermissionError(errno.EACCES, "permission denied", os.fspath(canonical_target))
+            raise PermissionError(
+                errno.EACCES, "permission denied", os.fspath(canonical_target)
+            )
         return original_open(path, *args, **kwargs)
 
     return mock.patch.object(Path, "open", failing_open)
@@ -209,11 +217,15 @@ class ParserAndStateTests(unittest.TestCase):
         )
         self.assertIn("duration 1m30s", finished)
 
-    def test_inspect_plan_sorts_exact_session_files_and_finds_next_pending(self) -> None:
+    def test_inspect_plan_sorts_exact_session_files_and_finds_next_pending(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             write_plan(plan_dir, ("complete", "pending", "complete"))
-            (plan_dir / "session-10.expand.md").write_text("ignored\n", encoding="utf-8")
+            (plan_dir / "session-10.expand.md").write_text(
+                "ignored\n", encoding="utf-8"
+            )
             (plan_dir / "session-10.md").write_text(
                 "# Session 10\n\n## Handoff\n\n- **Status**: pending\n",
                 encoding="utf-8",
@@ -221,8 +233,13 @@ class ParserAndStateTests(unittest.TestCase):
 
             snapshot = plans.inspect_plan(plan_dir)
 
-            self.assertEqual([1, 2, 3, 10], [session.number for session in snapshot.sessions])
-            self.assertEqual(["complete", "pending", "complete", "pending"], [session.status for session in snapshot.sessions])
+            self.assertEqual(
+                [1, 2, 3, 10], [session.number for session in snapshot.sessions]
+            )
+            self.assertEqual(
+                ["complete", "pending", "complete", "pending"],
+                [session.status for session in snapshot.sessions],
+            )
             self.assertEqual(2, snapshot.next_pending.number)
             self.assertEqual(plans.path_sha256(plan_dir), snapshot.path_hash)
 
@@ -281,7 +298,9 @@ class ParserAndStateTests(unittest.TestCase):
 
             def failing_iterdir(path: Path):
                 if plans.canonicalize_path(path) == canonical_plan_dir:
-                    raise PermissionError(errno.EACCES, "permission denied", os.fspath(canonical_plan_dir))
+                    raise PermissionError(
+                        errno.EACCES, "permission denied", os.fspath(canonical_plan_dir)
+                    )
                 return original_iterdir(path)
 
             with mock.patch.object(Path, "iterdir", failing_iterdir):
@@ -308,7 +327,9 @@ class ParserAndStateTests(unittest.TestCase):
             lock_path = state.lock_path_for_plan(plan_dir, state_dir)
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             lock_path.write_text(
-                json.dumps({"pid": 0, "plan_dir": str(plans.canonicalize_path(plan_dir))}),
+                json.dumps(
+                    {"pid": 0, "plan_dir": str(plans.canonicalize_path(plan_dir))}
+                ),
                 encoding="utf-8",
             )
             replaced = state.acquire_lock(plan_dir, state_dir)
@@ -438,7 +459,10 @@ class CommandAndConfigTests(unittest.TestCase):
             cases = [
                 ({"codex": {"executable": "/bin/codex"}}, "/bin/codex"),
                 ({"codex": "/bin/codex-short"}, "/bin/codex-short"),
-                ({"harnesses": {"codex": {"executable": "/bin/codex-nested"}}}, "/bin/codex-nested"),
+                (
+                    {"harnesses": {"codex": {"executable": "/bin/codex-nested"}}},
+                    "/bin/codex-nested",
+                ),
             ]
 
             for raw, expected in cases:
@@ -448,7 +472,10 @@ class CommandAndConfigTests(unittest.TestCase):
                         {"codex": {"executable": expected}},
                         config.load_harness_config(config_path),
                     )
-                    self.assertEqual(expected, config.configured_harness_executable("codex", config_path))
+                    self.assertEqual(
+                        expected,
+                        config.configured_harness_executable("codex", config_path),
+                    )
 
     def test_native_model_payload_reads_codex_toml_and_copilot_settings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -465,7 +492,10 @@ class CommandAndConfigTests(unittest.TestCase):
 
             with patched_env(HOME=str(home)):
                 self.assertEqual(
-                    {"model": "gpt-5-codex", "model_source": config.MODEL_SOURCE_CODEX_CONFIG},
+                    {
+                        "model": "gpt-5-codex",
+                        "model_source": config.MODEL_SOURCE_CODEX_CONFIG,
+                    },
                     config.native_model_payload("codex"),
                 )
                 self.assertEqual(
@@ -488,13 +518,23 @@ class CommandAndConfigTests(unittest.TestCase):
                 self.assertEqual(expected, config.native_model_payload("copilot"))
                 self.assertEqual(expected, config.native_model_payload("claude"))
 
-                with mock.patch.object(Path, "read_text", side_effect=OSError("denied")):
+                with mock.patch.object(
+                    Path, "read_text", side_effect=OSError("denied")
+                ):
                     self.assertEqual(expected, config.native_model_payload("codex"))
                     self.assertEqual(expected, config.native_model_payload("copilot"))
 
     def test_build_session_prompt_uses_harness_skill_prefix(self) -> None:
-        self.assertTrue(runner.build_session_prompt("codex", "/tmp/plan").startswith("$session-run "))
-        self.assertTrue(runner.build_session_prompt("claude", "/tmp/plan").startswith("/session-run "))
+        self.assertTrue(
+            runner.build_session_prompt("codex", "/tmp/plan").startswith(
+                "$session-run "
+            )
+        )
+        self.assertTrue(
+            runner.build_session_prompt("claude", "/tmp/plan").startswith(
+                "/session-run "
+            )
+        )
 
     def test_commit_flags_are_mutually_exclusive(self) -> None:
         parser = cli.build_parser()
@@ -647,7 +687,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         effort: str | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, object], Path, Path, Path]:
-        plan_dir, state_dir, config_home, fake_codex = self.setup_loop(statuses=statuses)
+        plan_dir, state_dir, config_home, fake_codex = self.setup_loop(
+            statuses=statuses
+        )
         completed, payload = self.run_loop_command(
             mode=mode,
             plan_dir=plan_dir,
@@ -818,7 +860,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             turn["argv"][turn["argv"].index("-c") + 1],
         )
 
-        result_payload = json.loads(Path(turn["result_path"]).read_text(encoding="utf-8"))
+        result_payload = json.loads(
+            Path(turn["result_path"]).read_text(encoding="utf-8")
+        )
         self.assertEqual("gpt-5", result_payload["model"])
         self.assertEqual(config.MODEL_SOURCE_FLAG, result_payload["model_source"])
         self.assertEqual("high", result_payload["effort"])
@@ -826,17 +870,25 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
 
         event_payloads = [
             json.loads(line)
-            for line in Path(payload["events_path"]).read_text(encoding="utf-8").splitlines()
+            for line in Path(payload["events_path"])
+            .read_text(encoding="utf-8")
+            .splitlines()
         ]
         for event_name in ("run_started", "turn_started", "turn_finished"):
             with self.subTest(event_name=event_name):
                 event_payload = next(
-                    event["payload"] for event in event_payloads if event["name"] == event_name
+                    event["payload"]
+                    for event in event_payloads
+                    if event["name"] == event_name
                 )
                 self.assertEqual("gpt-5", event_payload["model"])
-                self.assertEqual(config.MODEL_SOURCE_FLAG, event_payload["model_source"])
+                self.assertEqual(
+                    config.MODEL_SOURCE_FLAG, event_payload["model_source"]
+                )
                 self.assertEqual("high", event_payload["effort"])
-                self.assertEqual(config.EFFORT_SOURCE_FLAG, event_payload["effort_source"])
+                self.assertEqual(
+                    config.EFFORT_SOURCE_FLAG, event_payload["effort_source"]
+                )
 
     def test_json_run_reports_native_model_metadata_without_argv_flags(self) -> None:
         home_tmp = tempfile.TemporaryDirectory()
@@ -904,7 +956,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             repo_dir = tmp_dir / "repo"
             init_git_repo(repo_dir)
             _fake_spec, spec_log, spec_env = self.setup_fake_spec(tmp_dir)
-            initial_commit_count = int(git_stdout(repo_dir, "rev-list", "--count", "HEAD"))
+            initial_commit_count = int(
+                git_stdout(repo_dir, "rev-list", "--count", "HEAD")
+            )
 
             completed, payload, _plan_dir, _state_dir, _fake_codex = self.run_loop(
                 mode="success",
@@ -946,7 +1000,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 self.assertTrue(Path(commit["result_path"]).exists())
 
             event_records = read_jsonl(Path(payload["events_path"]))
-            turn_1_finished = self.event_index(event_records, "turn_finished", session=1)
+            turn_1_finished = self.event_index(
+                event_records, "turn_finished", session=1
+            )
             commit_1_started = self.event_index(
                 event_records,
                 events.COMMIT_STARTED_EVENT,
@@ -970,7 +1026,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             repo_dir = tmp_dir / "repo"
             init_git_repo(repo_dir)
             _fake_spec, spec_log, spec_env = self.setup_fake_spec(tmp_dir)
-            initial_commit_count = int(git_stdout(repo_dir, "rev-list", "--count", "HEAD"))
+            initial_commit_count = int(
+                git_stdout(repo_dir, "rev-list", "--count", "HEAD")
+            )
 
             completed, payload, _plan_dir, _state_dir, _fake_codex = self.run_loop(
                 mode="success",
@@ -998,7 +1056,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertIsNone(commit["session"])
 
             event_records = read_jsonl(Path(payload["events_path"]))
-            turn_2_finished = self.event_index(event_records, "turn_finished", session=2)
+            turn_2_finished = self.event_index(
+                event_records, "turn_finished", session=2
+            )
             commit_started = self.event_index(
                 event_records,
                 events.COMMIT_STARTED_EVENT,
@@ -1098,7 +1158,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo_dir = Path(tmp) / "repo"
             init_git_repo(repo_dir)
-            initial_commit_count = int(git_stdout(repo_dir, "rev-list", "--count", "HEAD"))
+            initial_commit_count = int(
+                git_stdout(repo_dir, "rev-list", "--count", "HEAD")
+            )
 
             completed, payload, _plan_dir, _state_dir, _fake_codex = self.run_loop(
                 mode="success",
@@ -1117,7 +1179,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 int(git_stdout(repo_dir, "rev-list", "--count", "HEAD")),
             )
 
-            event_names = [record["name"] for record in read_jsonl(Path(payload["events_path"]))]
+            event_names = [
+                record["name"] for record in read_jsonl(Path(payload["events_path"]))
+            ]
             self.assertNotIn(events.COMMIT_STARTED_EVENT, event_names)
             self.assertNotIn(events.COMMIT_FINISHED_EVENT, event_names)
 
@@ -1147,21 +1211,20 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         timestamp = r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] "
         self.assertRegex(
             completed.stderr,
-            timestamp + r"agent-session-loop: run started: harness codex; run ",
+            timestamp + r"run started: harness codex; run ",
         )
         self.assertIn("run dir ", completed.stderr)
         self.assertIn("state ", completed.stderr)
         self.assertIn("events ", completed.stderr)
         self.assertRegex(
             completed.stderr,
-            timestamp + r"agent-session-loop: session 1 started \(turn 1\)",
+            timestamp + r"session 1 started \(turn 1\)",
         )
         self.assertIn(
-            "agent-session-loop: session 1 finished "
-            "(turn 1, status complete, return code 0, duration ",
+            "session 1 finished (turn 1, status complete, return code 0, duration ",
             completed.stderr,
         )
-        self.assertIn("agent-session-loop: run finished: run ", completed.stderr)
+        self.assertIn("run finished: run ", completed.stderr)
         self.assertIn("reason all-complete", completed.stderr)
         self.assertNotIn("stdout=", completed.stderr)
         self.assertNotIn("stderr=", completed.stderr)
@@ -1187,7 +1250,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertRegex(
             completed.stderr,
             r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] "
-            r"agent-session-loop: run paused: run [^,]+, "
+            r"run paused: run [^,]+, "
             r"reason nonzero-exit, duration \d+\.\ds",
         )
 
@@ -1207,7 +1270,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        self.addCleanup(lambda: run_process.kill() if run_process.poll() is None else None)
+        self.addCleanup(
+            lambda: run_process.kill() if run_process.poll() is None else None
+        )
 
         state_path = state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
 
@@ -1287,9 +1352,13 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        self.addCleanup(lambda: run_process.kill() if run_process.poll() is None else None)
+        self.addCleanup(
+            lambda: run_process.kill() if run_process.poll() is None else None
+        )
 
-        events_path = state.plan_state_dir(plan_dir, state_dir) / events.EVENTS_FILE_NAME
+        events_path = (
+            state.plan_state_dir(plan_dir, state_dir) / events.EVENTS_FILE_NAME
+        )
 
         def has_first_turn_started():
             if not events_path.exists():
@@ -1314,7 +1383,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        self.addCleanup(lambda: tail_process.kill() if tail_process.poll() is None else None)
+        self.addCleanup(
+            lambda: tail_process.kill() if tail_process.poll() is None else None
+        )
 
         run_stdout, run_stderr = run_process.communicate(timeout=10)
         tail_stdout, tail_stderr = tail_process.communicate(timeout=10)
@@ -1328,16 +1399,24 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         timestamp = r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] "
         self.assertRegex(
             tail_stdout,
-            timestamp + r"agent-session-loop: session 1 started \(turn 1\)",
+            timestamp + r"session 1 started \(turn 1\)",
         )
-        self.assertIn("agent-session-loop: session 1 finished", tail_stdout)
-        self.assertIn("agent-session-loop: session 2 started (turn 2)", tail_stdout)
-        self.assertIn("agent-session-loop: run finished: run ", tail_stdout)
+        self.assertIn("session 1 finished", tail_stdout)
+        self.assertIn("session 2 started (turn 2)", tail_stdout)
+        self.assertIn("run finished: run ", tail_stdout)
         self.assertNotIn("event turn_started", tail_stdout)
-        self.assertIn("stdout session=1 turn=1 | session 1 stdout before completion", tail_stdout)
-        self.assertIn("stderr session=1 turn=1 | session 1 stderr before completion", tail_stdout)
-        self.assertIn("stdout session=2 turn=2 | session 2 stdout before completion", tail_stdout)
-        self.assertIn("stderr session=2 turn=2 | session 2 stderr after completion", tail_stdout)
+        self.assertIn(
+            "stdout session=1 turn=1 | session 1 stdout before completion", tail_stdout
+        )
+        self.assertIn(
+            "stderr session=1 turn=1 | session 1 stderr before completion", tail_stdout
+        )
+        self.assertIn(
+            "stdout session=2 turn=2 | session 2 stdout before completion", tail_stdout
+        )
+        self.assertIn(
+            "stderr session=2 turn=2 | session 2 stderr after completion", tail_stdout
+        )
 
     def test_live_turn_heartbeat_updates_state_events_and_progress(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1382,9 +1461,11 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             with redirect_stderr(stderr):
                 live_turn.start()
                 wait_until(
-                    lambda: event_path.exists()
-                    and events.TURN_HEARTBEAT_EVENT
-                    in event_path.read_text(encoding="utf-8")
+                    lambda: (
+                        event_path.exists()
+                        and events.TURN_HEARTBEAT_EVENT
+                        in event_path.read_text(encoding="utf-8")
+                    )
                 )
                 live_turn.stop()
                 live_turn.finish(runner._utc_now())
@@ -1396,17 +1477,20 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             ]
             self.assertIsNone(state_payload["active_turn"])
             self.assertTrue(
-                any(record["name"] == events.TURN_HEARTBEAT_EVENT for record in event_records)
+                any(
+                    record["name"] == events.TURN_HEARTBEAT_EVENT
+                    for record in event_records
+                )
             )
             stderr_text = stderr.getvalue()
             timestamp = r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] "
             self.assertRegex(
                 stderr_text,
-                timestamp + r"agent-session-loop: session 1 started \(turn 1\)",
+                timestamp + r"session 1 started \(turn 1\)",
             )
             self.assertRegex(
                 stderr_text,
-                timestamp + r"agent-session-loop: session 1 heartbeat \(turn 1,",
+                timestamp + r"session 1 heartbeat \(turn 1,",
             )
 
     def test_retry_after_failed_turn_keeps_first_run_artifacts(self) -> None:
@@ -1660,7 +1744,9 @@ class JsonCliTests(unittest.TestCase):
             self.assertEqual(config.MODEL_SOURCE_FLAG, invocation["model_source"])
             self.assertEqual("high", invocation["effort"])
             self.assertEqual(config.EFFORT_SOURCE_FLAG, invocation["effort_source"])
-            self.assertEqual("gpt-5", invocation["argv"][invocation["argv"].index("--model") + 1])
+            self.assertEqual(
+                "gpt-5", invocation["argv"][invocation["argv"].index("--model") + 1]
+            )
             self.assertEqual(
                 'model_reasoning_effort="high"',
                 invocation["argv"][invocation["argv"].index("-c") + 1],
@@ -1668,7 +1754,9 @@ class JsonCliTests(unittest.TestCase):
             self.assertTrue(run_payload["state_path"].endswith("/state.json"))
             self.assertTrue(run_payload["events_path"].endswith("/events.jsonl"))
 
-    def test_dry_run_json_reports_native_model_metadata_without_argv_flags(self) -> None:
+    def test_dry_run_json_reports_native_model_metadata_without_argv_flags(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             plan_dir = tmp_dir / "plan"
@@ -1717,7 +1805,9 @@ class JsonCliTests(unittest.TestCase):
             self.assertIsNone(planned["effort"])
             self.assertIsNone(planned["effort_source"])
             self.assertEqual("gpt-5-codex", invocation["model"])
-            self.assertEqual(config.MODEL_SOURCE_CODEX_CONFIG, invocation["model_source"])
+            self.assertEqual(
+                config.MODEL_SOURCE_CODEX_CONFIG, invocation["model_source"]
+            )
             self.assertIsNone(invocation["effort"])
             self.assertIsNone(invocation["effort_source"])
             self.assertNotIn("--model", invocation["argv"])
@@ -1801,23 +1891,33 @@ class JsonCliTests(unittest.TestCase):
             self.assertEqual("codex", payload["harness"])
             self.assertEqual(str(fake_codex), payload["resolved_executable"])
             self.assertEqual(str(REPO_ROOT), payload["cwd"])
-            self.assertEqual(str(plans.canonicalize_path(plan_dir)), payload["plan_dir"])
+            self.assertEqual(
+                str(plans.canonicalize_path(plan_dir)), payload["plan_dir"]
+            )
             self.assertEqual(1, payload["next_pending"])
             self.assertEqual("gpt-5", payload["model"])
             self.assertEqual(config.MODEL_SOURCE_FLAG, payload["model_source"])
             self.assertEqual("high", payload["effort"])
             self.assertEqual(config.EFFORT_SOURCE_FLAG, payload["effort_source"])
             self.assertTrue(payload["prompt"].startswith("$session-run "))
-            self.assertEqual(["codex"], payload["harness_config"]["configured_harnesses"])
+            self.assertEqual(
+                ["codex"], payload["harness_config"]["configured_harnesses"]
+            )
             self.assertEqual(str(fake_codex), payload["invocation"]["argv"][0])
             self.assertEqual(payload["invocation"]["argv"], payload["invocation_argv"])
             self.assertEqual("gpt-5", payload["invocation"]["model"])
-            self.assertEqual(config.MODEL_SOURCE_FLAG, payload["invocation"]["model_source"])
+            self.assertEqual(
+                config.MODEL_SOURCE_FLAG, payload["invocation"]["model_source"]
+            )
             self.assertEqual("high", payload["invocation"]["effort"])
-            self.assertEqual(config.EFFORT_SOURCE_FLAG, payload["invocation"]["effort_source"])
+            self.assertEqual(
+                config.EFFORT_SOURCE_FLAG, payload["invocation"]["effort_source"]
+            )
             self.assertEqual(
                 "gpt-5",
-                payload["invocation_argv"][payload["invocation_argv"].index("--model") + 1],
+                payload["invocation_argv"][
+                    payload["invocation_argv"].index("--model") + 1
+                ],
             )
             self.assertEqual(
                 'model_reasoning_effort="high"',

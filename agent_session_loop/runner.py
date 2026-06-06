@@ -132,9 +132,7 @@ def _commit_mode(args: argparse.Namespace) -> str | None:
     value = getattr(args, "commit_mode", None)
     if value is None or value in COMMIT_MODES:
         return value
-    raise RunError(
-        "commit_mode must be None, 'per-session', or 'end'"
-    )
+    raise RunError("commit_mode must be None, 'per-session', or 'end'")
 
 
 def _commit_mode_payload(args: argparse.Namespace) -> str | None:
@@ -445,7 +443,9 @@ def _prepare_stream_logs(paths: dict[str, Path]) -> harnesses.StreamCallback:
     return stream_callback
 
 
-def _turn_paths(run_dir: Path, *, turn_index: int, session_number: int) -> dict[str, Path]:
+def _turn_paths(
+    run_dir: Path, *, turn_index: int, session_number: int
+) -> dict[str, Path]:
     artifact_dir = run_dir / f"turn-{turn_index:04d}-session-{session_number}"
     return {
         "artifact_dir": artifact_dir,
@@ -798,7 +798,7 @@ class _ProgressReporter:
             return
         with self._lock:
             print(
-                f"[{_local_timestamp()}] agent-session-loop: {message}",
+                f"[{_local_timestamp()}] {message}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -929,7 +929,9 @@ class _LiveTurn:
             )
             self._active_turn["idle_seconds"] = 0.0
             char_key = f"{stream_name}_chars"
-            self._active_turn[char_key] = int(self._active_turn.get(char_key, 0)) + len(text)
+            self._active_turn[char_key] = int(self._active_turn.get(char_key, 0)) + len(
+                text
+            )
 
             signal = _live_action_signal(stream_name, text)
             if signal is not None and self._active_turn.get("action_required") is None:
@@ -1616,8 +1618,7 @@ def _run_locked(
                             payload,
                             reason="commit-failed",
                             message=(
-                                "final auto-commit failed after all sessions "
-                                "completed"
+                                "final auto-commit failed after all sessions completed"
                             ),
                             details={"commit": commit_payload},
                         )

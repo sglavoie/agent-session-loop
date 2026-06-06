@@ -247,7 +247,7 @@ def _event_line(record: dict[str, Any]) -> str:
     name = str(record.get("name") or "unknown")
     payload = _payload(record)
     timestamp = _format_local_datetime(record.get("created_at"))
-    return f"[{timestamp}] agent-session-loop: {_event_message(name, payload)}"
+    return f"[{timestamp}] {_event_message(name, payload)}"
 
 
 def _target_key(path: Path) -> str:
