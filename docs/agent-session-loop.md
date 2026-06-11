@@ -80,14 +80,17 @@ agent-session-loop run ~/.local/share/agent-plans/example-plan/ --cwd "$PWD" --h
 ```
 
 The runner stops when every `session-N.md` handoff status is `complete`, when
-`--max-sessions` is reached, or when a pause condition requires review. Resume
-a paused run by re-running the same command after fixing the blocker.
+`--max-sessions` is reached, when an operator requests stop-after-current, or
+when a pause condition requires review. Resume a paused run by re-running the
+same command after fixing the blocker.
 
 Optional auto-commit modes require `--cwd` to be a clean git worktree before
 the first harness turn starts, and require `spec` on `PATH`. Use
 `--commit-per-session` to commit after each verified completed session, or
 `--commit-at-end` to commit once after all pending sessions complete in the
-same run. Both modes always invoke `spec commit --yes --no-verify`.
+same run. Both modes always invoke `spec commit --yes --no-verify`. A
+stop-after-current request before all sessions complete exits successfully
+without running the final `--commit-at-end` commit.
 
 ## Commands
 
@@ -106,7 +109,19 @@ session changed from `pending` to `complete`. `--commit-per-session` then runs
 `--commit-at-end` runs the same command once after all pending sessions finish
 successfully in that runner invocation. `--commit-at-end` cannot be combined
 with `--max-sessions` unless `--max-sessions` is high enough to complete every
-session that was pending at the start of the run.
+session that was pending at the start of the run. If text TTY run controls stop
+the run before all pending sessions finish, `--commit-at-end` does not run.
+
+For normal text TTY runs, `run` also listens for keyboard controls. Press `p`
+to toggle stop-after-current. When active, the current session still finishes
+and any `--commit-per-session` commit for that session runs; if more sessions
+remain, the run exits 0 with `ok: true`, `paused: false`, and
+`reason: stopped`. Press `p` again before the session finishes to cancel the
+request. Press `h` to print a timestamped help line with available keys and the
+current stop-after-current state. Keyboard controls are disabled for
+`run --json`, `run --dry-run`, and runs where stdin or stderr is not a TTY.
+Future key ideas include `s` for a status snapshot, `l` for artifact and log
+paths, and `?` as a help alias; those keys are not implemented.
 
 `status` reads durable plan files and prints session counts, the next pending
 session, content hashes, state paths, lock state, and any active harness turn.
@@ -114,7 +129,8 @@ Use `--json` for scripts.
 
 `tail` prints recent activity for the latest run and follows `events.jsonl`
 plus live harness and commit stdout/stderr logs until the observed run
-finishes. Use `--no-follow` to print recent activity and exit.
+finishes. Use `--no-follow` to print recent activity and exit. `tail` is a log
+viewer only; it has no interactive control mode.
 
 `doctor` performs a non-mutating harness and path check. Use `--json` for
 scriptable prerequisite checks.
@@ -221,27 +237,34 @@ Runtime files include:
 `state.json` is updated to the latest run and includes `run_id`, `run_dir`, and
 `turns[*]` entries with `artifact_dir`, `stdout_path`, `stderr_path`,
 `last_message_path`, and `result_path`. It also includes `commit_mode`,
-`commits`, and, after successful auto-commit preflight, `commit_preflight`.
-Failed-run artifacts remain in their original `runs/<run_id>/` directory when a
-later retry succeeds.
+`commits`, `control`, and, after successful auto-commit preflight,
+`commit_preflight`. The `control` object reports `stop_after_current`,
+`consumed`, and `last_action`; `last_action` is one of
+`stop-after-current-requested`, `stop-after-current-canceled`,
+`stop-after-current-consumed`, or `null`. Failed-run artifacts remain in their
+original `runs/<run_id>/` directory when a later retry succeeds.
 
 While a harness turn is active, `state.json` also includes `active_turn` with
 the run id, turn index, session number, artifact paths, elapsed and idle
 seconds, last activity metadata, heartbeat count, and any best-effort
 action-required signal. `events.jsonl` records `turn_started`,
 `turn_heartbeat`, `action_required`, `turn_finished`, `commit_started`,
-`commit_finished`, `run_paused`, and `run_finished` events as they happen.
-Commit events include the commit index, scope, session number for per-session
-commits, argv, cwd, artifact paths, status result, duration, and commit SHA when
-one was created.
+`commit_finished`, `run_control`, `run_paused`, and `run_finished` events as
+they happen. Commit events include the commit index, scope, session number for
+per-session commits, argv, cwd, artifact paths, status result, duration, and
+commit SHA when one was created. `run_control` events record
+`stop-after-current-requested`, `stop-after-current-canceled`, and
+`stop-after-current-consumed` actions with the current stop-after-current state
+and, when available, session and turn context. `tail` renders these as `run
+control:` lines.
 
 For normal text runs, live progress is printed to stderr with local compact
 timestamps, for example `[2026-06-04 14:32:10] session 2/3 started`, so stdout
 remains the final human summary. The live lines
 cover run start, session starts and finishes, periodic 30-second heartbeats,
-action-required signals, commits, pauses, and run finish. Detailed artifact
-paths remain in the final summary, `status`, `state.json`, and `events.jsonl`
-instead of being repeated on every turn line.
+action-required signals, commits, run-control help or toggle messages, pauses,
+and run finish. Detailed artifact paths remain in the final summary, `status`,
+`state.json`, and `events.jsonl` instead of being repeated on every turn line.
 
 For `run --json`, stdout remains the final JSON payload and stderr stays quiet;
 live monitoring should read `state.json`, `events.jsonl`, or use `tail`.
@@ -262,9 +285,10 @@ error fields are `ok`, `command`, `reason`, `error`, `paused`, and `details`.
 `run --json` preserves its existing fields and adds the common `command` and
 `details` fields; important run fields include `paused`, `reason`,
 `pause_reason`, `pause_details`, `model`, `model_source`, `effort`,
-`effort_source`, `commit_mode`, `commits`, `completed_sessions`, `turns`,
-`initial_snapshot`, `final_snapshot`, `state_path`, and `events_path`. Runs
-without commit flags report `commit_mode: null` and `commits: []`.
+`effort_source`, `commit_mode`, `commits`, `control`, `completed_sessions`,
+`turns`, `initial_snapshot`, `final_snapshot`, `state_path`, and
+`events_path`. Runs without commit flags report `commit_mode: null` and
+`commits: []`.
 
 Commit payloads include `commit_index`, `scope`, `session`, `artifact_dir`,
 `stdout_path`, `stderr_path`, `result_path`, `argv`, `cwd`, `returncode`,
@@ -289,6 +313,12 @@ whether a lock existed, whether it was removed, whether it was active or stale,
 and the lock path.
 
 ## Pause Semantics
+
+A stop-after-current request is not a pause. When `p` is active at a lifecycle
+checkpoint and another session remains pending, the run exits successfully with
+`ok: true`, `paused: false`, and `reason: stopped`, then releases the plan
+lock. If the just-completed session was the final pending session, the run ends
+with `reason: all-complete`. Stop-after-current does not add a pause reason.
 
 A paused run exits nonzero and leaves the plan lock released. Inspect the JSON
 payload, `state.json`, `events.jsonl`, and the last turn artifacts, then rerun
@@ -344,6 +374,10 @@ agent-session-loop tail ~/.local/share/agent-plans/example-plan/
 agent-session-loop tail ~/.local/share/agent-plans/example-plan/ --lines 80 --no-follow
 ```
 
+For text runs started from a real terminal, press `h` for the current keyboard
+controls and press `p` to request or cancel stop-after-current. Use `tail` from
+another terminal to inspect the resulting `run_control` events.
+
 Remove a stale lock:
 
 ```bash
@@ -378,6 +412,16 @@ Manual smoke checklist:
 - Create a synthetic split plan, run with a fake harness that fails one turn,
   confirm the run pauses, then rerun successfully and confirm the failed and
   successful turns are preserved under different `runs/<run_id>/` directories.
+- Run a multi-session synthetic plan from a real terminal, press `h`, press `p`
+  while a session is active, and confirm the run exits successfully after the
+  current session with `reason: stopped`, a consumed `control` payload, and
+  `run_control` events visible through `tail`.
+- Repeat the text TTY run with `--commit-per-session` and confirm the
+  per-session commit runs before the stop-after-current request is consumed.
+- Run a text TTY plan with `--commit-at-end`, stop before all sessions are
+  complete, and confirm no final `commit-0001-end` artifact is created.
+- Run `run --json` and confirm stdout is the final JSON payload, stderr is
+  quiet, and keyboard controls are not enabled.
 - Make a required plan file unreadable or remove `context.md`, then confirm
   `run --json`, `status --json`, and `doctor --json` emit JSON failures without
   Python tracebacks.

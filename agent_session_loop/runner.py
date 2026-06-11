@@ -13,7 +13,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from . import config, events, harnesses, plans, responses, state
+from . import config, events, harnesses, plans, responses, run_control, state
 from .formatting import format_duration_seconds
 
 
@@ -33,6 +33,16 @@ APPROVAL_SIGNAL_PATTERNS: tuple[str, ...] = (
     "allow this command",
     "permission to proceed",
 )
+RUN_CONTROL_EVENT_ACTIONS: dict[str, str] = {
+    "request": "stop-after-current-requested",
+    "cancel": "stop-after-current-canceled",
+    "consumed": "stop-after-current-consumed",
+}
+RUN_CONTROL_EVENT_MESSAGES: dict[str, str] = {
+    "request": "stop-after-current requested",
+    "cancel": "stop-after-current canceled",
+    "consumed": "stop-after-current consumed",
+}
 
 
 class RunError(Exception):
@@ -765,6 +775,50 @@ def _append_event(event_path: Path, name: str, payload: dict[str, Any]) -> None:
     events.append_event(event_path, events.Event(name=name, payload=payload))
 
 
+def _initial_control_payload() -> dict[str, Any]:
+    return {
+        "stop_after_current": False,
+        "consumed": False,
+        "last_action": None,
+    }
+
+
+def _apply_run_control_action(
+    control_payload: dict[str, Any],
+    action: run_control.RunControlAction,
+) -> str:
+    event_action = RUN_CONTROL_EVENT_ACTIONS[action.action]
+    control_payload["stop_after_current"] = action.stop_after_current
+    if action.action == "consumed":
+        control_payload["consumed"] = True
+    control_payload["last_action"] = event_action
+    return event_action
+
+
+def _record_run_control_action(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    control_payload: dict[str, Any],
+    action: run_control.RunControlAction,
+    context: dict[str, Any] | None = None,
+) -> None:
+    event_action = _apply_run_control_action(control_payload, action)
+    payload["control"] = dict(control_payload)
+    event_payload = {
+        "run_id": payload.get("run_id"),
+        "action": event_action,
+        "stop_after_current": action.stop_after_current,
+        "message": RUN_CONTROL_EVENT_MESSAGES[action.action],
+    }
+    if context is not None:
+        for key in ("session", "turn_index", "total_sessions"):
+            value = context.get(key)
+            if value is not None:
+                event_payload[key] = value
+    _append_event(event_path, events.RUN_CONTROL_EVENT, event_payload)
+
+
 def _local_timestamp(moment: datetime | None = None) -> str:
     value = datetime.now().astimezone() if moment is None else moment.astimezone()
     return value.strftime("%Y-%m-%d %H:%M:%S")
@@ -1129,6 +1183,31 @@ def _pause_run(
     )
 
 
+def _consume_run_control_stop(
+    listener: run_control.RunControlListener,
+    *,
+    snapshot: plans.PlanSnapshot,
+    payload: dict[str, Any],
+    event_path: Path,
+    control_payload: dict[str, Any],
+    context: dict[str, Any] | None = None,
+) -> bool:
+    action = listener.consume_stop_after_current()
+    if action is None:
+        return False
+    _record_run_control_action(
+        event_path=event_path,
+        payload=payload,
+        control_payload=control_payload,
+        action=action,
+        context=context,
+    )
+    if snapshot.next_pending is None:
+        return False
+    payload["reason"] = "stopped"
+    return True
+
+
 def _initial_payload(
     *,
     args: argparse.Namespace,
@@ -1174,6 +1253,7 @@ def _initial_payload(
         completed_sessions=[],
         commits=[],
         turns=[],
+        control=_initial_control_payload(),
         initial_snapshot=_snapshot_payload(snapshot),
         final_snapshot=_snapshot_payload(snapshot),
     )
@@ -1333,6 +1413,36 @@ def _run_locked(
         _finish_run(event_path, payload, progress)
         return 1, payload
 
+    run_control_lock = threading.Lock()
+    run_control_context: dict[str, Any] | None = None
+    control_payload = dict(payload["control"])
+
+    def handle_run_control_action(action: run_control.RunControlAction) -> None:
+        if action.action == "consumed":
+            return
+        with run_control_lock:
+            context = (
+                None
+                if run_control_context is None
+                else dict(run_control_context)
+            )
+            _record_run_control_action(
+                event_path=event_path,
+                payload=payload,
+                control_payload=control_payload,
+                action=action,
+                context=context,
+            )
+
+    run_controls = run_control.RunControlListener.for_run(
+        args,
+        state=run_control.RunControlState(),
+        stdin=sys.stdin,
+        stderr=sys.stderr,
+        on_action=handle_run_control_action,
+    )
+    run_controls.start()
+
     completed_count = 0
     previous_turn_finished_at: datetime | None = None
     total_sessions = sum(payload["initial_snapshot"]["counts"].values())
@@ -1402,6 +1512,8 @@ def _run_locked(
             log_stream_callback(stream_name, text)
             live_turn.record_activity(stream_name, text)
 
+        with run_control_lock:
+            run_control_context = dict(active_turn)
         _append_event(event_path, "turn_started", active_turn)
         live_turn.start()
         try:
@@ -1420,10 +1532,13 @@ def _run_locked(
         except Exception:
             live_turn.stop()
             live_turn.finish(_utc_now())
+            run_controls.stop()
             raise
         live_turn.stop()
         turn_finished_at = _utc_now()
         live_turn_payload = live_turn.finish(turn_finished_at)
+        with run_control_lock:
+            run_control_context = None
         previous_turn_finished_at = turn_finished_at
         plan_error = None
         try:
@@ -1604,6 +1719,17 @@ def _run_locked(
         completed_count += 1
         snapshot = after
         payload["final_snapshot"] = _snapshot_payload(snapshot)
+        with run_control_lock:
+            should_stop_after_current = _consume_run_control_stop(
+                run_controls,
+                snapshot=snapshot,
+                payload=payload,
+                event_path=event_path,
+                control_payload=control_payload,
+                context=turn_payload,
+            )
+        if should_stop_after_current:
+            break
 
     if payload["ok"] and payload["reason"] == "":
         if snapshot.next_pending is None:
@@ -1644,6 +1770,7 @@ def _run_locked(
         else:
             payload["reason"] = "stopped"
 
+    run_controls.stop()
     _finish_run(event_path, payload, progress)
     return (0 if payload["ok"] else 1), payload
 

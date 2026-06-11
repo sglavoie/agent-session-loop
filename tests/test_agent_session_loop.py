@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import argparse
 from contextlib import contextmanager, redirect_stderr
 import errno
 import io
 import json
 import os
 from pathlib import Path
+import pty
+import select
 import shutil
 import stat
 import subprocess
@@ -21,6 +24,7 @@ from agent_session_loop import (
     events,
     harnesses,
     plans,
+    run_control,
     runner,
     state,
     tail,
@@ -31,6 +35,19 @@ from agent_session_loop.formatting import format_duration_seconds
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_CODEX_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "fake_codex.py"
 FAKE_SPEC_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "fake_spec.py"
+
+
+class TTYText(io.StringIO):
+    def __init__(self, value: str = "", *, tty: bool = True, fd: int = 10) -> None:
+        super().__init__(value)
+        self._tty = tty
+        self._fd = fd
+
+    def isatty(self) -> bool:
+        return self._tty
+
+    def fileno(self) -> int:
+        return self._fd
 
 
 @contextmanager
@@ -216,6 +233,37 @@ class ParserAndStateTests(unittest.TestCase):
             },
         )
         self.assertIn("duration 1m30s", finished)
+
+    def test_tail_event_messages_format_run_controls(self) -> None:
+        requested = tail._event_message(
+            events.RUN_CONTROL_EVENT,
+            {
+                "action": "stop-after-current-requested",
+                "message": "stop-after-current requested",
+                "stop_after_current": True,
+                "session": 2,
+                "turn_index": 3,
+                "total_sessions": 5,
+            },
+        )
+        self.assertEqual(
+            "run control: stop-after-current requested "
+            "(stop-after-current on, session 2/5, turn 3)",
+            requested,
+        )
+
+        canceled = tail._event_message(
+            events.RUN_CONTROL_EVENT,
+            {
+                "action": "stop-after-current-canceled",
+                "message": "stop-after-current canceled",
+                "stop_after_current": False,
+            },
+        )
+        self.assertEqual(
+            "run control: stop-after-current canceled (stop-after-current off)",
+            canceled,
+        )
 
     def test_inspect_plan_sorts_exact_session_files_and_finds_next_pending(
         self,
@@ -555,6 +603,235 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertEqual(2, raised.exception.code)
         self.assertIn("not allowed with argument", stderr.getvalue())
 
+    def test_tail_interactive_flag_is_rejected(self) -> None:
+        parser = cli.build_parser()
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            parser.parse_args(["tail", "--interactive", "/tmp/plan"])
+
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("unrecognized arguments: --interactive", stderr.getvalue())
+
+
+class RunControlTests(unittest.TestCase):
+    def run_args(self, *, json_output: bool = False, dry_run: bool = False):
+        return mock.Mock(json=json_output, dry_run=dry_run)
+
+    def test_run_control_state_toggles_and_consumes_stop_after_current(self) -> None:
+        state = run_control.RunControlState()
+
+        self.assertFalse(state.stop_after_current)
+        requested = state.toggle_stop_after_current()
+        self.assertEqual("request", requested.action)
+        self.assertTrue(requested.stop_after_current)
+        self.assertTrue(state.stop_after_current)
+
+        canceled = state.toggle_stop_after_current()
+        self.assertEqual("cancel", canceled.action)
+        self.assertFalse(canceled.stop_after_current)
+        self.assertFalse(state.stop_after_current)
+        self.assertIsNone(state.consume_stop_after_current())
+
+        state.toggle_stop_after_current()
+        consumed = state.consume_stop_after_current()
+        self.assertIsNotNone(consumed)
+        assert consumed is not None
+        self.assertEqual("consumed", consumed.action)
+        self.assertFalse(consumed.stop_after_current)
+        self.assertFalse(state.stop_after_current)
+
+    def test_run_control_help_and_toggle_lines_include_state(self) -> None:
+        state = run_control.RunControlState()
+        stderr = TTYText()
+        actions: list[run_control.RunControlAction] = []
+        listener = run_control.RunControlListener(
+            enabled=False,
+            state=state,
+            stderr=stderr,
+            on_action=actions.append,
+            timestamp=lambda: "2026-06-11 12:00:00",
+        )
+
+        listener.handle_key("h")
+        listener.handle_key("p")
+        listener.handle_key("h")
+
+        lines = stderr.getvalue().splitlines()
+        self.assertEqual(
+            "[2026-06-11 12:00:00] controls: p toggle stop-after-current "
+            "(currently off); h show help",
+            lines[0],
+        )
+        self.assertEqual(
+            "[2026-06-11 12:00:00] control: stop-after-current requested; "
+            "press p to cancel",
+            lines[1],
+        )
+        self.assertEqual(
+            "[2026-06-11 12:00:00] controls: p toggle stop-after-current "
+            "(currently on); h show help",
+            lines[2],
+        )
+        self.assertEqual(["request"], [action.action for action in actions])
+
+    def test_run_controls_require_text_tty_run(self) -> None:
+        args = self.run_args()
+        self.assertTrue(
+            run_control.should_enable_run_controls(
+                args,
+                stdin=TTYText(tty=True),
+                stderr=TTYText(tty=True),
+            )
+        )
+        self.assertFalse(
+            run_control.should_enable_run_controls(
+                self.run_args(json_output=True),
+                stdin=TTYText(tty=True),
+                stderr=TTYText(tty=True),
+            )
+        )
+        self.assertFalse(
+            run_control.should_enable_run_controls(
+                self.run_args(dry_run=True),
+                stdin=TTYText(tty=True),
+                stderr=TTYText(tty=True),
+            )
+        )
+        self.assertFalse(
+            run_control.should_enable_run_controls(
+                args,
+                stdin=TTYText(tty=False),
+                stderr=TTYText(tty=True),
+            )
+        )
+        self.assertFalse(
+            run_control.should_enable_run_controls(
+                args,
+                stdin=TTYText(tty=True),
+                stderr=TTYText(tty=False),
+            )
+        )
+
+    def test_disabled_run_control_listener_never_touches_terminal(self) -> None:
+        listener = run_control.RunControlListener.for_run(
+            self.run_args(json_output=True),
+            stdin=TTYText(tty=True),
+            stderr=TTYText(tty=True),
+        )
+
+        with mock.patch.object(run_control.termios, "tcgetattr") as tcgetattr:
+            self.assertFalse(listener.start())
+
+        tcgetattr.assert_not_called()
+
+    def test_run_control_start_stop_restores_terminal(self) -> None:
+        original_settings = ["original"]
+        thread = mock.Mock()
+        thread.is_alive.return_value = False
+
+        with (
+            mock.patch.object(
+                run_control.termios,
+                "tcgetattr",
+                return_value=original_settings,
+            ) as tcgetattr,
+            mock.patch.object(run_control.tty, "setcbreak") as setcbreak,
+            mock.patch.object(run_control.termios, "tcsetattr") as tcsetattr,
+            mock.patch.object(run_control.threading, "Thread", return_value=thread),
+        ):
+            listener = run_control.RunControlListener(
+                enabled=True,
+                stdin=TTYText(tty=True, fd=42),
+                stderr=TTYText(tty=True),
+            )
+            self.assertTrue(listener.start())
+            listener.stop()
+
+        tcgetattr.assert_called_once_with(42)
+        setcbreak.assert_called_once_with(42)
+        thread.start.assert_called_once_with()
+        tcsetattr.assert_called_once_with(
+            42,
+            run_control.termios.TCSADRAIN,
+            original_settings,
+        )
+
+    def test_run_control_start_failure_restores_terminal(self) -> None:
+        original_settings = ["original"]
+        thread = mock.Mock()
+        thread.start.side_effect = RuntimeError("thread failed")
+
+        with (
+            mock.patch.object(
+                run_control.termios,
+                "tcgetattr",
+                return_value=original_settings,
+            ),
+            mock.patch.object(run_control.tty, "setcbreak"),
+            mock.patch.object(run_control.termios, "tcsetattr") as tcsetattr,
+            mock.patch.object(run_control.threading, "Thread", return_value=thread),
+        ):
+            listener = run_control.RunControlListener(
+                enabled=True,
+                stdin=TTYText(tty=True, fd=43),
+                stderr=TTYText(tty=True),
+            )
+            self.assertFalse(listener.start())
+            self.assertFalse(listener.running)
+
+        tcsetattr.assert_called_once_with(
+            43,
+            run_control.termios.TCSADRAIN,
+            original_settings,
+        )
+
+
+class FakeRunControlListener:
+    def __init__(
+        self,
+        *,
+        consume_on_call: int | None = None,
+        actions_on_start: tuple[run_control.RunControlAction, ...] = (),
+        state_path: Path | None = None,
+        events_path: Path | None = None,
+    ) -> None:
+        self.consume_on_call = consume_on_call
+        self.actions_on_start = actions_on_start
+        self.state_path = state_path
+        self.events_path = events_path
+        self.on_action: run_control.ActionCallback | None = None
+        self.start_calls = 0
+        self.stop_calls = 0
+        self.consume_calls = 0
+        self.state_exists_at_start = False
+        self.events_exists_at_start = False
+
+    def start(self) -> bool:
+        self.start_calls += 1
+        self.state_exists_at_start = (
+            self.state_path.exists() if self.state_path is not None else False
+        )
+        self.events_exists_at_start = (
+            self.events_path.exists() if self.events_path is not None else False
+        )
+        if self.on_action is not None:
+            for action in self.actions_on_start:
+                self.on_action(action)
+        return True
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+
+    def consume_stop_after_current(self) -> run_control.RunControlAction | None:
+        self.consume_calls += 1
+        if self.consume_on_call is None or self.consume_calls != self.consume_on_call:
+            return None
+        return run_control.RunControlAction(
+            action="consumed",
+            stop_after_current=False,
+        )
+
 
 class FakeHarnessIntegrationTests(unittest.TestCase):
     def setup_loop(
@@ -609,6 +886,75 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             if all(payload.get(key) == value for key, value in payload_values.items()):
                 return index
         raise AssertionError(f"event not found: {name} {payload_values}")
+
+    def run_locked_with_listener(
+        self,
+        *,
+        mode: str,
+        statuses: tuple[str, ...],
+        listener: FakeRunControlListener,
+        cwd: Path | None = None,
+        commit_mode: str | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> tuple[int, dict[str, object], Path, Path, Path]:
+        plan_dir, state_dir, config_home, fake_codex = self.setup_loop(
+            statuses=statuses
+        )
+        real_state_dir = state.plan_state_dir(plan_dir, state_dir)
+        if listener.state_path is None:
+            listener.state_path = real_state_dir / events.STATE_FILE_NAME
+        if listener.events_path is None:
+            listener.events_path = real_state_dir / events.EVENTS_FILE_NAME
+        run_cwd = REPO_ROOT if cwd is None else cwd
+        args = argparse.Namespace(
+            plan_dir=str(plan_dir),
+            cwd=str(run_cwd),
+            harness="codex",
+            state_dir=str(state_dir),
+            json=False,
+            dry_run=False,
+            unsafe_bypass=False,
+            timeout=None,
+            max_sessions=None,
+            commit_mode=commit_mode,
+            model=None,
+            effort=None,
+        )
+        env_updates = {
+            "XDG_CONFIG_HOME": str(config_home),
+            "FAKE_CODEX_MODE": mode,
+            "FAKE_CODEX_SLEEP": "5",
+            "PYTHONPATH": str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+        }
+        if extra_env is not None:
+            env_updates.update(extra_env)
+
+        def fake_for_run(*_args, **kwargs):
+            listener.on_action = kwargs.get("on_action")
+            return listener
+
+        with (
+            patched_env(**env_updates),
+            mock.patch.object(
+                runner.run_control.RunControlListener,
+                "for_run",
+                side_effect=fake_for_run,
+            ),
+        ):
+            lock_info = state.acquire_lock(plan_dir, state_dir)
+            try:
+                exit_code, payload = runner._run_locked(
+                    args=args,
+                    cwd=run_cwd,
+                    timeout=None,
+                    max_sessions=None,
+                    commit_mode=commit_mode,
+                    lock_info=lock_info,
+                    run_id="test-run",
+                )
+            finally:
+                state.release_lock(plan_dir, state_dir)
+        return exit_code, payload, plan_dir, state_dir, fake_codex
 
     def run_loop_command(
         self,
@@ -761,6 +1107,562 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         if json_output:
             command.append("--json")
         return command
+
+    def start_run_pty(
+        self,
+        *,
+        plan_dir: Path,
+        state_dir: Path,
+        config_home: Path,
+        mode: str,
+        cwd: Path | None = None,
+        commit_mode: str | None = None,
+        extra_env: dict[str, str] | None = None,
+        fake_step_sleep: str = "0.8",
+    ) -> tuple[subprocess.Popen[bytes], int]:
+        master_fd, slave_fd = pty.openpty()
+        env_extra = {"FAKE_CODEX_STEP_SLEEP": fake_step_sleep}
+        if extra_env is not None:
+            env_extra.update(extra_env)
+        env = self.loop_env(config_home=config_home, mode=mode, extra=env_extra)
+        try:
+            process = subprocess.Popen(
+                self.run_command(
+                    plan_dir=plan_dir,
+                    state_dir=state_dir,
+                    cwd=cwd,
+                    commit_mode=commit_mode,
+                ),
+                cwd=REPO_ROOT,
+                env=env,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                close_fds=True,
+            )
+        finally:
+            os.close(slave_fd)
+        os.set_blocking(master_fd, False)
+
+        def cleanup_process() -> None:
+            if process.poll() is None:
+                process.kill()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+
+        self.addCleanup(cleanup_process)
+        return process, master_fd
+
+    def read_run_pty_available(self, master_fd: int, output: str) -> str:
+        while True:
+            readable, _, _ = select.select([master_fd], [], [], 0)
+            if not readable:
+                return output
+            try:
+                chunk = os.read(master_fd, 4096)
+            except BlockingIOError:
+                return output
+            except OSError as error:
+                if error.errno == errno.EIO:
+                    return output
+                raise
+            if not chunk:
+                return output
+            output += chunk.decode("utf-8", errors="replace")
+
+    def read_run_pty_until(
+        self,
+        master_fd: int,
+        output: str,
+        predicate,
+        *,
+        process: subprocess.Popen[bytes],
+        timeout: float = 5.0,
+    ) -> str:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            output = self.read_run_pty_available(master_fd, output)
+            if predicate(output):
+                return output
+            if process.poll() is not None:
+                break
+            remaining = max(0.0, deadline - time.monotonic())
+            select.select([master_fd], [], [], min(0.05, remaining))
+
+        output = self.read_run_pty_available(master_fd, output)
+        if predicate(output):
+            return output
+        self.fail(f"condition was not met before timeout. PTY output:\n{output}")
+
+    def finish_run_pty(
+        self,
+        *,
+        process: subprocess.Popen[bytes],
+        master_fd: int,
+        output: str,
+        timeout: float = 15.0,
+    ) -> str:
+        output = self.read_run_pty_until(
+            master_fd,
+            output,
+            lambda _text: process.poll() is not None,
+            process=process,
+            timeout=timeout,
+        )
+        process.wait(timeout=5)
+        return self.read_run_pty_available(master_fd, output)
+
+    def read_run_payload(
+        self,
+        *,
+        plan_dir: Path,
+        state_dir: Path,
+    ) -> dict[str, object]:
+        state_path = state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
+        return json.loads(state_path.read_text(encoding="utf-8"))
+
+    def test_text_run_pty_p_stops_after_current_session(self) -> None:
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+            statuses=("pending", "pending")
+        )
+        process, master_fd = self.start_run_pty(
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            mode="streaming-success",
+        )
+
+        output = self.read_run_pty_until(
+            master_fd,
+            "",
+            lambda text: "session 1/2 started" in text,
+            process=process,
+        )
+        os.write(master_fd, b"p")
+        output = self.read_run_pty_until(
+            master_fd,
+            output,
+            lambda text: "control: stop-after-current requested" in text,
+            process=process,
+        )
+        output = self.finish_run_pty(
+            process=process,
+            master_fd=master_fd,
+            output=output,
+        )
+
+        self.assertEqual(0, process.returncode, output)
+        self.assertIn("Run complete: 1 session(s) completed", output)
+        self.assertIn("Next pending: session 2", output)
+        payload = self.read_run_payload(plan_dir=plan_dir, state_dir=state_dir)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual("stopped", payload["reason"])
+        self.assertEqual([1], payload["completed_sessions"])
+        self.assertEqual(2, payload["final_snapshot"]["next_pending"])
+        self.assertEqual(
+            {
+                "stop_after_current": False,
+                "consumed": True,
+                "last_action": "stop-after-current-consumed",
+            },
+            payload["control"],
+        )
+        self.assertIn(
+            "- **Status**: complete",
+            (plan_dir / "session-1.md").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "- **Status**: pending",
+            (plan_dir / "session-2.md").read_text(encoding="utf-8"),
+        )
+
+        control_events = [
+            record["payload"]
+            for record in read_jsonl(Path(payload["events_path"]))
+            if record["name"] == events.RUN_CONTROL_EVENT
+        ]
+        self.assertEqual(
+            [
+                "stop-after-current-requested",
+                "stop-after-current-consumed",
+            ],
+            [event["action"] for event in control_events],
+        )
+
+    def test_text_run_pty_second_p_cancels_stop_after_current(self) -> None:
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+            statuses=("pending", "pending")
+        )
+        process, master_fd = self.start_run_pty(
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            mode="streaming-success",
+        )
+
+        output = self.read_run_pty_until(
+            master_fd,
+            "",
+            lambda text: "session 1/2 started" in text,
+            process=process,
+        )
+        os.write(master_fd, b"p")
+        output = self.read_run_pty_until(
+            master_fd,
+            output,
+            lambda text: "control: stop-after-current requested" in text,
+            process=process,
+        )
+        os.write(master_fd, b"p")
+        output = self.read_run_pty_until(
+            master_fd,
+            output,
+            lambda text: "control: stop-after-current canceled" in text,
+            process=process,
+        )
+        output = self.finish_run_pty(
+            process=process,
+            master_fd=master_fd,
+            output=output,
+        )
+
+        self.assertEqual(0, process.returncode, output)
+        payload = self.read_run_payload(plan_dir=plan_dir, state_dir=state_dir)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual([1, 2], payload["completed_sessions"])
+        self.assertIsNone(payload["final_snapshot"]["next_pending"])
+        self.assertEqual(
+            {
+                "stop_after_current": False,
+                "consumed": False,
+                "last_action": "stop-after-current-canceled",
+            },
+            payload["control"],
+        )
+        control_events = [
+            record["payload"]
+            for record in read_jsonl(Path(payload["events_path"]))
+            if record["name"] == events.RUN_CONTROL_EVENT
+        ]
+        self.assertEqual(
+            [
+                "stop-after-current-requested",
+                "stop-after-current-canceled",
+            ],
+            [event["action"] for event in control_events],
+        )
+
+    def test_text_run_pty_h_prints_one_help_line(self) -> None:
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+            statuses=("pending",)
+        )
+        process, master_fd = self.start_run_pty(
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            mode="streaming-success",
+        )
+
+        output = self.read_run_pty_until(
+            master_fd,
+            "",
+            lambda text: "session 1/1 started" in text,
+            process=process,
+        )
+        os.write(master_fd, b"h")
+        output = self.read_run_pty_until(
+            master_fd,
+            output,
+            lambda text: "controls: p toggle stop-after-current" in text,
+            process=process,
+        )
+        output = self.finish_run_pty(
+            process=process,
+            master_fd=master_fd,
+            output=output,
+        )
+
+        self.assertEqual(0, process.returncode, output)
+        self.assertRegex(
+            output,
+            r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] "
+            r"controls: p toggle stop-after-current "
+            r"\(currently off\); h show help",
+        )
+        self.assertEqual(1, output.count("controls: p toggle stop-after-current"))
+        payload = self.read_run_payload(plan_dir=plan_dir, state_dir=state_dir)
+        self.assertEqual("all-complete", payload["reason"])
+        control_events = [
+            record
+            for record in read_jsonl(Path(payload["events_path"]))
+            if record["name"] == events.RUN_CONTROL_EVENT
+        ]
+        self.assertEqual([], control_events)
+
+    def test_text_run_pty_commit_per_session_finishes_before_stop_consumed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            repo_dir = tmp_dir / "repo"
+            init_git_repo(repo_dir)
+            _fake_spec, spec_log, spec_env = self.setup_fake_spec(tmp_dir)
+            plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+                statuses=("pending", "pending")
+            )
+            process, master_fd = self.start_run_pty(
+                plan_dir=plan_dir,
+                state_dir=state_dir,
+                config_home=config_home,
+                mode="streaming-success",
+                cwd=repo_dir,
+                commit_mode=runner.COMMIT_MODE_PER_SESSION,
+                extra_env=spec_env,
+            )
+
+            output = self.read_run_pty_until(
+                master_fd,
+                "",
+                lambda text: "session 1/2 started" in text,
+                process=process,
+            )
+            os.write(master_fd, b"p")
+            output = self.read_run_pty_until(
+                master_fd,
+                output,
+                lambda text: "control: stop-after-current requested" in text,
+                process=process,
+            )
+            output = self.finish_run_pty(
+                process=process,
+                master_fd=master_fd,
+                output=output,
+            )
+            payload = self.read_run_payload(plan_dir=plan_dir, state_dir=state_dir)
+            spec_records = read_jsonl(spec_log)
+
+        self.assertEqual(0, process.returncode, output)
+        self.assertIn("commit 1 finished (session 1, status success,", output)
+        self.assertEqual("stopped", payload["reason"])
+        self.assertEqual([1], payload["completed_sessions"])
+        self.assertEqual(1, len(payload["commits"]))
+        self.assertTrue(payload["commits"][0]["success"])
+        self.assertEqual(1, len(spec_records))
+        event_records = read_jsonl(Path(payload["events_path"]))
+        commit_finished = self.event_index(
+            event_records,
+            events.COMMIT_FINISHED_EVENT,
+            session=1,
+            scope="session",
+        )
+        consumed = self.event_index(
+            event_records,
+            events.RUN_CONTROL_EVENT,
+            action="stop-after-current-consumed",
+        )
+        self.assertLess(commit_finished, consumed)
+
+    def test_run_control_stop_after_current_stops_between_sessions(self) -> None:
+        listener = FakeRunControlListener(consume_on_call=1)
+        exit_code, payload, _plan_dir, _state_dir, _fake_codex = (
+            self.run_locked_with_listener(
+                mode="success",
+                statuses=("pending", "pending"),
+                listener=listener,
+            )
+        )
+
+        self.assertEqual(0, exit_code)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual("stopped", payload["reason"])
+        self.assertEqual([1], payload["completed_sessions"])
+        self.assertEqual(2, payload["final_snapshot"]["next_pending"])
+        self.assertEqual(1, len(payload["turns"]))
+        self.assertEqual(1, listener.start_calls)
+        self.assertEqual(1, listener.stop_calls)
+        self.assertEqual(1, listener.consume_calls)
+
+    def test_run_control_events_record_actions_and_final_control_payload(self) -> None:
+        listener = FakeRunControlListener(
+            consume_on_call=1,
+            actions_on_start=(
+                run_control.RunControlAction(
+                    action="request",
+                    stop_after_current=True,
+                ),
+                run_control.RunControlAction(
+                    action="cancel",
+                    stop_after_current=False,
+                ),
+                run_control.RunControlAction(
+                    action="request",
+                    stop_after_current=True,
+                ),
+            ),
+        )
+
+        exit_code, payload, _plan_dir, _state_dir, _fake_codex = (
+            self.run_locked_with_listener(
+                mode="success",
+                statuses=("pending", "pending"),
+                listener=listener,
+            )
+        )
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual("stopped", payload["reason"])
+        self.assertEqual(
+            {
+                "stop_after_current": False,
+                "consumed": True,
+                "last_action": "stop-after-current-consumed",
+            },
+            payload["control"],
+        )
+
+        event_records = read_jsonl(Path(payload["events_path"]))
+        control_events = [
+            record["payload"]
+            for record in event_records
+            if record["name"] == events.RUN_CONTROL_EVENT
+        ]
+        self.assertEqual(
+            [
+                "stop-after-current-requested",
+                "stop-after-current-canceled",
+                "stop-after-current-requested",
+                "stop-after-current-consumed",
+            ],
+            [event["action"] for event in control_events],
+        )
+        self.assertEqual(
+            [True, False, True, False],
+            [event["stop_after_current"] for event in control_events],
+        )
+        self.assertEqual(
+            [
+                "stop-after-current requested",
+                "stop-after-current canceled",
+                "stop-after-current requested",
+                "stop-after-current consumed",
+            ],
+            [event["message"] for event in control_events],
+        )
+        for event in control_events:
+            self.assertEqual(payload["run_id"], event["run_id"])
+
+        consumed_event = control_events[-1]
+        self.assertEqual(1, consumed_event["session"])
+        self.assertEqual(1, consumed_event["turn_index"])
+        self.assertEqual(2, consumed_event["total_sessions"])
+        run_finished = event_records[self.event_index(event_records, "run_finished")]
+        self.assertEqual(payload["control"], run_finished["payload"]["control"])
+
+    def test_run_control_starts_after_state_and_event_files_exist(self) -> None:
+        listener = FakeRunControlListener(consume_on_call=None)
+
+        exit_code, payload, _plan_dir, _state_dir, _fake_codex = (
+            self.run_locked_with_listener(
+                mode="success",
+                statuses=("pending",),
+                listener=listener,
+            )
+        )
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual(1, listener.start_calls)
+        self.assertTrue(listener.state_exists_at_start)
+        self.assertTrue(listener.events_exists_at_start)
+
+    def test_run_control_final_session_keeps_all_complete_reason(self) -> None:
+        listener = FakeRunControlListener(consume_on_call=1)
+
+        exit_code, payload, _plan_dir, _state_dir, _fake_codex = (
+            self.run_locked_with_listener(
+                mode="success",
+                statuses=("pending",),
+                listener=listener,
+            )
+        )
+
+        self.assertEqual(0, exit_code)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual([1], payload["completed_sessions"])
+        self.assertIsNone(payload["final_snapshot"]["next_pending"])
+        self.assertEqual(1, listener.consume_calls)
+
+    def test_run_control_stop_after_current_waits_for_per_session_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            repo_dir = tmp_dir / "repo"
+            init_git_repo(repo_dir)
+            _fake_spec, spec_log, spec_env = self.setup_fake_spec(tmp_dir)
+            listener = FakeRunControlListener(consume_on_call=1)
+
+            exit_code, payload, _plan_dir, _state_dir, _fake_codex = (
+                self.run_locked_with_listener(
+                    mode="success",
+                    statuses=("pending", "pending"),
+                    listener=listener,
+                    cwd=repo_dir,
+                    commit_mode=runner.COMMIT_MODE_PER_SESSION,
+                    extra_env=spec_env,
+                )
+            )
+            spec_records = read_jsonl(spec_log)
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual("stopped", payload["reason"])
+        self.assertEqual([1], payload["completed_sessions"])
+        self.assertEqual(1, len(payload["commits"]))
+        self.assertTrue(payload["commits"][0]["success"])
+        self.assertEqual(1, len(spec_records))
+        event_records = read_jsonl(Path(payload["events_path"]))
+        commit_finished = self.event_index(
+            event_records,
+            events.COMMIT_FINISHED_EVENT,
+            session=1,
+            scope="session",
+        )
+        consumed = self.event_index(
+            event_records,
+            events.RUN_CONTROL_EVENT,
+            action="stop-after-current-consumed",
+        )
+        self.assertLess(commit_finished, consumed)
+
+    def test_run_control_stop_request_does_not_override_harness_failure(self) -> None:
+        listener = FakeRunControlListener(consume_on_call=1)
+
+        exit_code, payload, _plan_dir, _state_dir, _fake_codex = (
+            self.run_locked_with_listener(
+                mode="failure",
+                statuses=("pending", "pending"),
+                listener=listener,
+            )
+        )
+
+        self.assertEqual(1, exit_code)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["paused"])
+        self.assertEqual("nonzero-exit", payload["reason"])
+        self.assertEqual("nonzero-exit", payload["pause_reason"])
+        self.assertEqual([], payload["completed_sessions"])
+        self.assertEqual(0, listener.consume_calls)
+        self.assertEqual(1, listener.stop_calls)
 
     def test_successful_fake_harness_turn_persists_state_and_artifacts(self) -> None:
         completed, payload, plan_dir, _state_dir, fake_codex = self.run_loop(
@@ -1270,9 +2172,17 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        self.addCleanup(
-            lambda: run_process.kill() if run_process.poll() is None else None
-        )
+
+        def cleanup_run_process() -> None:
+            if run_process.poll() is None:
+                run_process.kill()
+            try:
+                run_process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                run_process.kill()
+                run_process.communicate(timeout=5)
+
+        self.addCleanup(cleanup_run_process)
 
         state_path = state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
 

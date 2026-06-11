@@ -172,6 +172,19 @@ def _run_started_message(payload: dict[str, Any]) -> str:
     return "; ".join(str(part) for part in parts)
 
 
+def _run_control_message(payload: dict[str, Any]) -> str:
+    message = payload.get("message") or payload.get("action") or "unknown action"
+    status = "on" if payload.get("stop_after_current") else "off"
+    details = [f"stop-after-current {status}"]
+    session = payload.get("session")
+    if session is not None:
+        details.append(f"session {_format_session_label(payload)}")
+    turn_index = payload.get("turn_index")
+    if turn_index is not None:
+        details.append(f"turn {turn_index}")
+    return f"run control: {message} ({', '.join(details)})"
+
+
 def _event_message(name: str, payload: dict[str, Any]) -> str:
     if name == "run_started":
         return _run_started_message(payload)
@@ -215,6 +228,8 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
             f"sha {sha}, "
             f"duration {format_duration_seconds(payload.get('duration_seconds'))})"
         )
+    if name == events.RUN_CONTROL_EVENT:
+        return _run_control_message(payload)
     if name == events.RUN_PAUSED_EVENT:
         detail = payload.get("message")
         suffix = "" if not detail else f": {detail}"
