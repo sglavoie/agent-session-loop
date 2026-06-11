@@ -787,6 +787,129 @@ class RunControlTests(unittest.TestCase):
         )
 
 
+class FinishNotificationTests(unittest.TestCase):
+    def finish_payload(self, tmp_dir: Path) -> dict[str, object]:
+        return {
+            "run_id": "run-123",
+            "plan_dir": str(tmp_dir / "plan"),
+            "cwd": str(tmp_dir / "repo"),
+            "reason": "all-complete",
+            "run_started_at": "2026-06-11T12:00:00Z",
+            "run_finished_at": "2026-06-11T12:00:03Z",
+            "state_path": str(tmp_dir / "state.json"),
+        }
+
+    def test_finish_notification_builds_agent_mux_command_and_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self.finish_payload(Path(tmp))
+            completed = subprocess.CompletedProcess(
+                ["/opt/amx", "hook-indicator", "AgentSessionLoopFinished"],
+                0,
+                stdout="",
+                stderr="",
+            )
+
+            with (
+                mock.patch.object(
+                    runner.shutil,
+                    "which",
+                    return_value="/opt/amx",
+                ) as which,
+                mock.patch.object(
+                    runner.subprocess,
+                    "run",
+                    return_value=completed,
+                ) as run,
+            ):
+                runner._notify_agent_mux_loop_finished(payload)
+
+            which.assert_called_once_with("amx")
+            run.assert_called_once()
+            args, kwargs = run.call_args
+            self.assertEqual(
+                ["/opt/amx", "hook-indicator", "AgentSessionLoopFinished"],
+                args[0],
+            )
+            self.assertTrue(kwargs["text"])
+            self.assertEqual(subprocess.PIPE, kwargs["stdout"])
+            self.assertEqual(subprocess.PIPE, kwargs["stderr"])
+            self.assertEqual(
+                runner.AGENT_MUX_FINISH_NOTIFY_TIMEOUT_SECONDS,
+                kwargs["timeout"],
+            )
+            self.assertFalse(kwargs["check"])
+            self.assertEqual(
+                {
+                    "source": "agent_session_loop",
+                    "reason": "run_finished",
+                    "run_id": "run-123",
+                    "plan_dir": payload["plan_dir"],
+                    "cwd": payload["cwd"],
+                    "run_finished_at": "2026-06-11T12:00:03Z",
+                },
+                json.loads(kwargs["input"]),
+            )
+
+    def test_finish_notification_skips_when_amx_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                mock.patch.object(runner.shutil, "which", return_value=None),
+                mock.patch.object(runner.subprocess, "run") as run,
+            ):
+                runner._notify_agent_mux_loop_finished(self.finish_payload(Path(tmp)))
+
+            run.assert_not_called()
+
+    def test_finish_notification_swallows_subprocess_failures(self) -> None:
+        failures: tuple[Exception, ...] = (
+            subprocess.TimeoutExpired(["/opt/amx"], 1),
+            OSError("amx failed"),
+            subprocess.SubprocessError("amx failed"),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self.finish_payload(Path(tmp))
+            for failure in failures:
+                with self.subTest(failure=type(failure).__name__):
+                    with (
+                        mock.patch.object(
+                            runner.shutil,
+                            "which",
+                            return_value="/opt/amx",
+                        ),
+                        mock.patch.object(
+                            runner.subprocess,
+                            "run",
+                            side_effect=failure,
+                        ),
+                    ):
+                        runner._notify_agent_mux_loop_finished(payload)
+
+    def test_finish_run_notifies_after_setting_finished_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            event_path = tmp_dir / "events.jsonl"
+            payload = self.finish_payload(tmp_dir)
+            payload["run_finished_at"] = None
+
+            with mock.patch.object(
+                runner,
+                "_notify_agent_mux_loop_finished",
+            ) as notify:
+                runner._finish_run(event_path, payload)
+
+            notify.assert_called_once_with(payload)
+            self.assertIsNotNone(payload["run_finished_at"])
+            self.assertIsNone(payload["active_turn"])
+            self.assertTrue(Path(payload["state_path"]).exists())
+            records = read_jsonl(event_path)
+            self.assertEqual("run_finished", records[0]["name"])
+            self.assertEqual(
+                payload["run_finished_at"],
+                records[0]["payload"]["run_finished_at"],
+            )
+
+
 class FakeRunControlListener:
     def __init__(
         self,

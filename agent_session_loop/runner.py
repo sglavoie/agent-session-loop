@@ -43,6 +43,10 @@ RUN_CONTROL_EVENT_MESSAGES: dict[str, str] = {
     "cancel": "stop-after-current canceled",
     "consumed": "stop-after-current consumed",
 }
+AGENT_MUX_FINISH_EVENT = "AgentSessionLoopFinished"
+AGENT_MUX_FINISH_SOURCE = "agent_session_loop"
+AGENT_MUX_FINISH_REASON = "run_finished"
+AGENT_MUX_FINISH_NOTIFY_TIMEOUT_SECONDS = 1.0
 
 
 class RunError(Exception):
@@ -771,6 +775,33 @@ def _write_state_payload(payload: dict[str, Any]) -> None:
     _write_json_file(Path(state_path), payload)
 
 
+def _notify_agent_mux_loop_finished(payload: dict[str, Any]) -> None:
+    amx_path = shutil.which("amx")
+    if amx_path is None:
+        return
+
+    hook_payload = {
+        "source": AGENT_MUX_FINISH_SOURCE,
+        "reason": AGENT_MUX_FINISH_REASON,
+        "run_id": payload.get("run_id"),
+        "plan_dir": payload.get("plan_dir"),
+        "cwd": payload.get("cwd"),
+        "run_finished_at": payload.get("run_finished_at"),
+    }
+    try:
+        subprocess.run(
+            [amx_path, "hook-indicator", AGENT_MUX_FINISH_EVENT],
+            input=json.dumps(hook_payload, separators=(",", ":")),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=AGENT_MUX_FINISH_NOTIFY_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+
+
 def _append_event(event_path: Path, name: str, payload: dict[str, Any]) -> None:
     events.append_event(event_path, events.Event(name=name, payload=payload))
 
@@ -1141,6 +1172,7 @@ def _finish_run(
     payload["active_turn"] = None
     _append_event(event_path, "run_finished", payload)
     _write_state_payload(payload)
+    _notify_agent_mux_loop_finished(payload)
     if progress is not None:
         progress.run_finished(payload)
 
