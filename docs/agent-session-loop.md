@@ -197,8 +197,11 @@ and repository are trusted and the harness must write outside the normal
 workspace sandbox.
 
 The runner itself never marks sessions complete. Durable completion is only the
-`- **Status**: complete` line inside each `session-N.md` handoff. Operational
-state can be deleted and rebuilt from the plan files.
+`- **Status**: complete` line inside the final `## Handoff` block of each
+`session-N.md` file. Operational state can be deleted and rebuilt from the plan
+files. After a successful turn, the runner may update recognized status tables
+in `manifest.md` and `context.md`, but those tables are derived bookkeeping;
+handoff statuses remain authoritative.
 
 ## State Files
 
@@ -331,7 +334,8 @@ Common pause reasons:
 - `no-status-change`: the pending session did not become complete.
 - `multiple-status-changes`: more than one session changed during one turn.
 - `unexpected-status-change`: a different session changed.
-- `malformed-plan`: the plan could not be inspected or a status is missing.
+- `malformed-plan`: the plan could not be inspected, a final handoff status is
+  missing, or derived status ledgers could not be synced.
 - `unknown-status`: a handoff status is not `pending` or `complete`.
 - `lock-contention`: another active runner holds the plan lock.
 - `runner-pause`: the harness output contained a `RUNNER_PAUSE:` or paused
@@ -391,9 +395,9 @@ runner you still need:
 agent-session-loop unlock ~/.local/share/agent-plans/example-plan/ --force --json
 ```
 
-If a plan has no pending sessions but is not complete, inspect every
+If a plan has no pending sessions but is not complete, inspect every final
 `session-N.md` handoff and normalize statuses to exactly `pending` or
-`complete`.
+`complete`. Ignore older status templates preserved above the final handoff.
 
 ## Verification
 

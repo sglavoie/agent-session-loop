@@ -72,13 +72,16 @@ If `<plan-dir>/parallel-validation.md` exists, read it before selecting or imple
 
 ### Step 3: Build Session Status Map
 
-Build the numerically sorted exact session file list first (`session-N.md`, excluding `session-N.expand.md`). Then run a single grep over that explicit list to extract all status lines (important, use the full path to grep to avoid issues):
+Build the numerically sorted exact session file list first (`session-N.md`, excluding `session-N.expand.md`).
 
-```bash
-/usr/bin/grep -h "^\- \*\*Status\*\*:" <exact-session-file-list>
-```
+For each session file, read the status from the final exact `## Handoff` block:
 
-Parse the output against the exact session file list to build `(session-number, status)` pairs. If the grep output count does not match the file count, inspect the listed session files directly before selecting a session.
+- Find the last line whose trimmed text is exactly `## Handoff`.
+- Within that block, read the first line that starts with `- **Status**:`.
+- Ignore any `- **Status**:` lines above the final handoff, including preserved original-plan templates such as `**Handoff (fill on completion)**`.
+- Treat a missing final handoff or missing populated status line as a malformed plan.
+
+Build `(session-number, status)` pairs from those final handoff statuses. Valid runnable statuses are exactly `pending` and `complete`.
 
 - If **no session files exist**: print an error and stop.
 
@@ -132,7 +135,7 @@ Edit the Handoff section in `session-N.md` with actual results:
 - **Blockers for next session**: issues the next session should be aware of
 - **Notes**: anything else relevant
 
-Use the Edit tool to update the handoff in place — do not rewrite the entire file. Do not update `manifest.md` session statuses; the selected session handoff is the required completion mutation.
+Use the Edit tool to update the handoff in place — do not rewrite the entire file. The selected session handoff remains the required completion mutation and the source of truth.
 
 ### Step 6b: Inject Notes for Future Sessions
 
@@ -147,14 +150,30 @@ Use the Edit tool to make these injections. Never just print "Notes for S3: ..."
 
 The current session's own handoff (Step 6) is for _results of this session_. Step 6b is for _instructions/context for later sessions_. Keep these separate.
 
+### Step 6c: Sync Derived Status Ledgers
+
+After the selected handoff is updated and any future-session notes are injected, rebuild the status map from final handoff blocks and sync derived status tables where it is safe:
+
+- In directory auto-advance mode, sync recognized status tables after every completed session.
+- In explicit mode, if any session remains `pending`, skip shared `manifest.md`/`context.md` status-table sync to avoid concurrent workers racing on shared files.
+- In explicit mode, if no sessions remain `pending`, sync recognized status tables as final bookkeeping.
+- Always treat session handoffs as authoritative. `manifest.md` and `context.md` are derived bookkeeping only.
+
+For `manifest.md`, update markdown tables that have a session-number column (`#`, `Session`, `Session #`, or `Session number`) and a `Status` column. Keep row order and non-status cells intact.
+
+For `context.md`, update only clear markdown session-status tables with both a session-number column and a `Status` column. Do not rewrite prose, checklists, ambiguous tables, or unrelated uses of words like `pending`.
+
+If a derived ledger cannot be updated safely, leave it unchanged and mention that in the report. Do not let stale derived tables change the next-session decision.
+
 ### Step 7: Report
 
 Print a brief summary:
 
 1. Which session was completed (number and title)
 2. Files modified (short list)
-3. What session comes next, or "All sessions implemented" if this was the last one
-4. Any blockers or notes for the next session — and, for each, name the file you injected it into (e.g., "Injected note for S3 into session-3.expand.md"). Do not put the note content itself in the report; the report only confirms where it was written.
+3. Derived status ledgers updated, if any (`manifest.md` and/or `context.md`)
+4. What session comes next, or "All sessions implemented" if this was the last one
+5. Any blockers or notes for the next session — and, for each, name the file you injected it into (e.g., "Injected note for S3 into session-3.expand.md"). Do not put the note content itself in the report; the report only confirms where it was written.
 
 For runner-friendly output, you may print one or more machine-readable lines immediately before the final `Next command:` line:
 
@@ -183,6 +202,7 @@ Use the original plan directory argument provided by the user for `<plan-dir>` w
 - If `parallel-validation.md` exists, read it and treat it as authoritative over manifest/session parallel metadata
 - Expansion notes (`session-N.expand.md`) take precedence over the session file for factual claims (file paths, line numbers, function signatures)
 - The session file is the source of truth for what to implement; expansion notes only correct factual details
-- Never modify the original plan file or `context.md`
+- Never modify the original plan file
+- Modify `context.md` only for clear derived session-status table sync described in Step 6c
 - In directory auto-advance mode, if a session's status is already `complete`, skip it and move to the next pending one
 - In explicit mode, never skip to another session; fail closed when the selected session cannot run

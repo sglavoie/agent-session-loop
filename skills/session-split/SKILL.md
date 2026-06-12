@@ -315,7 +315,7 @@ Rules:
 - **Heading normalization**: if the original session heading was `###` level, promote all headings within the session by one level so the file reads naturally as a standalone document (session title becomes `#`, its `####` sub-sections become `##`, etc.)
 - Preserve fenced code blocks verbatim
 - If `Optional internal tracks` is not `none`, add an `### Internal Track Worker Prompts` subsection directly below the metadata with one prompt per track.
-- Emit intra-session worker prompts only when optional internal tracks have disjoint ownership. Track workers must not edit `manifest.md`, `context.md`, session handoffs, or files outside their ownership; the coordinator integrates results and updates the session handoff.
+- Emit intra-session worker prompts only when optional internal tracks have disjoint ownership. Track workers must not edit `manifest.md`, `context.md`, session handoffs, or files outside their ownership; the coordinator integrates results, updates the session handoff, and lets `session-run` sync derived status tables.
 
 ### Step 10: Write manifest.md
 
@@ -349,7 +349,9 @@ Run `<skill-prefix>session-run` once per session, preferably in a fresh harness 
 
 Example rendered command: `<skill-prefix>session-run ~/.local/share/agent-plans/<slug>-<hash>/`
 
-`<skill-prefix>session-run` auto-advances — it finds the next pending session, implements it, and updates the handoff. No session number needed. Repeat in new conversations until all sessions are complete.
+`<skill-prefix>session-run` auto-advances — it finds the next pending session from final session handoff statuses, implements it, updates the handoff, and syncs recognized derived status tables in `manifest.md` and `context.md`. No session number needed. Repeat in new conversations until all sessions are complete.
+
+Session handoff statuses are the source of truth. The `manifest.md` status table is derived bookkeeping for humans and automation.
 
 ## Parallel Execution
 
@@ -400,7 +402,7 @@ You own only these write paths: <owned paths>.
 Do not edit these shared or forbidden paths: <forbidden/shared paths>.
 You are not alone in the codebase; do not revert or overwrite changes outside your ownership.
 Run the session verification that applies to your scope.
-Update only the Handoff section of session-<N>.md when complete.
+Update the Handoff section of session-<N>.md when complete. In explicit parallel runs, leave shared manifest/context status tables for the final bookkeeping sync unless this is the last pending session.
 ```
 
 ### Serial Blockers

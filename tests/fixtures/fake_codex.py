@@ -11,6 +11,7 @@ import time
 
 STATUS_PENDING = "- **Status**: pending"
 STATUS_COMPLETE = "- **Status**: complete"
+HANDOFF_HEADING = "## Handoff"
 
 
 def _arg_value(flag: str) -> str | None:
@@ -35,13 +36,39 @@ def _pending_sessions(plan_dir: Path) -> list[Path]:
     return [
         path
         for path in _session_files(plan_dir)
-        if STATUS_PENDING in path.read_text(encoding="utf-8")
+        if _handoff_status_line(path) == STATUS_PENDING
     ]
+
+
+def _handoff_status_line(path: Path) -> str | None:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index].strip() != HANDOFF_HEADING:
+            continue
+        for line in lines[index + 1 :]:
+            if line.startswith("## "):
+                return None
+            if line.startswith("- **Status**:"):
+                return line
+        return None
+    return None
 
 
 def _mark_complete(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
-    path.write_text(text.replace(STATUS_PENDING, STATUS_COMPLETE, 1), encoding="utf-8")
+    lines = text.splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index].strip() != HANDOFF_HEADING:
+            continue
+        for status_index in range(index + 1, len(lines)):
+            if lines[status_index].startswith("## "):
+                break
+            if lines[status_index] == STATUS_PENDING:
+                lines[status_index] = STATUS_COMPLETE
+                suffix = "\n" if text.endswith("\n") else ""
+                path.write_text("\n".join(lines) + suffix, encoding="utf-8")
+                return
+        return
 
 
 def _write_last_message(text: str) -> None:

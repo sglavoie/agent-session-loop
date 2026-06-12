@@ -291,6 +291,123 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertEqual(2, snapshot.next_pending.number)
             self.assertEqual(plans.path_sha256(plan_dir), snapshot.path_hash)
 
+    def test_inspect_plan_reads_status_from_final_handoff_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+            (plan_dir / "session-1.md").write_text(
+                "\n".join(
+                    [
+                        "# Session 1",
+                        "",
+                        "Instructions.",
+                        "",
+                        "**Handoff (fill on completion)**:",
+                        "",
+                        "- **Status**:",
+                        "- **Files modified**:",
+                        "",
+                        "## Handoff",
+                        "",
+                        "- **Status**: complete",
+                        "- **Files modified**: done",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            snapshot = plans.inspect_plan(plan_dir)
+
+            self.assertEqual("complete", snapshot.sessions[0].status)
+            self.assertEqual("complete", snapshot.sessions[0].raw_value)
+            self.assertEqual(12, snapshot.sessions[0].line_number)
+
+    def test_sync_derived_status_ledgers_updates_clear_status_tables(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("complete", "pending"))
+            manifest_path = plan_dir / "manifest.md"
+            context_path = plan_dir / "context.md"
+            manifest_path.write_text(
+                "\n".join(
+                    [
+                        "# Manifest",
+                        "",
+                        "| # | Title | Status | File |",
+                        "|---|---|---|---|",
+                        "| 1 | One | pending | [session-1.md](session-1.md) |",
+                        "| 2 | Two | complete | session-2.md |",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            context_path.write_text(
+                "\n".join(
+                    [
+                        "# Context",
+                        "",
+                        "| Session | Title | Status |",
+                        "|---|---|---|",
+                        "| S1 | One | pending |",
+                        "| S2 | Two | complete |",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            snapshot = plans.inspect_plan(plan_dir)
+            changed = plans.sync_derived_status_ledgers(snapshot)
+
+            self.assertEqual(
+                {
+                    plans.canonicalize_path(manifest_path),
+                    plans.canonicalize_path(context_path),
+                },
+                set(changed),
+            )
+            self.assertIn(
+                "| 1 | One | complete | [session-1.md](session-1.md) |",
+                manifest_path.read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "| 2 | Two | pending | session-2.md |",
+                manifest_path.read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "| S1 | One | complete |",
+                context_path.read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "| S2 | Two | pending |",
+                context_path.read_text(encoding="utf-8"),
+            )
+
+    def test_sync_derived_status_ledgers_leaves_ambiguous_context_tables(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("complete",))
+            context_path = plan_dir / "context.md"
+            original_context = "\n".join(
+                [
+                    "# Context",
+                    "",
+                    "| Item | Status |",
+                    "|---|---|",
+                    "| Draft -> review | pending |",
+                    "",
+                ]
+            )
+            context_path.write_text(original_context, encoding="utf-8")
+
+            snapshot = plans.inspect_plan(plan_dir)
+            changed = plans.sync_derived_status_ledgers(snapshot)
+
+            self.assertEqual((), changed)
+            self.assertEqual(original_context, context_path.read_text(encoding="utf-8"))
+
     def test_unknown_and_empty_statuses_are_reported_as_invalid_pauses(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
@@ -1350,6 +1467,74 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
     ) -> dict[str, object]:
         state_path = state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
         return json.loads(state_path.read_text(encoding="utf-8"))
+
+    def test_successful_turn_syncs_derived_status_ledgers(self) -> None:
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+            statuses=("pending", "pending")
+        )
+        (plan_dir / "manifest.md").write_text(
+            "\n".join(
+                [
+                    "# Manifest",
+                    "",
+                    "| # | Title | Status | File |",
+                    "|---|---|---|---|",
+                    "| 1 | One | pending | session-1.md |",
+                    "| 2 | Two | pending | session-2.md |",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (plan_dir / "context.md").write_text(
+            "\n".join(
+                [
+                    "# Context",
+                    "",
+                    "| Session | Title | Status |",
+                    "|---|---|---|",
+                    "| S1 | One | pending |",
+                    "| S2 | Two | pending |",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        completed, payload = self.run_loop_command(
+            mode="success",
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            max_sessions=1,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        turn = payload["turns"][0]
+        self.assertEqual(
+            {
+                str(plans.canonicalize_path(plan_dir / "manifest.md")),
+                str(plans.canonicalize_path(plan_dir / "context.md")),
+            },
+            set(turn["ledger_updates"]),
+        )
+        self.assertIn(
+            "| 1 | One | complete | session-1.md |",
+            (plan_dir / "manifest.md").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "| 2 | Two | pending | session-2.md |",
+            (plan_dir / "manifest.md").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "| S1 | One | complete |",
+            (plan_dir / "context.md").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "| S2 | Two | pending |",
+            (plan_dir / "context.md").read_text(encoding="utf-8"),
+        )
 
     def test_text_run_pty_p_stops_after_current_session(self) -> None:
         plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(

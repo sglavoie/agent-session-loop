@@ -1720,6 +1720,41 @@ def _run_locked(
             )
             break
 
+        try:
+            ledger_updates = plans.sync_derived_status_ledgers(after)
+        except plans.PlanError as error:
+            payload["final_snapshot"] = _snapshot_payload(after)
+            _pause_run(
+                event_path,
+                payload,
+                reason="malformed-plan",
+                message="derived status ledgers could not be synced",
+                details={
+                    "session": pending_session.number,
+                    "error": str(error),
+                },
+            )
+            break
+        if ledger_updates:
+            try:
+                after = plans.inspect_plan(before.plan_dir)
+            except plans.PlanError as error:
+                payload["final_snapshot"] = _snapshot_payload(after)
+                _pause_run(
+                    event_path,
+                    payload,
+                    reason="malformed-plan",
+                    message="plan could not be inspected after syncing ledgers",
+                    details={
+                        "session": pending_session.number,
+                        "error": str(error),
+                    },
+                )
+                break
+            turn_payload["ledger_updates"] = [str(path) for path in ledger_updates]
+            turn_payload["after"] = _snapshot_payload(after)
+            _write_json_file(paths["result"], turn_payload)
+
         if commit_mode == COMMIT_MODE_PER_SESSION:
             commit_payload = _run_auto_commit(
                 event_path=event_path,
