@@ -99,10 +99,10 @@ without running the final `--commit-at-end` commit.
 ## Commands
 
 ```text
-asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass] [--json] [--dry-run]
+asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--json] [--dry-run]
 asl status PLAN_DIR [--state-dir DIR] [--json]
 asl tail PLAN_DIR [--state-dir DIR] [--lines N] [--no-follow]
-asl doctor --harness codex|claude|copilot [--model MODEL] [--effort EFFORT] [--cwd REPO_ROOT] --plan-dir PLAN_DIR [--json]
+asl doctor --harness codex|claude|copilot [--model MODEL] [--effort EFFORT] [--cwd REPO_ROOT] --plan-dir PLAN_DIR [--unsafe-bypass|--no-unsafe-bypass] [--json]
 asl unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
 ```
 
@@ -151,13 +151,13 @@ interpolation.
 Codex:
 
 ```text
-codex exec -C <cwd> --add-dir <plan-dir> -s workspace-write [--model <model>] [-c model_reasoning_effort="<effort>"] -o <last-message-file> <prompt>
+codex exec -C <cwd> --add-dir <plan-dir> --dangerously-bypass-approvals-and-sandbox [--model <model>] [-c model_reasoning_effort="<effort>"] -o <last-message-file> <prompt>
 ```
 
 Claude:
 
 ```text
-claude --print --add-dir <plan-dir> --permission-mode dontAsk [--model <model>] [--effort <effort>] <prompt>
+claude --print --add-dir <plan-dir> --permission-mode bypassPermissions [--model <model>] [--effort <effort>] <prompt>
 ```
 
 Copilot:
@@ -182,23 +182,26 @@ Codex `~/.codex/config.toml`, Copilot `~/.copilot/settings.json`, or
 
 ## Safety Modes
 
-The default Codex mode uses workspace-write sandboxing:
-
-```text
-codex exec -C <cwd> --add-dir <plan-dir> -s workspace-write -o <last-message-file> <prompt>
-```
-
-`--unsafe-bypass` changes Codex and Claude to their harness-specific bypass
-modes:
+By default, `run` and `doctor` use harness-specific bypass modes for every
+harness. For Codex and Claude this means:
 
 ```text
 codex exec -C <cwd> --add-dir <plan-dir> --dangerously-bypass-approvals-and-sandbox -o <last-message-file> <prompt>
 claude --print --add-dir <plan-dir> --permission-mode bypassPermissions <prompt>
 ```
 
-Copilot always uses its explicit allow flags. Use bypass mode only when the plan
-and repository are trusted and the harness must write outside the normal
-workspace sandbox.
+`--unsafe-bypass` is accepted as an explicit form of the default. Pass
+`--no-unsafe-bypass` to use the harness default sandbox and approval behavior:
+
+```text
+codex exec -C <cwd> --add-dir <plan-dir> -s workspace-write -o <last-message-file> <prompt>
+claude --print --add-dir <plan-dir> --permission-mode dontAsk <prompt>
+```
+
+Copilot always uses its explicit allow flags. Because bypass mode is the
+default, run only trusted plans against trusted repositories, or pass
+`--no-unsafe-bypass` when the harness should stay in its normal workspace
+sandbox.
 
 The runner itself never marks sessions complete. Durable completion is only the
 `- **Status**: complete` line inside the final `## Handoff` block of each

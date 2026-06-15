@@ -138,8 +138,12 @@ def _parse_datetime(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _unsafe_bypass(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "unsafe_bypass", True))
+
+
 def _approval_mode(args: argparse.Namespace) -> str:
-    return "unsafe-bypass" if args.unsafe_bypass else "harness-default"
+    return "unsafe-bypass" if _unsafe_bypass(args) else "harness-default"
 
 
 def _commit_mode(args: argparse.Namespace) -> str | None:
@@ -1313,7 +1317,7 @@ def _dry_run_payload(
         args.harness,
         cwd=cwd,
         plan_dir=snapshot.plan_dir,
-        unsafe_bypass=args.unsafe_bypass,
+        unsafe_bypass=_unsafe_bypass(args),
         last_message_path=paths["last_message"],
         model=args.model,
         effort=args.effort,
@@ -1554,7 +1558,7 @@ def _run_locked(
                 cwd=cwd,
                 plan_dir=before.plan_dir,
                 prompt=prompt,
-                unsafe_bypass=args.unsafe_bypass,
+                unsafe_bypass=_unsafe_bypass(args),
                 last_message_path=paths["last_message"],
                 timeout=timeout,
                 stream_callback=stream_callback,
@@ -2167,6 +2171,7 @@ def doctor_from_args(args: argparse.Namespace) -> int:
             args.harness,
             cwd=cwd,
             plan_dir=snapshot.plan_dir,
+            unsafe_bypass=_unsafe_bypass(args),
             last_message_path=last_message_path,
             model=args.model,
             effort=args.effort,

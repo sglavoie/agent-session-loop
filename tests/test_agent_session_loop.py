@@ -578,6 +578,17 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertEqual("dontAsk", claude[claude.index("--permission-mode") + 1])
         self.assertIn("--add-dir", claude)
 
+        claude_unsafe = harnesses.ClaudeAdapter(executable="claude").build_argv(
+            cwd=cwd,
+            plan_dir=plan_dir,
+            prompt="/session-run /tmp/plan/",
+            unsafe_bypass=True,
+        )
+        self.assertEqual(
+            "bypassPermissions",
+            claude_unsafe[claude_unsafe.index("--permission-mode") + 1],
+        )
+
         copilot = harnesses.CopilotAdapter(executable="copilot").build_argv(
             cwd=cwd,
             plan_dir=plan_dir,
@@ -730,6 +741,37 @@ class CommandAndConfigTests(unittest.TestCase):
             ["doctor", "--harness", "codex", "--plan-dir", "/tmp/plan"]
         )
         self.assertEqual(".", doctor_args.cwd)
+
+    def test_run_and_doctor_default_to_unsafe_bypass_with_opt_out(self) -> None:
+        parser = cli.build_parser()
+
+        run_args = parser.parse_args(["run", "/tmp/plan"])
+        self.assertTrue(run_args.unsafe_bypass)
+
+        run_explicit_args = parser.parse_args(["run", "/tmp/plan", "--unsafe-bypass"])
+        self.assertTrue(run_explicit_args.unsafe_bypass)
+
+        run_safe_args = parser.parse_args(
+            ["run", "/tmp/plan", "--no-unsafe-bypass"]
+        )
+        self.assertFalse(run_safe_args.unsafe_bypass)
+
+        doctor_args = parser.parse_args(
+            ["doctor", "--harness", "codex", "--plan-dir", "/tmp/plan"]
+        )
+        self.assertTrue(doctor_args.unsafe_bypass)
+
+        doctor_safe_args = parser.parse_args(
+            [
+                "doctor",
+                "--harness",
+                "codex",
+                "--plan-dir",
+                "/tmp/plan",
+                "--no-unsafe-bypass",
+            ]
+        )
+        self.assertFalse(doctor_safe_args.unsafe_bypass)
 
     def test_parser_uses_custom_program_name_in_help(self) -> None:
         parser = cli.build_parser(prog="asl")
@@ -1175,7 +1217,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             state_dir=str(state_dir),
             json=False,
             dry_run=False,
-            unsafe_bypass=False,
+            unsafe_bypass=True,
             timeout=None,
             max_sessions=None,
             commit_mode=commit_mode,
@@ -2985,6 +3027,11 @@ class JsonCliTests(unittest.TestCase):
             self.assertEqual(config.MODEL_SOURCE_FLAG, invocation["model_source"])
             self.assertEqual("high", invocation["effort"])
             self.assertEqual(config.EFFORT_SOURCE_FLAG, invocation["effort_source"])
+            self.assertIn(
+                "--dangerously-bypass-approvals-and-sandbox",
+                invocation["argv"],
+            )
+            self.assertNotIn("workspace-write", invocation["argv"])
             self.assertEqual(
                 "gpt-5", invocation["argv"][invocation["argv"].index("--model") + 1]
             )
@@ -2994,6 +3041,44 @@ class JsonCliTests(unittest.TestCase):
             )
             self.assertTrue(run_payload["state_path"].endswith("/state.json"))
             self.assertTrue(run_payload["events_path"].endswith("/events.jsonl"))
+
+    def test_dry_run_json_no_unsafe_bypass_uses_harness_default_argv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("pending",))
+
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(tmp_dir / "config")
+            env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_session_loop",
+                    "run",
+                    str(plan_dir),
+                    "--cwd",
+                    str(REPO_ROOT),
+                    "--state-dir",
+                    str(state_dir),
+                    "--dry-run",
+                    "--json",
+                    "--no-unsafe-bypass",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            payload = json.loads(completed.stdout)
+            argv = payload["planned"]["invocation"]["argv"]
+            self.assertIn("-s", argv)
+            self.assertIn("workspace-write", argv)
+            self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
 
     def test_run_json_uses_current_directory_when_cwd_is_omitted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3182,6 +3267,11 @@ class JsonCliTests(unittest.TestCase):
                 ["codex"], payload["harness_config"]["configured_harnesses"]
             )
             self.assertEqual(str(fake_codex), payload["invocation"]["argv"][0])
+            self.assertIn(
+                "--dangerously-bypass-approvals-and-sandbox",
+                payload["invocation"]["argv"],
+            )
+            self.assertNotIn("workspace-write", payload["invocation"]["argv"])
             self.assertEqual(payload["invocation"]["argv"], payload["invocation_argv"])
             self.assertEqual("gpt-5", payload["invocation"]["model"])
             self.assertEqual(

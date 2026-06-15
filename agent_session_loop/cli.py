@@ -10,6 +10,22 @@ from pathlib import Path
 from . import harnesses, runner, state, tail
 
 
+def _add_unsafe_bypass_flags(parser: argparse.ArgumentParser) -> None:
+    parser.set_defaults(unsafe_bypass=True)
+    parser.add_argument(
+        "--unsafe-bypass",
+        dest="unsafe_bypass",
+        action="store_true",
+        help="Use harness-specific bypass flags for sandbox and approval prompts (default)",
+    )
+    parser.add_argument(
+        "--no-unsafe-bypass",
+        dest="unsafe_bypass",
+        action="store_false",
+        help="Use the harness default sandbox and approval behavior",
+    )
+
+
 def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=prog,
@@ -71,11 +87,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         "--state-dir",
         help="Override operational state directory",
     )
-    run_parser.add_argument(
-        "--unsafe-bypass",
-        action="store_true",
-        help="Use harness-specific bypass flags for sandbox and approval prompts",
-    )
+    _add_unsafe_bypass_flags(run_parser)
     run_parser.add_argument(
         "--json",
         action="store_true",
@@ -159,6 +171,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         action="store_true",
         help="Print machine-readable JSON output",
     )
+    _add_unsafe_bypass_flags(doctor_parser)
     doctor_parser.set_defaults(handler=runner.doctor_from_args)
 
     unlock_parser = subparsers.add_parser(
