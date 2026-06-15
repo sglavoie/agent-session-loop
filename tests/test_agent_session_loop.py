@@ -720,6 +720,17 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertEqual(2, raised.exception.code)
         self.assertIn("not allowed with argument", stderr.getvalue())
 
+    def test_run_and_doctor_default_cwd_to_current_directory(self) -> None:
+        parser = cli.build_parser()
+
+        run_args = parser.parse_args(["run", "/tmp/plan"])
+        self.assertEqual(".", run_args.cwd)
+
+        doctor_args = parser.parse_args(
+            ["doctor", "--harness", "codex", "--plan-dir", "/tmp/plan"]
+        )
+        self.assertEqual(".", doctor_args.cwd)
+
     def test_tail_interactive_flag_is_rejected(self) -> None:
         parser = cli.build_parser()
         stderr = io.StringIO()
@@ -2973,6 +2984,43 @@ class JsonCliTests(unittest.TestCase):
             self.assertTrue(run_payload["state_path"].endswith("/state.json"))
             self.assertTrue(run_payload["events_path"].endswith("/events.jsonl"))
 
+    def test_run_json_uses_current_directory_when_cwd_is_omitted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("pending",))
+
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(tmp_dir / "config")
+            env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_session_loop",
+                    "run",
+                    str(plan_dir),
+                    "--state-dir",
+                    str(state_dir),
+                    "--dry-run",
+                    "--json",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            payload = json.loads(completed.stdout)
+            invocation = payload["planned"]["invocation"]
+            self.assertEqual(str(REPO_ROOT), payload["cwd"])
+            self.assertEqual(str(REPO_ROOT), invocation["cwd"])
+            self.assertEqual(
+                str(REPO_ROOT), invocation["argv"][invocation["argv"].index("-C") + 1]
+            )
+
     def test_dry_run_json_reports_native_model_metadata_without_argv_flags(
         self,
     ) -> None:
@@ -3141,6 +3189,50 @@ class JsonCliTests(unittest.TestCase):
             self.assertEqual(
                 'model_reasoning_effort="high"',
                 payload["invocation_argv"][payload["invocation_argv"].index("-c") + 1],
+            )
+
+    def test_doctor_json_uses_current_directory_when_cwd_is_omitted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            config_home = tmp_dir / "config"
+            config_path = config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            fake_codex = install_fake_codex(tmp_dir)
+            config_path.write_text(
+                json.dumps({"codex": {"executable": str(fake_codex)}}),
+                encoding="utf-8",
+            )
+            write_plan(plan_dir, ("pending",))
+
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(config_home)
+            env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_session_loop",
+                    "doctor",
+                    "--harness",
+                    "codex",
+                    "--plan-dir",
+                    str(plan_dir),
+                    "--json",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            payload = json.loads(completed.stdout)
+            invocation = payload["invocation"]
+            self.assertEqual(str(REPO_ROOT), payload["cwd"])
+            self.assertEqual(str(REPO_ROOT), invocation["cwd"])
+            self.assertEqual(
+                str(REPO_ROOT), invocation["argv"][invocation["argv"].index("-C") + 1]
             )
 
     def test_doctor_text_outputs_model_effort_and_argv(self) -> None:

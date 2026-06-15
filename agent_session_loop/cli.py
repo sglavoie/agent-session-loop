@@ -23,8 +23,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("plan_dir", help="Split plan directory to execute")
     run_parser.add_argument(
         "--cwd",
-        required=True,
-        help="Repository root where the harness should run",
+        default=".",
+        help="Repository root where the harness should run (default: current directory)",
     )
     run_parser.add_argument(
         "--harness",
@@ -145,8 +145,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor_parser.add_argument(
         "--cwd",
-        required=True,
-        help="Repository root where the harness should run",
+        default=".",
+        help="Repository root where the harness should run (default: current directory)",
     )
     doctor_parser.add_argument(
         "--plan-dir",

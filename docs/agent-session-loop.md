@@ -6,11 +6,11 @@ session plan directory. Each harness turn runs one `$session-run` or
 deciding whether to continue.
 
 ```bash
-bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --cwd "$PWD" --harness codex
-bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --cwd "$PWD" --harness codex --max-sessions 1
-bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --cwd "$PWD" --harness codex --commit-per-session
-bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --cwd "$PWD" --harness codex --commit-at-end
-bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --cwd "$PWD" --harness codex --dry-run
+bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --harness codex
+bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --harness codex --max-sessions 1
+bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --harness codex --commit-per-session
+bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --harness codex --commit-at-end
+bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --harness codex --dry-run
 bin/.local/bin/agent-session-loop status ~/.local/share/agent-plans/example-plan/
 bin/.local/bin/agent-session-loop tail ~/.local/share/agent-plans/example-plan/
 ```
@@ -50,11 +50,13 @@ The config loader also accepts these equivalent shapes:
 Check local prerequisites before a real run:
 
 ```bash
-agent-session-loop doctor --harness codex --cwd "$PWD" --plan-dir ~/.local/share/agent-plans/example-plan/
+agent-session-loop doctor --harness codex --plan-dir ~/.local/share/agent-plans/example-plan/
 ```
 
 `doctor` verifies the working directory, plan directory, configured harness
 executable, next pending session, generated prompt, and argv.
+Both `run` and `doctor` default to the current directory; pass
+`--cwd REPO_ROOT` to run the harness somewhere else.
 
 ## Workflow After Session Expand
 
@@ -70,13 +72,13 @@ agent-session-loop status ~/.local/share/agent-plans/example-plan/
 1. Preview the first harness turn:
 
 ```bash
-agent-session-loop run ~/.local/share/agent-plans/example-plan/ --cwd "$PWD" --harness codex --dry-run
+agent-session-loop run ~/.local/share/agent-plans/example-plan/ --harness codex --dry-run
 ```
 
 1. Run the loop:
 
 ```bash
-agent-session-loop run ~/.local/share/agent-plans/example-plan/ --cwd "$PWD" --harness codex
+agent-session-loop run ~/.local/share/agent-plans/example-plan/ --harness codex
 ```
 
 The runner stops when every `session-N.md` handoff status is `complete`, when
@@ -84,8 +86,9 @@ The runner stops when every `session-N.md` handoff status is `complete`, when
 when a pause condition requires review. Resume a paused run by re-running the
 same command after fixing the blocker.
 
-Optional auto-commit modes require `--cwd` to be a clean git worktree before
-the first harness turn starts, and require `spec` on `PATH`. Use
+Optional auto-commit modes require the resolved working directory to be a clean
+git worktree before the first harness turn starts, and require `spec` on
+`PATH`. Use
 `--commit-per-session` to commit after each verified completed session, or
 `--commit-at-end` to commit once after all pending sessions complete in the
 same run. Both modes always invoke `spec commit --yes --no-verify`. A
@@ -95,10 +98,10 @@ without running the final `--commit-at-end` commit.
 ## Commands
 
 ```text
-agent-session-loop run PLAN_DIR --cwd REPO_ROOT [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass] [--json] [--dry-run]
+agent-session-loop run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass] [--json] [--dry-run]
 agent-session-loop status PLAN_DIR [--state-dir DIR] [--json]
 agent-session-loop tail PLAN_DIR [--state-dir DIR] [--lines N] [--no-follow]
-agent-session-loop doctor --harness codex|claude|copilot [--model MODEL] [--effort EFFORT] --cwd REPO_ROOT --plan-dir PLAN_DIR [--json]
+agent-session-loop doctor --harness codex|claude|copilot [--model MODEL] [--effort EFFORT] [--cwd REPO_ROOT] --plan-dir PLAN_DIR [--json]
 agent-session-loop unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
 ```
 
@@ -277,9 +280,9 @@ live monitoring should read `state.json`, `events.jsonl`, or use `tail`.
 Use `--json` for runner integrations:
 
 ```bash
-agent-session-loop run ~/.local/share/agent-plans/example-plan/ --cwd "$PWD" --harness codex --max-sessions 1 --json
+agent-session-loop run ~/.local/share/agent-plans/example-plan/ --harness codex --max-sessions 1 --json
 agent-session-loop status ~/.local/share/agent-plans/example-plan/ --json
-agent-session-loop doctor --harness codex --cwd "$PWD" --plan-dir ~/.local/share/agent-plans/example-plan/ --json
+agent-session-loop doctor --harness codex --plan-dir ~/.local/share/agent-plans/example-plan/ --json
 agent-session-loop unlock ~/.local/share/agent-plans/example-plan/ --json
 ```
 
@@ -343,8 +346,9 @@ Common pause reasons:
 - `no-pending-but-incomplete`: no pending session exists, but not all sessions
   are complete.
 - `commit-preflight`: auto-commit setup failed before the first harness turn,
-  such as a dirty initial worktree, missing `spec`, non-git `--cwd`, or an
-  incompatible `--commit-at-end` and `--max-sessions` combination.
+  such as a dirty initial worktree, missing `spec`, a non-git working
+  directory, or an incompatible `--commit-at-end` and `--max-sessions`
+  combination.
 - `commit-failed`: `spec commit --yes --no-verify` ran but did not create a new
   commit, including nonzero exits and zero-exit no-op commits that leave `HEAD`
   unchanged.
@@ -360,7 +364,7 @@ agent-session-loop status ~/.local/share/agent-plans/example-plan/ --json
 Preview the next command without invoking the harness:
 
 ```bash
-agent-session-loop run ~/.local/share/agent-plans/example-plan/ --cwd "$PWD" --harness codex --dry-run --model gpt-5 --effort high
+agent-session-loop run ~/.local/share/agent-plans/example-plan/ --harness codex --dry-run --model gpt-5 --effort high
 ```
 
 Inspect the most recent artifacts named in `state.json` or the JSON output:
