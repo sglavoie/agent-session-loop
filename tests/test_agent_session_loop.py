@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager, redirect_stderr
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import errno
 import io
 import json
@@ -730,6 +730,17 @@ class CommandAndConfigTests(unittest.TestCase):
             ["doctor", "--harness", "codex", "--plan-dir", "/tmp/plan"]
         )
         self.assertEqual(".", doctor_args.cwd)
+
+    def test_parser_uses_custom_program_name_in_help(self) -> None:
+        parser = cli.build_parser(prog="asl")
+        stdout = io.StringIO()
+
+        self.assertTrue(parser.format_help().startswith("usage: asl "))
+        with redirect_stdout(stdout), self.assertRaises(SystemExit) as raised:
+            parser.parse_args(["run", "--help"])
+
+        self.assertEqual(0, raised.exception.code)
+        self.assertIn("usage: asl run", stdout.getvalue())
 
     def test_tail_interactive_flag_is_rejected(self) -> None:
         parser = cli.build_parser()

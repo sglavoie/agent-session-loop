@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from . import harnesses, runner, state, tail
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="agent-session-loop",
+        prog=prog,
         description="Run split agent session plans one session at a time.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -185,6 +186,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_parser()
+    parser = build_parser(prog=Path(sys.argv[0]).name)
     args = parser.parse_args(sys.argv[1:] if argv is None else list(argv))
     return args.handler(args)

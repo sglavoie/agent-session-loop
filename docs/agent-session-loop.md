@@ -1,23 +1,24 @@
 # Agent Session Loop
 
 `agent-session-loop` repeatedly invokes an agent harness against a split
-session plan directory. Each harness turn runs one `$session-run` or
-`/session-run` invocation, then the runner re-reads the plan files before
-deciding whether to continue.
+session plan directory. The default short executable alias is `asl`. Each
+harness turn runs one `$session-run` or `/session-run` invocation, then the
+runner re-reads the plan files before deciding whether to continue.
 
 ```bash
-bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --harness codex
-bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --harness codex --max-sessions 1
-bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --harness codex --commit-per-session
-bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --harness codex --commit-at-end
-bin/.local/bin/agent-session-loop run ~/.local/share/agent-plans/example-plan/ --harness codex --dry-run
-bin/.local/bin/agent-session-loop status ~/.local/share/agent-plans/example-plan/
-bin/.local/bin/agent-session-loop tail ~/.local/share/agent-plans/example-plan/
+bin/.local/bin/asl run ~/.local/share/agent-plans/example-plan/ --harness codex
+bin/.local/bin/asl run ~/.local/share/agent-plans/example-plan/ --harness codex --max-sessions 1
+bin/.local/bin/asl run ~/.local/share/agent-plans/example-plan/ --harness codex --commit-per-session
+bin/.local/bin/asl run ~/.local/share/agent-plans/example-plan/ --harness codex --commit-at-end
+bin/.local/bin/asl run ~/.local/share/agent-plans/example-plan/ --harness codex --dry-run
+bin/.local/bin/asl status ~/.local/share/agent-plans/example-plan/
+bin/.local/bin/asl tail ~/.local/share/agent-plans/example-plan/
 ```
 
 The package is stdlib-only and lives in `agent_session_loop/`. The executable
 wrapper at `bin/.local/bin/agent-session-loop` adds this repository to
-`sys.path` and dispatches to the package CLI.
+`sys.path` and dispatches to the package CLI. `bin/.local/bin/asl` is a
+relative symlink to that wrapper. The long executable remains available.
 
 ## Setup
 
@@ -25,7 +26,7 @@ Run from this repository, or add `bin/.local/bin` to `PATH`:
 
 ```bash
 export PATH="$PWD/bin/.local/bin:$PATH"
-agent-session-loop status ~/.local/share/agent-plans/example-plan/
+asl status ~/.local/share/agent-plans/example-plan/
 ```
 
 The runner supports `codex`, `claude`, and `copilot` harnesses. Defaults use the
@@ -50,7 +51,7 @@ The config loader also accepts these equivalent shapes:
 Check local prerequisites before a real run:
 
 ```bash
-agent-session-loop doctor --harness codex --plan-dir ~/.local/share/agent-plans/example-plan/
+asl doctor --harness codex --plan-dir ~/.local/share/agent-plans/example-plan/
 ```
 
 `doctor` verifies the working directory, plan directory, configured harness
@@ -66,19 +67,19 @@ Both `run` and `doctor` default to the current directory; pass
 3. Check the plan:
 
 ```bash
-agent-session-loop status ~/.local/share/agent-plans/example-plan/
+asl status ~/.local/share/agent-plans/example-plan/
 ```
 
 1. Preview the first harness turn:
 
 ```bash
-agent-session-loop run ~/.local/share/agent-plans/example-plan/ --harness codex --dry-run
+asl run ~/.local/share/agent-plans/example-plan/ --harness codex --dry-run
 ```
 
 1. Run the loop:
 
 ```bash
-agent-session-loop run ~/.local/share/agent-plans/example-plan/ --harness codex
+asl run ~/.local/share/agent-plans/example-plan/ --harness codex
 ```
 
 The runner stops when every `session-N.md` handoff status is `complete`, when
@@ -98,11 +99,11 @@ without running the final `--commit-at-end` commit.
 ## Commands
 
 ```text
-agent-session-loop run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass] [--json] [--dry-run]
-agent-session-loop status PLAN_DIR [--state-dir DIR] [--json]
-agent-session-loop tail PLAN_DIR [--state-dir DIR] [--lines N] [--no-follow]
-agent-session-loop doctor --harness codex|claude|copilot [--model MODEL] [--effort EFFORT] [--cwd REPO_ROOT] --plan-dir PLAN_DIR [--json]
-agent-session-loop unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
+asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass] [--json] [--dry-run]
+asl status PLAN_DIR [--state-dir DIR] [--json]
+asl tail PLAN_DIR [--state-dir DIR] [--lines N] [--no-follow]
+asl doctor --harness codex|claude|copilot [--model MODEL] [--effort EFFORT] [--cwd REPO_ROOT] --plan-dir PLAN_DIR [--json]
+asl unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
 ```
 
 `run` acquires a per-plan lock, inspects the first pending session, invokes the
@@ -280,10 +281,10 @@ live monitoring should read `state.json`, `events.jsonl`, or use `tail`.
 Use `--json` for runner integrations:
 
 ```bash
-agent-session-loop run ~/.local/share/agent-plans/example-plan/ --harness codex --max-sessions 1 --json
-agent-session-loop status ~/.local/share/agent-plans/example-plan/ --json
-agent-session-loop doctor --harness codex --plan-dir ~/.local/share/agent-plans/example-plan/ --json
-agent-session-loop unlock ~/.local/share/agent-plans/example-plan/ --json
+asl run ~/.local/share/agent-plans/example-plan/ --harness codex --max-sessions 1 --json
+asl status ~/.local/share/agent-plans/example-plan/ --json
+asl doctor --harness codex --plan-dir ~/.local/share/agent-plans/example-plan/ --json
+asl unlock ~/.local/share/agent-plans/example-plan/ --json
 ```
 
 All parsed subcommands that support `--json` print JSON errors to stdout. Common
@@ -358,13 +359,13 @@ Common pause reasons:
 Check what the runner sees:
 
 ```bash
-agent-session-loop status ~/.local/share/agent-plans/example-plan/ --json
+asl status ~/.local/share/agent-plans/example-plan/ --json
 ```
 
 Preview the next command without invoking the harness:
 
 ```bash
-agent-session-loop run ~/.local/share/agent-plans/example-plan/ --harness codex --dry-run --model gpt-5 --effort high
+asl run ~/.local/share/agent-plans/example-plan/ --harness codex --dry-run --model gpt-5 --effort high
 ```
 
 Inspect the most recent artifacts named in `state.json` or the JSON output:
@@ -378,8 +379,8 @@ jq -r '.turns[-1].result_path' ~/.local/state/agent-session-loop/<plan-path-hash
 Follow the active or latest run:
 
 ```bash
-agent-session-loop tail ~/.local/share/agent-plans/example-plan/
-agent-session-loop tail ~/.local/share/agent-plans/example-plan/ --lines 80 --no-follow
+asl tail ~/.local/share/agent-plans/example-plan/
+asl tail ~/.local/share/agent-plans/example-plan/ --lines 80 --no-follow
 ```
 
 For text runs started from a real terminal, press `h` for the current keyboard
@@ -389,14 +390,14 @@ another terminal to inspect the resulting `run_control` events.
 Remove a stale lock:
 
 ```bash
-agent-session-loop unlock ~/.local/share/agent-plans/example-plan/ --json
+asl unlock ~/.local/share/agent-plans/example-plan/ --json
 ```
 
 Remove an active lock only after verifying the owning process is not a real
 runner you still need:
 
 ```bash
-agent-session-loop unlock ~/.local/share/agent-plans/example-plan/ --force --json
+asl unlock ~/.local/share/agent-plans/example-plan/ --force --json
 ```
 
 If a plan has no pending sessions but is not complete, inspect every final
@@ -409,7 +410,7 @@ Run the regression suite and compile check from this repository:
 
 ```bash
 python3 -m unittest discover -s tests
-python3 -m py_compile agent_session_loop/*.py bin/.local/bin/agent-session-loop
+python3 -m py_compile agent_session_loop/*.py bin/.local/bin/agent-session-loop bin/.local/bin/asl
 ```
 
 Use a synthetic plan directory for manual smoke tests so generated state, locks,
