@@ -248,6 +248,40 @@ def _status_counts(snapshot: plans.PlanSnapshot) -> dict[str, int]:
     return counts
 
 
+def _session_number_alias(session_id: str) -> int | None:
+    parsed = plans.parse_session_id(session_id)
+    return parsed.as_int() if parsed.is_integer else None
+
+
+def _session_compat_value(session_id: str) -> int | str:
+    number = _session_number_alias(session_id)
+    return number if number is not None else session_id
+
+
+def _session_payload(session: plans.SessionStatus) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": session.id,
+        "status": session.status,
+        "raw_value": session.raw_value,
+        "line_number": session.line_number,
+        "path": str(session.path),
+    }
+    number = _session_number_alias(session.id)
+    if number is not None:
+        payload["number"] = number
+    return payload
+
+
+def _session_label_from_payload(payload: dict[str, Any]) -> str:
+    session_id = payload.get("session_id")
+    if session_id is not None:
+        return str(session_id)
+    session = payload.get("session")
+    if session is not None:
+        return str(session)
+    return "unknown"
+
+
 def _lock_payload(lock_info: LockInfo | None, lock_path: Path) -> dict[str, Any]:
     if lock_info is None:
         return {
@@ -344,17 +378,13 @@ def status_payload(
         runner_state=runner_state,
         active_turn=runner_state.get("active_turn"),
         counts=_status_counts(snapshot),
-        next_pending=next_pending.number if next_pending is not None else None,
-        sessions=[
-            {
-                "number": session.number,
-                "status": session.status,
-                "raw_value": session.raw_value,
-                "line_number": session.line_number,
-                "path": str(session.path),
-            }
-            for session in snapshot.sessions
-        ],
+        next_pending=(
+            _session_compat_value(next_pending.id)
+            if next_pending is not None
+            else None
+        ),
+        next_pending_id=next_pending.id if next_pending is not None else None,
+        sessions=[_session_payload(session) for session in snapshot.sessions],
         lock=_lock_payload(lock_info, lock_path),
     )
 
@@ -387,7 +417,7 @@ def _print_text_status(payload: dict[str, Any]) -> None:
     if isinstance(active_turn, dict):
         print(
             "Active turn: "
-            f"session {active_turn.get('session')} "
+            f"session {_session_label_from_payload(active_turn)} "
             f"turn {active_turn.get('turn_index')} "
             f"elapsed {format_duration_seconds(active_turn.get('elapsed_seconds'))} "
             f"idle {format_duration_seconds(active_turn.get('idle_seconds'))}"
@@ -407,12 +437,14 @@ def _print_text_status(payload: dict[str, Any]) -> None:
 
     print("Sessions:")
     for session in payload["sessions"]:
-        print(f"  {session['number']}: {session['status']} {Path(session['path']).name}")
+        session_id = session.get("id", session.get("number", "unknown"))
+        print(f"  {session_id}: {session['status']} {Path(session['path']).name}")
 
     if payload["next_pending"] is None:
         print("Next pending: none")
     else:
-        print(f"Next pending: session {payload['next_pending']}")
+        next_pending = payload.get("next_pending_id") or payload["next_pending"]
+        print(f"Next pending: session {next_pending}")
 
 
 def status_from_args(args: argparse.Namespace) -> int:

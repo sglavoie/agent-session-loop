@@ -35,7 +35,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser(
         "run",
-        help="Run pending sessions from a split plan directory.",
+        help="Run pending session IDs from a split plan directory.",
     )
     run_parser.add_argument("plan_dir", help="Split plan directory to execute")
     run_parser.add_argument(
@@ -102,7 +102,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
 
     status_parser = subparsers.add_parser(
         "status",
-        help="Show session and operational runner status.",
+        help="Show session ID and operational runner status.",
     )
     status_parser.add_argument("plan_dir", help="Split plan directory to inspect")
     status_parser.add_argument(
@@ -118,7 +118,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
 
     tail_parser = subparsers.add_parser(
         "tail",
-        help="Show and follow live run events and harness logs.",
+        help="Show and follow live run events and harness logs by session ID.",
     )
     tail_parser.add_argument("plan_dir", help="Split plan directory to tail")
     tail_parser.add_argument(

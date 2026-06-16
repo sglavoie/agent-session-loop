@@ -34,6 +34,12 @@ executable names on `PATH`, and optional overrides live in
 `~/.config/agent-session-loop/harnesses.json` or
 `$XDG_CONFIG_HOME/agent-session-loop/harnesses.json`.
 
+Session files use canonical session IDs in `session-<id>.md`. IDs may be plain
+integers such as `1` or nested dotted IDs such as `2.1`; status text, tail
+output, artifact paths, and JSON `id` fields use the same canonical value. JSON
+payloads keep integer compatibility aliases for integer-only plans where older
+callers already consumed numeric fields.
+
 ```json
 {"codex": {"executable": "/path/to/codex"}}
 ```
@@ -64,28 +70,43 @@ Both `run` and `doctor` default to the current directory; pass
 1. Create the split plan with `session-split`.
 2. Run `session-expand` on the plan directory so expansion notes and parallel
    validation are available.
-3. Check the plan:
+3. If a pending session is still too large, resplit that session and regenerate
+   expansion guidance before running the loop:
+
+```text
+$session-resplit ~/.local/share/agent-plans/example-plan/ --session 2 --parts 2
+$session-expand ~/.local/share/agent-plans/example-plan/
+```
+
+4. Check the plan:
 
 ```bash
 asl status ~/.local/share/agent-plans/example-plan/
 ```
 
-1. Preview the first harness turn:
+5. Preview the first harness turn:
 
 ```bash
 asl run ~/.local/share/agent-plans/example-plan/ --harness codex --dry-run
 ```
 
-1. Run the loop:
+6. Run the loop:
 
 ```bash
 asl run ~/.local/share/agent-plans/example-plan/ --harness codex
 ```
 
-The runner stops when every `session-N.md` handoff status is `complete`, when
+The runner stops when every `session-<id>.md` handoff status is `complete`, when
 `--max-sessions` is reached, when an operator requests stop-after-current, or
 when a pause condition requires review. Resume a paused run by re-running the
 same command after fixing the blocker.
+
+`session-resplit` is plan maintenance, not a runner subcommand. It archives one
+pending parent `session-<id>.md`, writes nested pending children such as
+`session-2.1.md` and `session-2.2.md`, archives stale expansion and
+`parallel-validation.md` artifacts, and tells you to rerun `session-expand`.
+After expansion is regenerated, `asl status` and `asl run --dry-run` should show
+the first child as the next pending session.
 
 Optional auto-commit modes require the resolved working directory to be a clean
 git worktree before the first harness turn starts, and require `spec` on
@@ -205,10 +226,10 @@ sandbox.
 
 The runner itself never marks sessions complete. Durable completion is only the
 `- **Status**: complete` line inside the final `## Handoff` block of each
-`session-N.md` file. Operational state can be deleted and rebuilt from the plan
-files. After a successful turn, the runner may update recognized status tables
-in `manifest.md` and `context.md`, but those tables are derived bookkeeping;
-handoff statuses remain authoritative.
+`session-<id>.md` file. Operational state can be deleted and rebuilt from the
+plan files. After a successful turn, the runner may update recognized status
+tables in `manifest.md` and `context.md`, but those tables are derived
+bookkeeping; handoff statuses remain authoritative.
 
 ## State Files
 
@@ -228,19 +249,21 @@ Runtime files include:
 - `events.jsonl`: append-only run, pause, turn, and commit events.
 - `lock.json`: active per-plan runner lock.
 - `runs/<run_id>/`: immutable artifacts for one runner invocation.
-- `runs/<run_id>/turn-0001-session-N/stdout.log`: stdout from the harness turn.
-- `runs/<run_id>/turn-0001-session-N/stderr.log`: stderr from the harness turn.
-- `runs/<run_id>/turn-0001-session-N/last-message.txt`: final harness message
-  when available.
-- `runs/<run_id>/turn-0001-session-N/result.json`: diagnostic result for the
+- `runs/<run_id>/turn-0001-session-<id>/stdout.log`: stdout from the harness
+  turn.
+- `runs/<run_id>/turn-0001-session-<id>/stderr.log`: stderr from the harness
+  turn.
+- `runs/<run_id>/turn-0001-session-<id>/last-message.txt`: final harness
+  message when available.
+- `runs/<run_id>/turn-0001-session-<id>/result.json`: diagnostic result for the
   turn, including argv, status changes, runner signals, snapshots, and artifact
   paths.
-- `runs/<run_id>/commit-0001-session-N/stdout.log`: stdout from an automatic
+- `runs/<run_id>/commit-0001-session-<id>/stdout.log`: stdout from an automatic
   per-session `spec commit --yes --no-verify` invocation.
-- `runs/<run_id>/commit-0001-session-N/stderr.log`: stderr from that commit.
-- `runs/<run_id>/commit-0001-session-N/result.json`: diagnostic commit result,
-  including argv, cwd, return code, HEAD before/after, status result, commit
-  SHA when one was created, and artifact paths.
+- `runs/<run_id>/commit-0001-session-<id>/stderr.log`: stderr from that commit.
+- `runs/<run_id>/commit-0001-session-<id>/result.json`: diagnostic commit
+  result, including argv, cwd, return code, HEAD before/after, status result,
+  commit SHA when one was created, and artifact paths.
 - `runs/<run_id>/commit-0001-end/...`: equivalent artifacts for
   `--commit-at-end`.
 
@@ -255,12 +278,12 @@ Runtime files include:
 original `runs/<run_id>/` directory when a later retry succeeds.
 
 While a harness turn is active, `state.json` also includes `active_turn` with
-the run id, turn index, session number, artifact paths, elapsed and idle
-seconds, last activity metadata, heartbeat count, and any best-effort
-action-required signal. `events.jsonl` records `turn_started`,
+the run id, turn index, session ID, artifact paths, elapsed and idle seconds,
+last activity metadata, heartbeat count, and any best-effort action-required
+signal. `events.jsonl` records `turn_started`,
 `turn_heartbeat`, `action_required`, `turn_finished`, `commit_started`,
 `commit_finished`, `run_control`, `run_paused`, and `run_finished` events as
-they happen. Commit events include the commit index, scope, session number for
+they happen. Commit events include the commit index, scope, session ID for
 per-session commits, argv, cwd, artifact paths, status result, duration, and
 commit SHA when one was created. `run_control` events record
 `stop-after-current-requested`, `stop-after-current-canceled`, and
@@ -296,15 +319,17 @@ error fields are `ok`, `command`, `reason`, `error`, `paused`, and `details`.
 `details` fields; important run fields include `paused`, `reason`,
 `pause_reason`, `pause_details`, `model`, `model_source`, `effort`,
 `effort_source`, `commit_mode`, `commits`, `control`, `completed_sessions`,
-`turns`, `initial_snapshot`, `final_snapshot`, `state_path`, and
+`completed_session_ids`, `turns`, `initial_snapshot`, `final_snapshot`,
+`state_path`, and
 `events_path`. Runs without commit flags report `commit_mode: null` and
 `commits: []`.
 
-Commit payloads include `commit_index`, `scope`, `session`, `artifact_dir`,
-`stdout_path`, `stderr_path`, `result_path`, `argv`, `cwd`, `returncode`,
-`success`, `status_result`, `head_before`, `head_after`, `commit_sha`,
-`started_at`, `finished_at`, `duration_seconds`, `stdout_chars`, and
-`stderr_chars`. `status_result` is `success` only when the command exits zero
+Commit payloads include `commit_index`, `scope`, `session`, `session_id`,
+`artifact_dir`, `stdout_path`, `stderr_path`, `result_path`, `argv`, `cwd`,
+`returncode`, `success`, `status_result`, `head_before`, `head_after`,
+`commit_sha`, `started_at`, `finished_at`, `duration_seconds`, `stdout_chars`,
+and `stderr_chars`. Integer-only session commits also include
+`session_number`. `status_result` is `success` only when the command exits zero
 and changes `HEAD`; nonzero exits, missing `HEAD`, and unchanged `HEAD` are
 recorded as failed commit attempts. A failed commit is also copied into
 `pause_details.commit`.
@@ -315,12 +340,15 @@ metadata. Source values are `flag`, `codex_config`, `copilot_settings`, and
 `unresolved`; omitted effort is reported as `null`.
 
 `status --json` reports parsed session state, hashes, state paths, and lock
-state. `doctor --json` reports the resolved harness executable, generated
-prompt, argv, and model/effort metadata without invoking the harness. Text
-`run` and `doctor` output print the selected model after `Harness:` and print
-effort only when an explicit effort was supplied. `unlock --json` reports
-whether a lock existed, whether it was removed, whether it was active or stale,
-and the lock path.
+state. Each parsed session includes canonical string `id`; integer-only
+sessions also include numeric `number` for compatibility. The top-level
+`next_pending_id` is the canonical string ID, while `next_pending` remains a
+numeric value for integer-only plans and a string for dotted plans. `doctor
+--json` reports the resolved harness executable, generated prompt, argv, and
+model/effort metadata without invoking the harness. Text `run` and `doctor`
+output print the selected model after `Harness:` and print effort only when an
+explicit effort was supplied. `unlock --json` reports whether a lock existed,
+whether it was removed, whether it was active or stale, and the lock path.
 
 ## Pause Semantics
 
@@ -376,7 +404,7 @@ Inspect the most recent artifacts named in `state.json` or the JSON output:
 ```bash
 jq '.turns[-1] | {stdout_path, stderr_path, last_message_path, result_path}' ~/.local/state/agent-session-loop/<plan-path-hash>/state.json
 jq -r '.turns[-1].artifact_dir' ~/.local/state/agent-session-loop/<plan-path-hash>/state.json
-jq -r '.turns[-1].result_path' ~/.local/state/agent-session-loop/<plan-path-hash>/state.json | xargs jq '{session, returncode, status_changes, runner_pause, plan_error}'
+jq -r '.turns[-1].result_path' ~/.local/state/agent-session-loop/<plan-path-hash>/state.json | xargs jq '{session, session_id, returncode, status_changes, runner_pause, plan_error}'
 ```
 
 Follow the active or latest run:
@@ -404,7 +432,7 @@ asl unlock ~/.local/share/agent-plans/example-plan/ --force --json
 ```
 
 If a plan has no pending sessions but is not complete, inspect every final
-`session-N.md` handoff and normalize statuses to exactly `pending` or
+`session-<id>.md` handoff and normalize statuses to exactly `pending` or
 `complete`. Ignore older status templates preserved above the final handoff.
 
 ## Verification
@@ -412,6 +440,10 @@ If a plan has no pending sessions but is not complete, inspect every final
 Run the regression suite and compile check from this repository:
 
 ```bash
+python3 -m pytest tests/test_agent_session_loop.py
+python3 -m pytest skills/session-split/scripts/test_*.py skills/session-resplit/scripts/test_*.py
+python3 /Users/dev/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/session-resplit
+just sync-skills
 python3 -m unittest discover -s tests
 python3 -m py_compile agent_session_loop/*.py bin/.local/bin/agent-session-loop bin/.local/bin/asl
 ```
@@ -439,6 +471,10 @@ Manual smoke checklist:
   Python tracebacks.
 - Run `doctor --json` against a valid synthetic plan and confirm it reports the
   resolved harness executable, prompt, and invocation argv.
+- Create a synthetic plan with sessions `1`, `2`, and `3`; run
+  `$session-resplit <plan-dir>/ --session 2 --parts 2`, rerun
+  `$session-expand <plan-dir>/`, then confirm `asl status` and
+  `asl run --dry-run --json` report `2.1` as the next pending session.
 - Create a synthetic active lock, confirm `unlock --json` reports
   `reason: active-lock`, then run `unlock --force --json` and confirm the lock
   is removed.

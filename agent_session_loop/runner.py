@@ -158,8 +158,60 @@ def _commit_mode_payload(args: argparse.Namespace) -> str | None:
     return value if value in COMMIT_MODES else None
 
 
-def _status_map(snapshot: plans.PlanSnapshot) -> dict[int, plans.StatusValue]:
-    return {session.number: session.status for session in snapshot.sessions}
+def _session_number_alias(session_id: str) -> int | None:
+    parsed = plans.parse_session_id(session_id)
+    return parsed.as_int() if parsed.is_integer else None
+
+
+def _session_compat_value(session_id: str) -> int | str:
+    number = _session_number_alias(session_id)
+    return number if number is not None else session_id
+
+
+def _session_label(session_id: str) -> str:
+    return f"session {session_id}"
+
+
+def _session_path_label(session_id: str) -> str:
+    return f"session-{plans.parse_session_id(session_id).value}"
+
+
+def _session_identity_payload(session_id: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {"session": _session_compat_value(session_id)}
+    payload["session_id"] = session_id
+    number = _session_number_alias(session_id)
+    if number is not None:
+        payload["session_number"] = number
+    return payload
+
+
+def _session_details_payload(session_id: str) -> dict[str, Any]:
+    number = _session_number_alias(session_id)
+    if number is not None:
+        return {"session": number}
+    return {"session": session_id, "session_id": session_id}
+
+
+def _session_status_change_payload(
+    session_id: str,
+    *,
+    before: plans.StatusValue | None,
+    after: plans.StatusValue | None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "before": before,
+        "after": after,
+    }
+    number = _session_number_alias(session_id)
+    if number is None:
+        payload["id"] = session_id
+    else:
+        payload["number"] = number
+    return payload
+
+
+def _status_map(snapshot: plans.PlanSnapshot) -> dict[str, plans.StatusValue]:
+    return snapshot.status_by_id
 
 
 def _status_counts(snapshot: plans.PlanSnapshot) -> dict[str, int]:
@@ -203,16 +255,22 @@ def _invalid_status_pause(
 
 
 def _session_payload(session: plans.SessionStatus) -> dict[str, Any]:
-    return {
-        "number": session.number,
+    payload: dict[str, Any] = {
+        "id": session.id,
         "status": session.status,
         "path": str(session.path),
         "line_number": session.line_number,
         "raw_value": session.raw_value,
     }
+    number = _session_number_alias(session.id)
+    if number is not None:
+        payload["number"] = number
+    return payload
 
 
 def _snapshot_payload(snapshot: plans.PlanSnapshot) -> dict[str, Any]:
+    next_pending = snapshot.next_pending
+    next_pending_id = next_pending.id if next_pending is not None else None
     return {
         "plan_dir": str(snapshot.plan_dir),
         "plan_hash": snapshot.plan_hash,
@@ -220,8 +278,11 @@ def _snapshot_payload(snapshot: plans.PlanSnapshot) -> dict[str, Any]:
         "path_hash": snapshot.path_hash,
         "counts": _status_counts(snapshot),
         "next_pending": (
-            snapshot.next_pending.number if snapshot.next_pending is not None else None
+            _session_compat_value(next_pending_id)
+            if next_pending_id is not None
+            else None
         ),
+        "next_pending_id": next_pending_id,
         "sessions": [_session_payload(session) for session in snapshot.sessions],
     }
 
@@ -233,16 +294,19 @@ def _status_changes(
     before_statuses = _status_map(before)
     after_statuses = _status_map(after)
     changes: list[dict[str, Any]] = []
-    for number in sorted(set(before_statuses) | set(after_statuses)):
-        before_value = before_statuses.get(number)
-        after_value = after_statuses.get(number)
+    for session_id in sorted(
+        set(before_statuses) | set(after_statuses),
+        key=lambda value: plans.parse_session_id(value).sort_key,
+    ):
+        before_value = before_statuses.get(session_id)
+        after_value = after_statuses.get(session_id)
         if before_value != after_value:
             changes.append(
-                {
-                    "number": number,
-                    "before": before_value,
-                    "after": after_value,
-                }
+                _session_status_change_payload(
+                    session_id,
+                    before=before_value,
+                    after=after_value,
+                )
             )
     return tuple(changes)
 
@@ -250,14 +314,17 @@ def _status_changes(
 def _pending_completed(
     before: plans.PlanSnapshot,
     after: plans.PlanSnapshot,
-) -> tuple[int, ...]:
+) -> tuple[str, ...]:
     before_statuses = _status_map(before)
     after_statuses = _status_map(after)
     return tuple(
-        number
-        for number in sorted(before_statuses)
-        if before_statuses[number] == "pending"
-        and after_statuses.get(number) == "complete"
+        session_id
+        for session_id in sorted(
+            before_statuses,
+            key=lambda value: plans.parse_session_id(value).sort_key,
+        )
+        if before_statuses[session_id] == "pending"
+        and after_statuses.get(session_id) == "complete"
     )
 
 
@@ -462,9 +529,9 @@ def _prepare_stream_logs(paths: dict[str, Path]) -> harnesses.StreamCallback:
 
 
 def _turn_paths(
-    run_dir: Path, *, turn_index: int, session_number: int
+    run_dir: Path, *, turn_index: int, session_id: str
 ) -> dict[str, Path]:
-    artifact_dir = run_dir / f"turn-{turn_index:04d}-session-{session_number}"
+    artifact_dir = run_dir / f"turn-{turn_index:04d}-{_session_path_label(session_id)}"
     return {
         "artifact_dir": artifact_dir,
         "stdout": artifact_dir / "stdout.log",
@@ -478,13 +545,13 @@ def _commit_paths(
     run_dir: Path,
     *,
     commit_index: int,
-    session_number: int | None,
+    session_id: str | None,
 ) -> dict[str, Path]:
     if commit_index <= 0:
         raise RunError("commit_index must be a positive integer")
-    if session_number is not None and session_number <= 0:
-        raise RunError("session_number must be a positive integer")
-    suffix = f"session-{session_number}" if session_number is not None else "end"
+    if session_id is not None:
+        session_id = plans.parse_session_id(session_id).value
+    suffix = _session_path_label(session_id) if session_id is not None else "end"
     artifact_dir = run_dir / f"commit-{commit_index:04d}-{suffix}"
     return {
         "artifact_dir": artifact_dir,
@@ -522,8 +589,8 @@ def _turn_status_result(
     *,
     result: harnesses.HarnessResult,
     status_changes: tuple[dict[str, Any], ...],
-    pending_completed: tuple[int, ...],
-    session_number: int,
+    pending_completed: tuple[str, ...],
+    session_id: str,
     runner_signals: dict[str, Any],
     plan_error: str | None,
 ) -> str:
@@ -539,14 +606,14 @@ def _turn_status_result(
         return "no-status-change"
     if len(status_changes) > 1:
         return "multiple-status-changes"
-    expected_change = {
-        "number": session_number,
-        "before": "pending",
-        "after": "complete",
-    }
+    expected_change = _session_status_change_payload(
+        session_id,
+        before="pending",
+        after="complete",
+    )
     if status_changes != (expected_change,):
         return "unexpected-status-change"
-    if pending_completed == (session_number,):
+    if pending_completed == (session_id,):
         return "complete"
     return "unknown"
 
@@ -559,7 +626,7 @@ def _write_turn_artifacts(
     after: plans.PlanSnapshot | None,
     run_id: str,
     turn_index: int,
-    session_number: int,
+    session_id: str,
     live_turn: dict[str, Any],
     plan_error: str | None = None,
 ) -> dict[str, Any]:
@@ -574,14 +641,14 @@ def _write_turn_artifacts(
         result=result,
         status_changes=status_changes,
         pending_completed=pending_completed,
-        session_number=session_number,
+        session_id=session_id,
         runner_signals=runner_signals,
         plan_error=plan_error,
     )
     payload = {
         "run_id": run_id,
         "turn_index": turn_index,
-        "session": session_number,
+        **_session_identity_payload(session_id),
         "total_sessions": live_turn.get("total_sessions"),
         "artifact_dir": str(paths["artifact_dir"]),
         "harness": result.name,
@@ -597,7 +664,10 @@ def _write_turn_artifacts(
         "last_message_path": str(paths["last_message"]),
         "result_path": str(paths["result"]),
         "status_changes": list(status_changes),
-        "pending_completed": list(pending_completed),
+        "pending_completed": [
+            _session_compat_value(completed_id) for completed_id in pending_completed
+        ],
+        "pending_completed_ids": list(pending_completed),
         "status_result": status_result,
         "started_at": live_turn["started_at"],
         "finished_at": live_turn["finished_at"],
@@ -664,13 +734,13 @@ def _run_spec_commit(
     cwd: Path,
     run_dir: Path,
     commit_index: int,
-    session_number: int | None,
+    session_id: str | None,
 ) -> dict[str, Any]:
     canonical_cwd = plans.canonicalize_path(cwd)
     paths = _commit_paths(
         run_dir,
         commit_index=commit_index,
-        session_number=session_number,
+        session_id=session_id,
     )
     argv = list(COMMIT_ARGV)
     head_before_payload = _read_git_head(canonical_cwd)
@@ -710,10 +780,15 @@ def _run_spec_commit(
         head_before=head_before,
         head_after=head_after,
     )
+    session_identity = (
+        _session_identity_payload(session_id)
+        if session_id is not None
+        else {"session": None, "session_id": None}
+    )
     payload = {
         "commit_index": commit_index,
-        "scope": "session" if session_number is not None else "end",
-        "session": session_number,
+        "scope": "session" if session_id is not None else "end",
+        **session_identity,
         "artifact_dir": str(paths["artifact_dir"]),
         "stdout_path": str(paths["stdout"]),
         "stderr_path": str(paths["stderr"]),
@@ -751,18 +826,23 @@ def _commit_started_payload(
     cwd: Path,
     run_dir: Path,
     commit_index: int,
-    session_number: int | None,
+    session_id: str | None,
 ) -> dict[str, Any]:
     paths = _commit_paths(
         run_dir,
         commit_index=commit_index,
-        session_number=session_number,
+        session_id=session_id,
+    )
+    session_identity = (
+        _session_identity_payload(session_id)
+        if session_id is not None
+        else {"session": None, "session_id": None}
     )
     return {
         "run_id": run_id,
         "commit_index": commit_index,
-        "scope": "session" if session_number is not None else "end",
-        "session": session_number,
+        "scope": "session" if session_id is not None else "end",
+        **session_identity,
         "artifact_dir": str(paths["artifact_dir"]),
         "stdout_path": str(paths["stdout"]),
         "stderr_path": str(paths["stderr"]),
@@ -867,7 +947,7 @@ def _format_local_datetime(value: Any) -> str:
 
 
 def _format_session_label(payload: dict[str, Any]) -> str:
-    session = payload.get("session")
+    session = payload.get("session_id") or payload.get("session")
     total = payload.get("total_sessions")
     if total is None:
         return str(session)
@@ -876,7 +956,7 @@ def _format_session_label(payload: dict[str, Any]) -> str:
 
 def _progress_commit_label(commit: dict[str, Any]) -> str:
     scope = commit.get("scope")
-    session = commit.get("session")
+    session = commit.get("session_id") or commit.get("session")
     if scope == "session" and session is not None:
         return f"session {session}"
     if scope == "end":
@@ -1076,6 +1156,7 @@ class _LiveTurn:
                 "run_id": self._active_turn["run_id"],
                 "turn_index": self._active_turn["turn_index"],
                 "session": self._active_turn["session"],
+                "session_id": self._active_turn.get("session_id"),
                 "total_sessions": self._active_turn.get("total_sessions"),
                 "artifact_dir": self._active_turn["artifact_dir"],
                 "stdout_path": self._active_turn["stdout_path"],
@@ -1090,6 +1171,8 @@ class _LiveTurn:
                 "idle_seconds": _duration_seconds(self._last_activity_at, now),
                 "heartbeat_count": heartbeat_count,
             }
+            if self._active_turn.get("session_number") is not None:
+                heartbeat["session_number"] = self._active_turn["session_number"]
             self._active_turn["last_heartbeat_at"] = heartbeat["created_at"]
             self._active_turn["heartbeat_count"] = heartbeat_count
             self._active_turn["elapsed_seconds"] = heartbeat["elapsed_seconds"]
@@ -1112,6 +1195,7 @@ class _LiveTurn:
             "run_id": self._active_turn["run_id"],
             "turn_index": self._active_turn["turn_index"],
             "session": self._active_turn["session"],
+            "session_id": self._active_turn.get("session_id"),
             "total_sessions": self._active_turn.get("total_sessions"),
             "artifact_dir": self._active_turn["artifact_dir"],
             "stdout_path": self._active_turn["stdout_path"],
@@ -1123,7 +1207,11 @@ class _LiveTurn:
             "message": signal["message"],
             "source": signal["source"],
             "matched": signal["matched"],
-        }
+        } | (
+            {"session_number": self._active_turn["session_number"]}
+            if self._active_turn.get("session_number") is not None
+            else {}
+        )
 
 
 def _run_auto_commit(
@@ -1134,7 +1222,7 @@ def _run_auto_commit(
     cwd: Path,
     run_dir: Path,
     run_id: str,
-    session_number: int | None,
+    session_id: str | None,
 ) -> dict[str, Any]:
     commit_index = len(payload["commits"]) + 1
     commit_started = _commit_started_payload(
@@ -1142,7 +1230,7 @@ def _run_auto_commit(
         cwd=cwd,
         run_dir=run_dir,
         commit_index=commit_index,
-        session_number=session_number,
+        session_id=session_id,
     )
     _append_event(event_path, events.COMMIT_STARTED_EVENT, commit_started)
     _write_state_payload(payload)
@@ -1152,7 +1240,7 @@ def _run_auto_commit(
         cwd=cwd,
         run_dir=run_dir,
         commit_index=commit_index,
-        session_number=session_number,
+        session_id=session_id,
     )
     payload["commits"].append(commit_payload)
     commit_finished = {"run_id": run_id, **commit_payload}
@@ -1287,6 +1375,7 @@ def _initial_payload(
         lock_path=str(lock_info.path),
         harness_config=config.harness_config_payload(),
         completed_sessions=[],
+        completed_session_ids=[],
         commits=[],
         turns=[],
         control=_initial_control_payload(),
@@ -1307,12 +1396,13 @@ def _dry_run_payload(
     if next_pending is None:
         return {
             "next_pending": None,
+            "next_pending_id": None,
             "prompt": None,
             "invocation": None,
             **model_effort,
         }
 
-    paths = _turn_paths(run_dir, turn_index=1, session_number=next_pending.number)
+    paths = _turn_paths(run_dir, turn_index=1, session_id=next_pending.id)
     invocation = build_harness_invocation(
         args.harness,
         cwd=cwd,
@@ -1323,7 +1413,8 @@ def _dry_run_payload(
         effort=args.effort,
     )
     return {
-        "next_pending": next_pending.number,
+        "next_pending": _session_compat_value(next_pending.id),
+        "next_pending_id": next_pending.id,
         "prompt": build_session_prompt(args.harness, snapshot.plan_dir),
         "invocation": _build_invocation_payload(
             invocation,
@@ -1491,12 +1582,16 @@ def _run_locked(
         pending_session = before.next_pending
         if pending_session is None:
             break
+        session_id = pending_session.id
+        session_label = _session_label(session_id)
+        session_identity = _session_identity_payload(session_id)
+        session_details = _session_details_payload(session_id)
 
         turn_index = len(payload["turns"]) + 1
         paths = _turn_paths(
             run_dir,
             turn_index=turn_index,
-            session_number=pending_session.number,
+            session_id=session_id,
         )
         prompt = build_session_prompt(args.harness, before.plan_dir)
         turn_started_at = _utc_now()
@@ -1509,7 +1604,7 @@ def _run_locked(
         active_turn = {
             "run_id": run_id,
             "turn_index": turn_index,
-            "session": pending_session.number,
+            **session_identity,
             "total_sessions": total_sessions,
             "artifact_dir": str(paths["artifact_dir"]),
             "prompt": prompt,
@@ -1589,7 +1684,7 @@ def _run_locked(
             after=after,
             run_id=run_id,
             turn_index=turn_index,
-            session_number=pending_session.number,
+            session_id=session_id,
             live_turn=live_turn_payload,
             plan_error=plan_error,
         )
@@ -1608,8 +1703,8 @@ def _run_locked(
                 event_path,
                 payload,
                 reason="timeout",
-                message=f"harness turn timed out for session {pending_session.number}",
-                details={"session": pending_session.number},
+                message=f"harness turn timed out for {session_label}",
+                details=session_details,
             )
             break
         if after is None:
@@ -1619,7 +1714,7 @@ def _run_locked(
                 payload,
                 reason="malformed-plan",
                 message="plan could not be inspected after the harness turn",
-                details={"error": plan_error, "session": pending_session.number},
+                details={"error": plan_error, **session_details},
             )
             break
 
@@ -1632,7 +1727,7 @@ def _run_locked(
                 payload,
                 reason=reason,
                 message=message,
-                details=details | {"session": pending_session.number},
+                details=details | session_details,
             )
             break
 
@@ -1645,7 +1740,7 @@ def _run_locked(
                 reason="runner-pause",
                 message=str(runner_pause),
                 details={
-                    "session": pending_session.number,
+                    **session_details,
                     "source": turn_payload.get("runner_pause_source"),
                 },
             )
@@ -1658,21 +1753,21 @@ def _run_locked(
                 reason="nonzero-exit",
                 message=(
                     f"harness exited with status {result.returncode} "
-                    f"for session {pending_session.number}"
+                    f"for {session_label}"
                 ),
                 details={
-                    "session": pending_session.number,
+                    **session_details,
                     "returncode": result.returncode,
                 },
             )
             break
 
         expected_change = (
-            {
-                "number": pending_session.number,
-                "before": "pending",
-                "after": "complete",
-            },
+            _session_status_change_payload(
+                session_id,
+                before="pending",
+                after="complete",
+            ),
         )
         status_changes = _status_changes(before, after)
         if not status_changes:
@@ -1683,9 +1778,9 @@ def _run_locked(
                 event_path,
                 payload,
                 reason="no-status-change",
-                message=f"session {pending_session.number} did not change status",
+                message=f"{session_label} did not change status",
                 details={
-                    "session": pending_session.number,
+                    **session_details,
                     "expected_status_changes": list(expected_change),
                     "observed_status_changes": [],
                 },
@@ -1701,7 +1796,7 @@ def _run_locked(
                 reason="multiple-status-changes",
                 message="more than one session status changed during one harness turn",
                 details={
-                    "session": pending_session.number,
+                    **session_details,
                     "expected_status_changes": list(expected_change),
                     "observed_status_changes": list(status_changes),
                 },
@@ -1717,7 +1812,7 @@ def _run_locked(
                 reason="unexpected-status-change",
                 message="the changed session status did not match the expected pending completion",
                 details={
-                    "session": pending_session.number,
+                    **session_details,
                     "expected_status_changes": list(expected_change),
                     "observed_status_changes": list(status_changes),
                 },
@@ -1734,7 +1829,7 @@ def _run_locked(
                 reason="malformed-plan",
                 message="derived status ledgers could not be synced",
                 details={
-                    "session": pending_session.number,
+                    **session_details,
                     "error": str(error),
                 },
             )
@@ -1750,7 +1845,7 @@ def _run_locked(
                     reason="malformed-plan",
                     message="plan could not be inspected after syncing ledgers",
                     details={
-                        "session": pending_session.number,
+                        **session_details,
                         "error": str(error),
                     },
                 )
@@ -1767,7 +1862,7 @@ def _run_locked(
                 cwd=cwd,
                 run_dir=run_dir,
                 run_id=run_id,
-                session_number=pending_session.number,
+                session_id=session_id,
             )
             if not commit_payload["success"]:
                 payload["final_snapshot"] = _snapshot_payload(after)
@@ -1777,16 +1872,17 @@ def _run_locked(
                     reason="commit-failed",
                     message=(
                         "auto-commit failed after session "
-                        f"{pending_session.number} completed"
+                        f"{session_id} completed"
                     ),
                     details={
-                        "session": pending_session.number,
+                        **session_details,
                         "commit": commit_payload,
                     },
                 )
                 break
 
-        payload["completed_sessions"].append(pending_session.number)
+        payload["completed_sessions"].append(_session_compat_value(session_id))
+        payload.setdefault("completed_session_ids", []).append(session_id)
         completed_count += 1
         snapshot = after
         payload["final_snapshot"] = _snapshot_payload(snapshot)
@@ -1814,7 +1910,7 @@ def _run_locked(
                         cwd=cwd,
                         run_dir=run_dir,
                         run_id=run_id,
-                        session_number=None,
+                        session_id=None,
                     )
                     if not commit_payload["success"]:
                         _pause_run(
@@ -1887,6 +1983,7 @@ def _error_payload(
         cwd=str(cwd) if cwd is not None else str(getattr(args, "cwd", "")),
         harness=getattr(args, "harness", None),
         completed_sessions=[],
+        completed_session_ids=[],
         turns=[],
     )
     payload.update(_selected_model_effort_payload(args))
@@ -1921,7 +2018,7 @@ def _print_model_effort_lines(payload: dict[str, Any]) -> None:
 
 def _commit_scope_label(commit: dict[str, Any]) -> str:
     scope = commit.get("scope")
-    session = commit.get("session")
+    session = commit.get("session_id") or commit.get("session")
     if scope == "session" and session is not None:
         return f"session {session}"
     if scope == "end":
@@ -2215,7 +2312,12 @@ def doctor_from_args(args: argparse.Namespace) -> int:
                 cwd=str(cwd),
                 plan_dir=str(snapshot.plan_dir),
                 next_pending=(
-                    snapshot.next_pending.number
+                    _session_compat_value(snapshot.next_pending.id)
+                    if snapshot.next_pending is not None
+                    else None
+                ),
+                next_pending_id=(
+                    snapshot.next_pending.id
                     if snapshot.next_pending is not None
                     else None
                 ),
@@ -2243,7 +2345,7 @@ def doctor_from_args(args: argparse.Namespace) -> int:
     if snapshot.next_pending is None:
         print("Next pending: none")
     else:
-        print(f"Next pending: session {snapshot.next_pending.number}")
+        print(f"Next pending: session {snapshot.next_pending.id}")
     print(f"Prompt: {prompt}")
     print("Argv:")
     for arg in invocation.argv:

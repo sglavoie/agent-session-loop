@@ -29,12 +29,16 @@ Examples:
 ```
 $session-expand ~/.local/share/agent-plans/my-plan-abc123def456/
 $session-expand ~/.local/share/agent-plans/my-plan-abc123def456/session-2.md
+$session-expand ~/.local/share/agent-plans/my-plan-abc123def456/session-2.1.md
 /session-expand ~/.local/share/agent-plans/my-plan-abc123def456/
 /session-expand ~/.local/share/agent-plans/my-plan-abc123def456/session-2.md
+/session-expand ~/.local/share/agent-plans/my-plan-abc123def456/session-2.1.md
 ```
 
-- **Directory path**: expand all session files in the directory.
-- **Single file path**: expand only that session file.
+- **Directory path**: expand all canonical session files in the directory.
+- **Single session file path**: expand only that session file.
+
+Session IDs use `[1-9][0-9]*(\.[1-9][0-9]*)*`. Session files are named `session-<ID>.md`, and expansion files are named `session-<ID>.expand.md`.
 
 ## Instructions
 
@@ -44,13 +48,15 @@ $session-expand ~/.local/share/agent-plans/my-plan-abc123def456/session-2.md
 
 1. Read `context.md` to understand the project scope, target repository, and files listed.
 2. Read `manifest.md` to get the session list, titles, and optional `## Parallel Execution` scheduling guidance.
-3. Collect all `session-*.md` files (sorted numerically by session number).
+3. Collect exact session files whose basename matches `session-<ID>.md`, where `<ID>` matches `[1-9][0-9]*(\.[1-9][0-9]*)*`. Exclude expansion files such as `session-2.expand.md` and `session-2.1.expand.md`.
+4. Sort session files by dotted numeric order: compare dot-separated components as integers, and when all compared components are equal, the shorter ID sorts first. For example, `2` sorts before `2.1`, and `2.10` sorts after `2.2`.
 
 **Single file mode** (path ends with `.md`):
 
 1. Derive the plan directory from the file's parent directory.
 2. Read `context.md` from the same directory.
-3. Process only the specified session file.
+3. Verify the selected file basename matches exactly `session-<ID>.md`, where `<ID>` matches `[1-9][0-9]*(\.[1-9][0-9]*)*`.
+4. Process only the specified session file and write the corresponding `session-<ID>.expand.md`.
 
 **Determine the codebase root** from `context.md`. Look for:
 
@@ -90,6 +96,8 @@ Separately collect each session's `## Parallel Metadata` block when present:
 - Forbidden/shared paths
 - Serial blockers
 - Optional internal tracks
+
+Required prior session and allowed concurrent session references may use dotted session IDs. Accept references such as `2`, `2.1`, `session 2.1`, or a comma/space-separated list of those IDs, and treat `none` as an empty list.
 
 Treat these as scheduling claims to validate during the directory-mode cross-session check. Do not count missing parallel metadata as a path/signature/field/dependency/behavior/naming issue.
 
@@ -145,7 +153,7 @@ Verify each claim using the most efficient tool:
 
 When processing all sessions, verify:
 
-1. **Creation order**: If session N references a file or function that session M (M < N) is supposed to create, confirm session M's scope actually covers that creation.
+1. **Creation order**: If session `<ID>` references a file or function that an earlier session `<PRIOR_ID>` in dotted numeric order is supposed to create, confirm the earlier session's scope actually covers that creation.
 2. **Handoff consistency**: If a completed session has a filled Handoff section, check whether its "Files modified" list matches what later sessions assume exists.
 3. **Missing gaps**: Flag anything that no session creates but a later session depends on.
 
@@ -153,7 +161,7 @@ Then validate parallel metadata using all session files, `manifest.md`, and the 
 
 1. **Metadata completeness**: Confirm each `## Parallel Metadata` block uses known fields and one of these classifications: `parallel-safe`, `parallel-candidate`, or `serial-required`. Flag unknown classifications or missing required fields.
 2. **Required prior sessions**: Check whether implementation instructions, generated-output usage, handoff references, or verified dependencies imply prior sessions that are absent from `Required prior sessions`. Record the added required prior sessions.
-3. **Allowed concurrency**: For each session listed in `Allowed concurrent sessions`, confirm neither session requires the other, neither shares overlapping write ownership, and neither touches a forbidden/shared path owned by the other.
+3. **Allowed concurrency**: For each session ID listed in `Allowed concurrent sessions`, confirm neither session requires the other, neither shares overlapping write ownership, and neither touches a forbidden/shared path owned by the other.
 4. **Owned write paths**: Treat exact path overlap, parent/child path overlap, broad directory ownership, generated-output directories, shared configs, schemas, migrations, lockfiles, package-manager metadata, build-system files, and repo-wide rewrite instructions as unsafe unless the plan assigns a single clear owner and the other sessions avoid that path.
 5. **Forbidden/shared paths**: Confirm forbidden/shared paths are not also listed as owned write paths by the same session and are not claimed as allowed concurrent write scope by another session.
 6. **Safety classification**: Keep `parallel-safe` only when ownership is concrete, dependencies are satisfied by prior sessions or absent, and allowed concurrent sessions are demonstrably disjoint. Treat `parallel-candidate` and `serial-required` as not safe for concurrent execution unless validation proves narrower ownership and dependency boundaries. Flag uncertain or broad ownership as unsafe instead of inferring safety.
@@ -183,12 +191,12 @@ Include the file path and line range for each pattern.
 
 ### Step 6: Write Annotation Files
 
-For each session file `session-N.md`, write `session-N.expand.md` in the same directory.
+For each session file `session-<ID>.md`, write `session-<ID>.expand.md` in the same directory. Preserve the exact dotted ID from the source filename in annotation filenames, headings, dependency references, and blockquotes.
 
 **File structure**:
 
 ```markdown
-# Session N Expansion: <title>
+# Session <ID> Expansion: <title>
 
 **Expanded**: <YYYY-MM-DD>
 **Codebase root**: `<path>`
@@ -237,16 +245,16 @@ For each session file `session-N.md`, write `session-N.expand.md` in the same di
 
 <!-- Only for multi-session expansion -->
 
-- **Requires from session <M>**: <what this session assumes session M created>
-- **Provides for session <M>**: <what this session creates that session M needs>
+- **Requires from session <ID>**: <what this session assumes session <ID> created>
+- **Provides for session <ID>**: <what this session creates that session <ID> needs>
 
 ## Parallel Safety
 
 <!-- Only for directory-mode expansion when cross-session context is available -->
 
 - **Validated classification**: <parallel-safe | parallel-candidate | serial-required | blocked>
-- **Required prior sessions**: <none | session numbers and reasons, including validation-added requirements>
-- **Allowed concurrent sessions**: <none | session numbers validated as disjoint>
+- **Required prior sessions**: <none | session IDs and reasons, including validation-added requirements>
+- **Allowed concurrent sessions**: <none | session IDs validated as disjoint>
 - **Ownership findings**: <none | unsafe overlaps, broad ownership, ambiguous ownership, forbidden/shared path conflicts>
 - **Session-run markers**: <none | blocked | unsafe to run now | ownership-conflicted | dependent on unresolved work>
 ```
@@ -271,11 +279,11 @@ Use this structure:
 
 ## Session Results
 
-### Session <N>: <title>
+### Session <ID>: <title>
 
 - **Validated classification**: <parallel-safe | parallel-candidate | serial-required | blocked>
-- **Required prior sessions**: <none | session numbers and reasons>
-- **Allowed concurrent sessions**: <none | session numbers>
+- **Required prior sessions**: <none | session IDs and reasons>
+- **Allowed concurrent sessions**: <none | session IDs>
 - **Run condition**: <safe to run now | unsafe to run now | blocked | ownership-conflicted | dependent on unresolved work>
 - **Findings**: <none | concise findings>
 
@@ -298,13 +306,13 @@ Use this structure:
 
 Use explicit blocking language in `parallel-validation.md` when `session-run` should fail closed for explicit-mode execution: `blocked`, `unsafe to run now`, `ownership-conflicted`, `dependent on unresolved work`, or `required prior sessions`.
 
-**After writing each annotation file**, edit the corresponding `session-N.md` to add a reference. Insert a new blockquote line immediately after the `> **Before starting**:` line:
+**After writing each annotation file**, edit the corresponding `session-<ID>.md` to add a reference. Insert a new blockquote line immediately after the `> **Before starting**:` line:
 
 ```
-> **Expansion notes**: Read `session-N.expand.md` for verified line numbers, corrected paths, and patterns to reuse.
+> **Expansion notes**: Read `session-<ID>.expand.md` for verified line numbers, corrected paths, and patterns to reuse.
 ```
 
-Use the actual session number for N. If the line already exists (idempotence), skip the edit for that file.
+Use the actual session ID from the filename. If the line already exists with the same expansion filename (idempotence), skip the edit for that file.
 
 Rules:
 
@@ -321,7 +329,7 @@ Print a concise summary:
 
 1. Number of sessions expanded
 2. Total claims checked and total issues found
-3. Per-session one-liner: `session-N: <claims> checked / <issues> issues — <worst issue description or "clean">`
+3. Per-session one-liner: `session-<ID>: <claims> checked / <issues> issues — <worst issue description or "clean">`
 4. Blocking issues highlighted prominently (wrong file paths, missing dependencies)
 5. Parallel validation summary when directory-mode validation was performed
 6. List of annotation files created and whether `parallel-validation.md` was written

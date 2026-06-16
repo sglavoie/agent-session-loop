@@ -120,7 +120,7 @@ def _format_local_datetime(value: Any) -> str:
 
 def _progress_commit_label(payload: dict[str, Any]) -> str:
     scope = payload.get("scope")
-    session = payload.get("session")
+    session = payload.get("session_id") or payload.get("session")
     if scope == "session" and session is not None:
         return f"session {session}"
     if scope == "end":
@@ -129,7 +129,7 @@ def _progress_commit_label(payload: dict[str, Any]) -> str:
 
 
 def _format_session_label(payload: dict[str, Any]) -> str:
-    session = payload.get("session", "unknown")
+    session = payload.get("session_id") or payload.get("session", "unknown")
     total = payload.get("total_sessions")
     if total is None:
         return str(session)
@@ -139,7 +139,7 @@ def _format_session_label(payload: dict[str, Any]) -> str:
 def _run_started_message(payload: dict[str, Any]) -> str:
     run_id = payload.get("run_id", "unknown")
     harness = payload.get("harness", "unknown")
-    next_pending = payload.get("next_pending")
+    next_pending = payload.get("next_pending_id") or payload.get("next_pending")
     next_label = "none" if next_pending is None else f"session {next_pending}"
     parts = [
         f"run started: harness {harness}",
@@ -251,7 +251,7 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
     run_id = payload.get("run_id")
     if run_id is not None:
         parts.append(f"run {run_id}")
-    session = payload.get("session")
+    session = payload.get("session_id") or payload.get("session")
     if session is not None:
         parts.append(f"session {session}")
     turn_index = payload.get("turn_index")
@@ -286,7 +286,8 @@ def _add_log_targets(
             {
                 "path": path,
                 "stream": stream_name,
-                "session": payload.get("session"),
+                "session": payload.get("session_id") or payload.get("session"),
+                "session_id": payload.get("session_id"),
                 "turn_index": payload.get("turn_index"),
                 "commit_index": payload.get("commit_index"),
                 "scope": payload.get("scope"),
@@ -386,6 +387,21 @@ def _read_new_log_text(
     return [f"{prefix}{line}" for line in text.splitlines()]
 
 
+def _int_sort_key(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _session_sort_key(value: Any) -> tuple[tuple[int, ...], str]:
+    try:
+        parsed = plans.parse_session_id(value)
+    except (TypeError, ValueError):
+        return ((sys.maxsize,), str(value or ""))
+    return (parsed.sort_key, parsed.value)
+
+
 def _print_lines(lines: list[str], out: TextIO) -> None:
     for line in lines:
         print(line, file=out, flush=True)
@@ -407,8 +423,8 @@ def _emit_recent(
     for target in sorted(
         targets.values(),
         key=lambda value: (
-            int(value.get("turn_index") or 0),
-            int(value.get("session") or 0),
+            _int_sort_key(value.get("turn_index")),
+            _session_sort_key(value.get("session_id") or value.get("session")),
             str(value.get("stream")),
         ),
     ):

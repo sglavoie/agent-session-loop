@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
+import shlex
 import sys
 import time
 
@@ -12,6 +14,7 @@ import time
 STATUS_PENDING = "- **Status**: pending"
 STATUS_COMPLETE = "- **Status**: complete"
 HANDOFF_HEADING = "## Handoff"
+SESSION_FILE_RE = re.compile(r"^session-([1-9][0-9]*(?:\.[1-9][0-9]*)*)\.md$")
 
 
 def _arg_value(flag: str) -> str | None:
@@ -24,12 +27,25 @@ def _arg_value(flag: str) -> str | None:
     return sys.argv[index + 1]
 
 
-def _session_number(path: Path) -> int:
-    return int(path.stem.split("-", 1)[1])
+def _session_id(path: Path) -> str | None:
+    match = SESSION_FILE_RE.fullmatch(path.name)
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def _session_sort_key(path: Path) -> tuple[int, ...]:
+    session_id = _session_id(path)
+    if session_id is None:
+        raise ValueError(f"not a session file: {path.name}")
+    return tuple(int(component) for component in session_id.split("."))
 
 
 def _session_files(plan_dir: Path) -> list[Path]:
-    return sorted(plan_dir.glob("session-*.md"), key=_session_number)
+    return sorted(
+        (path for path in plan_dir.glob("session-*.md") if _session_id(path)),
+        key=_session_sort_key,
+    )
 
 
 def _pending_sessions(plan_dir: Path) -> list[Path]:
@@ -38,6 +54,44 @@ def _pending_sessions(plan_dir: Path) -> list[Path]:
         for path in _session_files(plan_dir)
         if _handoff_status_line(path) == STATUS_PENDING
     ]
+
+
+def _prompt_tokens() -> list[str]:
+    for value in reversed(sys.argv[1:]):
+        if "session-run" not in value:
+            continue
+        try:
+            return shlex.split(value)
+        except ValueError:
+            return value.split()
+    return []
+
+
+def _selected_session(plan_dir: Path) -> Path | None:
+    tokens = _prompt_tokens()
+    for index, token in enumerate(tokens):
+        if token != "--session":
+            continue
+        if index + 1 >= len(tokens):
+            return None
+        session_id = tokens[index + 1]
+        if SESSION_FILE_RE.fullmatch(f"session-{session_id}.md") is None:
+            return None
+        return plan_dir / f"session-{session_id}.md"
+
+    for token in tokens:
+        path = Path(token)
+        if _session_id(path) is None:
+            continue
+        return path if path.is_absolute() else plan_dir / path.name
+    return None
+
+
+def _session_label(path: Path) -> str:
+    session_id = _session_id(path)
+    if session_id is None:
+        raise ValueError(f"not a session file: {path.name}")
+    return session_id
 
 
 def _handoff_status_line(path: Path) -> str | None:
@@ -136,7 +190,14 @@ def main() -> int:
         return 0
 
     if mode == "success":
-        if pending:
+        selected = _selected_session(plan_dir)
+        if (
+            selected is not None
+            and selected.is_file()
+            and _handoff_status_line(selected) == STATUS_PENDING
+        ):
+            _mark_complete(selected)
+        elif pending:
             _mark_complete(pending[0])
         _write_last_message("Runner status: complete\nNext command: $session-run plan/\n")
         print("completed one session")
@@ -148,19 +209,19 @@ def main() -> int:
             print("no pending sessions", flush=True)
             return 0
 
-        session_number = _session_number(pending[0])
-        print(f"session {session_number} stdout before completion", flush=True)
+        session_label = _session_label(pending[0])
+        print(f"session {session_label} stdout before completion", flush=True)
         print(
-            f"session {session_number} stderr before completion",
+            f"session {session_label} stderr before completion",
             file=sys.stderr,
             flush=True,
         )
         _step_sleep()
         _mark_complete(pending[0])
         _write_last_message("Runner status: complete\nNext command: $session-run plan/\n")
-        print(f"session {session_number} stdout after completion", flush=True)
+        print(f"session {session_label} stdout after completion", flush=True)
         print(
-            f"session {session_number} stderr after completion",
+            f"session {session_label} stderr after completion",
             file=sys.stderr,
             flush=True,
         )

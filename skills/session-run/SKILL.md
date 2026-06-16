@@ -29,17 +29,21 @@ Examples:
 ```
 $session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/
 $session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --session 2
+$session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --session 2.1
 $session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/session-2.md
+$session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/session-2.1.md
 /session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/
 /session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --session 2
+/session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --session 2.1
 /session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/session-2.md
+/session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/session-2.1.md
 ```
 
 Accepted input forms:
 
 - **Directory auto-advance**: `<plan-dir>/` keeps the serial workflow and selects the first pending session.
-- **Explicit flag**: `<plan-dir>/ --session <N>` runs exactly `session-N.md`.
-- **Direct session file**: `<plan-dir>/session-N.md` runs exactly that session.
+- **Explicit flag**: `<plan-dir>/ --session <ID>` runs exactly `session-<ID>.md`, where `<ID>` is a session ID such as `2` or `2.1`.
+- **Direct session file**: `<plan-dir>/session-<ID>.md` runs exactly that session.
 
 Concurrent auto-advance invocations are unsafe because multiple workers can select the same pending session. Parallel workers must use an explicit session target assigned by a coordinator.
 
@@ -50,14 +54,14 @@ Concurrent auto-advance invocations are unsafe because multiple workers can sele
 Trim trailing whitespace from the invocation argument and determine the execution mode:
 
 - **Directory auto-advance mode**: the input is a directory path with no extra selector.
-- **Explicit flag mode**: the input is a directory path followed by exactly `--session <N>`, where `<N>` is a positive integer.
-- **Direct file mode**: the input is a path ending in `session-N.md`; derive the plan directory from the file's parent directory and the selected session number from the filename.
+- **Explicit flag mode**: the input is a directory path followed by exactly `--session <ID>`, where `<ID>` matches `[1-9][0-9]*(\.[1-9][0-9]*)*`.
+- **Direct file mode**: the input is a path ending in `session-<ID>.md`; derive the plan directory from the file's parent directory and the selected session ID from the filename.
 
 Reject malformed inputs and stop without making changes:
 
 - Unknown flags or extra positional arguments
-- `--session` without a positive integer
-- A direct file path whose basename is not exactly `session-N.md`
+- `--session` without a valid session ID
+- A direct file path whose basename is not exactly `session-<ID>.md` with a valid session ID
 - A selected session file that does not exist
 
 Verify the resolved plan directory exists and contains `manifest.md` and `context.md`.
@@ -72,7 +76,9 @@ If `<plan-dir>/parallel-validation.md` exists, read it before selecting or imple
 
 ### Step 3: Build Session Status Map
 
-Build the numerically sorted exact session file list first (`session-N.md`, excluding `session-N.expand.md`).
+Build the exact session file list first (`session-<ID>.md`, excluding `session-<ID>.expand.md`). Session IDs must match `[1-9][0-9]*(\.[1-9][0-9]*)*`.
+
+Sort session files by dotted numeric order: compare dot-separated components as integers, and when all compared components are equal, the shorter ID sorts first. For example, `2` sorts before `2.1`, and `2.10` sorts after `2.2`.
 
 For each session file, read the status from the final exact `## Handoff` block:
 
@@ -81,15 +87,15 @@ For each session file, read the status from the final exact `## Handoff` block:
 - Ignore any `- **Status**:` lines above the final handoff, including preserved original-plan templates such as `**Handoff (fill on completion)**`.
 - Treat a missing final handoff or missing populated status line as a malformed plan.
 
-Build `(session-number, status)` pairs from those final handoff statuses. Valid runnable statuses are exactly `pending` and `complete`.
+Build `(session-id, status)` pairs from those final handoff statuses. Valid runnable statuses are exactly `pending` and `complete`.
 
 - If **no session files exist**: print an error and stop.
 
-In **directory auto-advance mode**, find the first session with status `pending`.
+In **directory auto-advance mode**, find the first session with status `pending` in dotted numeric order.
 
 - If **no sessions are pending** (all are `complete`): print `Next command: All sessions implemented - nothing left to run.` and stop.
 
-In **explicit mode**, select only the requested session:
+In **explicit mode**, select only the requested session ID:
 
 - If the selected session is missing from the status map, print an error and stop.
 - If the selected session is already `complete`, print an error and stop.
@@ -98,24 +104,24 @@ In **explicit mode**, select only the requested session:
 
 ### Step 4: Load Session
 
-Read `session-N.md` for the selected session.
+Read `session-<ID>.md` for the selected session.
 
-Also check for `session-N.expand.md`. If it exists, read it — this contains verified file paths, corrected signatures, and codebase patterns discovered by `session-expand`. Treat expansion notes as authoritative corrections to the session plan.
+Also check for `session-<ID>.expand.md`. If it exists, read it — this contains verified file paths, corrected signatures, and codebase patterns discovered by `session-expand`. Treat expansion notes as authoritative corrections to the session plan.
 
 Read the selected session's `## Parallel Metadata` block if present. In explicit mode, use it together with `manifest.md` and optional `parallel-validation.md` to validate that this exact session may run now.
 
 Explicit-session validation fails closed. Stop without implementing or updating any handoff if:
 
 - `parallel-validation.md` marks the selected session as blocked, unsafe to run now, ownership-conflicted, or dependent on unresolved work.
-- `parallel-validation.md` adds required prior sessions that are not complete.
-- The session's `Required prior sessions` metadata lists prior sessions whose handoff status is not `complete`.
+- `parallel-validation.md` adds required prior session IDs that are not complete.
+- The session's `Required prior sessions` metadata lists prior session IDs whose handoff status is not `complete`.
 - The selected session has a prerequisite implied by concrete implementation instructions and that prerequisite is not complete.
 
 Manifest/session safety classifications guide parallel scheduling but do not by themselves forbid serial explicit execution after all required prior sessions are complete. For example, `serial-required` means "do not run concurrently"; it does not mean "never run explicitly." Validation notes can still block execution when they identify unresolved dependencies or ownership conflicts.
 
-In directory auto-advance mode, if this is not Session 1, also read the **Handoff** section from `session-<N-1>.md` for context from the previous session.
+In directory auto-advance mode, if the selected session is not the first session in the sorted status map, also read the **Handoff** section from the immediately preceding session file for context. Do not derive the previous session with integer arithmetic; use the sorted session ID list.
 
-In explicit mode, read the **Handoff** section for every required prior session. Also read `session-<N-1>.md` if it is complete or if metadata/validation/instructions list it as required. A pending previous session is not automatically a blocker unless required by metadata, validation notes, or concrete implementation dependencies.
+In explicit mode, read the **Handoff** section for every required prior session ID. Also read the immediately preceding session file in dotted numeric order if it is complete or if metadata/validation/instructions list it as required. A pending previous session is not automatically a blocker unless required by metadata, validation notes, or concrete implementation dependencies.
 
 ### Step 5: Implement
 
@@ -127,7 +133,7 @@ Explicit mode runs exactly the selected session. Do not auto-advance to another 
 
 ### Step 6: Update Handoff
 
-Edit the Handoff section in `session-N.md` with actual results:
+Edit the Handoff section in `session-<ID>.md` with actual results:
 
 - **Status**: complete
 - **Files modified**: list each file with a brief description of what changed
@@ -141,10 +147,10 @@ Use the Edit tool to update the handoff in place — do not rewrite the entire f
 
 If during implementation you produced guidance, corrections, or discoveries that a **future** session needs (e.g., "Notes for S3", "Heads-up for S4", "S5 should use the new helper at X"), do **not** leave them inline in your chat response. They must be written into the target session file so the future `<skill-prefix>session-run` invocation actually sees them.
 
-For each note targeted at session M (where M > N):
+For each note targeted at session `<TARGET_ID>` where `<TARGET_ID>` sorts after the current selected `<ID>` in dotted numeric order:
 
-- If `session-M.expand.md` exists, append the note to it under a clear heading like `## Notes from session-N`. Expansion files are the right home for verified facts, corrected paths, and codebase discoveries.
-- If `session-M.expand.md` does not exist, append the note to `session-M.md` under a `## Notes from session-N` section placed **above** the `## Handoff` section (so it is part of the instructions that get executed, not the handoff results).
+- If `session-<TARGET_ID>.expand.md` exists, append the note to it under a clear heading like `## Notes from session-<ID>`. Expansion files are the right home for verified facts, corrected paths, and codebase discoveries.
+- If `session-<TARGET_ID>.expand.md` does not exist, append the note to `session-<TARGET_ID>.md` under a `## Notes from session-<ID>` section placed **above** the `## Handoff` section (so it is part of the instructions that get executed, not the handoff results).
 
 Use the Edit tool to make these injections. Never just print "Notes for S3: ..." in the report — that information will be lost the moment the conversation ends.
 
@@ -159,9 +165,9 @@ After the selected handoff is updated and any future-session notes are injected,
 - In explicit mode, if no sessions remain `pending`, sync recognized status tables as final bookkeeping.
 - Always treat session handoffs as authoritative. `manifest.md` and `context.md` are derived bookkeeping only.
 
-For `manifest.md`, update markdown tables that have a session-number column (`#`, `Session`, `Session #`, or `Session number`) and a `Status` column. Keep row order and non-status cells intact.
+For `manifest.md`, update markdown tables that have a session ID column (`#`, `Session`, `Session #`, `Session number`, `Session ID`, or `ID`) and a `Status` column. Keep row order and non-status cells intact.
 
-For `context.md`, update only clear markdown session-status tables with both a session-number column and a `Status` column. Do not rewrite prose, checklists, ambiguous tables, or unrelated uses of words like `pending`.
+For `context.md`, update only clear markdown session-status tables with both a session ID column and a `Status` column. Do not rewrite prose, checklists, ambiguous tables, or unrelated uses of words like `pending`.
 
 If a derived ledger cannot be updated safely, leave it unchanged and mention that in the report. Do not let stale derived tables change the next-session decision.
 
@@ -169,7 +175,7 @@ If a derived ledger cannot be updated safely, leave it unchanged and mention tha
 
 Print a brief summary:
 
-1. Which session was completed (number and title)
+1. Which session was completed (ID and title)
 2. Files modified (short list)
 3. Derived status ledgers updated, if any (`manifest.md` and/or `context.md`)
 4. What session comes next, or "All sessions implemented" if this was the last one
@@ -186,7 +192,7 @@ These runner-readable lines are optional for manual use and must not replace the
 End every successful report with exactly one `Next command:` line:
 
 - In directory auto-advance mode, if another pending session remains, print `Next command: <skill-prefix>session-run <plan-dir>/`
-- In explicit mode, if another pending session remains and the coordinator/manifest/validation clearly identifies the next assigned explicit target, print `Next command: <skill-prefix>session-run <plan-dir>/ --session <N>`
+- In explicit mode, if another pending session remains and the coordinator/manifest/validation clearly identifies the next assigned explicit target, print `Next command: <skill-prefix>session-run <plan-dir>/ --session <ID>`
 - In explicit mode, if another pending session remains but there is no clear next explicit target, print `Next command: <skill-prefix>session-run <plan-dir>/` and state above it that this is the serial fallback after active parallel workers have finished
 - If no pending sessions remain, print `Next command: All sessions implemented - nothing left to run.`
 
@@ -200,7 +206,7 @@ Use the original plan directory argument provided by the user for `<plan-dir>` w
 - Always read `context.md` before starting implementation
 - Always read `manifest.md`; use its parallel metadata as guidance, not as the completion source of truth
 - If `parallel-validation.md` exists, read it and treat it as authoritative over manifest/session parallel metadata
-- Expansion notes (`session-N.expand.md`) take precedence over the session file for factual claims (file paths, line numbers, function signatures)
+- Expansion notes (`session-<ID>.expand.md`) take precedence over the session file for factual claims (file paths, line numbers, function signatures)
 - The session file is the source of truth for what to implement; expansion notes only correct factual details
 - Never modify the original plan file
 - Modify `context.md` only for clear derived session-status table sync described in Step 6c

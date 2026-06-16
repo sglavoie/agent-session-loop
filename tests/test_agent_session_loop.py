@@ -94,6 +94,33 @@ def write_plan(plan_dir: Path, statuses: tuple[str, ...]) -> None:
         )
 
 
+def write_plan_with_ids(plan_dir: Path, statuses: tuple[tuple[str, str], ...]) -> None:
+    plan_dir.mkdir(parents=True, exist_ok=True)
+    (plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
+    (plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
+    for session_id, status_value in statuses:
+        display_label = plans.session_id_display_label(session_id)
+        (plan_dir / plans.session_id_to_filename(session_id)).write_text(
+            "\n".join(
+                [
+                    f"# {display_label}: Test",
+                    "",
+                    "Instructions.",
+                    "",
+                    "## Handoff",
+                    "",
+                    f"- **Status**: {status_value}",
+                    "- **Files modified**: (none)",
+                    "- **Key decisions**: (none)",
+                    "- **Blockers for next session**: (none)",
+                    "- **Notes**:",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+
 def install_fake_codex(tmp_dir: Path) -> Path:
     fake_path = tmp_dir / "codex"
     shutil.copyfile(FAKE_CODEX_FIXTURE, fake_path)
@@ -265,6 +292,53 @@ class ParserAndStateTests(unittest.TestCase):
             canceled,
         )
 
+    def test_session_id_helpers_parse_sort_and_reject_invalid_ids(self) -> None:
+        parsed = [
+            plans.parse_session_id(value)
+            for value in ("2.10", "2", "10", "2.1", "2.2")
+        ]
+
+        self.assertEqual(
+            ["2", "2.1", "2.2", "2.10", "10"],
+            [
+                session_id.value
+                for session_id in sorted(parsed, key=lambda item: item.sort_key)
+            ],
+        )
+        self.assertEqual((2, 1), plans.parse_session_id("2.1").components)
+        self.assertEqual("session-2.1.md", plans.session_id_to_filename("2.1"))
+        self.assertEqual(
+            "session-2.1.expand.md",
+            plans.session_id_to_expansion_filename("2.1"),
+        )
+        self.assertEqual("Session 2.1", plans.session_id_display_label("2.1"))
+
+        for value in ("0", "01", "1.0", "1.", "1..2", "1.a", "a"):
+            with self.subTest(value=value):
+                self.assertFalse(plans.is_valid_session_id(value))
+                with self.assertRaises(ValueError):
+                    plans.parse_session_id(value)
+
+    def test_session_filename_helpers_match_dotted_files_exactly(self) -> None:
+        session_id = plans.session_id_from_filename("session-2.1.md")
+        expansion_id = plans.session_id_from_expansion_filename(
+            "session-2.1.expand.md"
+        )
+
+        self.assertIsNotNone(session_id)
+        self.assertIsNotNone(expansion_id)
+        self.assertEqual("2.1", session_id.value)
+        self.assertEqual("2.1", expansion_id.value)
+
+        self.assertIsNone(plans.session_id_from_filename("session-2.1.expand.md"))
+        self.assertIsNone(plans.session_id_from_filename("session-02.md"))
+        self.assertIsNone(
+            plans.session_id_from_expansion_filename("session-2.1.md")
+        )
+        self.assertIsNone(
+            plans.session_id_from_expansion_filename("session-2.01.expand.md")
+        )
+
     def test_inspect_plan_sorts_exact_session_files_and_finds_next_pending(
         self,
     ) -> None:
@@ -290,6 +364,41 @@ class ParserAndStateTests(unittest.TestCase):
             )
             self.assertEqual(2, snapshot.next_pending.number)
             self.assertEqual(plans.path_sha256(plan_dir), snapshot.path_hash)
+
+    def test_inspect_plan_sorts_dotted_session_files_and_finds_nested_next_pending(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan_with_ids(
+                plan_dir,
+                (
+                    ("1", "complete"),
+                    ("2.10", "pending"),
+                    ("2.1", "complete"),
+                    ("2", "complete"),
+                    ("10", "pending"),
+                    ("2.2", "pending"),
+                ),
+            )
+            (plan_dir / "session-2.1.expand.md").write_text(
+                "ignored for discovery\n", encoding="utf-8"
+            )
+            (plan_dir / "session-2.01.md").write_text(
+                "invalid id ignored\n", encoding="utf-8"
+            )
+
+            snapshot = plans.inspect_plan(plan_dir)
+
+            self.assertEqual(
+                ["1", "2", "2.1", "2.2", "2.10", "10"],
+                [session.id for session in snapshot.sessions],
+            )
+            self.assertEqual("2.2", snapshot.next_pending.id)
+            self.assertEqual(
+                ["complete", "complete", "complete", "pending", "pending", "pending"],
+                [session.status for session in snapshot.sessions],
+            )
 
     def test_inspect_plan_reads_status_from_final_handoff_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -322,6 +431,26 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertEqual("complete", snapshot.sessions[0].status)
             self.assertEqual("complete", snapshot.sessions[0].raw_value)
             self.assertEqual(12, snapshot.sessions[0].line_number)
+
+    def test_plan_content_hash_tracks_matching_dotted_expansion_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan_with_ids(plan_dir, (("1", "complete"), ("1.1", "pending")))
+            ignored = plan_dir / "session-1.1.expand.md.bak"
+            ignored.write_text("ignored\n", encoding="utf-8")
+
+            without_expansion = plans.plan_content_sha256(plan_dir)
+            expansion = plan_dir / "session-1.1.expand.md"
+            expansion.write_text("first\n", encoding="utf-8")
+            with_expansion = plans.plan_content_sha256(plan_dir)
+            expansion.write_text("second\n", encoding="utf-8")
+            changed_expansion = plans.plan_content_sha256(plan_dir)
+
+            self.assertNotEqual(without_expansion, with_expansion)
+            self.assertNotEqual(with_expansion, changed_expansion)
+            ignored_hash = plans.plan_content_sha256(plan_dir)
+            ignored.write_text("still ignored\n", encoding="utf-8")
+            self.assertEqual(ignored_hash, plans.plan_content_sha256(plan_dir))
 
     def test_sync_derived_status_ledgers_updates_clear_status_tables(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -382,6 +511,124 @@ class ParserAndStateTests(unittest.TestCase):
             )
             self.assertIn(
                 "| S2 | Two | pending |",
+                context_path.read_text(encoding="utf-8"),
+            )
+
+    def test_sync_derived_status_ledgers_updates_dotted_session_cells(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan_with_ids(
+                plan_dir,
+                (("1", "complete"), ("1.1", "pending"), ("2", "pending")),
+            )
+            manifest_path = plan_dir / "manifest.md"
+            context_path = plan_dir / "context.md"
+            manifest_path.write_text(
+                "\n".join(
+                    [
+                        "# Manifest",
+                        "",
+                        "| Session | Title | Status | File |",
+                        "|---|---|---|---|",
+                        "| S1 | One | pending | session-1.md |",
+                        "| S1.1 | Nested | complete | session-1.1.md |",
+                        "| 2 | Two | complete | session-2.md |",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            context_path.write_text(
+                "\n".join(
+                    [
+                        "# Context",
+                        "",
+                        "| Session | Title | Status |",
+                        "|---|---|---|",
+                        "| `S1` | One | pending |",
+                        "| `S1.1` | Nested | complete |",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            snapshot = plans.inspect_plan(plan_dir)
+            changed = plans.sync_derived_status_ledgers(snapshot)
+
+            self.assertEqual(
+                {
+                    plans.canonicalize_path(manifest_path),
+                    plans.canonicalize_path(context_path),
+                },
+                set(changed),
+            )
+            self.assertIn(
+                "| S1 | One | complete | session-1.md |",
+                manifest_path.read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "| S1.1 | Nested | pending | session-1.1.md |",
+                manifest_path.read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "| 2 | Two | pending | session-2.md |",
+                manifest_path.read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "| `S1.1` | Nested | pending |",
+                context_path.read_text(encoding="utf-8"),
+            )
+
+    def test_sync_derived_status_ledgers_accepts_id_headers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan_with_ids(plan_dir, (("1.1", "complete"),))
+            manifest_path = plan_dir / "manifest.md"
+            context_path = plan_dir / "context.md"
+            manifest_path.write_text(
+                "\n".join(
+                    [
+                        "# Manifest",
+                        "",
+                        "| Session ID | Status |",
+                        "|---|---|",
+                        "| 1.1 | pending |",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            context_path.write_text(
+                "\n".join(
+                    [
+                        "# Context",
+                        "",
+                        "| ID | Status |",
+                        "|---|---|",
+                        "| 1.1 | pending |",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            snapshot = plans.inspect_plan(plan_dir)
+            changed = plans.sync_derived_status_ledgers(snapshot)
+
+            self.assertEqual(
+                {
+                    plans.canonicalize_path(manifest_path),
+                    plans.canonicalize_path(context_path),
+                },
+                set(changed),
+            )
+            self.assertIn(
+                "| 1.1 | complete |",
+                manifest_path.read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "| 1.1 | complete |",
                 context_path.read_text(encoding="utf-8"),
             )
 
@@ -1157,6 +1404,27 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             encoding="utf-8",
         )
         write_plan(plan_dir, statuses)
+        return plan_dir, state_dir, config_home, fake_codex
+
+    def setup_loop_with_ids(
+        self,
+        *,
+        statuses: tuple[tuple[str, str], ...],
+    ) -> tuple[Path, Path, Path, Path]:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        tmp_dir = Path(tmp.name)
+        plan_dir = tmp_dir / "plan"
+        state_dir = tmp_dir / "state"
+        config_home = tmp_dir / "config"
+        config_path = config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        fake_codex = install_fake_codex(tmp_dir)
+        config_path.write_text(
+            json.dumps({"codex": {"executable": str(fake_codex)}}),
+            encoding="utf-8",
+        )
+        write_plan_with_ids(plan_dir, statuses)
         return plan_dir, state_dir, config_home, fake_codex
 
     def setup_fake_spec(
@@ -2107,6 +2375,162 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             (plan_dir / "session-2.md").read_text(encoding="utf-8"),
         )
 
+    def test_dotted_fake_harness_run_auto_advances_nested_sessions(self) -> None:
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop_with_ids(
+            statuses=(
+                ("1", "complete"),
+                ("2.1", "pending"),
+                ("2.2", "pending"),
+                ("3", "pending"),
+            )
+        )
+
+        completed, payload = self.run_loop_command(
+            mode="success",
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual(["2.1", "2.2", 3], payload["completed_sessions"])
+        self.assertEqual(["2.1", "2.2", "3"], payload["completed_session_ids"])
+        self.assertIsNone(payload["final_snapshot"]["next_pending"])
+        self.assertIsNone(payload["final_snapshot"]["next_pending_id"])
+
+        turns = payload["turns"]
+        self.assertEqual(["2.1", "2.2", 3], [turn["session"] for turn in turns])
+        self.assertEqual(["2.1", "2.2", "3"], [turn["session_id"] for turn in turns])
+        self.assertNotIn("session_number", turns[0])
+        self.assertNotIn("session_number", turns[1])
+        self.assertEqual(3, turns[2]["session_number"])
+        self.assertEqual(
+            [
+                Path(payload["run_dir"]) / "turn-0001-session-2.1",
+                Path(payload["run_dir"]) / "turn-0002-session-2.2",
+                Path(payload["run_dir"]) / "turn-0003-session-3",
+            ],
+            [Path(turn["artifact_dir"]) for turn in turns],
+        )
+
+        event_records = read_jsonl(Path(payload["events_path"]))
+        started_ids = [
+            record["payload"]["session_id"]
+            for record in event_records
+            if record["name"] == "turn_started"
+        ]
+        self.assertEqual(["2.1", "2.2", "3"], started_ids)
+
+    def test_fake_codex_explicit_dotted_session_prompt_marks_selected_session(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            write_plan_with_ids(
+                plan_dir,
+                (("2", "pending"), ("2.1", "pending"), ("3", "pending")),
+            )
+            fake_codex = install_fake_codex(tmp_dir)
+            last_message = tmp_dir / "last-message.txt"
+
+            completed = subprocess.run(
+                [
+                    str(fake_codex),
+                    "exec",
+                    "--add-dir",
+                    str(plan_dir),
+                    "-o",
+                    str(last_message),
+                    f"$session-run {plan_dir}/ --session 2.1",
+                ],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertIn(
+                "- **Status**: pending",
+                (plan_dir / "session-2.md").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "- **Status**: complete",
+                (plan_dir / "session-2.1.md").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "- **Status**: pending",
+                (plan_dir / "session-3.md").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "Runner status: complete",
+                last_message.read_text(encoding="utf-8"),
+            )
+
+    def test_unexpected_dotted_progress_reports_expected_and_observed_ids(
+        self,
+    ) -> None:
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop_with_ids(
+            statuses=(("2.1", "pending"), ("2.2", "pending"))
+        )
+
+        completed, payload = self.run_loop_command(
+            mode="unexpected-progress",
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+        )
+
+        expected = [{"before": "pending", "after": "complete", "id": "2.1"}]
+        observed = [{"before": "pending", "after": "complete", "id": "2.2"}]
+        self.assertEqual(1, completed.returncode)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["paused"])
+        self.assertEqual("unexpected-status-change", payload["pause_reason"])
+        self.assertEqual(expected, payload["expected_status_changes"])
+        self.assertEqual(observed, payload["observed_status_changes"])
+        self.assertEqual("2.1", payload["final_snapshot"]["next_pending"])
+        self.assertEqual("2.1", payload["final_snapshot"]["next_pending_id"])
+        self.assertEqual([], payload["completed_sessions"])
+        self.assertEqual([], payload["completed_session_ids"])
+        self.assertEqual("2.1", payload["turns"][0]["session_id"])
+        self.assertEqual(
+            "unexpected-status-change",
+            payload["turns"][0]["status_result"],
+        )
+        self.assertIn(
+            "- **Status**: pending",
+            (plan_dir / "session-2.1.md").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "- **Status**: complete",
+            (plan_dir / "session-2.2.md").read_text(encoding="utf-8"),
+        )
+
+    def test_integer_fake_harness_run_keeps_numeric_payload_contract(self) -> None:
+        completed, payload, _plan_dir, _state_dir, _fake_codex = self.run_loop(
+            mode="success",
+            statuses=("pending", "pending"),
+            max_sessions=1,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual([1], payload["completed_sessions"])
+        self.assertEqual(["1"], payload["completed_session_ids"])
+        self.assertEqual(2, payload["final_snapshot"]["next_pending"])
+        self.assertEqual("2", payload["final_snapshot"]["next_pending_id"])
+        turn = payload["turns"][0]
+        self.assertEqual(1, turn["session"])
+        self.assertEqual("1", turn["session_id"])
+        self.assertEqual(1, turn["session_number"])
+        self.assertEqual(
+            Path(payload["run_dir"]) / "turn-0001-session-1",
+            Path(turn["artifact_dir"]),
+        )
+
     def test_json_run_reports_explicit_model_effort_metadata_and_argv(self) -> None:
         completed, payload, _plan_dir, _state_dir, _fake_codex = self.run_loop(
             mode="success",
@@ -2976,6 +3400,9 @@ class JsonCliTests(unittest.TestCase):
             self.assertTrue(status_payload["ok"])
             self.assertEqual("status", status_payload["command"])
             self.assertEqual(1, status_payload["next_pending"])
+            self.assertEqual("1", status_payload["next_pending_id"])
+            self.assertEqual("1", status_payload["sessions"][0]["id"])
+            self.assertEqual(1, status_payload["sessions"][0]["number"])
             self.assertTrue(status_payload["state_path"].endswith("/state.json"))
             self.assertTrue(status_payload["events_path"].endswith("/events.jsonl"))
 
@@ -3017,6 +3444,8 @@ class JsonCliTests(unittest.TestCase):
             self.assertEqual("high", run_payload["effort"])
             self.assertEqual(config.EFFORT_SOURCE_FLAG, run_payload["effort_source"])
             self.assertEqual(1, run_payload["planned"]["next_pending"])
+            self.assertEqual("1", run_payload["planned"]["next_pending_id"])
+            self.assertEqual("1", run_payload["initial_snapshot"]["next_pending_id"])
             planned = run_payload["planned"]
             invocation = planned["invocation"]
             self.assertEqual("gpt-5", planned["model"])
@@ -3041,6 +3470,57 @@ class JsonCliTests(unittest.TestCase):
             )
             self.assertTrue(run_payload["state_path"].endswith("/state.json"))
             self.assertTrue(run_payload["events_path"].endswith("/events.jsonl"))
+
+    def test_status_and_dry_run_json_outputs_nested_session_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan_with_ids(plan_dir, (("1", "complete"), ("1.1", "pending")))
+
+            status_payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+            self.assertEqual("1.1", status_payload["next_pending"])
+            self.assertEqual("1.1", status_payload["next_pending_id"])
+            integer_session = status_payload["sessions"][0]
+            nested_session = status_payload["sessions"][1]
+            self.assertEqual("1", integer_session["id"])
+            self.assertEqual(1, integer_session["number"])
+            self.assertEqual("1.1", nested_session["id"])
+            self.assertNotIn("number", nested_session)
+
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(tmp_dir / "config")
+            env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_session_loop",
+                    "run",
+                    str(plan_dir),
+                    "--cwd",
+                    str(REPO_ROOT),
+                    "--state-dir",
+                    str(state_dir),
+                    "--dry-run",
+                    "--json",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            payload = json.loads(completed.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertEqual("1.1", payload["initial_snapshot"]["next_pending"])
+            self.assertEqual("1.1", payload["initial_snapshot"]["next_pending_id"])
+            self.assertEqual("1.1", payload["planned"]["next_pending"])
+            self.assertEqual("1.1", payload["planned"]["next_pending_id"])
+            nested = payload["initial_snapshot"]["sessions"][1]
+            self.assertEqual("1.1", nested["id"])
+            self.assertNotIn("number", nested)
 
     def test_dry_run_json_no_unsafe_bypass_uses_harness_default_argv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

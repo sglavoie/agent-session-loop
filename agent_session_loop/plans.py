@@ -1,8 +1,8 @@
 """Plan directory inspection helpers.
 
 The plan files are the durable source of truth. This module will parse
-`manifest.md`, `context.md`, exact `session-N.md` files, and handoff status
-lines without trusting generated runner state.
+`manifest.md`, `context.md`, exact `session-<id>.md` files, and handoff
+status lines without trusting generated runner state.
 """
 
 from __future__ import annotations
@@ -12,25 +12,154 @@ import hashlib
 import os
 from pathlib import Path
 import re
-from typing import Literal, NoReturn
+from typing import Literal, Mapping, NoReturn
 
 
 StatusValue = Literal["pending", "complete", "empty", "unknown"]
 STATUS_PREFIX = "- **Status**:"
 HANDOFF_HEADING = "## Handoff"
-SESSION_FILE_RE = re.compile(r"^session-([1-9][0-9]*)\.md$")
+SESSION_ID_PATTERN = r"[1-9][0-9]*(?:\.[1-9][0-9]*)*"
+SESSION_ID_RE = re.compile(rf"^{SESSION_ID_PATTERN}$")
+SESSION_FILE_RE = re.compile(rf"^session-({SESSION_ID_PATTERN})\.md$")
+SESSION_EXPANSION_FILE_RE = re.compile(
+    rf"^session-({SESSION_ID_PATTERN})\.expand\.md$"
+)
+SESSION_STATUS_TABLE_HEADERS = {
+    "#",
+    "session",
+    "session #",
+    "session number",
+    "session id",
+    "id",
+}
 
 
 class PlanError(Exception):
     """Raised when a plan directory cannot be inspected safely."""
 
 
+@dataclass(frozen=True, order=True)
+class SessionId:
+    """Canonical dotted session id sorted by numeric components."""
+
+    components: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        components = tuple(self.components)
+        if not components:
+            raise ValueError("session id must contain at least one component")
+        if any(type(component) is not int or component <= 0 for component in components):
+            raise ValueError("session id components must be positive integers")
+        object.__setattr__(self, "components", components)
+
+    @classmethod
+    def parse(cls, value: int | str | SessionId) -> SessionId:
+        if isinstance(value, SessionId):
+            return value
+        if type(value) is int:
+            return cls((value,))
+        if not isinstance(value, str):
+            raise ValueError(f"invalid session id: {value!r}")
+
+        text = value.strip()
+        if SESSION_ID_RE.fullmatch(text) is None:
+            raise ValueError(f"invalid session id: {value!r}")
+        return cls(tuple(int(component) for component in text.split(".")))
+
+    @property
+    def value(self) -> str:
+        return ".".join(str(component) for component in self.components)
+
+    @property
+    def is_integer(self) -> bool:
+        return len(self.components) == 1
+
+    @property
+    def sort_key(self) -> tuple[int, ...]:
+        return self.components
+
+    @property
+    def filename(self) -> str:
+        return f"session-{self.value}.md"
+
+    @property
+    def expansion_filename(self) -> str:
+        return f"session-{self.value}.expand.md"
+
+    @property
+    def display_label(self) -> str:
+        return f"Session {self.value}"
+
+    def as_int(self) -> int:
+        if not self.is_integer:
+            raise ValueError(f"nested session id has no integer alias: {self.value}")
+        return self.components[0]
+
+    def __str__(self) -> str:
+        return self.value
+
+
+def parse_session_id(value: int | str | SessionId) -> SessionId:
+    """Parse and validate a canonical session id."""
+    return SessionId.parse(value)
+
+
+def is_valid_session_id(value: str) -> bool:
+    return SESSION_ID_RE.fullmatch(value.strip()) is not None
+
+
+def session_id_to_filename(value: int | str | SessionId) -> str:
+    return parse_session_id(value).filename
+
+
+def session_id_to_expansion_filename(value: int | str | SessionId) -> str:
+    return parse_session_id(value).expansion_filename
+
+
+def session_id_display_label(value: int | str | SessionId) -> str:
+    return parse_session_id(value).display_label
+
+
+def session_id_from_filename(filename: str) -> SessionId | None:
+    match = SESSION_FILE_RE.fullmatch(filename)
+    if match is None:
+        return None
+    return parse_session_id(match.group(1))
+
+
+def session_id_from_expansion_filename(filename: str) -> SessionId | None:
+    match = SESSION_EXPANSION_FILE_RE.fullmatch(filename)
+    if match is None:
+        return None
+    return parse_session_id(match.group(1))
+
+
 @dataclass(frozen=True)
 class SessionFile:
-    """A numerically identified `session-N.md` file."""
+    """A canonical `session-<id>.md` file."""
 
-    number: int
+    session_id: SessionId
     path: Path
+
+    @property
+    def id(self) -> str:
+        return self.session_id.value
+
+    @property
+    def number(self) -> int:
+        return self.session_id.as_int()
+
+    @property
+    def filename(self) -> str:
+        return self.session_id.filename
+
+    @property
+    def expansion_filename(self) -> str:
+        return self.session_id.expansion_filename
+
+    @property
+    def display_label(self) -> str:
+        return self.session_id.display_label
 
 
 @dataclass(frozen=True)
@@ -43,12 +172,24 @@ class SessionStatus:
     line_number: int | None
 
     @property
+    def session_id(self) -> SessionId:
+        return self.session.session_id
+
+    @property
+    def id(self) -> str:
+        return self.session.id
+
+    @property
     def number(self) -> int:
         return self.session.number
 
     @property
     def path(self) -> Path:
         return self.session.path
+
+    @property
+    def display_label(self) -> str:
+        return self.session.display_label
 
 
 @dataclass(frozen=True)
@@ -71,6 +212,22 @@ class PlanSnapshot:
     @property
     def next_pending(self) -> SessionStatus | None:
         return next((session for session in self.sessions if session.status == "pending"), None)
+
+    @property
+    def session_ids(self) -> tuple[str, ...]:
+        return tuple(session.id for session in self.sessions)
+
+    @property
+    def status_by_id(self) -> dict[str, StatusValue]:
+        return {session.id: session.status for session in self.sessions}
+
+    @property
+    def status_by_number(self) -> dict[int, StatusValue]:
+        return {
+            session.number: session.status
+            for session in self.sessions
+            if session.session_id.is_integer
+        }
 
 
 def canonicalize_path(path: str | Path) -> Path:
@@ -113,7 +270,7 @@ def _is_file(path: Path) -> bool:
 
 
 def discover_session_files(plan_dir: str | Path) -> tuple[SessionFile, ...]:
-    """Find exact `session-N.md` files, excluding expansion notes."""
+    """Find exact `session-<id>.md` files, excluding expansion notes."""
     canonical_dir = canonicalize_path(plan_dir)
     sessions: list[SessionFile] = []
 
@@ -123,12 +280,12 @@ def discover_session_files(plan_dir: str | Path) -> tuple[SessionFile, ...]:
         _raise_read_error(canonical_dir, error)
 
     for path in directory_entries:
-        match = SESSION_FILE_RE.match(path.name)
-        if match is None:
+        session_id = session_id_from_filename(path.name)
+        if session_id is None:
             continue
-        sessions.append(SessionFile(number=int(match.group(1)), path=path))
+        sessions.append(SessionFile(session_id=session_id, path=path))
 
-    return tuple(sorted(sessions, key=lambda session: session.number))
+    return tuple(sorted(sessions, key=lambda session: session.session_id.sort_key))
 
 
 def parse_status_value(raw_value: str) -> StatusValue:
@@ -205,12 +362,23 @@ def _is_separator_row(cells: list[str]) -> bool:
     return bool(cells) and all(_is_separator_cell(cell) for cell in cells)
 
 
-def _session_number_from_cell(value: str) -> int | None:
+def _session_id_from_cell(value: str) -> SessionId | None:
     text = value.strip().strip("`")
-    match = re.fullmatch(r"(?:session[\s-]*|s)?([1-9][0-9]*)", text, re.IGNORECASE)
+    match = re.fullmatch(
+        rf"(?:session[\s-]*|s)?({SESSION_ID_PATTERN})",
+        text,
+        re.IGNORECASE,
+    )
     if match is None:
         return None
-    return int(match.group(1))
+    return parse_session_id(match.group(1))
+
+
+def _session_number_from_cell(value: str) -> int | None:
+    session_id = _session_id_from_cell(value)
+    if session_id is None or not session_id.is_integer:
+        return None
+    return session_id.as_int()
 
 
 def _replace_cell_content(cell: str, value: str) -> str:
@@ -224,9 +392,26 @@ def _join_table_row(leading: str, cells: list[str]) -> str:
     return f"{leading}|{'|'.join(cells)}|"
 
 
+def _status_for_session_id(
+    status_by_session: Mapping[object, StatusValue],
+    session_id: SessionId,
+) -> StatusValue | None:
+    status = status_by_session.get(session_id.value)
+    if status is not None:
+        return status
+
+    status = status_by_session.get(session_id)
+    if status is not None:
+        return status
+
+    if session_id.is_integer:
+        return status_by_session.get(session_id.as_int())
+    return None
+
+
 def _sync_status_table_block(
     block: list[str],
-    status_by_session: dict[int, StatusValue],
+    status_by_session: Mapping[object, StatusValue],
 ) -> tuple[list[str], bool]:
     if len(block) < 2:
         return block, False
@@ -246,7 +431,7 @@ def _sync_status_table_block(
         (
             index
             for index, name in enumerate(headers)
-            if name in {"#", "session", "session #", "session number"}
+            if name in SESSION_STATUS_TABLE_HEADERS
         ),
         None,
     )
@@ -263,10 +448,10 @@ def _sync_status_table_block(
         leading, cells = parsed
         if max(session_index, status_index) >= len(cells):
             continue
-        session_number = _session_number_from_cell(cells[session_index])
-        if session_number is None:
+        session_id = _session_id_from_cell(cells[session_index])
+        if session_id is None:
             continue
-        status = status_by_session.get(session_number)
+        status = _status_for_session_id(status_by_session, session_id)
         if status not in {"pending", "complete"}:
             continue
         synced_rows += 1
@@ -283,7 +468,7 @@ def _sync_status_table_block(
 
 def _sync_status_tables_in_text(
     text: str,
-    status_by_session: dict[int, StatusValue],
+    status_by_session: Mapping[object, StatusValue],
 ) -> tuple[str, bool]:
     lines = text.splitlines(keepends=False)
     updated: list[str] = []
@@ -322,9 +507,7 @@ def sync_derived_status_ledgers(
     sync_context: bool = True,
 ) -> tuple[Path, ...]:
     """Sync recognized derived status tables from authoritative handoff statuses."""
-    status_by_session = {
-        session.number: session.status for session in snapshot.sessions
-    }
+    status_by_session = snapshot.status_by_id
     changed_paths: list[Path] = []
 
     for path, enabled in (
@@ -352,14 +535,17 @@ def plan_content_sha256(
     """Hash the current plan files in deterministic relative-path order."""
     canonical_dir = canonicalize_path(plan_dir)
     selected_sessions = discover_session_files(canonical_dir) if sessions is None else sessions
+    selected_sessions = tuple(
+        sorted(selected_sessions, key=lambda session: session.session_id.sort_key)
+    )
     relative_names = ["context.md", "manifest.md"]
 
     if _is_file(canonical_dir / "parallel-validation.md"):
         relative_names.append("parallel-validation.md")
 
     for session in selected_sessions:
-        relative_names.append(session.path.name)
-        expansion_name = f"session-{session.number}.expand.md"
+        relative_names.append(session.filename)
+        expansion_name = session.expansion_filename
         if _is_file(canonical_dir / expansion_name):
             relative_names.append(expansion_name)
 
@@ -397,7 +583,9 @@ def inspect_plan(plan_dir: str | Path) -> PlanSnapshot:
 
     sessions = discover_session_files(canonical_dir)
     if not sessions:
-        raise PlanError(f"no session-N.md files found in plan directory: {canonical_dir}")
+        raise PlanError(
+            f"no session-<id>.md files found in plan directory: {canonical_dir}"
+        )
 
     statuses = tuple(read_session_status(session) for session in sessions)
     content_hash = plan_content_sha256(canonical_dir, sessions)
