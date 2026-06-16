@@ -24,6 +24,7 @@ SESSION_FILE_RE = re.compile(rf"^session-({SESSION_ID_PATTERN})\.md$")
 SESSION_EXPANSION_FILE_RE = re.compile(
     rf"^session-({SESSION_ID_PATTERN})\.expand\.md$"
 )
+LOOSE_SESSION_FILE_RE = re.compile(r"^session-([0-9]+(?:\.[0-9]+)*)\.md$")
 SESSION_STATUS_TABLE_HEADERS = {
     "#",
     "session",
@@ -132,6 +133,25 @@ def session_id_from_expansion_filename(filename: str) -> SessionId | None:
     if match is None:
         return None
     return parse_session_id(match.group(1))
+
+
+def _canonical_session_id_for_loose_filename(filename: str) -> SessionId | None:
+    match = LOOSE_SESSION_FILE_RE.fullmatch(filename)
+    if match is None:
+        return None
+
+    raw_id = match.group(1)
+    try:
+        components = tuple(int(component) for component in raw_id.split("."))
+    except ValueError:
+        return None
+    if any(component <= 0 for component in components):
+        return None
+
+    canonical_id = SessionId(components)
+    if canonical_id.value == raw_id:
+        return None
+    return canonical_id
 
 
 @dataclass(frozen=True)
@@ -286,6 +306,49 @@ def discover_session_files(plan_dir: str | Path) -> tuple[SessionFile, ...]:
         sessions.append(SessionFile(session_id=session_id, path=path))
 
     return tuple(sorted(sessions, key=lambda session: session.session_id.sort_key))
+
+
+def noncanonical_session_file_suggestions(
+    plan_dir: str | Path,
+) -> tuple[tuple[str, str], ...]:
+    """Return leading-zero session filenames and their canonical replacements."""
+    canonical_dir = canonicalize_path(plan_dir)
+    suggestions: list[tuple[SessionId, str, str]] = []
+
+    try:
+        directory_entries = tuple(canonical_dir.iterdir())
+    except OSError as error:
+        _raise_read_error(canonical_dir, error)
+
+    for path in directory_entries:
+        session_id = _canonical_session_id_for_loose_filename(path.name)
+        if session_id is None:
+            continue
+        suggestions.append((session_id, path.name, session_id.filename))
+
+    return tuple(
+        (source, target)
+        for _session_id, source, target in sorted(
+            suggestions, key=lambda item: (item[0].sort_key, item[1])
+        )
+    )
+
+
+def _format_noncanonical_session_file_error(
+    canonical_dir: Path,
+    suggestions: tuple[tuple[str, str], ...],
+) -> str:
+    rendered = ", ".join(
+        f"{source} -> {target}" for source, target in suggestions[:5]
+    )
+    remaining = len(suggestions) - 5
+    if remaining > 0:
+        rendered += f", and {remaining} more"
+    return (
+        f"no canonical session-<id>.md files found in plan directory: {canonical_dir}; "
+        "leading zeroes are invalid in session IDs. Rename non-canonical session "
+        f"files: {rendered}"
+    )
 
 
 def parse_status_value(raw_value: str) -> StatusValue:
@@ -583,6 +646,13 @@ def inspect_plan(plan_dir: str | Path) -> PlanSnapshot:
 
     sessions = discover_session_files(canonical_dir)
     if not sessions:
+        noncanonical_suggestions = noncanonical_session_file_suggestions(canonical_dir)
+        if noncanonical_suggestions:
+            raise PlanError(
+                _format_noncanonical_session_file_error(
+                    canonical_dir, noncanonical_suggestions
+                )
+            )
         raise PlanError(
             f"no session-<id>.md files found in plan directory: {canonical_dir}"
         )

@@ -35,10 +35,11 @@ executable names on `PATH`, and optional overrides live in
 `$XDG_CONFIG_HOME/agent-session-loop/harnesses.json`.
 
 Session files use canonical session IDs in `session-<id>.md`. IDs may be plain
-integers such as `1` or nested dotted IDs such as `2.1`; status text, tail
-output, artifact paths, and JSON `id` fields use the same canonical value. JSON
-payloads keep integer compatibility aliases for integer-only plans where older
-callers already consumed numeric fields.
+integers such as `1` or nested dotted IDs such as `2.1`; leading zeroes are
+invalid, so a heading like `Session 01` must still produce `session-1.md`.
+Status text, tail output, artifact paths, and JSON `id` fields use the same
+canonical value. JSON payloads keep integer compatibility aliases for
+integer-only plans where older callers already consumed numeric fields.
 
 ```json
 {"codex": {"executable": "/path/to/codex"}}

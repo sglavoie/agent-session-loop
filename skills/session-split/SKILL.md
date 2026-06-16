@@ -270,7 +270,7 @@ _No shared context section found in the original plan._
 
 ### Step 9: Write session-N.md Files
 
-For each session, write `<output_dir>/session-N.md` where N is the actual session number from the heading.
+For each session, write `<output_dir>/session-N.md` where N is the canonical session number from the heading. Normalize numeric IDs by parsing each dotted component as an integer before naming files: `Session 01` writes `session-1.md`, `Session 02.03` writes `session-2.3.md`, and leading zeroes must never appear in filenames, expansion references, manifest tables, or execution commands.
 
 **File structure**:
 

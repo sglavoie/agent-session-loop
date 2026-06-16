@@ -339,6 +339,35 @@ class ParserAndStateTests(unittest.TestCase):
             plans.session_id_from_expansion_filename("session-2.01.expand.md")
         )
 
+    def test_inspect_plan_reports_noncanonical_leading_zero_session_files(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir(parents=True)
+            (plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
+            (plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
+            (plan_dir / "session-01.md").write_text(
+                "# Session 01\n\n## Handoff\n\n- **Status**: pending\n",
+                encoding="utf-8",
+            )
+            (plan_dir / "session-2.01.md").write_text(
+                "# Session 2.01\n\n## Handoff\n\n- **Status**: pending\n",
+                encoding="utf-8",
+            )
+            (plan_dir / "session-01.expand.md").write_text(
+                "ignored for session discovery\n", encoding="utf-8"
+            )
+
+            with self.assertRaises(plans.PlanError) as raised:
+                plans.inspect_plan(plan_dir)
+
+            message = str(raised.exception)
+            self.assertIn("no canonical session-<id>.md files found", message)
+            self.assertIn("leading zeroes are invalid", message)
+            self.assertIn("session-01.md -> session-1.md", message)
+            self.assertIn("session-2.01.md -> session-2.1.md", message)
+
     def test_inspect_plan_sorts_exact_session_files_and_finds_next_pending(
         self,
     ) -> None:
