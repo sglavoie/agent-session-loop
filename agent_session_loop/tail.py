@@ -7,7 +7,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import sys
-import time
+import threading
 from typing import Any, TextIO
 
 from . import events, plans, state
@@ -452,6 +452,180 @@ def _state_run_finished(state_payload: dict[str, Any] | None) -> bool:
     )
 
 
+class _TailFollowLoop:
+    def __init__(
+        self,
+        *,
+        state_path: Path,
+        events_path: Path,
+        run_id: str | None,
+        seen_event_count: int,
+        targets: dict[str, dict[str, Any]],
+        offsets: dict[str, int],
+        out: TextIO,
+        poll_interval: float,
+        stop_event: threading.Event,
+        initial_finished: bool,
+    ) -> None:
+        self._state_path = state_path
+        self._events_path = events_path
+        self._run_id = run_id
+        self._seen_event_count = seen_event_count
+        self._targets = targets
+        self._offsets = offsets
+        self._out = out
+        self._poll_interval = poll_interval
+        self._stop_event = stop_event
+        self._initial_finished = initial_finished
+
+    def run(self) -> None:
+        finished = self._initial_finished
+        while not finished and not self._stop_event.is_set():
+            finished = self._poll_once()
+            if finished or self._stop_event.is_set():
+                break
+            self._stop_event.wait(self._poll_interval)
+
+    def _poll_once(self) -> bool:
+        state_payload = _read_json_file(self._state_path)
+        current_records = _read_event_records(self._events_path)
+        if self._run_id is None:
+            self._run_id = _latest_run_id(state_payload, current_records)
+
+        run_records = _event_records_for_run(current_records, self._run_id)
+        self._targets.update(_discover_targets(run_records, state_payload))
+
+        new_records = current_records[self._seen_event_count :]
+        finished = False
+        for record in new_records:
+            if not _matches_run(record, self._run_id):
+                continue
+            _print_lines([_event_line(record)], self._out)
+            _add_log_targets(self._targets, _payload(record))
+            if record.get("name") == "run_finished":
+                finished = True
+        self._seen_event_count = len(current_records)
+
+        for target in list(self._targets.values()):
+            _print_lines(_read_new_log_text(target, self._offsets), self._out)
+
+        if finished or _state_run_finished(state_payload):
+            for target in list(self._targets.values()):
+                _print_lines(_read_new_log_text(target, self._offsets), self._out)
+            return True
+        return False
+
+
+class TailFollower:
+    """Cancellable in-process follower for new events and log text."""
+
+    def __init__(
+        self,
+        plan_dir: str | Path,
+        *,
+        state_dir: str | Path | None = None,
+        out: TextIO | None = None,
+        poll_interval: float = POLL_INTERVAL_SECONDS,
+    ) -> None:
+        self._plan_dir = plan_dir
+        self._state_dir = state_dir
+        self._out = sys.stdout if out is None else out
+        self._poll_interval = poll_interval
+        self._stop_event = threading.Event()
+        self._done_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._thread_error: BaseException | None = None
+
+    def start(self) -> None:
+        """Start following in a background thread from the current EOF."""
+        if self._thread is not None and self._thread.is_alive():
+            raise TailError("tail follower is already running")
+
+        follow_loop = self._build_loop_from_eof()
+        self._stop_event.clear()
+        self._done_event.clear()
+        self._thread_error = None
+        self._thread = threading.Thread(
+            target=self._run_thread,
+            args=(follow_loop,),
+            name="agent-session-loop-tail",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def follow(self) -> None:
+        """Follow in the current thread from the current EOF until stopped."""
+        if self._thread is not None and self._thread.is_alive():
+            raise TailError("tail follower is already running")
+
+        follow_loop = self._build_loop_from_eof()
+        self._stop_event.clear()
+        self._done_event.clear()
+        self._thread_error = None
+        try:
+            follow_loop.run()
+        finally:
+            self._done_event.set()
+
+    def stop(self) -> None:
+        """Request follower shutdown."""
+        self._stop_event.set()
+
+    def join(self, timeout: float | None = None) -> bool:
+        """Wait for the background follower to stop; return whether it stopped."""
+        if self._thread is None:
+            return True
+        self._thread.join(timeout)
+        stopped = not self._thread.is_alive()
+        if stopped and self._thread_error is not None:
+            raise self._thread_error
+        return stopped
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def done(self) -> bool:
+        return self._done_event.is_set()
+
+    def _run_thread(self, follow_loop: _TailFollowLoop) -> None:
+        try:
+            follow_loop.run()
+        except BaseException as error:
+            self._thread_error = error
+        finally:
+            self._done_event.set()
+
+    def _build_loop_from_eof(self) -> _TailFollowLoop:
+        snapshot = plans.inspect_plan(self._plan_dir)
+        plan_state = state.plan_state_dir(snapshot.plan_dir, self._state_dir)
+        state_path = plan_state / events.STATE_FILE_NAME
+        events_path = plan_state / events.EVENTS_FILE_NAME
+        records = _read_event_records(events_path)
+        state_payload = _read_json_file(state_path)
+        run_id = _latest_run_id(state_payload, records)
+        run_records = _event_records_for_run(records, run_id)
+        targets = _discover_targets(run_records, state_payload)
+        offsets: dict[str, int] = {}
+        _set_offsets_to_eof(targets, offsets)
+        return _TailFollowLoop(
+            state_path=state_path,
+            events_path=events_path,
+            run_id=run_id,
+            seen_event_count=len(records),
+            targets=targets,
+            offsets=offsets,
+            out=self._out,
+            poll_interval=self._poll_interval,
+            stop_event=self._stop_event,
+            initial_finished=(
+                _has_run_finished(records, run_id)
+                or _state_run_finished(state_payload)
+            ),
+        )
+
+
 def tail_plan(
     plan_dir: str | Path,
     *,
@@ -488,37 +662,22 @@ def tail_plan(
     if not follow:
         return
 
-    seen_event_count = len(records)
-    finished = _has_run_finished(records, run_id) or _state_run_finished(state_payload)
-
-    while not finished:
-        state_payload = _read_json_file(state_path)
-        current_records = _read_event_records(events_path)
-        if run_id is None:
-            run_id = _latest_run_id(state_payload, current_records)
-
-        run_records = _event_records_for_run(current_records, run_id)
-        targets.update(_discover_targets(run_records, state_payload))
-
-        new_records = current_records[seen_event_count:]
-        for record in new_records:
-            if not _matches_run(record, run_id):
-                continue
-            _print_lines([_event_line(record)], out)
-            _add_log_targets(targets, _payload(record))
-            if record.get("name") == "run_finished":
-                finished = True
-        seen_event_count = len(current_records)
-
-        for target in list(targets.values()):
-            _print_lines(_read_new_log_text(target, offsets), out)
-
-        if finished or _state_run_finished(state_payload):
-            for target in list(targets.values()):
-                _print_lines(_read_new_log_text(target, offsets), out)
-            break
-
-        time.sleep(poll_interval)
+    stop_event = threading.Event()
+    follow_loop = _TailFollowLoop(
+        state_path=state_path,
+        events_path=events_path,
+        run_id=run_id,
+        seen_event_count=len(records),
+        targets=targets,
+        offsets=offsets,
+        out=out,
+        poll_interval=poll_interval,
+        stop_event=stop_event,
+        initial_finished=(
+            _has_run_finished(records, run_id) or _state_run_finished(state_payload)
+        ),
+    )
+    follow_loop.run()
 
 
 def tail_from_args(args: argparse.Namespace) -> int:

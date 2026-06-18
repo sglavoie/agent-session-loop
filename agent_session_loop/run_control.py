@@ -13,11 +13,28 @@ import tty
 from typing import Any, Literal, TextIO
 
 
-RunControlActionName = Literal["request", "cancel", "consumed"]
+HarnessName = Literal["codex", "claude", "copilot"]
+RunControlActionName = Literal[
+    "request",
+    "cancel",
+    "consumed",
+    "status",
+    "tail-enabled",
+    "tail-disabled",
+    "harness-selected",
+]
 ActionCallback = Callable[["RunControlAction"], None]
+StatusCallback = Callable[["RunControlAction"], None]
 
 HELP_KEY = "h"
+STATUS_SNAPSHOT_KEY = "s"
+TAIL_TOGGLE_KEY = "t"
 STOP_AFTER_CURRENT_KEY = "p"
+HARNESS_SELECTION_KEYS: dict[str, HarnessName] = {
+    "1": "codex",
+    "2": "claude",
+    "3": "copilot",
+}
 _POLL_INTERVAL_SECONDS = 0.1
 
 
@@ -27,28 +44,56 @@ class RunControlAction:
 
     action: RunControlActionName
     stop_after_current: bool
+    tail_enabled: bool = False
+    next_harness: HarnessName | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
             "action": self.action,
             "stop_after_current": self.stop_after_current,
+            "tail_enabled": self.tail_enabled,
+            "next_harness": self.next_harness,
         }
 
 
 class RunControlState:
-    """Thread-safe stop-after-current state shared with the runner."""
+    """Thread-safe runtime control state shared with the runner."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        current_harness: HarnessName | None = None,
+        tail_enabled: bool = False,
+        next_harness: HarnessName | None = None,
+    ) -> None:
         self._lock = threading.Lock()
         self._stop_after_current = False
+        self._tail_enabled = tail_enabled
+        self._current_harness = current_harness
+        self._next_harness = next_harness
 
     @property
     def stop_after_current(self) -> bool:
         with self._lock:
             return self._stop_after_current
 
-    def snapshot(self) -> dict[str, bool]:
-        return {"stop_after_current": self.stop_after_current}
+    @property
+    def tail_enabled(self) -> bool:
+        with self._lock:
+            return self._tail_enabled
+
+    @property
+    def next_harness(self) -> HarnessName | None:
+        with self._lock:
+            return self._next_harness
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "stop_after_current": self._stop_after_current,
+                "tail_enabled": self._tail_enabled,
+                "next_harness": self._next_harness,
+            }
 
     def toggle_stop_after_current(self) -> RunControlAction:
         with self._lock:
@@ -56,6 +101,8 @@ class RunControlState:
             return RunControlAction(
                 action="request" if self._stop_after_current else "cancel",
                 stop_after_current=self._stop_after_current,
+                tail_enabled=self._tail_enabled,
+                next_harness=self._next_harness,
             )
 
     def consume_stop_after_current(self) -> RunControlAction | None:
@@ -63,14 +110,58 @@ class RunControlState:
             if not self._stop_after_current:
                 return None
             self._stop_after_current = False
-            return RunControlAction(action="consumed", stop_after_current=False)
+            return RunControlAction(
+                action="consumed",
+                stop_after_current=False,
+                tail_enabled=self._tail_enabled,
+                next_harness=self._next_harness,
+            )
+
+    def request_status_snapshot(self) -> RunControlAction:
+        with self._lock:
+            return RunControlAction(
+                action="status",
+                stop_after_current=self._stop_after_current,
+                tail_enabled=self._tail_enabled,
+                next_harness=self._next_harness,
+            )
+
+    def toggle_tail(self) -> RunControlAction:
+        with self._lock:
+            self._tail_enabled = not self._tail_enabled
+            return RunControlAction(
+                action="tail-enabled" if self._tail_enabled else "tail-disabled",
+                stop_after_current=self._stop_after_current,
+                tail_enabled=self._tail_enabled,
+                next_harness=self._next_harness,
+            )
+
+    def select_harness(self, harness: HarnessName) -> RunControlAction | None:
+        with self._lock:
+            selected_harness = self._next_harness or self._current_harness
+            if harness == selected_harness:
+                return None
+            self._next_harness = harness
+            return RunControlAction(
+                action="harness-selected",
+                stop_after_current=self._stop_after_current,
+                tail_enabled=self._tail_enabled,
+                next_harness=self._next_harness,
+            )
 
     def help_text(self) -> str:
-        status = "on" if self.stop_after_current else "off"
+        snapshot = self.snapshot()
+        stop_status = "on" if snapshot["stop_after_current"] else "off"
+        tail_status = "on" if snapshot["tail_enabled"] else "off"
+        next_harness = snapshot["next_harness"] or "unchanged"
         return (
             "controls: "
             f"{STOP_AFTER_CURRENT_KEY} toggle stop-after-current "
-            f"(currently {status}); "
+            f"(currently {stop_status}); "
+            f"{STATUS_SNAPSHOT_KEY} show status; "
+            f"{TAIL_TOGGLE_KEY} toggle live tail (currently {tail_status}); "
+            "1 codex, 2 claude, 3 copilot select next harness "
+            f"(currently {next_harness}); "
             f"{HELP_KEY} show help"
         )
 
@@ -105,12 +196,38 @@ def should_enable_run_controls(
     return _stream_is_tty(stdin) and _stream_is_tty(stderr)
 
 
-def _format_toggle_line(action: RunControlAction) -> str:
+def _format_stop_toggle_line(action: RunControlAction) -> str:
     if action.action == "request":
         return "control: stop-after-current requested; press p to cancel"
     if action.action == "cancel":
         return "control: stop-after-current canceled"
     return "control: stop-after-current consumed"
+
+
+def _format_status_snapshot_line(action: RunControlAction) -> str:
+    stop_status = "on" if action.stop_after_current else "off"
+    tail_status = "on" if action.tail_enabled else "off"
+    next_harness = action.next_harness or "unchanged"
+    return (
+        "control status: "
+        f"stop-after-current {stop_status}; "
+        f"live tail {tail_status}; "
+        f"next harness {next_harness}"
+    )
+
+
+def _format_tail_toggle_line(action: RunControlAction) -> str:
+    if action.action == "tail-enabled":
+        return "control: live tail enabled; press t to disable"
+    return "control: live tail disabled"
+
+
+def _format_harness_selection_line(action: RunControlAction) -> str:
+    return f"control: next harness selected: {action.next_harness}"
+
+
+def _format_harness_already_selected_line(harness: HarnessName) -> str:
+    return f"control: next harness already {harness}"
 
 
 class RunControlListener:
@@ -124,6 +241,7 @@ class RunControlListener:
         stdin: TextIO = sys.stdin,
         stderr: TextIO = sys.stderr,
         on_action: ActionCallback | None = None,
+        on_status: StatusCallback | None = None,
         poll_interval: float = _POLL_INTERVAL_SECONDS,
         timestamp: Callable[[], str] = _local_timestamp,
     ) -> None:
@@ -132,6 +250,7 @@ class RunControlListener:
         self._stdin = stdin
         self._stderr = stderr
         self._on_action = on_action
+        self._on_status = on_status
         self._poll_interval = poll_interval
         self._timestamp = timestamp
         self._lock = threading.Lock()
@@ -149,6 +268,7 @@ class RunControlListener:
         stdin: TextIO = sys.stdin,
         stderr: TextIO = sys.stderr,
         on_action: ActionCallback | None = None,
+        on_status: StatusCallback | None = None,
     ) -> "RunControlListener":
         return cls(
             enabled=should_enable_run_controls(args, stdin=stdin, stderr=stderr),
@@ -156,6 +276,7 @@ class RunControlListener:
             stdin=stdin,
             stderr=stderr,
             on_action=on_action,
+            on_status=on_status,
         )
 
     def __enter__(self) -> "RunControlListener":
@@ -223,7 +344,28 @@ class RunControlListener:
     def handle_key(self, key: str) -> RunControlAction | None:
         if key == STOP_AFTER_CURRENT_KEY:
             action = self.state.toggle_stop_after_current()
-            self._emit_line(_format_toggle_line(action))
+            self._emit_line(_format_stop_toggle_line(action))
+            self._notify_action(action)
+            return action
+        if key == STATUS_SNAPSHOT_KEY:
+            action = self.state.request_status_snapshot()
+            if self._on_status is None:
+                self._emit_line(_format_status_snapshot_line(action))
+            else:
+                self._on_status(action)
+            return action
+        if key == TAIL_TOGGLE_KEY:
+            action = self.state.toggle_tail()
+            self._emit_line(_format_tail_toggle_line(action))
+            self._notify_action(action)
+            return action
+        if key in HARNESS_SELECTION_KEYS:
+            harness = HARNESS_SELECTION_KEYS[key]
+            action = self.state.select_harness(harness)
+            if action is None:
+                self._emit_line(_format_harness_already_selected_line(harness))
+                return None
+            self._emit_line(_format_harness_selection_line(action))
             self._notify_action(action)
             return action
         if key == HELP_KEY:

@@ -11,9 +11,9 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
-from . import config, events, harnesses, plans, responses, run_control, state
+from . import config, events, harnesses, plans, responses, run_control, state, tail
 from .formatting import format_duration_seconds
 
 
@@ -34,19 +34,26 @@ APPROVAL_SIGNAL_PATTERNS: tuple[str, ...] = (
     "permission to proceed",
 )
 RUN_CONTROL_EVENT_ACTIONS: dict[str, str] = {
-    "request": "stop-after-current-requested",
-    "cancel": "stop-after-current-canceled",
-    "consumed": "stop-after-current-consumed",
+    "request": events.RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED,
+    "cancel": events.RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CANCELED,
+    "consumed": events.RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CONSUMED,
+    "tail-enabled": events.RUN_CONTROL_ACTION_TAIL_ENABLED,
+    "tail-disabled": events.RUN_CONTROL_ACTION_TAIL_DISABLED,
+    "harness-selected": events.RUN_CONTROL_ACTION_HARNESS_SELECTED,
 }
 RUN_CONTROL_EVENT_MESSAGES: dict[str, str] = {
     "request": "stop-after-current requested",
     "cancel": "stop-after-current canceled",
     "consumed": "stop-after-current consumed",
+    "tail-enabled": "live tail enabled",
+    "tail-disabled": "live tail disabled",
+    "harness-selected": "next harness selected",
 }
 AGENT_MUX_FINISH_EVENT = "AgentSessionLoopFinished"
 AGENT_MUX_FINISH_SOURCE = "agent_session_loop"
 AGENT_MUX_FINISH_REASON = "run_finished"
 AGENT_MUX_FINISH_NOTIFY_TIMEOUT_SECONDS = 1.0
+INLINE_TAIL_JOIN_TIMEOUT_SECONDS = 1.0
 
 
 class RunError(Exception):
@@ -101,12 +108,93 @@ def build_harness_invocation(
     )
 
 
-def _selected_model_effort_payload(args: argparse.Namespace) -> dict[str, str | None]:
+def _selected_model_effort_payload(
+    args: argparse.Namespace,
+    *,
+    harness: str | None = None,
+) -> dict[str, str | None]:
     return config.model_effort_payload(
-        args.harness,
+        args.harness if harness is None else harness,
         model=getattr(args, "model", None),
         effort=getattr(args, "effort", None),
     )
+
+
+def _selected_future_harness(
+    args: argparse.Namespace,
+    control_payload: dict[str, Any],
+) -> str:
+    selected = control_payload.get("next_harness") or args.harness
+    if selected not in harnesses.HARNESS_NAMES:
+        raise RunError(f"unsupported selected harness: {selected}")
+    return str(selected)
+
+
+def _safe_harness_config_payload() -> dict[str, Any]:
+    try:
+        return config.harness_config_payload()
+    except config.ConfigError as error:
+        config_path = config.default_config_path()
+        return {
+            "path": str(config_path),
+            "present": config_path.exists(),
+            "configured_harnesses": [],
+            "error": str(error),
+        }
+
+
+def _harness_preflight_failure(
+    requested_harness: str,
+    *,
+    session_id: str,
+) -> tuple[str, dict[str, Any]] | None:
+    config_path = config.default_config_path()
+    details: dict[str, Any] = {
+        **_session_identity_payload(session_id),
+        "session_file": plans.session_id_to_filename(session_id),
+        "requested_harness": requested_harness,
+        "config_path": str(config_path),
+    }
+
+    try:
+        adapter = harnesses.get_adapter(requested_harness)
+    except (config.ConfigError, harnesses.HarnessError) as error:
+        details.update(
+            {
+                "executable": None,
+                "resolved_executable": None,
+                "error": str(error),
+            }
+        )
+        return str(error), details
+
+    details["executable"] = adapter.executable
+    try:
+        executable_path = adapter.resolve_executable()
+    except OSError as error:
+        details.update(
+            {
+                "resolved_executable": None,
+                "error": str(error),
+            }
+        )
+        return str(error), details
+
+    if executable_path is None:
+        message = (
+            f"{requested_harness} executable not found on PATH: "
+            f"{adapter.executable}"
+        )
+        details.update(
+            {
+                "resolved_executable": None,
+                "error": message,
+            }
+        )
+        return message, details
+
+    details["resolved_executable"] = executable_path
+    return None
 
 
 def _utc_run_id() -> str:
@@ -694,7 +782,9 @@ def _write_turn_artifacts(
 
 def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary_path = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
     temporary_path.write_text(
         json.dumps(payload, sort_keys=True, indent=2) + "\n",
         encoding="utf-8",
@@ -890,9 +980,37 @@ def _append_event(event_path: Path, name: str, payload: dict[str, Any]) -> None:
     events.append_event(event_path, events.Event(name=name, payload=payload))
 
 
+class _RunPersistence:
+    """Serializes one run's mutable payload, state writes, and event appends."""
+
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+
+    def append_event(
+        self,
+        event_path: Path,
+        name: str,
+        payload: dict[str, Any],
+    ) -> None:
+        with self.lock:
+            _append_event(event_path, name, payload)
+
+    def write_state(self, payload: dict[str, Any]) -> None:
+        with self.lock:
+            _write_state_payload(payload)
+
+
+def _run_persistence(
+    persistence: _RunPersistence | None,
+) -> _RunPersistence:
+    return _RunPersistence() if persistence is None else persistence
+
+
 def _initial_control_payload() -> dict[str, Any]:
     return {
         "stop_after_current": False,
+        "tail_enabled": False,
+        "next_harness": None,
         "consumed": False,
         "last_action": None,
     }
@@ -904,6 +1022,8 @@ def _apply_run_control_action(
 ) -> str:
     event_action = RUN_CONTROL_EVENT_ACTIONS[action.action]
     control_payload["stop_after_current"] = action.stop_after_current
+    control_payload["tail_enabled"] = action.tail_enabled
+    control_payload["next_harness"] = action.next_harness
     if action.action == "consumed":
         control_payload["consumed"] = True
     control_payload["last_action"] = event_action
@@ -917,21 +1037,36 @@ def _record_run_control_action(
     control_payload: dict[str, Any],
     action: run_control.RunControlAction,
     context: dict[str, Any] | None = None,
+    persistence: _RunPersistence | None = None,
 ) -> None:
-    event_action = _apply_run_control_action(control_payload, action)
-    payload["control"] = dict(control_payload)
-    event_payload = {
-        "run_id": payload.get("run_id"),
-        "action": event_action,
-        "stop_after_current": action.stop_after_current,
-        "message": RUN_CONTROL_EVENT_MESSAGES[action.action],
-    }
-    if context is not None:
-        for key in ("session", "turn_index", "total_sessions"):
-            value = context.get(key)
-            if value is not None:
-                event_payload[key] = value
-    _append_event(event_path, events.RUN_CONTROL_EVENT, event_payload)
+    persistence = _run_persistence(persistence)
+    with persistence.lock:
+        previous_harness = control_payload.get("next_harness") or payload.get("harness")
+        event_action = _apply_run_control_action(control_payload, action)
+        payload["control"] = dict(control_payload)
+        event_payload = {
+            "run_id": payload.get("run_id"),
+            "action": event_action,
+            "stop_after_current": action.stop_after_current,
+            "tail_enabled": action.tail_enabled,
+            "next_harness": action.next_harness,
+            "message": RUN_CONTROL_EVENT_MESSAGES[action.action],
+        }
+        if context is not None:
+            for key in ("session", "turn_index", "total_sessions"):
+                value = context.get(key)
+                if value is not None:
+                    event_payload[key] = value
+        if action.action == "harness-selected":
+            current_harness = (
+                context.get("harness")
+                if context is not None and context.get("harness") is not None
+                else previous_harness
+            )
+            event_payload["current_harness"] = current_harness
+            event_payload["selected_harness"] = action.next_harness
+        persistence.append_event(event_path, events.RUN_CONTROL_EVENT, event_payload)
+        persistence.write_state(payload)
 
 
 def _local_timestamp(moment: datetime | None = None) -> str:
@@ -964,22 +1099,138 @@ def _progress_commit_label(commit: dict[str, Any]) -> str:
     return str(scope or "unknown")
 
 
-class _ProgressReporter:
-    """Human-facing progress output for non-JSON runs."""
+class _CoordinatedStderrStream:
+    """Line-buffering stream proxy that shares the runner output lock."""
 
-    def __init__(self, *, enabled: bool) -> None:
+    def __init__(self, coordinator: "_StderrOutputCoordinator") -> None:
+        self._coordinator = coordinator
+
+    def write(self, text: str) -> int:
+        return self._coordinator.write_unprefixed(text)
+
+    def flush(self) -> None:
+        self._coordinator.flush_thread()
+
+    def isatty(self) -> bool:
+        return self._coordinator.isatty()
+
+    def fileno(self) -> int:
+        return self._coordinator.fileno()
+
+
+class _StderrOutputCoordinator:
+    """Shared stderr output path for progress, controls, status, and tails."""
+
+    def __init__(
+        self,
+        *,
+        enabled: bool,
+        stream: TextIO | None = None,
+    ) -> None:
         self.enabled = enabled
+        self._stream = stream
         self._lock = threading.Lock()
+        self._buffer_lock = threading.Lock()
+        self._thread_buffers: dict[int, str] = {}
+        self._stream_proxy = _CoordinatedStderrStream(self)
 
-    def _emit(self, message: str) -> None:
+    @property
+    def stream(self) -> _CoordinatedStderrStream:
+        return self._stream_proxy
+
+    def _target_stream(self) -> TextIO:
+        return sys.stderr if self._stream is None else self._stream
+
+    def isatty(self) -> bool:
+        isatty = getattr(self._target_stream(), "isatty", None)
+        if isatty is None:
+            return False
+        try:
+            return bool(isatty())
+        except (OSError, ValueError):
+            return False
+
+    def fileno(self) -> int:
+        return self._target_stream().fileno()
+
+    def emit_line(self, message: str) -> None:
         if not self.enabled:
             return
         with self._lock:
             print(
                 f"[{_local_timestamp()}] {message}",
-                file=sys.stderr,
+                file=self._target_stream(),
                 flush=True,
             )
+
+    def emit_lines(self, messages: list[str]) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            for message in messages:
+                print(
+                    f"[{_local_timestamp()}] {message}",
+                    file=self._target_stream(),
+                    flush=True,
+                )
+
+    def write_unprefixed(self, text: str) -> int:
+        if not self.enabled:
+            return len(text)
+
+        thread_id = threading.get_ident()
+        complete_lines: list[str] = []
+        with self._buffer_lock:
+            buffered = self._thread_buffers.get(thread_id, "") + text
+            while "\n" in buffered:
+                line, buffered = buffered.split("\n", 1)
+                complete_lines.append(line + "\n")
+            if buffered:
+                self._thread_buffers[thread_id] = buffered
+            else:
+                self._thread_buffers.pop(thread_id, None)
+
+        if complete_lines:
+            with self._lock:
+                stream = self._target_stream()
+                for line in complete_lines:
+                    stream.write(line)
+                stream.flush()
+        return len(text)
+
+    def flush_thread(self) -> None:
+        if not self.enabled:
+            return
+
+        thread_id = threading.get_ident()
+        with self._buffer_lock:
+            buffered = self._thread_buffers.pop(thread_id, "")
+        with self._lock:
+            stream = self._target_stream()
+            if buffered:
+                stream.write(buffered)
+            stream.flush()
+
+
+class _ProgressReporter:
+    """Human-facing progress output for non-JSON runs."""
+
+    def __init__(
+        self,
+        *,
+        enabled: bool,
+        output: _StderrOutputCoordinator | None = None,
+    ) -> None:
+        self.enabled = enabled
+        self.output = (
+            _StderrOutputCoordinator(enabled=enabled) if output is None else output
+        )
+
+    def _emit(self, message: str) -> None:
+        self.output.emit_line(message)
+
+    def status_snapshot(self, lines: list[str]) -> None:
+        self.output.emit_lines(lines)
 
     def run_started(self, payload: dict[str, Any]) -> None:
         snapshot = payload["initial_snapshot"]
@@ -1056,6 +1307,224 @@ class _ProgressReporter:
         )
 
 
+class _InlineTailController:
+    """Owns the optional in-process tail follower for a live run."""
+
+    def __init__(
+        self,
+        *,
+        plan_dir: Path,
+        state_dir: str | Path | None,
+        output: _StderrOutputCoordinator,
+    ) -> None:
+        self._plan_dir = plan_dir
+        self._state_dir = state_dir
+        self._output = output
+        self._lock = threading.Lock()
+        self._follower: tail.TailFollower | None = None
+
+    def enable(self) -> None:
+        with self._lock:
+            if self._follower is not None and self._follower.running:
+                return
+            self._follower = tail.TailFollower(
+                self._plan_dir,
+                state_dir=self._state_dir,
+                out=self._output.stream,
+            )
+            self._follower.start()
+
+    def disable(self) -> None:
+        self._stop_current()
+
+    def stop(self) -> None:
+        self._stop_current()
+
+    def _stop_current(self) -> None:
+        with self._lock:
+            follower = self._follower
+            self._follower = None
+
+        if follower is None:
+            return
+        follower.stop()
+        try:
+            stopped = follower.join(timeout=INLINE_TAIL_JOIN_TIMEOUT_SECONDS)
+        except Exception as error:
+            self._output.emit_line(f"live tail stopped with error: {error}")
+            return
+        if not stopped:
+            self._output.emit_line("live tail did not stop before cleanup timeout")
+
+
+def _compact_value(value: Any, *, fallback: str = "none") -> str:
+    if value is None or value == "":
+        return fallback
+    return str(value)
+
+
+def _compact_status_counts(
+    snapshot: plans.PlanSnapshot | None,
+    fallback: dict[str, Any] | None,
+) -> dict[str, int] | None:
+    if snapshot is not None:
+        return _status_counts(snapshot)
+    if isinstance(fallback, dict):
+        counts = fallback.get("counts")
+        if isinstance(counts, dict):
+            return {
+                "pending": int(counts.get("pending", 0)),
+                "complete": int(counts.get("complete", 0)),
+                "empty": int(counts.get("empty", 0)),
+                "unknown": int(counts.get("unknown", 0)),
+            }
+    return None
+
+
+def _compact_next_pending_id(
+    snapshot: plans.PlanSnapshot | None,
+    fallback: dict[str, Any] | None,
+) -> str | None:
+    if snapshot is not None and snapshot.next_pending is not None:
+        return snapshot.next_pending.id
+    if isinstance(fallback, dict):
+        value = fallback.get("next_pending_id")
+        if value is None:
+            value = fallback.get("next_pending")
+        if value is not None:
+            return str(value)
+    return None
+
+
+def _compact_artifact_source(
+    payload: dict[str, Any],
+    active_turn: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if active_turn is not None:
+        return active_turn
+    turns = payload.get("turns")
+    if isinstance(turns, list):
+        for turn in reversed(turns):
+            if isinstance(turn, dict):
+                return turn
+    return None
+
+
+def _compact_status_lines(
+    *,
+    payload: dict[str, Any],
+    control: dict[str, Any],
+    snapshot: plans.PlanSnapshot | None,
+    plan_error: str | None = None,
+) -> list[str]:
+    """Build a short live status snapshot without mutating runner state."""
+
+    active_turn = payload.get("active_turn")
+    if not isinstance(active_turn, dict):
+        active_turn = None
+
+    fallback_snapshot = payload.get("final_snapshot") or payload.get(
+        "initial_snapshot"
+    )
+    if not isinstance(fallback_snapshot, dict):
+        fallback_snapshot = None
+    counts = _compact_status_counts(snapshot, fallback_snapshot)
+    total_sessions = sum(counts.values()) if counts is not None else None
+    next_pending_id = _compact_next_pending_id(snapshot, fallback_snapshot)
+    turns = payload.get("turns")
+    turn_count = len(turns) if isinstance(turns, list) else 0
+    next_turn_index = turn_count + 1
+
+    if counts is None:
+        counts_text = "sessions unavailable"
+    else:
+        counts_text = (
+            f"sessions {counts['complete']}/{total_sessions} complete, "
+            f"{counts['pending']} pending"
+        )
+
+    if active_turn is not None:
+        current_text = (
+            f"status: active session {_format_session_label(active_turn)} "
+            f"turn {active_turn.get('turn_index')}; {counts_text}"
+        )
+        elapsed = active_turn.get("elapsed_seconds")
+        idle = active_turn.get("idle_seconds")
+        if elapsed is not None or idle is not None:
+            current_text += (
+                f"; elapsed {format_duration_seconds(elapsed)}, "
+                f"idle {format_duration_seconds(idle)}"
+            )
+    elif next_pending_id is not None:
+        total_suffix = "" if total_sessions is None else f"/{total_sessions}"
+        state_text = "idle" if turn_count else "no active turn"
+        current_text = (
+            f"status: {state_text}; next session {next_pending_id}{total_suffix} "
+            f"turn {next_turn_index}; {counts_text}"
+        )
+    else:
+        current_text = f"status: no active turn; {counts_text}; next session none"
+
+    active_harness = (
+        active_turn.get("harness")
+        if active_turn is not None and active_turn.get("harness") is not None
+        else payload.get("harness")
+    )
+    model_value = (
+        active_turn.get("model")
+        if active_turn is not None and "model" in active_turn
+        else payload.get("model")
+    )
+    model_source_value = (
+        active_turn.get("model_source")
+        if active_turn is not None and "model_source" in active_turn
+        else payload.get("model_source")
+    )
+    effort_value = (
+        active_turn.get("effort")
+        if active_turn is not None and "effort" in active_turn
+        else payload.get("effort")
+    )
+    effort_source_value = (
+        active_turn.get("effort_source")
+        if active_turn is not None and "effort_source" in active_turn
+        else payload.get("effort_source")
+    )
+    model_source = _compact_value(model_source_value)
+    effort_source = _compact_value(effort_source_value)
+    metadata_line = (
+        f"status: harness active {_compact_value(active_harness)}; "
+        f"future {_compact_value(control.get('next_harness'), fallback='unchanged')}; "
+        f"model {_compact_value(model_value)} ({model_source}); "
+        f"effort {_compact_value(effort_value)} ({effort_source})"
+    )
+
+    stop_state = "on" if control.get("stop_after_current") else "off"
+    tail_state = "on" if control.get("tail_enabled") else "off"
+    control_line = (
+        "status: controls "
+        f"stop-after-current {stop_state}; live tail {tail_state}"
+    )
+
+    artifact_source = _compact_artifact_source(payload, active_turn)
+    if artifact_source is None:
+        paths_line = "status paths: none yet"
+    else:
+        paths_line = (
+            "status paths: "
+            f"stdout {_compact_value(artifact_source.get('stdout_path'))}; "
+            f"stderr {_compact_value(artifact_source.get('stderr_path'))}; "
+            f"last-message {_compact_value(artifact_source.get('last_message_path'))}; "
+            f"result {_compact_value(artifact_source.get('result_path'))}"
+        )
+
+    lines = [current_text]
+    if plan_error is not None:
+        lines.append(f"status: plan inspection error: {plan_error}")
+    lines.extend([metadata_line, control_line, paths_line])
+    return lines
+
+
 class _LiveTurn:
     """Thread-safe live state and heartbeat manager for one harness turn."""
 
@@ -1066,12 +1535,14 @@ class _LiveTurn:
         event_path: Path,
         progress: _ProgressReporter,
         active_turn: dict[str, Any],
+        persistence: _RunPersistence | None = None,
         heartbeat_interval: float = HEARTBEAT_INTERVAL_SECONDS,
     ) -> None:
         self._payload = payload
         self._event_path = event_path
         self._progress = progress
         self._active_turn = dict(active_turn)
+        self._persistence = _run_persistence(persistence)
         self._heartbeat_interval = heartbeat_interval
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -1081,8 +1552,9 @@ class _LiveTurn:
 
     def start(self) -> None:
         with self._lock:
-            self._payload["active_turn"] = dict(self._active_turn)
-            _write_state_payload(self._payload)
+            with self._persistence.lock:
+                self._payload["active_turn"] = dict(self._active_turn)
+                self._persistence.write_state(self._payload)
         self._progress.turn_started(self._active_turn)
         self._thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
         self._thread.start()
@@ -1109,15 +1581,16 @@ class _LiveTurn:
             if signal is not None and self._active_turn.get("action_required") is None:
                 signal_to_report = self._action_required_payload(signal, now)
                 self._active_turn["action_required"] = signal_to_report
-                self._payload["action_required"] = signal_to_report
-                _append_event(
-                    self._event_path,
-                    events.ACTION_REQUIRED_EVENT,
-                    signal_to_report,
-                )
-
-            self._payload["active_turn"] = dict(self._active_turn)
-            _write_state_payload(self._payload)
+            with self._persistence.lock:
+                if signal_to_report is not None:
+                    self._payload["action_required"] = signal_to_report
+                    self._persistence.append_event(
+                        self._event_path,
+                        events.ACTION_REQUIRED_EVENT,
+                        signal_to_report,
+                    )
+                self._payload["active_turn"] = dict(self._active_turn)
+                self._persistence.write_state(self._payload)
 
         if signal_to_report is not None:
             self._progress.action_required(signal_to_report)
@@ -1139,8 +1612,9 @@ class _LiveTurn:
                 self._last_activity_at,
                 finished_at,
             )
-            self._payload["active_turn"] = None
-            _write_state_payload(self._payload)
+            with self._persistence.lock:
+                self._payload["active_turn"] = None
+                self._persistence.write_state(self._payload)
             return active_turn
 
     def _heartbeat_loop(self) -> None:
@@ -1177,13 +1651,14 @@ class _LiveTurn:
             self._active_turn["heartbeat_count"] = heartbeat_count
             self._active_turn["elapsed_seconds"] = heartbeat["elapsed_seconds"]
             self._active_turn["idle_seconds"] = heartbeat["idle_seconds"]
-            self._payload["active_turn"] = dict(self._active_turn)
-            _append_event(
-                self._event_path,
-                events.TURN_HEARTBEAT_EVENT,
-                heartbeat,
-            )
-            _write_state_payload(self._payload)
+            with self._persistence.lock:
+                self._payload["active_turn"] = dict(self._active_turn)
+                self._persistence.append_event(
+                    self._event_path,
+                    events.TURN_HEARTBEAT_EVENT,
+                    heartbeat,
+                )
+                self._persistence.write_state(self._payload)
             return heartbeat
 
     def _action_required_payload(
@@ -1223,8 +1698,11 @@ def _run_auto_commit(
     run_dir: Path,
     run_id: str,
     session_id: str | None,
+    persistence: _RunPersistence | None = None,
 ) -> dict[str, Any]:
-    commit_index = len(payload["commits"]) + 1
+    persistence = _run_persistence(persistence)
+    with persistence.lock:
+        commit_index = len(payload["commits"]) + 1
     commit_started = _commit_started_payload(
         run_id=run_id,
         cwd=cwd,
@@ -1232,8 +1710,9 @@ def _run_auto_commit(
         commit_index=commit_index,
         session_id=session_id,
     )
-    _append_event(event_path, events.COMMIT_STARTED_EVENT, commit_started)
-    _write_state_payload(payload)
+    with persistence.lock:
+        persistence.append_event(event_path, events.COMMIT_STARTED_EVENT, commit_started)
+        persistence.write_state(payload)
     progress.commit_started(commit_started)
 
     commit_payload = _run_spec_commit(
@@ -1242,10 +1721,11 @@ def _run_auto_commit(
         commit_index=commit_index,
         session_id=session_id,
     )
-    payload["commits"].append(commit_payload)
     commit_finished = {"run_id": run_id, **commit_payload}
-    _append_event(event_path, events.COMMIT_FINISHED_EVENT, commit_finished)
-    _write_state_payload(payload)
+    with persistence.lock:
+        payload["commits"].append(commit_payload)
+        persistence.append_event(event_path, events.COMMIT_FINISHED_EVENT, commit_finished)
+        persistence.write_state(payload)
     progress.commit_finished(commit_finished)
     return commit_payload
 
@@ -1254,16 +1734,19 @@ def _finish_run(
     event_path: Path,
     payload: dict[str, Any],
     progress: _ProgressReporter | None = None,
+    persistence: _RunPersistence | None = None,
 ) -> None:
-    finished_at = _utc_now()
-    payload["run_finished_at"] = _isoformat(finished_at)
-    started_at = _parse_datetime(payload.get("run_started_at"))
-    payload["duration_seconds"] = (
-        _duration_seconds(started_at, finished_at) if started_at is not None else None
-    )
-    payload["active_turn"] = None
-    _append_event(event_path, "run_finished", payload)
-    _write_state_payload(payload)
+    persistence = _run_persistence(persistence)
+    with persistence.lock:
+        finished_at = _utc_now()
+        payload["run_finished_at"] = _isoformat(finished_at)
+        started_at = _parse_datetime(payload.get("run_started_at"))
+        payload["duration_seconds"] = (
+            _duration_seconds(started_at, finished_at) if started_at is not None else None
+        )
+        payload["active_turn"] = None
+        persistence.append_event(event_path, "run_finished", payload)
+        persistence.write_state(payload)
     _notify_agent_mux_loop_finished(payload)
     if progress is not None:
         progress.run_finished(payload)
@@ -1292,19 +1775,22 @@ def _pause_run(
     reason: str,
     message: str,
     details: dict[str, Any] | None = None,
+    persistence: _RunPersistence | None = None,
 ) -> None:
-    _set_pause(payload, reason=reason, message=message, details=details)
-    _append_event(
-        event_path,
-        events.RUN_PAUSED_EVENT,
-        {
-            "run_id": payload.get("run_id"),
-            "run_dir": payload.get("run_dir"),
-            "reason": reason,
-            "message": message,
-            "details": {} if details is None else details,
-        },
-    )
+    persistence = _run_persistence(persistence)
+    with persistence.lock:
+        _set_pause(payload, reason=reason, message=message, details=details)
+        persistence.append_event(
+            event_path,
+            events.RUN_PAUSED_EVENT,
+            {
+                "run_id": payload.get("run_id"),
+                "run_dir": payload.get("run_dir"),
+                "reason": reason,
+                "message": message,
+                "details": {} if details is None else details,
+            },
+        )
 
 
 def _consume_run_control_stop(
@@ -1315,7 +1801,9 @@ def _consume_run_control_stop(
     event_path: Path,
     control_payload: dict[str, Any],
     context: dict[str, Any] | None = None,
+    persistence: _RunPersistence | None = None,
 ) -> bool:
+    persistence = _run_persistence(persistence)
     action = listener.consume_stop_after_current()
     if action is None:
         return False
@@ -1325,10 +1813,12 @@ def _consume_run_control_stop(
         control_payload=control_payload,
         action=action,
         context=context,
+        persistence=persistence,
     )
     if snapshot.next_pending is None:
         return False
-    payload["reason"] = "stopped"
+    with persistence.lock:
+        payload["reason"] = "stopped"
     return True
 
 
@@ -1373,7 +1863,7 @@ def _initial_payload(
         events_path=str(event_path),
         state_path=str(state_path),
         lock_path=str(lock_info.path),
-        harness_config=config.harness_config_payload(),
+        harness_config=_safe_harness_config_payload(),
         completed_sessions=[],
         completed_session_ids=[],
         commits=[],
@@ -1451,8 +1941,15 @@ def _run_locked(
         run_id=run_id,
         commit_mode=commit_mode,
     )
-    progress = _ProgressReporter(enabled=not args.json)
-    _append_event(
+    persistence = _RunPersistence()
+    output = _StderrOutputCoordinator(enabled=not args.json)
+    progress = _ProgressReporter(enabled=not args.json, output=output)
+    inline_tail = _InlineTailController(
+        plan_dir=snapshot.plan_dir,
+        state_dir=args.state_dir,
+        output=output,
+    )
+    persistence.append_event(
         event_path,
         "run_started",
         {
@@ -1473,21 +1970,23 @@ def _run_locked(
             "next_pending": payload["initial_snapshot"]["next_pending"],
         },
     )
-    _write_state_payload(payload)
+    persistence.write_state(payload)
     progress.run_started(payload)
 
     invalid_pause = _invalid_status_pause(snapshot)
     if invalid_pause is not None:
         reason, message, details = invalid_pause
-        payload["final_snapshot"] = _snapshot_payload(snapshot)
+        with persistence.lock:
+            payload["final_snapshot"] = _snapshot_payload(snapshot)
         _pause_run(
             event_path,
             payload,
             reason=reason,
             message=message,
             details=details,
+            persistence=persistence,
         )
-        _finish_run(event_path, payload, progress)
+        _finish_run(event_path, payload, progress, persistence=persistence)
         return 1, payload
 
     if snapshot.next_pending is None:
@@ -1498,22 +1997,25 @@ def _run_locked(
                 reason="no-pending-but-incomplete",
                 message="no pending session was found, but not every session is complete",
                 details={"snapshot": _snapshot_payload(snapshot)},
+                persistence=persistence,
             )
-            _finish_run(event_path, payload, progress)
+            _finish_run(event_path, payload, progress, persistence=persistence)
             return 1, payload
-        payload["reason"] = "all-complete"
-        _finish_run(event_path, payload, progress)
+        with persistence.lock:
+            payload["reason"] = "all-complete"
+        _finish_run(event_path, payload, progress, persistence=persistence)
         return 0, payload
 
     if args.dry_run:
-        payload["reason"] = "dry-run"
-        payload["planned"] = _dry_run_payload(
-            args=args,
-            snapshot=snapshot,
-            cwd=cwd,
-            run_dir=run_dir,
-        )
-        _finish_run(event_path, payload, progress)
+        with persistence.lock:
+            payload["reason"] = "dry-run"
+            payload["planned"] = _dry_run_payload(
+                args=args,
+                snapshot=snapshot,
+                cwd=cwd,
+                run_dir=run_dir,
+            )
+        _finish_run(event_path, payload, progress, persistence=persistence)
         return 0, payload
 
     try:
@@ -1523,9 +2025,12 @@ def _run_locked(
                 max_sessions=max_sessions,
             )
         if commit_mode is not None:
-            payload["commit_preflight"] = _validate_commit_preflight(cwd)
+            commit_preflight = _validate_commit_preflight(cwd)
+            with persistence.lock:
+                payload["commit_preflight"] = commit_preflight
     except RunError as error:
-        payload["final_snapshot"] = _snapshot_payload(snapshot)
+        with persistence.lock:
+            payload["final_snapshot"] = _snapshot_payload(snapshot)
         _pause_run(
             event_path,
             payload,
@@ -1536,17 +2041,20 @@ def _run_locked(
                 "max_sessions": max_sessions,
                 "pending_sessions": _status_counts(snapshot)["pending"],
             },
+            persistence=persistence,
         )
-        _finish_run(event_path, payload, progress)
+        _finish_run(event_path, payload, progress, persistence=persistence)
         return 1, payload
 
-    run_control_lock = threading.Lock()
+    run_control_lock = persistence.lock
     run_control_context: dict[str, Any] | None = None
     control_payload = dict(payload["control"])
 
     def handle_run_control_action(action: run_control.RunControlAction) -> None:
         if action.action == "consumed":
             return
+        if action.action == "tail-disabled":
+            inline_tail.disable()
         with run_control_lock:
             context = (
                 None
@@ -1559,23 +2067,69 @@ def _run_locked(
                 control_payload=control_payload,
                 action=action,
                 context=context,
+                persistence=persistence,
             )
+        if action.action == "tail-enabled":
+            inline_tail.enable()
+
+    def handle_run_control_status(action: run_control.RunControlAction) -> None:
+        with run_control_lock:
+            context = (
+                None
+                if run_control_context is None
+                else dict(run_control_context)
+            )
+            status_control = dict(control_payload)
+            status_control["stop_after_current"] = action.stop_after_current
+            status_control["tail_enabled"] = action.tail_enabled
+            status_control["next_harness"] = action.next_harness
+            status_payload = dict(payload)
+            active_turn = payload.get("active_turn")
+            if isinstance(active_turn, dict):
+                status_payload["active_turn"] = dict(active_turn)
+            elif context is not None:
+                status_payload["active_turn"] = dict(context)
+            turns = payload.get("turns")
+            if isinstance(turns, list):
+                status_payload["turns"] = [
+                    dict(turn) if isinstance(turn, dict) else turn
+                    for turn in turns
+                ]
+
+        try:
+            status_snapshot = plans.inspect_plan(snapshot.plan_dir)
+            plan_error = None
+        except plans.PlanError as error:
+            status_snapshot = None
+            plan_error = str(error)
+
+        progress.status_snapshot(
+            _compact_status_lines(
+                payload=status_payload,
+                control=status_control,
+                snapshot=status_snapshot,
+                plan_error=plan_error,
+            )
+        )
 
     run_controls = run_control.RunControlListener.for_run(
         args,
-        state=run_control.RunControlState(),
+        state=run_control.RunControlState(current_harness=args.harness),
         stdin=sys.stdin,
-        stderr=sys.stderr,
+        stderr=output.stream,
         on_action=handle_run_control_action,
+        on_status=handle_run_control_status,
     )
     run_controls.start()
 
     completed_count = 0
     previous_turn_finished_at: datetime | None = None
-    total_sessions = sum(payload["initial_snapshot"]["counts"].values())
+    with persistence.lock:
+        total_sessions = sum(payload["initial_snapshot"]["counts"].values())
     while snapshot.next_pending is not None:
         if max_sessions is not None and completed_count >= max_sessions:
-            payload["reason"] = "max-sessions"
+            with persistence.lock:
+                payload["reason"] = "max-sessions"
             break
 
         before = snapshot
@@ -1587,13 +2141,39 @@ def _run_locked(
         session_identity = _session_identity_payload(session_id)
         session_details = _session_details_payload(session_id)
 
-        turn_index = len(payload["turns"]) + 1
+        with persistence.lock:
+            turn_index = len(payload["turns"]) + 1
         paths = _turn_paths(
             run_dir,
             turn_index=turn_index,
             session_id=session_id,
         )
-        prompt = build_session_prompt(args.harness, before.plan_dir)
+        with run_control_lock:
+            turn_harness = _selected_future_harness(args, control_payload)
+        turn_model_effort = _selected_model_effort_payload(
+            args,
+            harness=turn_harness,
+        )
+        preflight_failure = _harness_preflight_failure(
+            turn_harness,
+            session_id=session_id,
+        )
+        if preflight_failure is not None:
+            message, details = preflight_failure
+            with persistence.lock:
+                payload["final_snapshot"] = _snapshot_payload(before)
+            _pause_run(
+                event_path,
+                payload,
+                reason="harness-unavailable",
+                message=(
+                    f"harness unavailable before {session_label}: {message}"
+                ),
+                details=details,
+                persistence=persistence,
+            )
+            break
+        prompt = build_session_prompt(turn_harness, before.plan_dir)
         turn_started_at = _utc_now()
         turn_started_at_text = _isoformat(turn_started_at)
         idle_seconds_since_previous_turn = (
@@ -1608,10 +2188,11 @@ def _run_locked(
             "total_sessions": total_sessions,
             "artifact_dir": str(paths["artifact_dir"]),
             "prompt": prompt,
-            "model": payload["model"],
-            "model_source": payload["model_source"],
-            "effort": payload["effort"],
-            "effort_source": payload["effort_source"],
+            "harness": turn_harness,
+            "model": turn_model_effort["model"],
+            "model_source": turn_model_effort["model_source"],
+            "effort": turn_model_effort["effort"],
+            "effort_source": turn_model_effort["effort_source"],
             "stdout_path": str(paths["stdout"]),
             "stderr_path": str(paths["stderr"]),
             "last_message_path": str(paths["last_message"]),
@@ -1637,6 +2218,7 @@ def _run_locked(
             event_path=event_path,
             progress=progress,
             active_turn=active_turn,
+            persistence=persistence,
         )
 
         def stream_callback(stream_name: harnesses.StreamName, text: str) -> None:
@@ -1645,11 +2227,11 @@ def _run_locked(
 
         with run_control_lock:
             run_control_context = dict(active_turn)
-        _append_event(event_path, "turn_started", active_turn)
+        persistence.append_event(event_path, "turn_started", active_turn)
         live_turn.start()
         try:
             result = harnesses.run_harness(
-                args.harness,
+                turn_harness,
                 cwd=cwd,
                 plan_dir=before.plan_dir,
                 prompt=prompt,
@@ -1664,6 +2246,7 @@ def _run_locked(
             live_turn.stop()
             live_turn.finish(_utc_now())
             run_controls.stop()
+            inline_tail.stop()
             raise
         live_turn.stop()
         turn_finished_at = _utc_now()
@@ -1688,52 +2271,60 @@ def _run_locked(
             live_turn=live_turn_payload,
             plan_error=plan_error,
         )
-        payload["turns"].append(turn_payload)
-        _append_event(event_path, "turn_finished", turn_payload)
-        _write_state_payload(payload)
+        with persistence.lock:
+            payload["turns"].append(turn_payload)
+            persistence.append_event(event_path, "turn_finished", turn_payload)
+            persistence.write_state(payload)
         progress.turn_finished(turn_payload)
 
         if result.timed_out:
-            payload["final_snapshot"] = (
-                _snapshot_payload(after)
-                if after is not None
-                else _snapshot_payload(before)
-            )
+            with persistence.lock:
+                payload["final_snapshot"] = (
+                    _snapshot_payload(after)
+                    if after is not None
+                    else _snapshot_payload(before)
+                )
             _pause_run(
                 event_path,
                 payload,
                 reason="timeout",
                 message=f"harness turn timed out for {session_label}",
                 details=session_details,
+                persistence=persistence,
             )
             break
         if after is None:
-            payload["final_snapshot"] = _snapshot_payload(before)
+            with persistence.lock:
+                payload["final_snapshot"] = _snapshot_payload(before)
             _pause_run(
                 event_path,
                 payload,
                 reason="malformed-plan",
                 message="plan could not be inspected after the harness turn",
                 details={"error": plan_error, **session_details},
+                persistence=persistence,
             )
             break
 
         invalid_pause = _invalid_status_pause(after)
         if invalid_pause is not None:
             reason, message, details = invalid_pause
-            payload["final_snapshot"] = _snapshot_payload(after)
+            with persistence.lock:
+                payload["final_snapshot"] = _snapshot_payload(after)
             _pause_run(
                 event_path,
                 payload,
                 reason=reason,
                 message=message,
                 details=details | session_details,
+                persistence=persistence,
             )
             break
 
         runner_pause = turn_payload.get("runner_pause")
         if runner_pause is not None:
-            payload["final_snapshot"] = _snapshot_payload(after)
+            with persistence.lock:
+                payload["final_snapshot"] = _snapshot_payload(after)
             _pause_run(
                 event_path,
                 payload,
@@ -1743,10 +2334,12 @@ def _run_locked(
                     **session_details,
                     "source": turn_payload.get("runner_pause_source"),
                 },
+                persistence=persistence,
             )
             break
         if result.returncode != 0:
-            payload["final_snapshot"] = _snapshot_payload(after)
+            with persistence.lock:
+                payload["final_snapshot"] = _snapshot_payload(after)
             _pause_run(
                 event_path,
                 payload,
@@ -1759,6 +2352,7 @@ def _run_locked(
                     **session_details,
                     "returncode": result.returncode,
                 },
+                persistence=persistence,
             )
             break
 
@@ -1771,9 +2365,10 @@ def _run_locked(
         )
         status_changes = _status_changes(before, after)
         if not status_changes:
-            payload["expected_status_changes"] = list(expected_change)
-            payload["observed_status_changes"] = []
-            payload["final_snapshot"] = _snapshot_payload(after)
+            with persistence.lock:
+                payload["expected_status_changes"] = list(expected_change)
+                payload["observed_status_changes"] = []
+                payload["final_snapshot"] = _snapshot_payload(after)
             _pause_run(
                 event_path,
                 payload,
@@ -1784,12 +2379,14 @@ def _run_locked(
                     "expected_status_changes": list(expected_change),
                     "observed_status_changes": [],
                 },
+                persistence=persistence,
             )
             break
         if len(status_changes) > 1:
-            payload["expected_status_changes"] = list(expected_change)
-            payload["observed_status_changes"] = list(status_changes)
-            payload["final_snapshot"] = _snapshot_payload(after)
+            with persistence.lock:
+                payload["expected_status_changes"] = list(expected_change)
+                payload["observed_status_changes"] = list(status_changes)
+                payload["final_snapshot"] = _snapshot_payload(after)
             _pause_run(
                 event_path,
                 payload,
@@ -1800,12 +2397,14 @@ def _run_locked(
                     "expected_status_changes": list(expected_change),
                     "observed_status_changes": list(status_changes),
                 },
+                persistence=persistence,
             )
             break
         if status_changes != expected_change:
-            payload["expected_status_changes"] = list(expected_change)
-            payload["observed_status_changes"] = list(status_changes)
-            payload["final_snapshot"] = _snapshot_payload(after)
+            with persistence.lock:
+                payload["expected_status_changes"] = list(expected_change)
+                payload["observed_status_changes"] = list(status_changes)
+                payload["final_snapshot"] = _snapshot_payload(after)
             _pause_run(
                 event_path,
                 payload,
@@ -1816,13 +2415,15 @@ def _run_locked(
                     "expected_status_changes": list(expected_change),
                     "observed_status_changes": list(status_changes),
                 },
+                persistence=persistence,
             )
             break
 
         try:
             ledger_updates = plans.sync_derived_status_ledgers(after)
         except plans.PlanError as error:
-            payload["final_snapshot"] = _snapshot_payload(after)
+            with persistence.lock:
+                payload["final_snapshot"] = _snapshot_payload(after)
             _pause_run(
                 event_path,
                 payload,
@@ -1832,13 +2433,15 @@ def _run_locked(
                     **session_details,
                     "error": str(error),
                 },
+                persistence=persistence,
             )
             break
         if ledger_updates:
             try:
                 after = plans.inspect_plan(before.plan_dir)
             except plans.PlanError as error:
-                payload["final_snapshot"] = _snapshot_payload(after)
+                with persistence.lock:
+                    payload["final_snapshot"] = _snapshot_payload(after)
                 _pause_run(
                     event_path,
                     payload,
@@ -1848,11 +2451,13 @@ def _run_locked(
                         **session_details,
                         "error": str(error),
                     },
+                    persistence=persistence,
                 )
                 break
-            turn_payload["ledger_updates"] = [str(path) for path in ledger_updates]
-            turn_payload["after"] = _snapshot_payload(after)
-            _write_json_file(paths["result"], turn_payload)
+            with persistence.lock:
+                turn_payload["ledger_updates"] = [str(path) for path in ledger_updates]
+                turn_payload["after"] = _snapshot_payload(after)
+                _write_json_file(paths["result"], turn_payload)
 
         if commit_mode == COMMIT_MODE_PER_SESSION:
             commit_payload = _run_auto_commit(
@@ -1863,9 +2468,11 @@ def _run_locked(
                 run_dir=run_dir,
                 run_id=run_id,
                 session_id=session_id,
+                persistence=persistence,
             )
             if not commit_payload["success"]:
-                payload["final_snapshot"] = _snapshot_payload(after)
+                with persistence.lock:
+                    payload["final_snapshot"] = _snapshot_payload(after)
                 _pause_run(
                     event_path,
                     payload,
@@ -1878,14 +2485,17 @@ def _run_locked(
                         **session_details,
                         "commit": commit_payload,
                     },
+                    persistence=persistence,
                 )
                 break
 
-        payload["completed_sessions"].append(_session_compat_value(session_id))
-        payload.setdefault("completed_session_ids", []).append(session_id)
+        with persistence.lock:
+            payload["completed_sessions"].append(_session_compat_value(session_id))
+            payload.setdefault("completed_session_ids", []).append(session_id)
         completed_count += 1
         snapshot = after
-        payload["final_snapshot"] = _snapshot_payload(snapshot)
+        with persistence.lock:
+            payload["final_snapshot"] = _snapshot_payload(snapshot)
         with run_control_lock:
             should_stop_after_current = _consume_run_control_stop(
                 run_controls,
@@ -1894,14 +2504,19 @@ def _run_locked(
                 event_path=event_path,
                 control_payload=control_payload,
                 context=turn_payload,
+                persistence=persistence,
             )
         if should_stop_after_current:
             break
 
-    if payload["ok"] and payload["reason"] == "":
+    with persistence.lock:
+        should_finalize_reason = payload["ok"] and payload["reason"] == ""
+
+    if should_finalize_reason:
         if snapshot.next_pending is None:
             if _all_sessions_complete(snapshot):
-                payload["final_snapshot"] = _snapshot_payload(snapshot)
+                with persistence.lock:
+                    payload["final_snapshot"] = _snapshot_payload(snapshot)
                 if commit_mode == COMMIT_MODE_END:
                     commit_payload = _run_auto_commit(
                         event_path=event_path,
@@ -1911,6 +2526,7 @@ def _run_locked(
                         run_dir=run_dir,
                         run_id=run_id,
                         session_id=None,
+                        persistence=persistence,
                     )
                     if not commit_payload["success"]:
                         _pause_run(
@@ -1921,11 +2537,14 @@ def _run_locked(
                                 "final auto-commit failed after all sessions completed"
                             ),
                             details={"commit": commit_payload},
+                            persistence=persistence,
                         )
                     else:
-                        payload["reason"] = "all-complete"
+                        with persistence.lock:
+                            payload["reason"] = "all-complete"
                 else:
-                    payload["reason"] = "all-complete"
+                    with persistence.lock:
+                        payload["reason"] = "all-complete"
             else:
                 _pause_run(
                     event_path,
@@ -1933,13 +2552,20 @@ def _run_locked(
                     reason="no-pending-but-incomplete",
                     message="no pending session was found, but not every session is complete",
                     details={"snapshot": _snapshot_payload(snapshot)},
+                    persistence=persistence,
                 )
         else:
-            payload["reason"] = "stopped"
+            with persistence.lock:
+                payload["reason"] = "stopped"
 
     run_controls.stop()
-    _finish_run(event_path, payload, progress)
-    return (0 if payload["ok"] else 1), payload
+    try:
+        _finish_run(event_path, payload, progress, persistence=persistence)
+    finally:
+        inline_tail.stop()
+    with persistence.lock:
+        exit_code = 0 if payload["ok"] else 1
+    return exit_code, payload
 
 
 def _state_error_reason(error: state.StateError) -> tuple[str, bool]:

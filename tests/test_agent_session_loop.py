@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -212,6 +213,46 @@ def wait_until(predicate, *, timeout: float = 5.0, interval: float = 0.05):
             return value
         time.sleep(interval)
     raise AssertionError("condition was not met before timeout")
+
+
+class EventPersistenceTests(unittest.TestCase):
+    def test_append_event_writes_complete_json_lines_under_concurrency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            event_path = Path(tmp) / events.EVENTS_FILE_NAME
+
+            def append_many(worker: int) -> None:
+                for index in range(50):
+                    events.append_event(
+                        event_path,
+                        events.Event(
+                            name="threaded",
+                            payload={"worker": worker, "index": index},
+                        ),
+                    )
+
+            threads = [
+                threading.Thread(target=append_many, args=(worker,))
+                for worker in range(8)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=2)
+                self.assertFalse(thread.is_alive())
+
+            lines = event_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(400, len(lines))
+            records = [json.loads(line) for line in lines]
+            observed = {
+                (record["payload"]["worker"], record["payload"]["index"])
+                for record in records
+            }
+            expected = {
+                (worker, index)
+                for worker in range(8)
+                for index in range(50)
+            }
+            self.assertEqual(expected, observed)
 
 
 class ParserAndStateTests(unittest.TestCase):
@@ -790,6 +831,246 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertEqual(1, payload["counts"]["pending"])
 
 
+class TailFollowerTests(unittest.TestCase):
+    def setup_tail_files(self, tmp_dir: Path):
+        plan_dir = tmp_dir / "plan"
+        state_dir = tmp_dir / "state"
+        write_plan(plan_dir, ("pending",))
+        plan_state = state.plan_state_dir(plan_dir, state_dir)
+        plan_state.mkdir(parents=True)
+        return (
+            plan_dir,
+            state_dir,
+            plan_state / events.STATE_FILE_NAME,
+            plan_state / events.EVENTS_FILE_NAME,
+        )
+
+    def write_state_payload(
+        self,
+        state_path: Path,
+        payload: dict[str, object],
+    ) -> None:
+        state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def append_log_line(self, path: Path, text: str) -> None:
+        with path.open("a", encoding="utf-8") as log_file:
+            log_file.write(text)
+
+    def cleanup_follower(self, follower: tail.TailFollower) -> None:
+        follower.stop()
+        follower.join(1.0)
+
+    def test_tail_follower_starts_at_eof_for_existing_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path, events_path = self.setup_tail_files(
+                tmp_dir
+            )
+            stdout_log = tmp_dir / "stdout.log"
+            stderr_log = tmp_dir / "stderr.log"
+            stdout_log.write_text("old stdout\n", encoding="utf-8")
+            stderr_log.write_text("old stderr\n", encoding="utf-8")
+            turn_payload = {
+                "run_id": "run-1",
+                "session": 1,
+                "session_id": "1",
+                "total_sessions": 1,
+                "turn_index": 1,
+                "stdout_path": str(stdout_log),
+                "stderr_path": str(stderr_log),
+            }
+            self.write_state_payload(
+                state_path,
+                {
+                    "run_id": "run-1",
+                    "active_turn": turn_payload,
+                    "turns": [turn_payload],
+                    "run_finished_at": None,
+                },
+            )
+            events.append_event(
+                events_path,
+                events.Event(
+                    name="turn_started",
+                    payload=turn_payload,
+                    created_at="2026-06-11T12:00:00+00:00",
+                ),
+            )
+            out = io.StringIO()
+            follower = tail.TailFollower(
+                plan_dir,
+                state_dir=state_dir,
+                out=out,
+                poll_interval=0.01,
+            )
+            self.addCleanup(self.cleanup_follower, follower)
+
+            follower.start()
+            self.append_log_line(stdout_log, "new stdout\n")
+            events.append_event(
+                events_path,
+                events.Event(
+                    name="turn_finished",
+                    payload={
+                        **turn_payload,
+                        "status_result": "complete",
+                        "returncode": 0,
+                        "duration_seconds": 1.2,
+                    },
+                    created_at="2026-06-11T12:00:01+00:00",
+                ),
+            )
+
+            wait_until(
+                lambda: (
+                    "session 1/1 finished" in out.getvalue()
+                    and "new stdout" in out.getvalue()
+                )
+            )
+            follower.stop()
+            self.assertTrue(follower.join(1.0))
+            text = out.getvalue()
+            self.assertNotIn("old stdout", text)
+            self.assertNotIn("old stderr", text)
+            self.assertNotIn("session 1/1 started", text)
+            self.assertIn("stdout session=1 turn=1 | new stdout", text)
+            self.assertIn("session 1/1 finished", text)
+
+    def test_tail_follower_discovers_log_targets_from_new_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path, events_path = self.setup_tail_files(
+                tmp_dir
+            )
+            stdout_log = tmp_dir / "stdout.log"
+            self.write_state_payload(
+                state_path,
+                {"run_id": "run-1", "active_turn": None, "turns": []},
+            )
+            out = io.StringIO()
+            follower = tail.TailFollower(
+                plan_dir,
+                state_dir=state_dir,
+                out=out,
+                poll_interval=0.01,
+            )
+            self.addCleanup(self.cleanup_follower, follower)
+
+            follower.start()
+            stdout_log.write_text("discovered stdout\n", encoding="utf-8")
+            events.append_event(
+                events_path,
+                events.Event(
+                    name="turn_started",
+                    payload={
+                        "run_id": "run-1",
+                        "session": 1,
+                        "session_id": "1",
+                        "total_sessions": 1,
+                        "turn_index": 1,
+                        "stdout_path": str(stdout_log),
+                    },
+                    created_at="2026-06-11T12:00:00+00:00",
+                ),
+            )
+
+            wait_until(
+                lambda: (
+                    "session 1/1 started" in out.getvalue()
+                    and "stdout session=1 turn=1 | discovered stdout"
+                    in out.getvalue()
+                )
+            )
+            follower.stop()
+            self.assertTrue(follower.join(1.0))
+
+    def test_tail_follower_stop_cancels_following_cleanly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path, events_path = self.setup_tail_files(
+                tmp_dir
+            )
+            self.write_state_payload(
+                state_path,
+                {"run_id": "run-1", "active_turn": None, "turns": []},
+            )
+            out = io.StringIO()
+            follower = tail.TailFollower(
+                plan_dir,
+                state_dir=state_dir,
+                out=out,
+                poll_interval=0.01,
+            )
+            self.addCleanup(self.cleanup_follower, follower)
+
+            follower.start()
+            self.assertFalse(follower.join(0.02))
+            follower.stop()
+            self.assertTrue(follower.join(1.0))
+            self.assertTrue(follower.done)
+            before = out.getvalue()
+            events.append_event(
+                events_path,
+                events.Event(
+                    name="turn_started",
+                    payload={"run_id": "run-1", "session": 1, "turn_index": 1},
+                ),
+            )
+            time.sleep(0.05)
+            self.assertEqual(before, out.getvalue())
+
+    def test_tail_follower_stops_after_run_finished_and_drains_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path, events_path = self.setup_tail_files(
+                tmp_dir
+            )
+            stdout_log = tmp_dir / "stdout.log"
+            stdout_log.write_text("", encoding="utf-8")
+            turn_payload = {
+                "run_id": "run-1",
+                "session": 1,
+                "session_id": "1",
+                "total_sessions": 1,
+                "turn_index": 1,
+                "stdout_path": str(stdout_log),
+            }
+            self.write_state_payload(
+                state_path,
+                {"run_id": "run-1", "active_turn": turn_payload, "turns": []},
+            )
+            out = io.StringIO()
+            follower = tail.TailFollower(
+                plan_dir,
+                state_dir=state_dir,
+                out=out,
+                poll_interval=0.01,
+            )
+            self.addCleanup(self.cleanup_follower, follower)
+
+            follower.start()
+            self.append_log_line(stdout_log, "final stdout\n")
+            events.append_event(
+                events_path,
+                events.Event(
+                    name="run_finished",
+                    payload={
+                        "run_id": "run-1",
+                        "ok": True,
+                        "reason": "all-complete",
+                        "duration_seconds": 1.0,
+                    },
+                    created_at="2026-06-11T12:00:02+00:00",
+                ),
+            )
+
+            wait_until(lambda: follower.done)
+            self.assertTrue(follower.join(1.0))
+            text = out.getvalue()
+            self.assertIn("run finished: run run-1", text)
+            self.assertIn("stdout session=1 turn=1 | final stdout", text)
+
+
 class CommandAndConfigTests(unittest.TestCase):
     def test_codex_command_uses_workspace_write_or_unsafe_bypass(self) -> None:
         adapter = harnesses.CodexAdapter(executable="codex")
@@ -1079,6 +1360,14 @@ class RunControlTests(unittest.TestCase):
         state = run_control.RunControlState()
 
         self.assertFalse(state.stop_after_current)
+        self.assertEqual(
+            {
+                "stop_after_current": False,
+                "tail_enabled": False,
+                "next_harness": None,
+            },
+            state.snapshot(),
+        )
         requested = state.toggle_stop_after_current()
         self.assertEqual("request", requested.action)
         self.assertTrue(requested.stop_after_current)
@@ -1097,6 +1386,33 @@ class RunControlTests(unittest.TestCase):
         self.assertEqual("consumed", consumed.action)
         self.assertFalse(consumed.stop_after_current)
         self.assertFalse(state.stop_after_current)
+
+    def test_run_control_state_tracks_tail_and_next_harness(self) -> None:
+        state = run_control.RunControlState(current_harness="codex")
+
+        status = state.request_status_snapshot()
+        self.assertEqual("status", status.action)
+        self.assertFalse(status.tail_enabled)
+        self.assertIsNone(status.next_harness)
+
+        enabled = state.toggle_tail()
+        self.assertEqual("tail-enabled", enabled.action)
+        self.assertTrue(enabled.tail_enabled)
+        self.assertTrue(state.tail_enabled)
+
+        disabled = state.toggle_tail()
+        self.assertEqual("tail-disabled", disabled.action)
+        self.assertFalse(disabled.tail_enabled)
+        self.assertFalse(state.tail_enabled)
+
+        self.assertIsNone(state.select_harness("codex"))
+        selected = state.select_harness("claude")
+        self.assertIsNotNone(selected)
+        assert selected is not None
+        self.assertEqual("harness-selected", selected.action)
+        self.assertEqual("claude", selected.next_harness)
+        self.assertEqual("claude", state.next_harness)
+        self.assertIsNone(state.select_harness("claude"))
 
     def test_run_control_help_and_toggle_lines_include_state(self) -> None:
         state = run_control.RunControlState()
@@ -1117,7 +1433,9 @@ class RunControlTests(unittest.TestCase):
         lines = stderr.getvalue().splitlines()
         self.assertEqual(
             "[2026-06-11 12:00:00] controls: p toggle stop-after-current "
-            "(currently off); h show help",
+            "(currently off); s show status; t toggle live tail (currently off); "
+            "1 codex, 2 claude, 3 copilot select next harness "
+            "(currently unchanged); h show help",
             lines[0],
         )
         self.assertEqual(
@@ -1127,10 +1445,89 @@ class RunControlTests(unittest.TestCase):
         )
         self.assertEqual(
             "[2026-06-11 12:00:00] controls: p toggle stop-after-current "
-            "(currently on); h show help",
+            "(currently on); s show status; t toggle live tail (currently off); "
+            "1 codex, 2 claude, 3 copilot select next harness "
+            "(currently unchanged); h show help",
             lines[2],
         )
         self.assertEqual(["request"], [action.action for action in actions])
+
+    def test_run_control_listener_handles_status_tail_and_harness_keys(self) -> None:
+        state = run_control.RunControlState(current_harness="codex")
+        stderr = TTYText()
+        actions: list[run_control.RunControlAction] = []
+        listener = run_control.RunControlListener(
+            enabled=False,
+            state=state,
+            stderr=stderr,
+            on_action=actions.append,
+            timestamp=lambda: "2026-06-11 12:00:00",
+        )
+
+        status = listener.handle_key("s")
+        tail_enabled = listener.handle_key("t")
+        same_harness = listener.handle_key("1")
+        next_harness = listener.handle_key("2")
+        repeated_harness = listener.handle_key("2")
+
+        self.assertIsNotNone(status)
+        assert status is not None
+        self.assertEqual("status", status.action)
+        self.assertIsNotNone(tail_enabled)
+        assert tail_enabled is not None
+        self.assertEqual("tail-enabled", tail_enabled.action)
+        self.assertIsNone(same_harness)
+        self.assertIsNotNone(next_harness)
+        assert next_harness is not None
+        self.assertEqual("harness-selected", next_harness.action)
+        self.assertEqual("claude", next_harness.next_harness)
+        self.assertIsNone(repeated_harness)
+        self.assertEqual(
+            ["tail-enabled", "harness-selected"],
+            [action.action for action in actions],
+        )
+
+        self.assertEqual(
+            [
+                "[2026-06-11 12:00:00] control status: "
+                "stop-after-current off; live tail off; next harness unchanged",
+                "[2026-06-11 12:00:00] control: live tail enabled; "
+                "press t to disable",
+                "[2026-06-11 12:00:00] control: next harness already codex",
+                "[2026-06-11 12:00:00] control: next harness selected: claude",
+                "[2026-06-11 12:00:00] control: next harness already claude",
+            ],
+            stderr.getvalue().splitlines(),
+        )
+
+    def test_run_control_status_callback_does_not_record_action(self) -> None:
+        state = run_control.RunControlState()
+        stderr = TTYText()
+        actions: list[run_control.RunControlAction] = []
+        statuses: list[run_control.RunControlAction] = []
+        listener = run_control.RunControlListener(
+            enabled=False,
+            state=state,
+            stderr=stderr,
+            on_action=actions.append,
+            on_status=statuses.append,
+            timestamp=lambda: "2026-06-11 12:00:00",
+        )
+
+        status = listener.handle_key("s")
+
+        self.assertIsNotNone(status)
+        assert status is not None
+        self.assertEqual("status", status.action)
+        self.assertEqual([status], statuses)
+        self.assertEqual([], actions)
+        self.assertEqual("", stderr.getvalue())
+
+    def test_run_control_event_contract_includes_runtime_actions(self) -> None:
+        self.assertIn("harness-unavailable", events.PAUSE_REASONS)
+        self.assertIn("tail-enabled", events.RUN_CONTROL_ACTIONS)
+        self.assertIn("tail-disabled", events.RUN_CONTROL_ACTIONS)
+        self.assertIn("harness-selected", events.RUN_CONTROL_ACTIONS)
 
     def test_run_controls_require_text_tty_run(self) -> None:
         args = self.run_args()
@@ -1373,14 +1770,17 @@ class FakeRunControlListener:
         *,
         consume_on_call: int | None = None,
         actions_on_start: tuple[run_control.RunControlAction, ...] = (),
+        status_on_start: tuple[run_control.RunControlAction, ...] = (),
         state_path: Path | None = None,
         events_path: Path | None = None,
     ) -> None:
         self.consume_on_call = consume_on_call
         self.actions_on_start = actions_on_start
+        self.status_on_start = status_on_start
         self.state_path = state_path
         self.events_path = events_path
         self.on_action: run_control.ActionCallback | None = None
+        self.on_status: run_control.StatusCallback | None = None
         self.start_calls = 0
         self.stop_calls = 0
         self.consume_calls = 0
@@ -1398,6 +1798,9 @@ class FakeRunControlListener:
         if self.on_action is not None:
             for action in self.actions_on_start:
                 self.on_action(action)
+        if self.on_status is not None:
+            for action in self.status_on_start:
+                self.on_status(action)
         return True
 
     def stop(self) -> None:
@@ -1418,6 +1821,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self,
         *,
         statuses: tuple[str, ...],
+        harness_config_overrides: dict[str, str] | None = None,
     ) -> tuple[Path, Path, Path, Path]:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -1428,8 +1832,12 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         config_path = config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
         config_path.parent.mkdir(parents=True, exist_ok=True)
         fake_codex = install_fake_codex(tmp_dir)
+        harness_config = {"codex": {"executable": str(fake_codex)}}
+        if harness_config_overrides is not None:
+            for harness_name, executable in harness_config_overrides.items():
+                harness_config[harness_name] = {"executable": executable}
         config_path.write_text(
-            json.dumps({"codex": {"executable": str(fake_codex)}}),
+            json.dumps(harness_config),
             encoding="utf-8",
         )
         write_plan(plan_dir, statuses)
@@ -1496,10 +1904,14 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         listener: FakeRunControlListener,
         cwd: Path | None = None,
         commit_mode: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
         extra_env: dict[str, str] | None = None,
+        harness_config_overrides: dict[str, str] | None = None,
     ) -> tuple[int, dict[str, object], Path, Path, Path]:
         plan_dir, state_dir, config_home, fake_codex = self.setup_loop(
-            statuses=statuses
+            statuses=statuses,
+            harness_config_overrides=harness_config_overrides,
         )
         real_state_dir = state.plan_state_dir(plan_dir, state_dir)
         if listener.state_path is None:
@@ -1518,8 +1930,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             timeout=None,
             max_sessions=None,
             commit_mode=commit_mode,
-            model=None,
-            effort=None,
+            model=model,
+            effort=effort,
         )
         env_updates = {
             "XDG_CONFIG_HOME": str(config_home),
@@ -1532,6 +1944,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
 
         def fake_for_run(*_args, **kwargs):
             listener.on_action = kwargs.get("on_action")
+            listener.on_status = kwargs.get("on_status")
             return listener
 
         with (
@@ -1556,6 +1969,64 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             finally:
                 state.release_lock(plan_dir, state_dir)
         return exit_code, payload, plan_dir, state_dir, fake_codex
+
+    def run_with_mocked_harness_switch(
+        self,
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> tuple[int, dict[str, object], list[dict[str, object]], Path, Path]:
+        listener = FakeRunControlListener()
+        calls: list[dict[str, object]] = []
+
+        def complete_next_pending(plan_dir: Path) -> None:
+            for session_file in sorted(plan_dir.glob("session-*.md")):
+                text = session_file.read_text(encoding="utf-8")
+                if "- **Status**: pending" not in text:
+                    continue
+                session_file.write_text(
+                    text.replace("- **Status**: pending", "- **Status**: complete", 1),
+                    encoding="utf-8",
+                )
+                return
+
+        def fake_run_harness(name: str, **kwargs: object) -> harnesses.HarnessResult:
+            calls.append({"harness": name, **kwargs})
+            complete_next_pending(Path(kwargs["plan_dir"]))
+            if len(calls) == 1 and listener.on_action is not None:
+                listener.on_action(
+                    run_control.RunControlAction(
+                        action="harness-selected",
+                        stop_after_current=False,
+                        next_harness="claude",
+                    )
+                )
+            return harnesses.HarnessResult(
+                name=name,
+                argv=[name, str(kwargs["prompt"])],
+                returncode=0,
+                stdout=f"{name} completed\n",
+                stderr="",
+            )
+
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=fake_run_harness,
+        ):
+            exit_code, payload, plan_dir, state_dir, _fake_codex = (
+                self.run_locked_with_listener(
+                    mode="success",
+                    statuses=("pending", "pending"),
+                    listener=listener,
+                    model=model,
+                    effort=effort,
+                    extra_env=extra_env,
+                    harness_config_overrides={"claude": sys.executable},
+                )
+            )
+        return exit_code, payload, calls, plan_dir, state_dir
 
     def run_loop_command(
         self,
@@ -1829,6 +2300,167 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         state_path = state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
         return json.loads(state_path.read_text(encoding="utf-8"))
 
+    def test_compact_status_snapshot_reports_active_turn(self) -> None:
+        plan_dir, _state_dir, _config_home, _fake_codex = self.setup_loop(
+            statuses=("pending", "pending")
+        )
+        active_turn = {
+            "session": 1,
+            "session_id": "1",
+            "total_sessions": 2,
+            "turn_index": 1,
+            "harness": "codex",
+            "stdout_path": "/tmp/run/stdout.log",
+            "stderr_path": "/tmp/run/stderr.log",
+            "last_message_path": "/tmp/run/last-message.txt",
+            "result_path": "/tmp/run/result.json",
+            "elapsed_seconds": 12.3,
+            "idle_seconds": 2.5,
+        }
+        payload = {
+            "harness": "codex",
+            "model": "gpt-5",
+            "model_source": config.MODEL_SOURCE_FLAG,
+            "effort": "high",
+            "effort_source": config.EFFORT_SOURCE_FLAG,
+            "active_turn": active_turn,
+            "turns": [],
+        }
+        control = {
+            "stop_after_current": True,
+            "tail_enabled": True,
+            "next_harness": "claude",
+        }
+
+        text = "\n".join(
+            runner._compact_status_lines(
+                payload=payload,
+                control=control,
+                snapshot=plans.inspect_plan(plan_dir),
+            )
+        )
+
+        self.assertIn("status: active session 1/2 turn 1", text)
+        self.assertIn("sessions 0/2 complete, 2 pending", text)
+        self.assertIn("harness active codex; future claude", text)
+        self.assertIn("model gpt-5 (flag); effort high (flag)", text)
+        self.assertIn("stop-after-current on; live tail on", text)
+        self.assertIn("stdout /tmp/run/stdout.log", text)
+        self.assertIn("last-message /tmp/run/last-message.txt", text)
+
+    def test_compact_status_snapshot_reports_idle_between_turns(self) -> None:
+        plan_dir, _state_dir, _config_home, _fake_codex = self.setup_loop(
+            statuses=("complete", "pending")
+        )
+        payload = {
+            "harness": "codex",
+            "model": config.NATIVE_MODEL_DEFAULT,
+            "model_source": config.MODEL_SOURCE_UNRESOLVED,
+            "effort": None,
+            "effort_source": None,
+            "active_turn": None,
+            "turns": [
+                {
+                    "stdout_path": "/tmp/run/turn-1/stdout.log",
+                    "stderr_path": "/tmp/run/turn-1/stderr.log",
+                    "last_message_path": "/tmp/run/turn-1/last-message.txt",
+                    "result_path": "/tmp/run/turn-1/result.json",
+                }
+            ],
+        }
+        control = {
+            "stop_after_current": False,
+            "tail_enabled": False,
+            "next_harness": None,
+        }
+
+        text = "\n".join(
+            runner._compact_status_lines(
+                payload=payload,
+                control=control,
+                snapshot=plans.inspect_plan(plan_dir),
+            )
+        )
+
+        self.assertIn(
+            "status: idle; next session 2/2 turn 2; "
+            "sessions 1/2 complete, 1 pending",
+            text,
+        )
+        self.assertIn("stdout /tmp/run/turn-1/stdout.log", text)
+        self.assertIn("result /tmp/run/turn-1/result.json", text)
+
+    def test_compact_status_snapshot_reports_no_active_turn(self) -> None:
+        plan_dir, _state_dir, _config_home, _fake_codex = self.setup_loop(
+            statuses=("pending",)
+        )
+        payload = {
+            "harness": "codex",
+            "model": config.NATIVE_MODEL_DEFAULT,
+            "model_source": config.MODEL_SOURCE_UNRESOLVED,
+            "effort": None,
+            "effort_source": None,
+            "active_turn": None,
+            "turns": [],
+        }
+        control = {
+            "stop_after_current": False,
+            "tail_enabled": False,
+            "next_harness": None,
+        }
+
+        text = "\n".join(
+            runner._compact_status_lines(
+                payload=payload,
+                control=control,
+                snapshot=plans.inspect_plan(plan_dir),
+            )
+        )
+
+        self.assertIn(
+            "status: no active turn; next session 1/1 turn 1; "
+            "sessions 0/1 complete, 1 pending",
+            text,
+        )
+        self.assertIn("status paths: none yet", text)
+
+    def test_compact_status_snapshot_reports_plan_inspection_error(self) -> None:
+        payload = {
+            "harness": "codex",
+            "model": config.NATIVE_MODEL_DEFAULT,
+            "model_source": config.MODEL_SOURCE_UNRESOLVED,
+            "effort": None,
+            "effort_source": None,
+            "active_turn": None,
+            "turns": [],
+            "initial_snapshot": {
+                "counts": {
+                    "pending": 1,
+                    "complete": 0,
+                    "empty": 0,
+                    "unknown": 0,
+                },
+                "next_pending_id": "1",
+            },
+        }
+        control = {
+            "stop_after_current": False,
+            "tail_enabled": False,
+            "next_harness": None,
+        }
+
+        text = "\n".join(
+            runner._compact_status_lines(
+                payload=payload,
+                control=control,
+                snapshot=None,
+                plan_error="missing context.md",
+            )
+        )
+
+        self.assertIn("status: plan inspection error: missing context.md", text)
+        self.assertIn("sessions 0/1 complete, 1 pending", text)
+
     def test_successful_turn_syncs_derived_status_ledgers(self) -> None:
         plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
             statuses=("pending", "pending")
@@ -1939,6 +2571,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual(
             {
                 "stop_after_current": False,
+                "tail_enabled": False,
+                "next_harness": None,
                 "consumed": True,
                 "last_action": "stop-after-current-consumed",
             },
@@ -2013,6 +2647,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual(
             {
                 "stop_after_current": False,
+                "tail_enabled": False,
+                "next_harness": None,
                 "consumed": False,
                 "last_action": "stop-after-current-canceled",
             },
@@ -2066,7 +2702,10 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             output,
             r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] "
             r"controls: p toggle stop-after-current "
-            r"\(currently off\); h show help",
+            r"\(currently off\); s show status; "
+            r"t toggle live tail \(currently off\); "
+            r"1 codex, 2 claude, 3 copilot select next harness "
+            r"\(currently unchanged\); h show help",
         )
         self.assertEqual(1, output.count("controls: p toggle stop-after-current"))
         payload = self.read_run_payload(plan_dir=plan_dir, state_dir=state_dir)
@@ -2077,6 +2716,259 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             if record["name"] == events.RUN_CONTROL_EVENT
         ]
         self.assertEqual([], control_events)
+
+    def test_text_run_pty_s_and_number_keys_select_future_harness(self) -> None:
+        plan_dir, state_dir, config_home, fake_codex = self.setup_loop(
+            statuses=("pending", "pending")
+        )
+        config_path = config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        config_path.write_text(
+            json.dumps(
+                {
+                    "codex": {"executable": str(fake_codex)},
+                    "claude": {"executable": str(fake_codex)},
+                    "copilot": {"executable": str(fake_codex)},
+                }
+            ),
+            encoding="utf-8",
+        )
+        process, master_fd = self.start_run_pty(
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            mode="streaming-success",
+            fake_step_sleep="2.0",
+        )
+
+        output = self.read_run_pty_until(
+            master_fd,
+            "",
+            lambda text: "session 1/2 started" in text,
+            process=process,
+        )
+        os.write(master_fd, b"s")
+        output = self.read_run_pty_until(
+            master_fd,
+            output,
+            lambda text: (
+                "status: active session 1/2 turn 1" in text
+                and "status: harness active codex; future unchanged" in text
+                and "status: controls stop-after-current off; live tail off" in text
+            ),
+            process=process,
+        )
+
+        os.write(master_fd, b"1")
+        output = self.read_run_pty_until(
+            master_fd,
+            output,
+            lambda text: "control: next harness already codex" in text,
+            process=process,
+        )
+        os.write(master_fd, b"2")
+        output = self.read_run_pty_until(
+            master_fd,
+            output,
+            lambda text: "control: next harness selected: claude" in text,
+            process=process,
+        )
+        os.write(master_fd, b"3")
+        output = self.read_run_pty_until(
+            master_fd,
+            output,
+            lambda text: "control: next harness selected: copilot" in text,
+            process=process,
+        )
+        os.write(master_fd, b"s")
+        output = self.read_run_pty_until(
+            master_fd,
+            output,
+            lambda text: "status: harness active codex; future copilot" in text,
+            process=process,
+        )
+        output = self.read_run_pty_until(
+            master_fd,
+            output,
+            lambda text: "session 2/2 started" in text,
+            process=process,
+            timeout=8,
+        )
+        output = self.finish_run_pty(
+            process=process,
+            master_fd=master_fd,
+            output=output,
+            timeout=20,
+        )
+
+        self.assertEqual(0, process.returncode, output)
+        payload = self.read_run_payload(plan_dir=plan_dir, state_dir=state_dir)
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual(
+            {
+                "stop_after_current": False,
+                "tail_enabled": False,
+                "next_harness": "copilot",
+                "consumed": False,
+                "last_action": "harness-selected",
+            },
+            payload["control"],
+        )
+        turns = payload["turns"]
+        self.assertEqual(["codex", "copilot"], [turn["harness"] for turn in turns])
+        self.assertTrue(turns[0]["argv"][-1].startswith("$session-run "))
+        self.assertIn("-p", turns[1]["argv"])
+        self.assertTrue(
+            turns[1]["argv"][turns[1]["argv"].index("-p") + 1].startswith(
+                "/session-run "
+            )
+        )
+
+        control_events = [
+            record["payload"]
+            for record in read_jsonl(Path(payload["events_path"]))
+            if record["name"] == events.RUN_CONTROL_EVENT
+        ]
+        self.assertEqual(
+            ["harness-selected", "harness-selected"],
+            [event["action"] for event in control_events],
+        )
+        self.assertEqual(
+            ["claude", "copilot"],
+            [event["selected_harness"] for event in control_events],
+        )
+        self.assertEqual(
+            ["claude", "copilot"],
+            [event["next_harness"] for event in control_events],
+        )
+
+    def test_text_run_pty_t_toggles_inline_tail_for_new_log_lines(self) -> None:
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+            statuses=("pending", "pending")
+        )
+        state_path = state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
+        process, master_fd = self.start_run_pty(
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            mode="streaming-success",
+            fake_step_sleep="1.5",
+        )
+
+        output = self.read_run_pty_until(
+            master_fd,
+            "",
+            lambda text: "session 1/2 started" in text,
+            process=process,
+        )
+
+        def first_turn_logs_ready():
+            if not state_path.exists():
+                return None
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+            active_turn = payload.get("active_turn")
+            if not isinstance(active_turn, dict):
+                return None
+            stdout_path = Path(active_turn["stdout_path"])
+            stderr_path = Path(active_turn["stderr_path"])
+            if not stdout_path.exists() or not stderr_path.exists():
+                return None
+            if (
+                "session 1 stdout before completion"
+                in stdout_path.read_text(encoding="utf-8")
+                and "session 1 stderr before completion"
+                in stderr_path.read_text(encoding="utf-8")
+            ):
+                return active_turn
+            return None
+
+        wait_until(first_turn_logs_ready, timeout=3)
+        os.write(master_fd, b"t")
+        output = self.read_run_pty_until(
+            master_fd,
+            output,
+            lambda text: "control: live tail enabled" in text,
+            process=process,
+        )
+        output = self.read_run_pty_until(
+            master_fd,
+            output,
+            lambda text: (
+                "stdout session=1 turn=1 | session 1 stdout after completion" in text
+            ),
+            process=process,
+            timeout=5,
+        )
+
+        self.assertNotIn(
+            "stdout session=1 turn=1 | session 1 stdout before completion",
+            output,
+        )
+        self.assertNotIn(
+            "stderr session=1 turn=1 | session 1 stderr before completion",
+            output,
+        )
+
+        output = self.read_run_pty_until(
+            master_fd,
+            output,
+            lambda text: (
+                "stdout session=2 turn=2 | session 2 stdout before completion" in text
+            ),
+            process=process,
+            timeout=5,
+        )
+        os.write(master_fd, b"t")
+        output = self.read_run_pty_until(
+            master_fd,
+            output,
+            lambda text: "control: live tail disabled" in text,
+            process=process,
+        )
+        output = self.finish_run_pty(
+            process=process,
+            master_fd=master_fd,
+            output=output,
+            timeout=20,
+        )
+
+        self.assertEqual(0, process.returncode, output)
+        self.assertIn(
+            "stdout session=2 turn=2 | session 2 stdout before completion",
+            output,
+        )
+        self.assertNotIn(
+            "stdout session=2 turn=2 | session 2 stdout after completion",
+            output,
+        )
+        self.assertNotIn(
+            "stderr session=2 turn=2 | session 2 stderr after completion",
+            output,
+        )
+        payload = self.read_run_payload(plan_dir=plan_dir, state_dir=state_dir)
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual(
+            {
+                "stop_after_current": False,
+                "tail_enabled": False,
+                "next_harness": None,
+                "consumed": False,
+                "last_action": "tail-disabled",
+            },
+            payload["control"],
+        )
+        control_events = [
+            record["payload"]
+            for record in read_jsonl(Path(payload["events_path"]))
+            if record["name"] == events.RUN_CONTROL_EVENT
+        ]
+        self.assertEqual(
+            ["tail-enabled", "tail-disabled"],
+            [event["action"] for event in control_events],
+        )
+        self.assertEqual(
+            [True, False],
+            [event["tail_enabled"] for event in control_events],
+        )
 
     def test_text_run_pty_commit_per_session_finishes_before_stop_consumed(
         self,
@@ -2194,6 +3086,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual(
             {
                 "stop_after_current": False,
+                "tail_enabled": False,
+                "next_harness": None,
                 "consumed": True,
                 "last_action": "stop-after-current-consumed",
             },
@@ -2238,6 +3132,189 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         run_finished = event_records[self.event_index(event_records, "run_finished")]
         self.assertEqual(payload["control"], run_finished["payload"]["control"])
 
+    def test_harness_selection_applies_to_next_session_and_recomputes_native_model(
+        self,
+    ) -> None:
+        home_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(home_tmp.cleanup)
+        home = Path(home_tmp.name)
+        codex_config = home / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text('model = "gpt-5-codex"\n', encoding="utf-8")
+
+        exit_code, payload, calls, _plan_dir, _state_dir = (
+            self.run_with_mocked_harness_switch(extra_env={"HOME": str(home)})
+        )
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual(["codex", "claude"], [call["harness"] for call in calls])
+        self.assertTrue(str(calls[0]["prompt"]).startswith("$session-run "))
+        self.assertTrue(str(calls[1]["prompt"]).startswith("/session-run "))
+        self.assertIsNone(calls[0]["model"])
+        self.assertIsNone(calls[1]["model"])
+
+        turns = payload["turns"]
+        self.assertEqual(["codex", "claude"], [turn["harness"] for turn in turns])
+        self.assertEqual("gpt-5-codex", turns[0]["model"])
+        self.assertEqual(config.MODEL_SOURCE_CODEX_CONFIG, turns[0]["model_source"])
+        self.assertEqual(config.NATIVE_MODEL_DEFAULT, turns[1]["model"])
+        self.assertEqual(config.MODEL_SOURCE_UNRESOLVED, turns[1]["model_source"])
+        self.assertEqual(
+            {
+                "stop_after_current": False,
+                "tail_enabled": False,
+                "next_harness": "claude",
+                "consumed": False,
+                "last_action": "harness-selected",
+            },
+            payload["control"],
+        )
+
+        control_events = [
+            record["payload"]
+            for record in read_jsonl(Path(payload["events_path"]))
+            if record["name"] == events.RUN_CONTROL_EVENT
+        ]
+        self.assertEqual(
+            ["harness-selected"],
+            [event["action"] for event in control_events],
+        )
+        self.assertEqual("codex", control_events[0]["current_harness"])
+        self.assertEqual("claude", control_events[0]["selected_harness"])
+        self.assertEqual("claude", control_events[0]["next_harness"])
+        self.assertEqual(1, control_events[0]["session"])
+        self.assertEqual(1, control_events[0]["turn_index"])
+
+    def test_harness_selection_carries_explicit_model_and_effort(self) -> None:
+        exit_code, payload, calls, _plan_dir, _state_dir = (
+            self.run_with_mocked_harness_switch(model="gpt-5", effort="high")
+        )
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(["codex", "claude"], [call["harness"] for call in calls])
+        self.assertEqual(["gpt-5", "gpt-5"], [call["model"] for call in calls])
+        self.assertEqual(["high", "high"], [call["effort"] for call in calls])
+
+        turns = payload["turns"]
+        self.assertEqual(["codex", "claude"], [turn["harness"] for turn in turns])
+        self.assertEqual(["gpt-5", "gpt-5"], [turn["model"] for turn in turns])
+        self.assertEqual(
+            [config.MODEL_SOURCE_FLAG, config.MODEL_SOURCE_FLAG],
+            [turn["model_source"] for turn in turns],
+        )
+        self.assertEqual(["high", "high"], [turn["effort"] for turn in turns])
+        self.assertEqual(
+            [config.EFFORT_SOURCE_FLAG, config.EFFORT_SOURCE_FLAG],
+            [turn["effort_source"] for turn in turns],
+        )
+
+    def test_missing_switched_harness_pauses_before_next_turn(self) -> None:
+        listener = FakeRunControlListener()
+        calls: list[dict[str, object]] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_claude = Path(tmp) / "missing-claude"
+
+            def complete_next_pending(plan_dir: Path) -> None:
+                for session_file in sorted(plan_dir.glob("session-*.md")):
+                    text = session_file.read_text(encoding="utf-8")
+                    if "- **Status**: pending" not in text:
+                        continue
+                    session_file.write_text(
+                        text.replace(
+                            "- **Status**: pending",
+                            "- **Status**: complete",
+                            1,
+                        ),
+                        encoding="utf-8",
+                    )
+                    return
+
+            def fake_run_harness(
+                name: str,
+                **kwargs: object,
+            ) -> harnesses.HarnessResult:
+                calls.append({"harness": name, **kwargs})
+                complete_next_pending(Path(kwargs["plan_dir"]))
+                if listener.on_action is not None:
+                    listener.on_action(
+                        run_control.RunControlAction(
+                            action="harness-selected",
+                            stop_after_current=False,
+                            next_harness="claude",
+                        )
+                    )
+                return harnesses.HarnessResult(
+                    name=name,
+                    argv=[name, str(kwargs["prompt"])],
+                    returncode=0,
+                    stdout=f"{name} completed\n",
+                    stderr="",
+                )
+
+            with mock.patch.object(
+                runner.harnesses,
+                "run_harness",
+                side_effect=fake_run_harness,
+            ):
+                exit_code, payload, plan_dir, state_dir, _fake_codex = (
+                    self.run_locked_with_listener(
+                        mode="success",
+                        statuses=("pending", "pending"),
+                        listener=listener,
+                        harness_config_overrides={
+                            "claude": str(missing_claude),
+                        },
+                    )
+                )
+
+        self.assertEqual(1, exit_code)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["paused"])
+        self.assertEqual("harness-unavailable", payload["reason"])
+        self.assertEqual("harness-unavailable", payload["pause_reason"])
+        self.assertEqual([1], payload["completed_sessions"])
+        self.assertEqual(["1"], payload["completed_session_ids"])
+        self.assertEqual(1, len(payload["turns"]))
+        self.assertEqual("complete", payload["turns"][0]["status_result"])
+        self.assertEqual(2, payload["final_snapshot"]["next_pending"])
+        self.assertEqual("2", payload["final_snapshot"]["next_pending_id"])
+        self.assertEqual(["codex"], [call["harness"] for call in calls])
+        self.assertFalse(state.lock_path_for_plan(plan_dir, state_dir).exists())
+
+        details = payload["pause_details"]
+        self.assertEqual(2, details["session"])
+        self.assertEqual("2", details["session_id"])
+        self.assertEqual("session-2.md", details["session_file"])
+        self.assertEqual("claude", details["requested_harness"])
+        self.assertEqual(str(missing_claude), details["executable"])
+        self.assertIsNone(details["resolved_executable"])
+        self.assertEqual(payload["harness_config"]["path"], details["config_path"])
+        self.assertIn("claude executable not found", details["error"])
+
+        event_records = read_jsonl(Path(payload["events_path"]))
+        self.assertEqual(
+            1,
+            len(
+                [
+                    record
+                    for record in event_records
+                    if record["name"] == "turn_started"
+                ]
+            ),
+        )
+        paused_event = event_records[
+            self.event_index(
+                event_records,
+                events.RUN_PAUSED_EVENT,
+                reason="harness-unavailable",
+            )
+        ]
+        paused_details = paused_event["payload"]["details"]
+        self.assertEqual("claude", paused_details["requested_harness"])
+        self.assertEqual(str(missing_claude), paused_details["executable"])
+
     def test_run_control_starts_after_state_and_event_files_exist(self) -> None:
         listener = FakeRunControlListener(consume_on_call=None)
 
@@ -2254,6 +3331,56 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual(1, listener.start_calls)
         self.assertTrue(listener.state_exists_at_start)
         self.assertTrue(listener.events_exists_at_start)
+
+    def test_run_control_status_callback_prints_without_recording_event(
+        self,
+    ) -> None:
+        listener = FakeRunControlListener(
+            status_on_start=(
+                run_control.RunControlAction(
+                    action="status",
+                    stop_after_current=False,
+                    tail_enabled=True,
+                    next_harness="claude",
+                ),
+            ),
+        )
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
+            exit_code, payload, _plan_dir, _state_dir, _fake_codex = (
+                self.run_locked_with_listener(
+                    mode="success",
+                    statuses=("pending",),
+                    listener=listener,
+                )
+            )
+
+        self.assertEqual(0, exit_code)
+        stderr_text = stderr.getvalue()
+        self.assertIn(
+            "status: no active turn; next session 1/1 turn 1; "
+            "sessions 0/1 complete, 1 pending",
+            stderr_text,
+        )
+        self.assertIn("harness active codex; future claude", stderr_text)
+        self.assertIn("stop-after-current off; live tail on", stderr_text)
+        self.assertEqual(
+            {
+                "stop_after_current": False,
+                "tail_enabled": False,
+                "next_harness": None,
+                "consumed": False,
+                "last_action": None,
+            },
+            payload["control"],
+        )
+        control_events = [
+            record
+            for record in read_jsonl(Path(payload["events_path"]))
+            if record["name"] == events.RUN_CONTROL_EVENT
+        ]
+        self.assertEqual([], control_events)
 
     def test_run_control_final_session_keeps_all_complete_reason(self) -> None:
         listener = FakeRunControlListener(consume_on_call=1)
@@ -3228,6 +4355,141 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 stderr_text,
                 timestamp + r"session 1/3 heartbeat \(elapsed",
             )
+
+    def test_run_persistence_serializes_live_turn_and_control_state_writes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            event_path = tmp_dir / events.EVENTS_FILE_NAME
+            state_path = tmp_dir / events.STATE_FILE_NAME
+            payload = {
+                "state_path": str(state_path),
+                "run_id": "run-1",
+                "harness": "codex",
+                "active_turn": None,
+                "control": runner._initial_control_payload(),
+            }
+            active_turn = {
+                "run_id": "run-1",
+                "turn_index": 1,
+                "session": 1,
+                "total_sessions": 2,
+                "artifact_dir": str(tmp_dir / "turn"),
+                "stdout_path": str(tmp_dir / "stdout.log"),
+                "stderr_path": str(tmp_dir / "stderr.log"),
+                "last_message_path": str(tmp_dir / "last-message.txt"),
+                "result_path": str(tmp_dir / "result.json"),
+                "started_at": runner._isoformat(runner._utc_now()),
+                "finished_at": None,
+                "duration_seconds": None,
+                "idle_seconds_since_previous_turn": 0.0,
+                "last_activity_at": None,
+                "last_activity_stream": None,
+                "last_activity_preview": "",
+                "last_heartbeat_at": None,
+                "elapsed_seconds": 0.0,
+                "idle_seconds": 0.0,
+                "heartbeat_count": 0,
+                "stdout_chars": 0,
+                "stderr_chars": 0,
+                "action_required": None,
+            }
+            persistence = runner._RunPersistence()
+            live_turn = runner._LiveTurn(
+                payload=payload,
+                event_path=event_path,
+                progress=runner._ProgressReporter(enabled=False),
+                active_turn=active_turn,
+                persistence=persistence,
+                heartbeat_interval=60,
+            )
+            activity_write_started = threading.Event()
+            release_activity_write = threading.Event()
+            delayed_once = False
+            thread_errors: list[BaseException] = []
+            original_write_json = runner._write_json_file
+
+            def delayed_write_json(path: Path, payload_arg: dict[str, object]) -> None:
+                nonlocal delayed_once
+                path = Path(path)
+                active = payload_arg.get("active_turn")
+                control = payload_arg.get("control")
+                if (
+                    path == state_path
+                    and not delayed_once
+                    and isinstance(active, dict)
+                    and active.get("last_activity_stream") == "stdout"
+                    and isinstance(control, dict)
+                    and control.get("next_harness") is None
+                ):
+                    delayed_once = True
+                    serialized = json.dumps(payload_arg, sort_keys=True, indent=2) + "\n"
+                    activity_write_started.set()
+                    release_activity_write.wait(timeout=2)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    temporary_path = path.with_name(f".{path.name}.blocked.tmp")
+                    temporary_path.write_text(serialized, encoding="utf-8")
+                    os.replace(temporary_path, path)
+                    return
+                original_write_json(path, payload_arg)
+
+            def record_activity() -> None:
+                try:
+                    live_turn.record_activity("stdout", "new output\n")
+                except BaseException as error:
+                    thread_errors.append(error)
+
+            def record_control() -> None:
+                try:
+                    runner._record_run_control_action(
+                        event_path=event_path,
+                        payload=payload,
+                        control_payload=dict(payload["control"]),
+                        action=run_control.RunControlAction(
+                            action="harness-selected",
+                            stop_after_current=False,
+                            next_harness="claude",
+                        ),
+                        context=active_turn,
+                        persistence=persistence,
+                    )
+                except BaseException as error:
+                    thread_errors.append(error)
+
+            with mock.patch.object(
+                runner,
+                "_write_json_file",
+                side_effect=delayed_write_json,
+            ):
+                activity_thread = threading.Thread(target=record_activity)
+                activity_thread.start()
+                self.assertTrue(activity_write_started.wait(timeout=2))
+
+                control_thread = threading.Thread(target=record_control)
+                control_thread.start()
+                time.sleep(0.1)
+                self.assertTrue(control_thread.is_alive())
+
+                release_activity_write.set()
+                activity_thread.join(timeout=2)
+                control_thread.join(timeout=2)
+
+            self.assertFalse(activity_thread.is_alive())
+            self.assertFalse(control_thread.is_alive())
+            if thread_errors:
+                raise thread_errors[0]
+
+            state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual("stdout", state_payload["active_turn"]["last_activity_stream"])
+            self.assertEqual("claude", state_payload["control"]["next_harness"])
+            self.assertEqual("harness-selected", state_payload["control"]["last_action"])
+            control_events = [
+                record["payload"]
+                for record in read_jsonl(event_path)
+                if record["name"] == events.RUN_CONTROL_EVENT
+            ]
+            self.assertEqual(["harness-selected"], [event["action"] for event in control_events])
 
     def test_retry_after_failed_turn_keeps_first_run_artifacts(self) -> None:
         plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import threading
 from typing import Any
 
 
@@ -23,6 +24,20 @@ COMMIT_FINISHED_EVENT = "commit_finished"
 RUN_CONTROL_EVENT = "run_control"
 STATE_FILE_NAME = "state.json"
 EVENTS_FILE_NAME = "events.jsonl"
+RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED = "stop-after-current-requested"
+RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CANCELED = "stop-after-current-canceled"
+RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CONSUMED = "stop-after-current-consumed"
+RUN_CONTROL_ACTION_TAIL_ENABLED = "tail-enabled"
+RUN_CONTROL_ACTION_TAIL_DISABLED = "tail-disabled"
+RUN_CONTROL_ACTION_HARNESS_SELECTED = "harness-selected"
+RUN_CONTROL_ACTIONS: tuple[str, ...] = (
+    RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED,
+    RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CANCELED,
+    RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CONSUMED,
+    RUN_CONTROL_ACTION_TAIL_ENABLED,
+    RUN_CONTROL_ACTION_TAIL_DISABLED,
+    RUN_CONTROL_ACTION_HARNESS_SELECTED,
+)
 PAUSE_REASONS: tuple[str, ...] = (
     "nonzero-exit",
     "timeout",
@@ -36,7 +51,9 @@ PAUSE_REASONS: tuple[str, ...] = (
     "no-pending-but-incomplete",
     "commit-preflight",
     "commit-failed",
+    "harness-unavailable",
 )
+_EVENT_WRITE_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -61,6 +78,7 @@ def append_event(path: str | Path, event: Event) -> None:
     """Append one event record as a JSON line."""
     event_path = Path(path)
     event_path.parent.mkdir(parents=True, exist_ok=True)
-    with event_path.open("a", encoding="utf-8") as event_file:
-        event_file.write(json.dumps(event.to_dict(), sort_keys=True))
-        event_file.write("\n")
+    line = json.dumps(event.to_dict(), sort_keys=True) + "\n"
+    with _EVENT_WRITE_LOCK:
+        with event_path.open("a", encoding="utf-8") as event_file:
+            event_file.write(line)

@@ -138,16 +138,28 @@ with `--max-sessions` unless `--max-sessions` is high enough to complete every
 session that was pending at the start of the run. If text TTY run controls stop
 the run before all pending sessions finish, `--commit-at-end` does not run.
 
-For normal text TTY runs, `run` also listens for keyboard controls. Press `p`
-to toggle stop-after-current. When active, the current session still finishes
-and any `--commit-per-session` commit for that session runs; if more sessions
-remain, the run exits 0 with `ok: true`, `paused: false`, and
-`reason: stopped`. Press `p` again before the session finishes to cancel the
-request. Press `h` to print a timestamped help line with available keys and the
-current stop-after-current state. Keyboard controls are disabled for
-`run --json`, `run --dry-run`, and runs where stdin or stderr is not a TTY.
-Future key ideas include `s` for a status snapshot, `l` for artifact and log
-paths, and `?` as a help alias; those keys are not implemented.
+For normal text TTY runs, `run` also listens for keyboard controls:
+
+- `p`: toggle stop-after-current. When active, the current session still
+  finishes and any `--commit-per-session` commit for that session runs; if more
+  sessions remain, the run exits 0 with `ok: true`, `paused: false`, and
+  `reason: stopped`. Press `p` again before the session finishes to cancel the
+  request.
+- `h`: print a timestamped help line with available keys and current control
+  state.
+- `s`: print a compact live status snapshot to stderr. The snapshot includes
+  the active or next session, session counts, active and future harness, model
+  and effort metadata, control state, and current artifact paths. It does not
+  mutate `state.json` or append a `run_control` event.
+- `t`: toggle inline live tailing for the active text run. Inline tailing uses
+  the same event and log formatting as `asl tail`, starts from the current end
+  of the files, and prints only new events or log lines while enabled.
+- `1`, `2`, `3`: select `codex`, `claude`, or `copilot` as the sticky harness
+  for future turns in the same runner invocation. The active subprocess is never
+  interrupted.
+
+Keyboard controls are disabled for `run --json`, `run --dry-run`, and runs
+where stdin or stderr is not a TTY.
 
 `status` reads durable plan files and prints session counts, the next pending
 session, content hashes, state paths, lock state, and any active harness turn.
@@ -155,8 +167,9 @@ Use `--json` for scripts.
 
 `tail` prints recent activity for the latest run and follows `events.jsonl`
 plus live harness and commit stdout/stderr logs until the observed run
-finishes. Use `--no-follow` to print recent activity and exit. `tail` is a log
-viewer only; it has no interactive control mode.
+finishes. Use `--no-follow` to print recent activity and exit. `tail` is still a
+separate log viewer; the `t` keyboard control embeds the same follower inside a
+text TTY `run`.
 
 `doctor` performs a non-mutating harness and path check. Use `--json` for
 scriptable prerequisite checks.
@@ -197,10 +210,14 @@ $session-run <plan-dir>/
 
 Codex writes a last-message file with `-o`. Claude and Copilot do not use that
 file, so their last-message capture falls back to stdout. `--model` and
-`--effort` are passed to the harness only when supplied. Omitting `--model`
-preserves the native CLI default; reporting uses best-effort metadata from
-Codex `~/.codex/config.toml`, Copilot `~/.copilot/settings.json`, or
-`native CLI default` with source `unresolved` when the default cannot be read.
+`--effort` are passed to every selected harness only when supplied. Omitting
+`--model` preserves each harness CLI default; reporting uses per-turn
+best-effort metadata from Codex `~/.codex/config.toml`, Copilot
+`~/.copilot/settings.json`, or `native CLI default` with source `unresolved`
+when the default cannot be read. If a text TTY run switches harnesses with
+`1`, `2`, or `3`, later turns recompute native model and effort metadata for
+the selected harness. Explicit `--model` and `--effort` values carry over to
+later selected harnesses.
 
 ## Safety Modes
 
@@ -273,32 +290,36 @@ Runtime files include:
 `last_message_path`, and `result_path`. It also includes `commit_mode`,
 `commits`, `control`, and, after successful auto-commit preflight,
 `commit_preflight`. The `control` object reports `stop_after_current`,
-`consumed`, and `last_action`; `last_action` is one of
-`stop-after-current-requested`, `stop-after-current-canceled`,
-`stop-after-current-consumed`, or `null`. Failed-run artifacts remain in their
-original `runs/<run_id>/` directory when a later retry succeeds.
+`tail_enabled`, `next_harness`, `consumed`, and `last_action`; `last_action` is
+one of `stop-after-current-requested`, `stop-after-current-canceled`,
+`stop-after-current-consumed`, `tail-enabled`, `tail-disabled`,
+`harness-selected`, or `null`. Failed-run artifacts remain in their original
+`runs/<run_id>/` directory when a later retry succeeds.
 
 While a harness turn is active, `state.json` also includes `active_turn` with
-the run id, turn index, session ID, artifact paths, elapsed and idle seconds,
-last activity metadata, heartbeat count, and any best-effort action-required
-signal. `events.jsonl` records `turn_started`,
-`turn_heartbeat`, `action_required`, `turn_finished`, `commit_started`,
-`commit_finished`, `run_control`, `run_paused`, and `run_finished` events as
-they happen. Commit events include the commit index, scope, session ID for
-per-session commits, argv, cwd, artifact paths, status result, duration, and
-commit SHA when one was created. `run_control` events record
-`stop-after-current-requested`, `stop-after-current-canceled`, and
-`stop-after-current-consumed` actions with the current stop-after-current state
-and, when available, session and turn context. `tail` renders these as `run
-control:` lines.
+the run id, turn index, session ID, harness, prompt, model and effort metadata,
+artifact paths, elapsed and idle seconds, last activity metadata, heartbeat
+count, and any best-effort action-required signal. `events.jsonl` records
+`turn_started`, `turn_heartbeat`, `action_required`, `turn_finished`,
+`commit_started`, `commit_finished`, `run_control`, `run_paused`, and
+`run_finished` events as they happen. Commit events include the commit index,
+scope, session ID for per-session commits, argv, cwd, artifact paths, status
+result, duration, and commit SHA when one was created. `run_control` events
+record `stop-after-current-requested`, `stop-after-current-canceled`,
+`stop-after-current-consumed`, `tail-enabled`, `tail-disabled`, and
+`harness-selected` actions with `stop_after_current`, `tail_enabled`,
+`next_harness`, and, when available, session and turn context. Harness-selection
+events also include `current_harness` and `selected_harness`. `tail` renders
+these as `run control:` lines.
 
 For normal text runs, live progress is printed to stderr with local compact
 timestamps, for example `[2026-06-04 14:32:10] session 2/3 started`, so stdout
 remains the final human summary. The live lines
 cover run start, session starts and finishes, periodic 30-second heartbeats,
-action-required signals, commits, run-control help or toggle messages, pauses,
-and run finish. Detailed artifact paths remain in the final summary, `status`,
-`state.json`, and `events.jsonl` instead of being repeated on every turn line.
+action-required signals, commits, run-control help or toggle messages, compact
+status snapshots, inline-tail output while enabled, pauses, and run finish.
+Detailed artifact paths remain in the final summary, `status`, `state.json`,
+and `events.jsonl`, and are included in the `s` status snapshot on demand.
 
 For `run --json`, stdout remains the final JSON payload and stderr stays quiet;
 live monitoring should read `state.json`, `events.jsonl`, or use `tail`.
@@ -318,12 +339,11 @@ All parsed subcommands that support `--json` print JSON errors to stdout. Common
 error fields are `ok`, `command`, `reason`, `error`, `paused`, and `details`.
 `run --json` preserves its existing fields and adds the common `command` and
 `details` fields; important run fields include `paused`, `reason`,
-`pause_reason`, `pause_details`, `model`, `model_source`, `effort`,
-`effort_source`, `commit_mode`, `commits`, `control`, `completed_sessions`,
-`completed_session_ids`, `turns`, `initial_snapshot`, `final_snapshot`,
-`state_path`, and
-`events_path`. Runs without commit flags report `commit_mode: null` and
-`commits: []`.
+`pause_reason`, `pause_details`, `harness`, `harness_config`, `model`,
+`model_source`, `effort`, `effort_source`, `commit_mode`, `commits`, `control`,
+`completed_sessions`, `completed_session_ids`, `turns`, `initial_snapshot`,
+`final_snapshot`, `state_path`, and `events_path`. Runs without commit flags
+report `commit_mode: null` and `commits: []`.
 
 Commit payloads include `commit_index`, `scope`, `session`, `session_id`,
 `artifact_dir`, `stdout_path`, `stderr_path`, `result_path`, `argv`, `cwd`,
@@ -338,7 +358,9 @@ recorded as failed commit attempts. A failed commit is also copied into
 Dry-run `planned` payloads, harness invocation payloads, active turn state,
 events, and turn `result.json` artifacts include the same model and effort
 metadata. Source values are `flag`, `codex_config`, `copilot_settings`, and
-`unresolved`; omitted effort is reported as `null`.
+`unresolved`; omitted effort is reported as `null`. The top-level `harness`
+field is the startup harness. `turns[*].harness` and `active_turn.harness` are
+authoritative for runtime-selected per-turn harnesses after `1`, `2`, or `3`.
 
 `status --json` reports parsed session state, hashes, state paths, and lock
 state. Each parsed session includes canonical string `id`; integer-only
@@ -385,6 +407,11 @@ Common pause reasons:
 - `commit-failed`: `spec commit --yes --no-verify` ran but did not create a new
   commit, including nonzero exits and zero-exit no-op commits that leave `HEAD`
   unchanged.
+- `harness-unavailable`: a runtime-selected future harness could not be resolved
+  before the next turn started. The previous completed turn remains recorded,
+  the lock is released, and `pause_details` identifies the session, requested
+  harness, configured executable, resolved executable when available, config
+  path, and error.
 
 ## Troubleshooting
 
@@ -416,8 +443,10 @@ asl tail ~/.local/share/agent-plans/example-plan/ --lines 80 --no-follow
 ```
 
 For text runs started from a real terminal, press `h` for the current keyboard
-controls and press `p` to request or cancel stop-after-current. Use `tail` from
-another terminal to inspect the resulting `run_control` events.
+controls, press `s` for a compact status snapshot, press `t` to toggle inline
+tailing, press `1`/`2`/`3` to select the future harness, and press `p` to
+request or cancel stop-after-current. Use `tail` from another terminal to
+inspect durable `run_control` events.
 
 Remove a stale lock:
 
@@ -461,6 +490,9 @@ Manual smoke checklist:
   while a session is active, and confirm the run exits successfully after the
   current session with `reason: stopped`, a consumed `control` payload, and
   `run_control` events visible through `tail`.
+- Repeat the text TTY run with `s`, `t`, and `1`/`2`/`3`; confirm `s` only
+  prints stderr status lines, `t` only prints new inline-tail entries while
+  enabled, and later turns use the selected harness.
 - Repeat the text TTY run with `--commit-per-session` and confirm the
   per-session commit runs before the stop-after-current request is consumed.
 - Run a text TTY plan with `--commit-at-end`, stop before all sessions are
