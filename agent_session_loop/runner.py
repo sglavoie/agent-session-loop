@@ -49,10 +49,16 @@ RUN_CONTROL_EVENT_MESSAGES: dict[str, str] = {
     "tail-disabled": "live tail disabled",
     "harness-selected": "next harness selected",
 }
+AGENT_MUX_START_EVENT = "AgentSessionLoopStarted"
+AGENT_MUX_TURN_START_EVENT = "AgentSessionLoopTurnStarted"
 AGENT_MUX_FINISH_EVENT = "AgentSessionLoopFinished"
-AGENT_MUX_FINISH_SOURCE = "agent_session_loop"
+AGENT_MUX_SOURCE = "agent_session_loop"
+AGENT_MUX_FINISH_SOURCE = AGENT_MUX_SOURCE
+AGENT_MUX_START_REASON = "run_started"
+AGENT_MUX_TURN_START_REASON = "turn_started"
 AGENT_MUX_FINISH_REASON = "run_finished"
-AGENT_MUX_FINISH_NOTIFY_TIMEOUT_SECONDS = 1.0
+AGENT_MUX_NOTIFY_TIMEOUT_SECONDS = 1.0
+AGENT_MUX_FINISH_NOTIFY_TIMEOUT_SECONDS = AGENT_MUX_NOTIFY_TIMEOUT_SECONDS
 INLINE_TAIL_JOIN_TIMEOUT_SECONDS = 1.0
 
 
@@ -949,31 +955,122 @@ def _write_state_payload(payload: dict[str, Any]) -> None:
     _write_json_file(Path(state_path), payload)
 
 
-def _notify_agent_mux_loop_finished(payload: dict[str, Any]) -> None:
+def _loop_harness(
+    payload: dict[str, Any],
+    active_turn: dict[str, Any] | None = None,
+) -> str | None:
+    if active_turn is not None:
+        turn_harness = active_turn.get("harness")
+        if isinstance(turn_harness, str) and turn_harness.strip():
+            return turn_harness
+    turns = payload.get("turns")
+    if isinstance(turns, list):
+        for turn in reversed(turns):
+            if not isinstance(turn, dict):
+                continue
+            turn_harness = turn.get("harness")
+            if isinstance(turn_harness, str) and turn_harness.strip():
+                return turn_harness
+    payload_harness = payload.get("harness")
+    if isinstance(payload_harness, str) and payload_harness.strip():
+        return payload_harness
+    return None
+
+
+def _agent_mux_loop_payload(
+    payload: dict[str, Any],
+    *,
+    reason: str,
+    active_turn: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    hook_payload: dict[str, Any] = {
+        "source": AGENT_MUX_SOURCE,
+        "reason": reason,
+        "run_id": payload.get("run_id"),
+        "plan_dir": payload.get("plan_dir"),
+        "cwd": payload.get("cwd"),
+        "state_path": payload.get("state_path"),
+        "harness": _loop_harness(payload, active_turn),
+    }
+    if payload.get("run_started_at") is not None:
+        hook_payload["run_started_at"] = payload.get("run_started_at")
+    if payload.get("run_finished_at") is not None:
+        hook_payload["run_finished_at"] = payload.get("run_finished_at")
+    if active_turn is not None:
+        for key in (
+            "turn_index",
+            "session",
+            "session_id",
+            "session_number",
+            "total_sessions",
+            "artifact_dir",
+            "stdout_path",
+            "stderr_path",
+            "last_message_path",
+            "result_path",
+            "started_at",
+        ):
+            if active_turn.get(key) is not None:
+                hook_payload[key] = active_turn.get(key)
+    return hook_payload
+
+
+def _notify_agent_mux_loop(
+    event_name: str,
+    payload: dict[str, Any],
+    *,
+    reason: str,
+    active_turn: dict[str, Any] | None = None,
+) -> None:
     amx_path = shutil.which("amx")
     if amx_path is None:
         return
 
-    hook_payload = {
-        "source": AGENT_MUX_FINISH_SOURCE,
-        "reason": AGENT_MUX_FINISH_REASON,
-        "run_id": payload.get("run_id"),
-        "plan_dir": payload.get("plan_dir"),
-        "cwd": payload.get("cwd"),
-        "run_finished_at": payload.get("run_finished_at"),
-    }
+    hook_payload = _agent_mux_loop_payload(
+        payload,
+        reason=reason,
+        active_turn=active_turn,
+    )
     try:
         subprocess.run(
-            [amx_path, "hook-indicator", AGENT_MUX_FINISH_EVENT],
+            [amx_path, "hook-indicator", event_name],
             input=json.dumps(hook_payload, separators=(",", ":")),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=AGENT_MUX_FINISH_NOTIFY_TIMEOUT_SECONDS,
+            timeout=AGENT_MUX_NOTIFY_TIMEOUT_SECONDS,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return
+
+
+def _notify_agent_mux_loop_started(payload: dict[str, Any]) -> None:
+    _notify_agent_mux_loop(
+        AGENT_MUX_START_EVENT,
+        payload,
+        reason=AGENT_MUX_START_REASON,
+    )
+
+
+def _notify_agent_mux_loop_turn_started(
+    payload: dict[str, Any],
+    active_turn: dict[str, Any],
+) -> None:
+    _notify_agent_mux_loop(
+        AGENT_MUX_TURN_START_EVENT,
+        payload,
+        reason=AGENT_MUX_TURN_START_REASON,
+        active_turn=active_turn,
+    )
+
+
+def _notify_agent_mux_loop_finished(payload: dict[str, Any]) -> None:
+    _notify_agent_mux_loop(
+        AGENT_MUX_FINISH_EVENT,
+        payload,
+        reason=AGENT_MUX_FINISH_REASON,
+    )
 
 
 def _append_event(event_path: Path, name: str, payload: dict[str, Any]) -> None:
@@ -1632,6 +1729,7 @@ class _LiveTurn:
                 "session": self._active_turn["session"],
                 "session_id": self._active_turn.get("session_id"),
                 "total_sessions": self._active_turn.get("total_sessions"),
+                "harness": self._active_turn.get("harness"),
                 "artifact_dir": self._active_turn["artifact_dir"],
                 "stdout_path": self._active_turn["stdout_path"],
                 "stderr_path": self._active_turn["stderr_path"],
@@ -1672,6 +1770,7 @@ class _LiveTurn:
             "session": self._active_turn["session"],
             "session_id": self._active_turn.get("session_id"),
             "total_sessions": self._active_turn.get("total_sessions"),
+            "harness": self._active_turn.get("harness"),
             "artifact_dir": self._active_turn["artifact_dir"],
             "stdout_path": self._active_turn["stdout_path"],
             "stderr_path": self._active_turn["stderr_path"],
@@ -1971,6 +2070,7 @@ def _run_locked(
         },
     )
     persistence.write_state(payload)
+    _notify_agent_mux_loop_started(payload)
     progress.run_started(payload)
 
     invalid_pause = _invalid_status_pause(snapshot)
@@ -2229,6 +2329,7 @@ def _run_locked(
             run_control_context = dict(active_turn)
         persistence.append_event(event_path, "turn_started", active_turn)
         live_turn.start()
+        _notify_agent_mux_loop_turn_started(payload, active_turn)
         try:
             result = harnesses.run_harness(
                 turn_harness,

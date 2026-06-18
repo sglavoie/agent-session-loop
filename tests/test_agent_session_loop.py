@@ -123,10 +123,47 @@ def write_plan_with_ids(plan_dir: Path, statuses: tuple[tuple[str, str], ...]) -
 
 
 def install_fake_codex(tmp_dir: Path) -> Path:
+    return install_fake_harness(tmp_dir, "codex")
+
+
+def install_fake_harness(tmp_dir: Path, executable_name: str) -> Path:
     fake_path = tmp_dir / "codex"
+    if executable_name != "codex":
+        fake_path = tmp_dir / executable_name
     shutil.copyfile(FAKE_CODEX_FIXTURE, fake_path)
     fake_path.chmod(fake_path.stat().st_mode | stat.S_IXUSR)
     return fake_path
+
+
+def install_fake_amx(tmp_dir: Path) -> tuple[Path, Path]:
+    fake_path = tmp_dir / "amx"
+    log_path = tmp_dir / "fake-amx.jsonl"
+    fake_path.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "from pathlib import Path",
+                "import json",
+                "import os",
+                "import sys",
+                "",
+                "log_path = os.environ.get('FAKE_AMX_LOG')",
+                "if log_path:",
+                "    Path(log_path).parent.mkdir(parents=True, exist_ok=True)",
+                "    with Path(log_path).open('a', encoding='utf-8') as handle:",
+                "        handle.write(json.dumps({",
+                "            'argv': sys.argv,",
+                "            'cwd': os.getcwd(),",
+                "            'stdin': sys.stdin.read(),",
+                "        }, separators=(',', ':')) + '\\n')",
+                "raise SystemExit(0)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    fake_path.chmod(fake_path.stat().st_mode | stat.S_IXUSR)
+    return fake_path, log_path
 
 
 def install_fake_spec(tmp_dir: Path) -> Path:
@@ -1647,11 +1684,110 @@ class FinishNotificationTests(unittest.TestCase):
             "run_id": "run-123",
             "plan_dir": str(tmp_dir / "plan"),
             "cwd": str(tmp_dir / "repo"),
+            "harness": "codex",
             "reason": "all-complete",
             "run_started_at": "2026-06-11T12:00:00Z",
             "run_finished_at": "2026-06-11T12:00:03Z",
             "state_path": str(tmp_dir / "state.json"),
         }
+
+    def test_loop_payload_uses_active_turn_harness_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            payload = self.finish_payload(tmp_dir)
+            active_turn = {
+                "harness": "claude",
+                "turn_index": 2,
+                "session": "2.1",
+                "session_id": "2.1",
+                "total_sessions": 4,
+                "artifact_dir": str(tmp_dir / "turn"),
+                "stdout_path": str(tmp_dir / "stdout.log"),
+                "stderr_path": str(tmp_dir / "stderr.log"),
+                "last_message_path": str(tmp_dir / "last-message.txt"),
+                "result_path": str(tmp_dir / "result.json"),
+                "started_at": "2026-06-11T12:01:00Z",
+            }
+
+            hook_payload = runner._agent_mux_loop_payload(
+                payload,
+                reason=runner.AGENT_MUX_TURN_START_REASON,
+                active_turn=active_turn,
+            )
+
+            self.assertEqual("agent_session_loop", hook_payload["source"])
+            self.assertEqual("turn_started", hook_payload["reason"])
+            self.assertEqual("claude", hook_payload["harness"])
+            self.assertEqual(payload["state_path"], hook_payload["state_path"])
+            self.assertEqual(2, hook_payload["turn_index"])
+            self.assertEqual("2.1", hook_payload["session"])
+            self.assertEqual("2.1", hook_payload["session_id"])
+            self.assertEqual(4, hook_payload["total_sessions"])
+
+    def test_start_and_turn_notifications_build_agent_mux_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            payload = self.finish_payload(tmp_dir)
+            payload["run_finished_at"] = None
+            active_turn = {
+                "harness": "claude",
+                "turn_index": 1,
+                "session": 1,
+                "session_id": "1",
+                "total_sessions": 2,
+                "artifact_dir": str(tmp_dir / "turn"),
+                "stdout_path": str(tmp_dir / "stdout.log"),
+                "stderr_path": str(tmp_dir / "stderr.log"),
+                "last_message_path": str(tmp_dir / "last-message.txt"),
+                "result_path": str(tmp_dir / "result.json"),
+                "started_at": "2026-06-11T12:01:00Z",
+            }
+            completed = subprocess.CompletedProcess(
+                ["/opt/amx", "hook-indicator", "AgentSessionLoopStarted"],
+                0,
+                stdout="",
+                stderr="",
+            )
+
+            with (
+                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.subprocess,
+                    "run",
+                    return_value=completed,
+                ) as run,
+            ):
+                runner._notify_agent_mux_loop_started(payload)
+                runner._notify_agent_mux_loop_turn_started(payload, active_turn)
+
+            self.assertEqual(2, run.call_count)
+            start_args, start_kwargs = run.call_args_list[0]
+            turn_args, turn_kwargs = run.call_args_list[1]
+            self.assertEqual(
+                ["/opt/amx", "hook-indicator", "AgentSessionLoopStarted"],
+                start_args[0],
+            )
+            self.assertEqual(
+                ["/opt/amx", "hook-indicator", "AgentSessionLoopTurnStarted"],
+                turn_args[0],
+            )
+            self.assertEqual(
+                runner.AGENT_MUX_NOTIFY_TIMEOUT_SECONDS,
+                start_kwargs["timeout"],
+            )
+            self.assertEqual(
+                runner.AGENT_MUX_NOTIFY_TIMEOUT_SECONDS,
+                turn_kwargs["timeout"],
+            )
+            start_payload = json.loads(start_kwargs["input"])
+            turn_payload = json.loads(turn_kwargs["input"])
+            self.assertEqual("run_started", start_payload["reason"])
+            self.assertEqual("codex", start_payload["harness"])
+            self.assertEqual(payload["state_path"], start_payload["state_path"])
+            self.assertEqual("turn_started", turn_payload["reason"])
+            self.assertEqual("claude", turn_payload["harness"])
+            self.assertEqual(1, turn_payload["turn_index"])
+            self.assertEqual(1, turn_payload["session"])
 
     def test_finish_notification_builds_agent_mux_command_and_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1699,6 +1835,9 @@ class FinishNotificationTests(unittest.TestCase):
                     "run_id": "run-123",
                     "plan_dir": payload["plan_dir"],
                     "cwd": payload["cwd"],
+                    "state_path": payload["state_path"],
+                    "harness": "codex",
+                    "run_started_at": "2026-06-11T12:00:00Z",
                     "run_finished_at": "2026-06-11T12:00:03Z",
                 },
                 json.loads(kwargs["input"]),
@@ -2122,6 +2261,251 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             extra_env=extra_env,
         )
         return completed, payload, plan_dir, state_dir, fake_codex
+
+    def test_loop_lifecycle_notifications_run_after_state_writes(self) -> None:
+        listener = FakeRunControlListener()
+        observed: list[tuple[str, object]] = []
+
+        def read_state_payload(payload: dict[str, object]) -> dict[str, object]:
+            return json.loads(Path(str(payload["state_path"])).read_text(encoding="utf-8"))
+
+        def notify_started(payload: dict[str, object]) -> None:
+            state_payload = read_state_payload(payload)
+            observed.append(("started", state_payload["active_turn"]))
+            self.assertEqual(payload["run_id"], state_payload["run_id"])
+            self.assertEqual("codex", state_payload["harness"])
+            self.assertIsNone(state_payload["active_turn"])
+
+        def notify_turn_started(
+            payload: dict[str, object],
+            active_turn: dict[str, object],
+        ) -> None:
+            state_payload = read_state_payload(payload)
+            state_turn = state_payload["active_turn"]
+            self.assertIsInstance(state_turn, dict)
+            assert isinstance(state_turn, dict)
+            observed.append(("turn_started", state_turn["harness"]))
+            self.assertEqual(active_turn["turn_index"], state_turn["turn_index"])
+            self.assertEqual("codex", state_turn["harness"])
+
+        def notify_finished(payload: dict[str, object]) -> None:
+            state_payload = read_state_payload(payload)
+            observed.append(("finished", state_payload["run_finished_at"]))
+            self.assertEqual(payload["run_finished_at"], state_payload["run_finished_at"])
+            self.assertIsNone(state_payload["active_turn"])
+
+        with (
+            mock.patch.object(
+                runner,
+                "_notify_agent_mux_loop_started",
+                side_effect=notify_started,
+            ),
+            mock.patch.object(
+                runner,
+                "_notify_agent_mux_loop_turn_started",
+                side_effect=notify_turn_started,
+            ),
+            mock.patch.object(
+                runner,
+                "_notify_agent_mux_loop_finished",
+                side_effect=notify_finished,
+            ),
+        ):
+            exit_code, payload, _plan_dir, _state_dir, _fake_codex = (
+                self.run_locked_with_listener(
+                    mode="success",
+                    statuses=("pending",),
+                    listener=listener,
+                )
+            )
+
+        self.assertEqual(0, exit_code)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(
+            ["started", "turn_started", "finished"],
+            [name for name, _value in observed],
+        )
+
+    def test_copilot_run_from_other_cwd_notifies_agent_mux_with_project_payloads(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            config_home = tmp_dir / "config"
+            config_path = config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            fake_codex = install_fake_codex(tmp_dir)
+            fake_copilot = install_fake_harness(tmp_dir, "copilot")
+            _fake_amx, amx_log = install_fake_amx(tmp_dir)
+            caller_dir = tmp_dir / "caller"
+            project_dir = tmp_dir / "project"
+            caller_dir.mkdir()
+            project_dir.mkdir()
+            write_plan(plan_dir, ("pending",))
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "codex": {"executable": str(fake_codex)},
+                        "copilot": {"executable": str(fake_copilot)},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            env = os.environ.copy()
+            env.update(
+                {
+                    "XDG_CONFIG_HOME": str(config_home),
+                    "FAKE_CODEX_MODE": "success",
+                    "FAKE_CODEX_SLEEP": "5",
+                    "FAKE_AMX_LOG": str(amx_log),
+                    "PATH": str(tmp_dir)
+                    + os.pathsep
+                    + os.environ.get("PATH", ""),
+                    "PYTHONPATH": str(REPO_ROOT)
+                    + os.pathsep
+                    + env.get("PYTHONPATH", ""),
+                }
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_session_loop",
+                    "run",
+                    str(plan_dir),
+                    "--cwd",
+                    str(project_dir),
+                    "--harness",
+                    "copilot",
+                    "--state-dir",
+                    str(state_dir),
+                    "--json",
+                ],
+                cwd=caller_dir,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=15,
+                check=False,
+            )
+            payload = json.loads(completed.stdout)
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertTrue(payload["ok"])
+            self.assertEqual("copilot", payload["harness"])
+            expected_cwd = str(plans.canonicalize_path(project_dir))
+            self.assertEqual(expected_cwd, payload["cwd"])
+
+            amx_records = read_jsonl(amx_log)
+            self.assertEqual(
+                [
+                    runner.AGENT_MUX_START_EVENT,
+                    runner.AGENT_MUX_TURN_START_EVENT,
+                    runner.AGENT_MUX_FINISH_EVENT,
+                ],
+                [record["argv"][-1] for record in amx_records],
+            )
+            self.assertEqual(
+                {str(plans.canonicalize_path(caller_dir))},
+                {record["cwd"] for record in amx_records},
+            )
+
+            hook_payloads = [
+                json.loads(str(record["stdin"])) for record in amx_records
+            ]
+            self.assertEqual(
+                [
+                    runner.AGENT_MUX_START_REASON,
+                    runner.AGENT_MUX_TURN_START_REASON,
+                    runner.AGENT_MUX_FINISH_REASON,
+                ],
+                [hook_payload["reason"] for hook_payload in hook_payloads],
+            )
+            for hook_payload in hook_payloads:
+                self.assertEqual("agent_session_loop", hook_payload["source"])
+                self.assertEqual("copilot", hook_payload["harness"])
+                self.assertEqual(expected_cwd, hook_payload["cwd"])
+                self.assertEqual(payload["plan_dir"], hook_payload["plan_dir"])
+                self.assertEqual(payload["state_path"], hook_payload["state_path"])
+                self.assertEqual(payload["run_id"], hook_payload["run_id"])
+                self.assertTrue(Path(str(hook_payload["state_path"])).exists())
+
+            turn_payload = hook_payloads[1]
+            self.assertEqual(1, turn_payload["turn_index"])
+            self.assertEqual(1, turn_payload["session"])
+            self.assertEqual("1", turn_payload["session_id"])
+            self.assertEqual(
+                str(payload["turns"][0]["artifact_dir"]),
+                turn_payload["artifact_dir"],
+            )
+            self.assertIsNone(
+                json.loads(Path(payload["state_path"]).read_text(encoding="utf-8"))[
+                    "active_turn"
+                ]
+            )
+
+    def test_harness_switch_updates_agent_mux_turn_notification_harness(self) -> None:
+        hook_payloads: list[dict[str, object]] = []
+        finish_payloads: list[dict[str, object]] = []
+
+        def notify_turn_started(
+            payload: dict[str, object],
+            active_turn: dict[str, object],
+        ) -> None:
+            hook_payloads.append(
+                runner._agent_mux_loop_payload(
+                    payload,
+                    reason=runner.AGENT_MUX_TURN_START_REASON,
+                    active_turn=active_turn,
+                )
+            )
+
+        def notify_finished(payload: dict[str, object]) -> None:
+            finish_payloads.append(
+                runner._agent_mux_loop_payload(
+                    payload,
+                    reason=runner.AGENT_MUX_FINISH_REASON,
+                )
+            )
+
+        with (
+            mock.patch.object(
+                runner,
+                "_notify_agent_mux_loop_turn_started",
+                side_effect=notify_turn_started,
+            ),
+            mock.patch.object(
+                runner,
+                "_notify_agent_mux_loop_finished",
+                side_effect=notify_finished,
+            ),
+        ):
+            exit_code, payload, _calls, _plan_dir, _state_dir = (
+                self.run_with_mocked_harness_switch()
+            )
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(
+            ["codex", "claude"],
+            [turn["harness"] for turn in payload["turns"]],
+        )
+        self.assertEqual(
+            ["codex", "claude"],
+            [hook_payload["harness"] for hook_payload in hook_payloads],
+        )
+        self.assertEqual(
+            [1, 2],
+            [hook_payload["turn_index"] for hook_payload in hook_payloads],
+        )
+        self.assertEqual(
+            [1, 2],
+            [hook_payload["session"] for hook_payload in hook_payloads],
+        )
+        self.assertEqual(1, len(finish_payloads))
+        self.assertEqual("claude", finish_payloads[0]["harness"])
 
     def loop_env(
         self,
@@ -4291,6 +4675,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "turn_index": 1,
                 "session": 1,
                 "total_sessions": 3,
+                "harness": "codex",
                 "artifact_dir": str(tmp_dir / "turn"),
                 "stdout_path": str(tmp_dir / "stdout.log"),
                 "stderr_path": str(tmp_dir / "stderr.log"),
@@ -4345,6 +4730,12 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     for record in event_records
                 )
             )
+            heartbeat_payloads = [
+                record["payload"]
+                for record in event_records
+                if record["name"] == events.TURN_HEARTBEAT_EVENT
+            ]
+            self.assertEqual({"codex"}, {payload["harness"] for payload in heartbeat_payloads})
             stderr_text = stderr.getvalue()
             timestamp = r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] "
             self.assertRegex(
@@ -4355,6 +4746,62 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 stderr_text,
                 timestamp + r"session 1/3 heartbeat \(elapsed",
             )
+
+    def test_live_turn_action_required_payload_includes_harness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            event_path = tmp_dir / events.EVENTS_FILE_NAME
+            state_path = tmp_dir / events.STATE_FILE_NAME
+            payload = {"state_path": str(state_path), "active_turn": None}
+            active_turn = {
+                "run_id": "run-1",
+                "turn_index": 1,
+                "session": 1,
+                "total_sessions": 3,
+                "harness": "codex",
+                "artifact_dir": str(tmp_dir / "turn"),
+                "stdout_path": str(tmp_dir / "stdout.log"),
+                "stderr_path": str(tmp_dir / "stderr.log"),
+                "last_message_path": str(tmp_dir / "last-message.txt"),
+                "result_path": str(tmp_dir / "result.json"),
+                "started_at": runner._isoformat(runner._utc_now()),
+                "finished_at": None,
+                "duration_seconds": None,
+                "idle_seconds_since_previous_turn": 0.0,
+                "last_activity_at": None,
+                "last_activity_stream": None,
+                "last_activity_preview": "",
+                "last_heartbeat_at": None,
+                "elapsed_seconds": 0.0,
+                "idle_seconds": 0.0,
+                "heartbeat_count": 0,
+                "stdout_chars": 0,
+                "stderr_chars": 0,
+                "action_required": None,
+            }
+            live_turn = runner._LiveTurn(
+                payload=payload,
+                event_path=event_path,
+                progress=runner._ProgressReporter(enabled=False),
+                active_turn=active_turn,
+                heartbeat_interval=60,
+            )
+
+            live_turn.start()
+            live_turn.record_activity("stderr", "approval required before continuing")
+            live_turn.stop()
+            live_turn.finish(runner._utc_now())
+
+            state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+            event_records = read_jsonl(event_path)
+            action_events = [
+                record["payload"]
+                for record in event_records
+                if record["name"] == events.ACTION_REQUIRED_EVENT
+            ]
+            self.assertEqual(1, len(action_events))
+            self.assertEqual("codex", action_events[0]["harness"])
+            self.assertEqual("codex", state_payload["action_required"]["harness"])
 
     def test_run_persistence_serializes_live_turn_and_control_state_writes(
         self,
