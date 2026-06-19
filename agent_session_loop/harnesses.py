@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import shutil
 import signal
@@ -53,6 +54,193 @@ class HarnessResult:
     interrupted: bool = False
 
 
+class _OutputProcessor:
+    """Normalize harness output before it is logged and persisted."""
+
+    def process_chunk(self, stream_name: StreamName, text: str) -> str:
+        del stream_name
+        return text
+
+    def last_message(
+        self,
+        *,
+        stdout: str,
+        stderr: str,
+        last_message_path: Path | None,
+    ) -> str:
+        del stderr
+        return _read_last_message(last_message_path) or stdout
+
+
+class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
+    """Render Claude stream-json records as readable line-oriented progress."""
+
+    def __init__(self) -> None:
+        self._text_buffer = ""
+        self._emitted_text = False
+        self._assistant_messages: list[str] = []
+        self._final_result: str | None = None
+
+    def process_chunk(self, stream_name: StreamName, text: str) -> str:
+        if stream_name != "stdout":
+            return text
+
+        rendered: list[str] = []
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                rendered.append(line)
+                continue
+            if not isinstance(record, dict):
+                rendered.append(line)
+                continue
+            rendered.extend(self._render_record(record))
+        return "".join(f"{line}\n" for line in rendered)
+
+    def last_message(
+        self,
+        *,
+        stdout: str,
+        stderr: str,
+        last_message_path: Path | None,
+    ) -> str:
+        saved = _read_last_message(last_message_path)
+        if saved:
+            return saved
+        if self._final_result:
+            return self._ensure_trailing_newline(self._final_result)
+        if self._assistant_messages:
+            return self._ensure_trailing_newline("\n".join(self._assistant_messages))
+        del stderr
+        return stdout
+
+    def _render_record(self, record: dict[str, object]) -> list[str]:
+        record_type = record.get("type")
+        if record_type == "system":
+            return self._render_system(record)
+        if record_type == "stream_event":
+            event = record.get("event")
+            if isinstance(event, dict):
+                return self._render_stream_event(event)
+            return []
+        if record_type == "assistant":
+            text = self._assistant_text(record.get("message"))
+            if text:
+                self._assistant_messages.append(text)
+                if not self._emitted_text:
+                    return self._format_text_lines(text)
+            return []
+        if record_type == "result":
+            result = record.get("result")
+            if isinstance(result, str):
+                self._final_result = result
+            subtype = record.get("subtype") or "unknown"
+            details = self._result_details(record)
+            suffix = "" if not details else f" ({', '.join(details)})"
+            return [f"claude result: {subtype}{suffix}"]
+        if record_type == "error":
+            message = record.get("message") or record.get("error") or "unknown"
+            return [f"claude error: {message}"]
+        return []
+
+    def _render_system(self, record: dict[str, object]) -> list[str]:
+        subtype = record.get("subtype")
+        if subtype == "init":
+            parts = ["claude init"]
+            model = record.get("model")
+            if model:
+                parts.append(f"model {model}")
+            session_id = record.get("session_id")
+            if session_id:
+                parts.append(f"session {session_id}")
+            return ["; ".join(str(part) for part in parts)]
+        if subtype == "status":
+            status = record.get("status") or "unknown"
+            return [f"claude status: {status}"]
+        return []
+
+    def _render_stream_event(self, event: dict[str, object]) -> list[str]:
+        event_type = event.get("type")
+        if event_type == "message_start":
+            message = event.get("message")
+            if isinstance(message, dict) and message.get("model"):
+                return [f"claude response: model {message['model']}"]
+            return ["claude response started"]
+        if event_type == "content_block_start":
+            content_block = event.get("content_block")
+            if (
+                isinstance(content_block, dict)
+                and content_block.get("type") == "tool_use"
+            ):
+                name = content_block.get("name") or "unknown"
+                return [f"claude tool: {name}"]
+            return []
+        if event_type == "content_block_delta":
+            delta = event.get("delta")
+            if isinstance(delta, dict) and delta.get("type") == "text_delta":
+                text = delta.get("text")
+                if isinstance(text, str):
+                    self._text_buffer += text
+                    return self._drain_text_buffer(force=False)
+            return []
+        if event_type == "content_block_stop":
+            return self._drain_text_buffer(force=True)
+        return []
+
+    def _drain_text_buffer(self, *, force: bool) -> list[str]:
+        lines: list[str] = []
+        while "\n" in self._text_buffer:
+            line, self._text_buffer = self._text_buffer.split("\n", 1)
+            if line.strip():
+                lines.append(f"claude text: {line}")
+        if force and self._text_buffer.strip():
+            lines.append(f"claude text: {self._text_buffer}")
+            self._text_buffer = ""
+        if lines:
+            self._emitted_text = True
+        return lines
+
+    def _format_text_lines(self, text: str) -> list[str]:
+        lines = [f"claude text: {line}" for line in text.splitlines() if line.strip()]
+        if lines:
+            self._emitted_text = True
+        return lines
+
+    def _assistant_text(self, raw_message: object) -> str:
+        if not isinstance(raw_message, dict):
+            return ""
+        content = raw_message.get("content")
+        if not isinstance(content, list):
+            return ""
+        chunks: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "text":
+                continue
+            text = block.get("text")
+            if isinstance(text, str):
+                chunks.append(text)
+        return "".join(chunks).strip()
+
+    def _result_details(self, record: dict[str, object]) -> list[str]:
+        details: list[str] = []
+        turns = record.get("num_turns")
+        if isinstance(turns, int):
+            label = "turn" if turns == 1 else "turns"
+            details.append(f"{turns} {label}")
+        duration_ms = record.get("duration_ms")
+        if isinstance(duration_ms, int | float):
+            details.append(f"{duration_ms / 1000:.1f}s")
+        return details
+
+    def _ensure_trailing_newline(self, text: str) -> str:
+        return text if text.endswith("\n") else f"{text}\n"
+
+
 class HarnessAdapter:
     """Base class for harness-specific command construction."""
 
@@ -70,6 +258,9 @@ class HarnessAdapter:
     def resolve_executable(self) -> str | None:
         """Return the resolved executable path if it is on PATH."""
         return shutil.which(self.executable)
+
+    def output_processor(self) -> _OutputProcessor:
+        return _OutputProcessor()
 
     def build_argv(
         self,
@@ -154,6 +345,7 @@ class HarnessAdapter:
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
         reader_errors: list[BaseException] = []
+        output_processor = self.output_processor()
 
         def read_stream(
             stream_name: StreamName,
@@ -162,10 +354,16 @@ class HarnessAdapter:
         ) -> None:
             try:
                 for chunk in iter(pipe.readline, ""):
-                    chunks.append(chunk)
+                    processed_chunk = output_processor.process_chunk(
+                        stream_name,
+                        chunk,
+                    )
+                    if not processed_chunk:
+                        continue
+                    chunks.append(processed_chunk)
                     if stream_callback is not None:
                         try:
-                            stream_callback(stream_name, chunk)
+                            stream_callback(stream_name, processed_chunk)
                         except Exception as error:
                             reader_errors.append(error)
             except Exception as error:
@@ -216,7 +414,11 @@ class HarnessAdapter:
                 returncode=130,
                 stdout="".join(stdout_chunks),
                 stderr="".join(stderr_chunks),
-                last_message=_read_last_message(invocation.last_message_path),
+                last_message=output_processor.last_message(
+                    stdout="".join(stdout_chunks),
+                    stderr="".join(stderr_chunks),
+                    last_message_path=invocation.last_message_path,
+                ),
                 interrupted=True,
             )
 
@@ -232,7 +434,11 @@ class HarnessAdapter:
                 returncode=124,
                 stdout=stdout,
                 stderr=stderr,
-                last_message=_read_last_message(invocation.last_message_path),
+                last_message=output_processor.last_message(
+                    stdout=stdout,
+                    stderr=stderr,
+                    last_message_path=invocation.last_message_path,
+                ),
                 timed_out=True,
             )
 
@@ -243,7 +449,11 @@ class HarnessAdapter:
             returncode=130 if interrupted else process.returncode,
             stdout=stdout,
             stderr=stderr,
-            last_message=_read_last_message(invocation.last_message_path) or stdout,
+            last_message=output_processor.last_message(
+                stdout=stdout,
+                stderr=stderr,
+                last_message_path=invocation.last_message_path,
+            ),
             interrupted=interrupted,
         )
 
@@ -290,6 +500,9 @@ class ClaudeAdapter(HarnessAdapter):
     name = "claude"
     skill_prefix = "/"
 
+    def output_processor(self) -> _OutputProcessor:
+        return _ClaudeStreamJsonOutputProcessor()
+
     def build_argv(
         self,
         *,
@@ -306,6 +519,9 @@ class ClaudeAdapter(HarnessAdapter):
         argv = [
             self.executable,
             "--print",
+            "--output-format",
+            "stream-json",
+            "--include-partial-messages",
             "--add-dir",
             str(plan_dir),
             "--permission-mode",

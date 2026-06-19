@@ -386,7 +386,7 @@ codex exec -C <cwd> --add-dir <plan-dir> --dangerously-bypass-approvals-and-sand
 Claude:
 
 ```text
-claude --print --add-dir <plan-dir> --permission-mode bypassPermissions [--model <model>] [--effort <effort>] <prompt>
+claude --print --output-format stream-json --include-partial-messages --add-dir <plan-dir> --permission-mode bypassPermissions [--model <model>] [--effort <effort>] <prompt>
 ```
 
 Copilot:
@@ -402,16 +402,18 @@ $session-run <plan-dir>/ --runner-managed
 /session-run <plan-dir>/ --runner-managed
 ```
 
-Codex writes a last-message file with `-o`. Claude and Copilot do not use that
-file, so their last-message capture falls back to stdout. `--model` and
-`--effort` are passed to every selected harness only when supplied. Omitting
-`--model` preserves each harness CLI default; reporting uses per-turn
-best-effort metadata from Codex `~/.codex/config.toml`, Copilot
+Codex writes a last-message file with `-o`. Claude streams JSONL in print mode;
+the adapter renders that stream as concise `claude ...` stdout log lines for
+live tailing and keeps the final `result` text as the last message. Copilot does
+not use a last-message file, so its last-message capture falls back to stdout.
+`--model` and `--effort` are passed to every selected harness only when
+supplied. Omitting `--model` preserves each harness CLI default; reporting uses
+per-turn best-effort metadata from Codex `~/.codex/config.toml`, Copilot
 `~/.copilot/settings.json`, or `native CLI default` with source `unresolved`
-when the default cannot be read. If a text TTY run switches harnesses with
-`1`, `2`, or `3`, later turns recompute native model and effort metadata for
-the selected harness. Explicit `--model` and `--effort` values carry over to
-later selected harnesses.
+when the default cannot be read. If a text TTY run switches harnesses with `1`,
+`2`, or `3`, later turns recompute native model and effort metadata for the
+selected harness. Explicit `--model` and `--effort` values carry over to later
+selected harnesses.
 
 ## Safety Modes
 
@@ -420,7 +422,7 @@ harness. For Codex and Claude this means:
 
 ```text
 codex exec -C <cwd> --add-dir <plan-dir> --dangerously-bypass-approvals-and-sandbox -o <last-message-file> <prompt>
-claude --print --add-dir <plan-dir> --permission-mode bypassPermissions <prompt>
+claude --print --output-format stream-json --include-partial-messages --add-dir <plan-dir> --permission-mode bypassPermissions <prompt>
 ```
 
 `--unsafe-bypass` is accepted as an explicit form of the default. Pass
@@ -428,7 +430,7 @@ claude --print --add-dir <plan-dir> --permission-mode bypassPermissions <prompt>
 
 ```text
 codex exec -C <cwd> --add-dir <plan-dir> -s workspace-write -o <last-message-file> <prompt>
-claude --print --add-dir <plan-dir> --permission-mode dontAsk <prompt>
+claude --print --output-format stream-json --include-partial-messages --add-dir <plan-dir> --permission-mode dontAsk <prompt>
 ```
 
 Copilot always uses its explicit allow flags. Because bypass mode is the

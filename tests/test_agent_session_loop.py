@@ -2882,6 +2882,11 @@ class CommandAndConfigTests(unittest.TestCase):
             prompt="/session-run /tmp/plan/",
         )
         self.assertEqual("dontAsk", claude[claude.index("--permission-mode") + 1])
+        self.assertEqual(
+            "stream-json",
+            claude[claude.index("--output-format") + 1],
+        )
+        self.assertIn("--include-partial-messages", claude)
         self.assertIn("--add-dir", claude)
 
         claude_unsafe = harnesses.ClaudeAdapter(executable="claude").build_argv(
@@ -2934,6 +2939,137 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertLess(copilot.index("--model"), prompt_index)
         self.assertLess(copilot.index("--effort"), prompt_index)
         self.assertEqual("/session-run /tmp/plan/", copilot[prompt_index + 1])
+
+    def test_claude_stream_json_output_is_rendered_and_preserves_last_message(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            fake_claude = tmp_dir / "claude"
+            fake_claude.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env python3",
+                        "import json",
+                        "records = [",
+                        "    {",
+                        "        'type': 'system',",
+                        "        'subtype': 'init',",
+                        "        'model': 'claude-test',",
+                        "        'session_id': 'session-1',",
+                        "    },",
+                        "    {'type': 'system', 'subtype': 'status', 'status': 'requesting'},",
+                        "    {",
+                        "        'type': 'stream_event',",
+                        "        'event': {",
+                        "            'type': 'message_start',",
+                        "            'message': {'model': 'claude-test'},",
+                        "        },",
+                        "    },",
+                        "    {",
+                        "        'type': 'stream_event',",
+                        "        'event': {",
+                        "            'type': 'content_block_delta',",
+                        "            'delta': {'type': 'text_delta', 'text': 'Runner status: '},",
+                        "        },",
+                        "    },",
+                        "    {",
+                        "        'type': 'stream_event',",
+                        "        'event': {",
+                        "            'type': 'content_block_delta',",
+                        "            'delta': {",
+                        "                'type': 'text_delta',",
+                        "                'text': 'complete\\nNext command: /session-run plan/\\n',",
+                        "            },",
+                        "        },",
+                        "    },",
+                        "    {",
+                        "        'type': 'stream_event',",
+                        "        'event': {'type': 'content_block_stop', 'index': 0},",
+                        "    },",
+                        "    {",
+                        "        'type': 'assistant',",
+                        "        'message': {",
+                        "            'content': [",
+                        "                {",
+                        "                    'type': 'text',",
+                        "                    'text': 'Runner status: complete\\n'",
+                        "                        'Next command: /session-run plan/\\n',",
+                        "                },",
+                        "            ],",
+                        "        },",
+                        "    },",
+                        "    {",
+                        "        'type': 'result',",
+                        "        'subtype': 'success',",
+                        "        'duration_ms': 1234,",
+                        "        'num_turns': 1,",
+                        "        'result': 'Runner status: complete\\n'",
+                        "            'Next command: /session-run plan/\\n',",
+                        "    },",
+                        "]",
+                        "for record in records:",
+                        "    print(json.dumps(record), flush=True)",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            fake_claude.chmod(fake_claude.stat().st_mode | stat.S_IXUSR)
+            callbacks: list[tuple[harnesses.StreamName, str]] = []
+
+            result = harnesses.ClaudeAdapter(executable=str(fake_claude)).run(
+                cwd=tmp_dir,
+                plan_dir=tmp_dir,
+                prompt="/session-run plan/",
+                stream_callback=lambda stream, text: callbacks.append(
+                    (stream, text)
+                ),
+            )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("--output-format", result.argv)
+        self.assertIn("--include-partial-messages", result.argv)
+        self.assertIn(
+            "claude init; model claude-test; session session-1",
+            result.stdout,
+        )
+        self.assertIn("claude status: requesting", result.stdout)
+        self.assertIn("claude response: model claude-test", result.stdout)
+        self.assertIn("claude text: Runner status: complete", result.stdout)
+        self.assertIn("claude text: Next command: /session-run plan/", result.stdout)
+        self.assertIn("claude result: success (1 turn, 1.2s)", result.stdout)
+        self.assertNotIn('"type": "system"', result.stdout)
+        self.assertEqual(
+            "complete",
+            runner._extract_prefixed_line(
+                result.stdout,
+                events.RUNNER_STATUS_PREFIX,
+            ),
+        )
+        self.assertEqual(
+            "Runner status: complete\nNext command: /session-run plan/\n",
+            result.last_message,
+        )
+        self.assertTrue(
+            any("claude status: requesting" in text for _stream, text in callbacks)
+        )
+        self.assertEqual(
+            "complete",
+            runner._runner_signals(result)["runner_status"],
+        )
+        self.assertEqual(
+            {
+                "reason": "runner-pause",
+                "message": "unsafe - wait",
+                "source": "stdout",
+                "matched": events.RUNNER_PAUSE_PREFIX,
+            },
+            runner._live_action_signal(
+                "stdout",
+                "claude text: RUNNER_PAUSE: unsafe - wait\n",
+            ),
+        )
 
     def test_custom_harness_config_accepts_supported_shapes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

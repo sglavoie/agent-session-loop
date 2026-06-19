@@ -444,8 +444,13 @@ def _pending_completed(
 def _extract_prefixed_line(text: str, prefix: str) -> str | None:
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith(prefix):
-            return stripped[len(prefix) :].strip()
+        candidates = [stripped]
+        for rendered_prefix in ("claude text: ",):
+            if stripped.startswith(rendered_prefix):
+                candidates.append(stripped[len(rendered_prefix) :].strip())
+        for candidate in candidates:
+            if candidate.startswith(prefix):
+                return candidate[len(prefix) :].strip()
     return None
 
 
