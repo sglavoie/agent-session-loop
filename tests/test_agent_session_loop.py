@@ -10,6 +10,7 @@ from pathlib import Path
 import pty
 import select
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -3197,6 +3198,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         commit_mode: str | None = None,
         model: str | None = None,
         effort: str | None = None,
+        note: str | None = None,
         extra_env: dict[str, str] | None = None,
         harness_config_overrides: dict[str, str] | None = None,
     ) -> tuple[int, dict[str, object], Path, Path, Path]:
@@ -3223,6 +3225,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             commit_mode=commit_mode,
             model=model,
             effort=effort,
+            note=note,
             allow_not_loop_ready=True,
         )
         env_updates = {
@@ -3333,6 +3336,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         commit_mode: str | None = None,
         model: str | None = None,
         effort: str | None = None,
+        note: str | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
         run_cwd = REPO_ROOT if cwd is None else cwd
@@ -3365,6 +3369,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             command.extend(["--model", model])
         if effort is not None:
             command.extend(["--effort", effort])
+        if note is not None:
+            command.extend(["--note", note])
 
         env = os.environ.copy()
         env["XDG_CONFIG_HOME"] = str(config_home)
@@ -3396,6 +3402,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         commit_mode: str | None = None,
         model: str | None = None,
         effort: str | None = None,
+        note: str | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, object], Path, Path, Path]:
         plan_dir, state_dir, config_home, fake_codex = self.setup_loop(
@@ -3412,6 +3419,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             commit_mode=commit_mode,
             model=model,
             effort=effort,
+            note=note,
             extra_env=extra_env,
         )
         return completed, payload, plan_dir, state_dir, fake_codex
@@ -3688,6 +3696,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         commit_mode: str | None = None,
         model: str | None = None,
         effort: str | None = None,
+        note: str | None = None,
     ) -> list[str]:
         run_cwd = REPO_ROOT if cwd is None else cwd
         command = [
@@ -3716,6 +3725,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             command.extend(["--model", model])
         if effort is not None:
             command.extend(["--effort", effort])
+        if note is not None:
+            command.extend(["--note", note])
         if json_output:
             command.append("--json")
         return command
@@ -3729,6 +3740,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         mode: str,
         cwd: Path | None = None,
         commit_mode: str | None = None,
+        note: str | None = None,
         extra_env: dict[str, str] | None = None,
         fake_step_sleep: str = "0.8",
     ) -> tuple[subprocess.Popen[bytes], int]:
@@ -3744,6 +3756,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     state_dir=state_dir,
                     cwd=cwd,
                     commit_mode=commit_mode,
+                    note=note,
                 ),
                 cwd=REPO_ROOT,
                 env=env,
@@ -3863,6 +3876,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             "model_source": config.MODEL_SOURCE_FLAG,
             "effort": "high",
             "effort_source": config.EFFORT_SOURCE_FLAG,
+            "note": "operator reference ABC-123",
             "active_turn": active_turn,
             "turns": [],
         }
@@ -3881,6 +3895,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         )
 
         self.assertIn("status: active session 1/2 turn 1", text)
+        self.assertIn("status note: operator reference ABC-123", text)
         self.assertIn("sessions 0/2 complete, 2 pending", text)
         self.assertIn("harness active codex; future claude", text)
         self.assertIn("model gpt-5 (flag); effort high (flag)", text)
@@ -4207,6 +4222,63 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             [event["action"] for event in control_events],
         )
 
+    def test_text_run_pty_ctrl_c_pauses_with_note(self) -> None:
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+            statuses=("pending",)
+        )
+        note = "operator reference ABC-123"
+        process, master_fd = self.start_run_pty(
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            mode="streaming-success",
+            note=note,
+            fake_step_sleep="5.0",
+        )
+
+        output = self.read_run_pty_until(
+            master_fd,
+            "",
+            lambda text: "session 1/1 started" in text,
+            process=process,
+        )
+
+        def harness_started():
+            payload = self.read_run_payload(plan_dir=plan_dir, state_dir=state_dir)
+            active_turn = payload.get("active_turn")
+            if not isinstance(active_turn, dict):
+                return None
+            stdout_path = Path(active_turn["stdout_path"])
+            if not stdout_path.exists():
+                return None
+            if "stdout before completion" in stdout_path.read_text(encoding="utf-8"):
+                return active_turn
+            return None
+
+        wait_until(harness_started, timeout=3)
+        process.send_signal(signal.SIGINT)
+        output = self.finish_run_pty(
+            process=process,
+            master_fd=master_fd,
+            output=output,
+            timeout=10,
+        )
+
+        self.assertEqual(runner.INTERRUPTED_EXIT, process.returncode, output)
+        self.assertIn(f"Note: {note}", output)
+        self.assertIn("Run paused: interrupted", output)
+        payload = self.read_run_payload(plan_dir=plan_dir, state_dir=state_dir)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["paused"])
+        self.assertEqual("interrupted", payload["pause_reason"])
+        self.assertEqual(note, payload["note"])
+        self.assertIsNone(payload["active_turn"])
+        self.assertEqual([], payload["completed_sessions"])
+        self.assertEqual(1, len(payload["turns"]))
+        self.assertTrue(payload["turns"][0]["interrupted"])
+        self.assertEqual("interrupted", payload["turns"][0]["status_result"])
+        self.assertFalse(state.lock_path_for_plan(plan_dir, state_dir).exists())
+
     def test_text_run_pty_h_prints_one_help_line(self) -> None:
         plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
             statuses=("pending",)
@@ -4277,6 +4349,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             state_dir=state_dir,
             config_home=config_home,
             mode="streaming-success",
+            note="operator reference ABC-123",
             fake_step_sleep="2.0",
         )
 
@@ -4292,6 +4365,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             output,
             lambda text: (
                 "status: active session 1/2 turn 1" in text
+                and "status note: operator reference ABC-123" in text
                 and "status: harness active codex; future unchanged" in text
                 and "status: controls stop-after-current off; live tail off" in text
             ),
@@ -5623,6 +5697,34 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertNotIn("stdout=", completed.stderr)
         self.assertNotIn("stderr=", completed.stderr)
         self.assertNotIn("result=", completed.stderr)
+
+    def test_run_note_is_persisted_and_printed_on_completion(self) -> None:
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+            statuses=("pending",)
+        )
+        note = "operator reference ABC-123"
+
+        completed = subprocess.run(
+            self.run_command(
+                plan_dir=plan_dir,
+                state_dir=state_dir,
+                note=note,
+            ),
+            cwd=REPO_ROOT,
+            env=self.loop_env(config_home=config_home, mode="success"),
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn(f"Note: {note}", completed.stdout)
+        self.assertIn(f"note: {note}", completed.stderr)
+        payload = self.read_run_payload(plan_dir=plan_dir, state_dir=state_dir)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual(note, payload["note"])
 
     def test_text_run_emits_final_paused_progress_line(self) -> None:
         plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(

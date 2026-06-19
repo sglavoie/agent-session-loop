@@ -87,6 +87,10 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         "--state-dir",
         help="Override operational state directory",
     )
+    run_parser.add_argument(
+        "--note",
+        help="Reference note to show in run status and final output",
+    )
     _add_unsafe_bypass_flags(run_parser)
     run_parser.add_argument(
         "--json",

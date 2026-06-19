@@ -31,6 +31,7 @@ from .formatting import format_duration_seconds
 
 
 NOT_IMPLEMENTED_EXIT = 2
+INTERRUPTED_EXIT = 130
 HEARTBEAT_INTERVAL_SECONDS = 30.0
 COMMIT_MODE_PER_SESSION = "per-session"
 COMMIT_MODE_END = "end"
@@ -715,6 +716,8 @@ def _turn_status_result(
     runner_signals: dict[str, Any],
     plan_error: str | None,
 ) -> str:
+    if result.interrupted:
+        return "interrupted"
     if result.timed_out:
         return "timeout"
     if plan_error is not None:
@@ -781,6 +784,7 @@ def _write_turn_artifacts(
         "argv": result.argv,
         "returncode": result.returncode,
         "timed_out": result.timed_out,
+        "interrupted": result.interrupted,
         "stdout_path": str(paths["stdout"]),
         "stderr_path": str(paths["stderr"]),
         "last_message_path": str(paths["last_message"]),
@@ -1224,6 +1228,16 @@ def _progress_commit_label(commit: dict[str, Any]) -> str:
     return str(scope or "unknown")
 
 
+def _note_lines(payload: dict[str, Any], *, prefix: str) -> list[str]:
+    note = payload.get("note")
+    if not isinstance(note, str) or note == "":
+        return []
+    lines = note.splitlines()
+    if not lines:
+        lines = [""]
+    return [f"{prefix}: {line}" for line in lines]
+
+
 class _CoordinatedStderrStream:
     """Line-buffering stream proxy that shares the runner output lock."""
 
@@ -1424,6 +1438,8 @@ class _ProgressReporter:
     def run_finished(self, payload: dict[str, Any]) -> None:
         verb = "run finished" if payload["ok"] else "run paused"
         reason = payload.get("pause_reason") or payload.get("reason") or "unknown"
+        for line in _note_lines(payload, prefix="note"):
+            self._emit(line)
         self._emit(
             f"{verb}: "
             f"run {payload['run_id']}, "
@@ -1644,6 +1660,7 @@ def _compact_status_lines(
         )
 
     lines = [current_text]
+    lines.extend(_note_lines(payload, prefix="status note"))
     if plan_error is not None:
         lines.append(f"status: plan inspection error: {plan_error}")
     lines.extend([metadata_line, control_line, paths_line])
@@ -2452,6 +2469,7 @@ def _initial_payload(
         action_required=None,
         approval_mode=_approval_mode(args),
         commit_mode=commit_mode,
+        note=getattr(args, "note", None),
         plan_dir=str(snapshot.plan_dir),
         cwd=str(cwd),
         harness=args.harness,
@@ -2565,6 +2583,7 @@ def _run_locked(
             "dry_run": args.dry_run,
             "max_sessions": max_sessions,
             "commit_mode": commit_mode,
+            "note": payload.get("note"),
             "run_id": run_id,
             "run_dir": str(run_dir),
             "run_started_at": payload["run_started_at"],
@@ -2897,6 +2916,24 @@ def _run_locked(
                 model=args.model,
                 effort=args.effort,
             )
+        except KeyboardInterrupt:
+            invocation = build_harness_invocation(
+                turn_harness,
+                cwd=cwd,
+                plan_dir=before.plan_dir,
+                unsafe_bypass=_unsafe_bypass(args),
+                last_message_path=paths["last_message"],
+                model=args.model,
+                effort=args.effort,
+            )
+            result = harnesses.HarnessResult(
+                name=turn_harness,
+                argv=invocation.argv,
+                returncode=INTERRUPTED_EXIT,
+                stdout="",
+                stderr="",
+                interrupted=True,
+            )
         except Exception:
             live_turn.stop()
             live_turn.finish(_utc_now())
@@ -2931,6 +2968,23 @@ def _run_locked(
             persistence.append_event(event_path, "turn_finished", turn_payload)
             persistence.write_state(payload)
         progress.turn_finished(turn_payload)
+
+        if result.interrupted:
+            with persistence.lock:
+                payload["final_snapshot"] = (
+                    _snapshot_payload(after)
+                    if after is not None
+                    else _snapshot_payload(before)
+                )
+            _pause_run(
+                event_path,
+                payload,
+                reason="interrupted",
+                message="run interrupted by user",
+                details=session_details,
+                persistence=persistence,
+            )
+            break
 
         if result.timed_out:
             with persistence.lock:
@@ -3239,6 +3293,8 @@ def _run_locked(
         inline_tail.stop()
     with persistence.lock:
         exit_code = 0 if payload["ok"] else 1
+        if payload.get("pause_reason") == "interrupted":
+            exit_code = INTERRUPTED_EXIT
     return exit_code, payload
 
 
@@ -3278,6 +3334,7 @@ def _error_payload(
         pause_message=message if paused else "",
         pause_details={},
         commit_mode=_commit_mode_payload(args),
+        note=getattr(args, "note", None),
         commits=[],
         plan_dir=plan_dir,
         cwd=str(cwd) if cwd is not None else str(getattr(args, "cwd", "")),
@@ -3364,6 +3421,8 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
         print(f"State file: {payload['state_path']}")
     if payload.get("events_path") is not None:
         print(f"Events: {payload['events_path']}")
+    for line in _note_lines(payload, prefix="Note"):
+        print(line)
 
     if payload.get("dry_run") and payload["ok"]:
         planned = payload.get("planned", {})
@@ -3476,6 +3535,20 @@ def run_from_args(args: argparse.Namespace) -> int:
             )
         finally:
             state.release_lock(initial_snapshot.plan_dir, args.state_dir)
+    except KeyboardInterrupt:
+        payload = _error_payload(
+            args,
+            reason="interrupted",
+            message="run interrupted by user",
+            paused=True,
+            cwd=cwd,
+            snapshot=initial_snapshot,
+        )
+        if args.json:
+            responses.print_json(payload)
+        else:
+            _print_text_outcome(payload)
+        return INTERRUPTED_EXIT
     except (
         config.ConfigError,
         harnesses.HarnessError,

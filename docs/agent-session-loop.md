@@ -10,6 +10,7 @@ bin/.local/bin/asl run ~/.local/share/agent-plans/example-plan/ --harness codex
 bin/.local/bin/asl run ~/.local/share/agent-plans/example-plan/ --harness codex --max-sessions 1
 bin/.local/bin/asl run ~/.local/share/agent-plans/example-plan/ --harness codex --commit-per-session
 bin/.local/bin/asl run ~/.local/share/agent-plans/example-plan/ --harness codex --commit-at-end
+bin/.local/bin/asl run ~/.local/share/agent-plans/example-plan/ --harness codex --note "operator reference"
 bin/.local/bin/asl run ~/.local/share/agent-plans/example-plan/ --harness codex --dry-run
 bin/.local/bin/asl status ~/.local/share/agent-plans/example-plan/
 bin/.local/bin/asl tail ~/.local/share/agent-plans/example-plan/
@@ -322,6 +323,11 @@ with `--max-sessions` unless `--max-sessions` is high enough to complete every
 session that was pending at the start of the run. If text TTY run controls stop
 the run before all pending sessions finish, `--commit-at-end` does not run.
 
+`--note TEXT` stores display-only reference text on the run payload. The note is
+not sent to the harness and does not change plan execution. Text runs print it
+in the compact `s` status snapshot, final completion or pause output, and
+Ctrl+C interrupted exits. JSON/state output preserves it as top-level `note`.
+
 For normal text TTY runs, `run` also listens for keyboard controls:
 
 - `p`: toggle stop-after-current. When active, the current session still
@@ -524,10 +530,10 @@ error fields are `ok`, `command`, `reason`, `error`, `paused`, and `details`.
 `run --json` preserves its existing fields and adds the common `command` and
 `details` fields; important run fields include `paused`, `reason`,
 `pause_reason`, `pause_details`, `harness`, `harness_config`, `model`,
-`model_source`, `effort`, `effort_source`, `commit_mode`, `commits`, `control`,
-`completed_sessions`, `completed_session_ids`, `turns`, `initial_snapshot`,
-`final_snapshot`, `state_path`, and `events_path`. Runs without commit flags
-report `commit_mode: null` and `commits: []`.
+`model_source`, `effort`, `effort_source`, `commit_mode`, `note`, `commits`,
+`control`, `completed_sessions`, `completed_session_ids`, `turns`,
+`initial_snapshot`, `final_snapshot`, `state_path`, and `events_path`. Runs
+without commit flags report `commit_mode: null` and `commits: []`.
 
 Commit payloads include `commit_index`, `scope`, `session`, `session_id`,
 `artifact_dir`, `stdout_path`, `stderr_path`, `result_path`, `argv`, `cwd`,
@@ -609,6 +615,7 @@ Common pause reasons:
   run was not started with `--allow-not-loop-ready`.
 - `malformed-contract`: the completed session's contract failed to parse or
   validate (see `agent_session_loop.contracts` errors).
+- `interrupted`: the run was interrupted by Ctrl+C.
 
 ## Troubleshooting
 

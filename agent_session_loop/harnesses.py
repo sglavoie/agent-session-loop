@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import threading
 from typing import IO, Literal
@@ -49,6 +50,7 @@ class HarnessResult:
     last_message: str = ""
     name: HarnessName | None = None
     timed_out: bool = False
+    interrupted: bool = False
 
 
 class HarnessAdapter:
@@ -189,14 +191,34 @@ class HarnessAdapter:
 
         timed_out = False
         try:
-            process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            process.kill()
-            process.wait()
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                process.kill()
+                process.wait()
 
-        stdout_thread.join()
-        stderr_thread.join()
+            stdout_thread.join()
+            stderr_thread.join()
+        except KeyboardInterrupt:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            stdout_thread.join(timeout=1)
+            stderr_thread.join(timeout=1)
+            return HarnessResult(
+                name=self.name,
+                argv=invocation.argv,
+                returncode=130,
+                stdout="".join(stdout_chunks),
+                stderr="".join(stderr_chunks),
+                last_message=_read_last_message(invocation.last_message_path),
+                interrupted=True,
+            )
 
         if reader_errors:
             raise HarnessError("stream callback failed") from reader_errors[0]
@@ -214,13 +236,15 @@ class HarnessAdapter:
                 timed_out=True,
             )
 
+        interrupted = process.returncode == -signal.SIGINT
         return HarnessResult(
             name=self.name,
             argv=invocation.argv,
-            returncode=process.returncode,
+            returncode=130 if interrupted else process.returncode,
             stdout=stdout,
             stderr=stderr,
             last_message=_read_last_message(invocation.last_message_path) or stdout,
+            interrupted=interrupted,
         )
 
 

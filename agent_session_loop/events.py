@@ -60,6 +60,7 @@ PAUSE_REASONS: tuple[str, ...] = (
     "verify-failed",
     "no-contract",
     "malformed-contract",
+    "interrupted",
 )
 _EVENT_WRITE_LOCK = threading.Lock()
 
