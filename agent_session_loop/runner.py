@@ -75,6 +75,7 @@ AGENT_MUX_FINISH_REASON = "run_finished"
 AGENT_MUX_NOTIFY_TIMEOUT_SECONDS = 1.0
 AGENT_MUX_FINISH_NOTIFY_TIMEOUT_SECONDS = AGENT_MUX_NOTIFY_TIMEOUT_SECONDS
 INLINE_TAIL_JOIN_TIMEOUT_SECONDS = 1.0
+INLINE_TAIL_INITIAL_LOG_LINES = 40
 
 
 class RunError(Exception):
@@ -1472,6 +1473,9 @@ class _InlineTailController:
                 self._plan_dir,
                 state_dir=self._state_dir,
                 out=self._output.stream,
+                include_events=False,
+                initial_log_lines=INLINE_TAIL_INITIAL_LOG_LINES,
+                initial_log_scope="active",
             )
             self._follower.start()
 

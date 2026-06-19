@@ -341,9 +341,12 @@ For normal text TTY runs, `run` also listens for keyboard controls:
   the active or next session, session counts, active and future harness, model
   and effort metadata, control state, and current artifact paths. It does not
   mutate `state.json` or append a `run_control` event.
-- `t`: toggle inline live tailing for the active text run. Inline tailing uses
-  the same event and log formatting as `asl tail`, starts from the current end
-  of the files, and prints only new events or log lines while enabled.
+- `t`: toggle inline live tailing for the active text run. When enabled,
+  inline tailing first prints the recent active-session stdout/stderr context
+  (up to 40 prefixed log lines, re-replayed on each enable) and then streams
+  only new log lines while enabled. It does not emit event or progress lines;
+  normal runner progress remains the single source for heartbeats, session
+  start/finish, control, status, and commit lines.
 - `1`, `2`, `3`: select `codex`, `claude`, or `copilot` as the sticky harness
   for future turns in the same runner invocation. The active subprocess is never
   interrupted.
@@ -357,9 +360,10 @@ Use `--json` for scripts.
 
 `tail` prints recent activity for the latest run and follows `events.jsonl`
 plus live harness and commit stdout/stderr logs until the observed run
-finishes. Use `--no-follow` to print recent activity and exit. `tail` is still a
-separate log viewer; the `t` keyboard control embeds the same follower inside a
-text TTY `run`.
+finishes. Use `--no-follow` to print recent activity and exit. `tail` remains
+the full event-and-log viewer; the `t` keyboard control embeds a logs-only
+variant of the same follower inside a text TTY `run` so runner progress is the
+single source for heartbeats and event lines.
 
 `doctor` performs a non-mutating harness and path check. Use `--json` for
 scriptable prerequisite checks.
@@ -504,12 +508,14 @@ these as `run control:` lines.
 
 For normal text runs, live progress is printed to stderr with local compact
 timestamps, for example `[2026-06-04 14:32:10] session 2/3 started`, so stdout
-remains the final human summary. The live lines
-cover run start, session starts and finishes, periodic 30-second heartbeats,
-action-required signals, commits, run-control help or toggle messages, compact
-status snapshots, inline-tail output while enabled, pauses, and run finish.
-Detailed artifact paths remain in the final summary, `status`, `state.json`,
-and `events.jsonl`, and are included in the `s` status snapshot on demand.
+remains the final human summary. The live progress lines cover run start,
+session starts and finishes, periodic 30-second heartbeats, action-required
+signals, commits, run-control help or toggle messages, compact status
+snapshots, pauses, and run finish. Inline-tail output, when `t` is enabled,
+streams only harness/commit log lines and does not duplicate heartbeats or any
+other event/progress lines. Detailed artifact paths remain in the final
+summary, `status`, `state.json`, and `events.jsonl`, and are included in the
+`s` status snapshot on demand.
 
 For `run --json`, stdout remains the final JSON payload and stderr stays quiet;
 live monitoring should read `state.json`, `events.jsonl`, or use `tail`.
@@ -695,8 +701,10 @@ Manual smoke checklist:
   current session with `reason: stopped`, a consumed `control` payload, and
   `run_control` events visible through `tail`.
 - Repeat the text TTY run with `s`, `t`, and `1`/`2`/`3`; confirm `s` only
-  prints stderr status lines, `t` only prints new inline-tail entries while
-  enabled, and later turns use the selected harness.
+  prints stderr status lines, `t` first shows recent active stdout/stderr
+  context and then streams new log lines while enabled (without re-emitting
+  heartbeats, session start/finish, control, status, or commit lines), and
+  later turns use the selected harness.
 - Repeat the text TTY run with `--commit-per-session` and confirm the
   per-session commit runs before the stop-after-current request is consumed.
 - Run a text TTY plan with `--commit-at-end`, stop before all sessions are

@@ -295,6 +295,17 @@ def _add_log_targets(
         )
 
 
+def _active_targets(
+    state_payload: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    targets: dict[str, dict[str, Any]] = {}
+    if isinstance(state_payload, dict):
+        active_turn = state_payload.get("active_turn")
+        if isinstance(active_turn, dict):
+            _add_log_targets(targets, active_turn)
+    return targets
+
+
 def _discover_targets(
     records: list[dict[str, Any]],
     state_payload: dict[str, Any] | None,
@@ -466,6 +477,7 @@ class _TailFollowLoop:
         poll_interval: float,
         stop_event: threading.Event,
         initial_finished: bool,
+        include_events: bool = True,
     ) -> None:
         self._state_path = state_path
         self._events_path = events_path
@@ -477,6 +489,7 @@ class _TailFollowLoop:
         self._poll_interval = poll_interval
         self._stop_event = stop_event
         self._initial_finished = initial_finished
+        self._include_events = include_events
 
     def run(self) -> None:
         finished = self._initial_finished
@@ -500,7 +513,8 @@ class _TailFollowLoop:
         for record in new_records:
             if not _matches_run(record, self._run_id):
                 continue
-            _print_lines([_event_line(record)], self._out)
+            if self._include_events:
+                _print_lines([_event_line(record)], self._out)
             _add_log_targets(self._targets, _payload(record))
             if record.get("name") == "run_finished":
                 finished = True
@@ -526,11 +540,21 @@ class TailFollower:
         state_dir: str | Path | None = None,
         out: TextIO | None = None,
         poll_interval: float = POLL_INTERVAL_SECONDS,
+        include_events: bool = True,
+        initial_log_lines: int = 0,
+        initial_log_scope: str = "all",
     ) -> None:
+        if initial_log_lines < 0:
+            raise TailError("initial_log_lines must be non-negative")
+        if initial_log_scope not in ("all", "active"):
+            raise TailError("initial_log_scope must be 'all' or 'active'")
         self._plan_dir = plan_dir
         self._state_dir = state_dir
         self._out = sys.stdout if out is None else out
         self._poll_interval = poll_interval
+        self._include_events = include_events
+        self._initial_log_lines = initial_log_lines
+        self._initial_log_scope = initial_log_scope
         self._stop_event = threading.Event()
         self._done_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -608,6 +632,8 @@ class TailFollower:
         run_records = _event_records_for_run(records, run_id)
         targets = _discover_targets(run_records, state_payload)
         offsets: dict[str, int] = {}
+        if self._initial_log_lines > 0:
+            self._emit_initial_log_replay(state_payload, targets)
         _set_offsets_to_eof(targets, offsets)
         return _TailFollowLoop(
             state_path=state_path,
@@ -623,7 +649,32 @@ class TailFollower:
                 _has_run_finished(records, run_id)
                 or _state_run_finished(state_payload)
             ),
+            include_events=self._include_events,
         )
+
+    def _emit_initial_log_replay(
+        self,
+        state_payload: dict[str, Any] | None,
+        targets: dict[str, dict[str, Any]],
+    ) -> None:
+        if self._initial_log_scope == "active":
+            replay_targets = _active_targets(state_payload)
+        else:
+            replay_targets = targets
+        if not replay_targets:
+            return
+        lines: list[str] = []
+        for target in sorted(
+            replay_targets.values(),
+            key=lambda value: (
+                _int_sort_key(value.get("turn_index")),
+                _session_sort_key(value.get("session_id") or value.get("session")),
+                str(value.get("stream")),
+            ),
+        ):
+            lines.extend(_read_log_lines(target))
+        if lines:
+            _print_lines(lines[-self._initial_log_lines :], self._out)
 
 
 def tail_plan(
