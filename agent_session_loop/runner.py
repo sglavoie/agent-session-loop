@@ -235,6 +235,23 @@ def _isoformat(moment: datetime) -> str:
     return moment.isoformat()
 
 
+def _positive_int_env(name: str) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def _kitty_window_id_from_env() -> int | None:
+    return _positive_int_env("KITTY_WINDOW_ID")
+
+
 def _duration_seconds(started_at: datetime, finished_at: datetime) -> float:
     return round(max(0.0, (finished_at - started_at).total_seconds()), 3)
 
@@ -1030,6 +1047,8 @@ def _agent_mux_loop_payload(
         "state_path": payload.get("state_path"),
         "harness": _loop_harness(payload, active_turn),
     }
+    if payload.get("kitty_window_id") is not None:
+        hook_payload["kitty_window_id"] = payload.get("kitty_window_id")
     if payload.get("run_started_at") is not None:
         hook_payload["run_started_at"] = payload.get("run_started_at")
     if payload.get("run_finished_at") is not None:
@@ -2481,6 +2500,7 @@ def _initial_payload(
         note=getattr(args, "note", None),
         plan_dir=str(snapshot.plan_dir),
         cwd=str(cwd),
+        kitty_window_id=_kitty_window_id_from_env(),
         harness=args.harness,
         **model_effort,
         state_dir=str(state_dir),

@@ -3541,7 +3541,17 @@ class FinishNotificationTests(unittest.TestCase):
             "run_started_at": "2026-06-11T12:00:00Z",
             "run_finished_at": "2026-06-11T12:00:03Z",
             "state_path": str(tmp_dir / "state.json"),
+            "kitty_window_id": 42,
         }
+
+    def test_kitty_window_id_from_env_accepts_positive_int(self) -> None:
+        with patched_env(KITTY_WINDOW_ID="42"):
+            self.assertEqual(42, runner._kitty_window_id_from_env())
+
+    def test_kitty_window_id_from_env_ignores_missing_or_invalid_values(self) -> None:
+        for raw in (None, "", "0", "-7", "not-an-int"):
+            with self.subTest(raw=raw), patched_env(KITTY_WINDOW_ID=raw):
+                self.assertIsNone(runner._kitty_window_id_from_env())
 
     def test_loop_payload_uses_active_turn_harness_when_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3571,6 +3581,7 @@ class FinishNotificationTests(unittest.TestCase):
             self.assertEqual("turn_started", hook_payload["reason"])
             self.assertEqual("claude", hook_payload["harness"])
             self.assertEqual(payload["state_path"], hook_payload["state_path"])
+            self.assertEqual(42, hook_payload["kitty_window_id"])
             self.assertEqual(2, hook_payload["turn_index"])
             self.assertEqual("2.1", hook_payload["session"])
             self.assertEqual("2.1", hook_payload["session_id"])
@@ -3636,8 +3647,10 @@ class FinishNotificationTests(unittest.TestCase):
             self.assertEqual("run_started", start_payload["reason"])
             self.assertEqual("codex", start_payload["harness"])
             self.assertEqual(payload["state_path"], start_payload["state_path"])
+            self.assertEqual(42, start_payload["kitty_window_id"])
             self.assertEqual("turn_started", turn_payload["reason"])
             self.assertEqual("claude", turn_payload["harness"])
+            self.assertEqual(42, turn_payload["kitty_window_id"])
             self.assertEqual(1, turn_payload["turn_index"])
             self.assertEqual(1, turn_payload["session"])
 
@@ -3688,6 +3701,7 @@ class FinishNotificationTests(unittest.TestCase):
                     "plan_dir": payload["plan_dir"],
                     "cwd": payload["cwd"],
                     "state_path": payload["state_path"],
+                    "kitty_window_id": 42,
                     "harness": "codex",
                     "run_started_at": "2026-06-11T12:00:00Z",
                     "run_finished_at": "2026-06-11T12:00:03Z",
