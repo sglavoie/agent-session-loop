@@ -7,7 +7,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import harnesses, preflight, runner, state, tail, verification
+from . import harnesses, preflight, runner, session_overview, state, tail, verification
 
 
 def _add_unsafe_bypass_flags(parser: argparse.ArgumentParser) -> None:
@@ -149,6 +149,45 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Print recent activity and exit without waiting",
     )
     tail_parser.set_defaults(handler=tail.tail_from_args)
+
+    sessions_help = (
+        "Show running and recent ASL-managed sessions across plan directories."
+    )
+    sessions_parser = subparsers.add_parser("sessions", help=sessions_help)
+    sessions_parser.add_argument(
+        "--running",
+        action="store_true",
+        help="Show only currently running sessions",
+    )
+    sessions_parser.add_argument(
+        "--recent",
+        action="store_true",
+        help="Show only recently completed sessions",
+    )
+    sessions_parser.add_argument(
+        "--limit",
+        type=int,
+        default=session_overview.DEFAULT_RECENT_LIMIT,
+        help=(
+            "Maximum recent rows to show "
+            f"(default: {session_overview.DEFAULT_RECENT_LIMIT})"
+        ),
+    )
+    sessions_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    sessions_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Use full plan directory paths in text output",
+    )
+    sessions_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    sessions_parser.set_defaults(handler=session_overview.sessions_from_args)
 
     doctor_parser = subparsers.add_parser(
         "doctor",

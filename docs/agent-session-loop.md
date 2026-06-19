@@ -14,6 +14,10 @@ bin/.local/bin/asl run ~/.local/share/agent-plans/example-plan/ --harness codex 
 bin/.local/bin/asl run ~/.local/share/agent-plans/example-plan/ --harness codex --dry-run
 bin/.local/bin/asl status ~/.local/share/agent-plans/example-plan/
 bin/.local/bin/asl tail ~/.local/share/agent-plans/example-plan/
+bin/.local/bin/asl sessions
+bin/.local/bin/asl sessions --running
+bin/.local/bin/asl sessions --recent --limit 5
+bin/.local/bin/asl sessions --json
 ```
 
 The package is stdlib-only and lives in `agent_session_loop/`. The executable
@@ -278,6 +282,7 @@ asl preflight PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--com
 asl verify PLAN_DIR --session ID [--cwd REPO_ROOT] [--json]
 asl status PLAN_DIR [--state-dir DIR] [--json]
 asl tail PLAN_DIR [--state-dir DIR] [--lines N] [--no-follow]
+asl sessions [--running] [--recent] [--limit N] [--state-dir DIR] [--verbose] [--json]
 asl doctor --harness codex|claude|copilot [--model MODEL] [--effort EFFORT] [--cwd REPO_ROOT] --plan-dir PLAN_DIR [--unsafe-bypass|--no-unsafe-bypass] [--json]
 asl unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
 ```
@@ -364,6 +369,26 @@ finishes. Use `--no-follow` to print recent activity and exit. `tail` remains
 the full event-and-log viewer; the `t` keyboard control embeds a logs-only
 variant of the same follower inside a text TTY `run` so runner progress is the
 single source for heartbeats and event lines.
+
+`sessions` shows ASL-managed activity across every plan state directory under
+the resolved state root. It scans each per-plan-hash directory for live
+`lock.json` and `state.json` (running rows) and walks every
+`runs/<run_id>/turn-*/result.json` artifact (recent rows). Output has two
+sections: `Running sessions` lists currently active turns (or `loop`-kind
+rows when a runner is alive between turns) with started time, elapsed, idle,
+PID, harness, session ID, turn index, and plan; `Recent sessions` lists the
+most recently finished turns with finished time, duration, status result,
+harness, session ID, run ID, and plan. `--running` and `--recent` are
+independent filters; passing neither (or both) shows both sections. `--limit`
+must be non-negative, defaults to `20`, and truncates recent rows only. Text
+output uses compact plan-directory basenames; `--verbose` opts into full
+canonical paths; JSON always includes full paths. A missing state root returns
+success with empty arrays — only a catastrophic state-root error yields a
+nonzero exit with `reason: state-error`. Recent rows are sourced from immutable turn artifacts,
+so repeated runs for the same plan are not collapsed by the latest
+`state.json`. Stale locks (dead PIDs, mismatched plan dirs, or invalid
+shapes) and unreadable artifacts surface in dedicated `Stale locks` and
+`Skipped artifacts` footer sections without aborting the scan.
 
 `doctor` performs a non-mutating harness and path check. Use `--json` for
 scriptable prerequisite checks.
@@ -455,7 +480,13 @@ By default, runtime metadata is stored under:
 
 `--state-dir DIR` changes the state root; the plan hash subdirectory is still
 created below that root. The hash is based on the canonical plan directory path,
-so logs and locks remain stable as session files change.
+so logs and locks remain stable as session files change. `asl sessions` scans
+every per-plan-hash subdirectory under the resolved state root, classifying
+`lock.json` and `state.json` for running rows and walking every
+`runs/<run_id>/turn-*/result.json` artifact for recent rows. Recent rows come
+from the immutable artifact tree, so the same plan's repeated runs are visible
+rather than collapsed by whichever `state.json` was overwritten last; running
+rows come from the live lock plus the latest `state.json` `active_turn`.
 
 Runtime files include:
 
@@ -529,6 +560,9 @@ Use `--json` for runner integrations:
 ```bash
 asl run ~/.local/share/agent-plans/example-plan/ --harness codex --max-sessions 1 --json
 asl status ~/.local/share/agent-plans/example-plan/ --json
+asl sessions --json
+asl sessions --running --json
+asl sessions --recent --limit 5 --json
 asl doctor --harness codex --plan-dir ~/.local/share/agent-plans/example-plan/ --json
 asl unlock ~/.local/share/agent-plans/example-plan/ --json
 ```
@@ -570,6 +604,25 @@ model/effort metadata without invoking the harness. Text `run` and `doctor`
 output print the selected model after `Harness:` and print effort only when an
 explicit effort was supplied. `unlock --json` reports whether a lock existed,
 whether it was removed, whether it was active or stale, and the lock path.
+
+`sessions --json` prints a success payload with `command: "sessions"`,
+`state_root` (canonical path), `filters` (an object with boolean `running`
+and `recent`), `limit` (a non-negative integer), `running` (array of running
+rows), `recent` (array of recent rows, truncated to `limit`), `stale_locks`,
+`skipped`, and `counts`. `counts` mirrors the row arrays with integer
+`running`, `recent`, `stale_locks`, and `skipped` fields. Running rows include
+`kind` (`"turn"` for an active turn, `"loop"` when the lock is alive but no
+`active_turn` exists), `plan_dir`, `state_dir`, `run_id`, `harness`,
+`session_id`, `turn_index`, `pid`, `started_at`, `elapsed_seconds`,
+`idle_seconds`, `last_activity_at`, `lock_active`, and `lock_stale`. Recent
+rows include `plan_dir`, `state_dir`, `run_id`, `harness`, `session_id`,
+`turn_index`, `status`, `finished_at`, `duration_seconds`, and
+`artifact_dir`. Plan paths in JSON are always full canonical paths; the
+text rendering uses basenames by default and switches to full paths when
+`--verbose` is passed. A missing state root returns success with empty
+arrays. Invalid parsed inputs such as `--limit -1` produce
+`reason: input-error`; catastrophic state-root errors produce
+`reason: state-error`.
 
 ## Pause Semantics
 
