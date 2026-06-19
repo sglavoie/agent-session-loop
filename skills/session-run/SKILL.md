@@ -1,6 +1,6 @@
 ---
 name: session-run
-description: Execute the next pending or explicitly selected session from a split plan directory. Supports parallel-safe explicit session scheduling with dependency validation while preserving serial auto-advance. Companion to session-split and session-expand.
+description: Execute the next pending or explicitly selected session from a split plan directory. Supports parallel-safe explicit session scheduling with dependency validation while preserving serial auto-advance. Runs `asl verify` after each session and pauses on contract issues, readiness divergence, or verification failure. Companion to session-split and session-expand.
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 ---
 
@@ -123,6 +123,30 @@ In directory auto-advance mode, if the selected session is not the first session
 
 In explicit mode, read the **Handoff** section for every required prior session ID. Also read the immediately preceding session file in dotted numeric order if it is complete or if metadata/validation/instructions list it as required. A pending previous session is not automatically a blocker unless required by metadata, validation notes, or concrete implementation dependencies.
 
+### Step 4a: Pre-Implementation Contract and Readiness Checks
+
+Before executing any implementation work, run these fail-closed checks against the artifacts emitted by `session-expand`. Each pause here happens **before** the handoff is touched, so no revert is needed — emit the pause line, do not run Step 5, do not modify the handoff, and let Step 7 print the report with the `Next command:` line pointing back at the same selected session.
+
+- **Contract issues** (per-session, from `session-<ID>.expand.md`): if a `## Contract Issues` section exists for the selected session and is **not** the literal `_no contract issues found_`, stop. Emit:
+
+  ```text
+  RUNNER_PAUSE: malformed-contract - expansion flagged contract issues for session <ID>; run `asl verify <plan-dir> --session <ID>` for the canonical finding set
+  ```
+
+  Do not try to fix contract bodies during session-run. The user repairs them through `session-split` Step 10a or by hand, then re-runs `session-expand` and this skill.
+
+  If the `## Contract Issues` section is missing entirely (e.g., the expansion file pre-dates session 11), treat the contract as "not checked" — proceed but mention in the report that expansion did not validate the contract.
+
+- **Plan readiness divergence** (plan-wide, from `parallel-validation.md`): if a `## Plan Readiness` section records a `Divergence` verdict other than `none` (hash mismatch or missing metadata), stop. Emit:
+
+  ```text
+  RUNNER_PAUSE: unsafe - plan readiness diverged from recorded SHA; rerun `session-split` Step 10a or `asl preflight --mark-loop-ready` before continuing
+  ```
+
+  Hash divergence at run time almost always means a session file has been edited since the readiness was recorded, and `asl run` would refuse the plan anyway.
+
+- **Preflight snapshot** (plan-wide, from `parallel-validation.md`): treat any `## Preflight Snapshot` section as **informational only**. Red counts > 0 do not block explicit-mode session execution because `asl run`'s hard gate already enforces `loop-ready`. Surface the snapshot in the report so the user understands the pre-execution state, but do not duplicate the gate decision.
+
 ### Step 5: Implement
 
 Execute the session's instructions — everything above the `## Handoff` section in the session file. Use the context from `context.md`, manifest scheduling guidance, validation notes (if any), expansion notes (if any), and required prior handoffs (if any) to inform the implementation.
@@ -142,6 +166,38 @@ Edit the Handoff section in `session-<ID>.md` with actual results:
 - **Notes**: anything else relevant
 
 Use the Edit tool to update the handoff in place — do not rewrite the entire file. The selected session handoff remains the required completion mutation and the source of truth.
+
+### Step 6a: Verify Before Final Commit
+
+Mirror the `asl run` loop policy: after writing the `complete` handoff in Step 6, invoke `asl verify` to execute the session's `Verify` recipe. The skill is the manual path that runs one session per harness invocation; the runner is the loop path. Both must enforce the same completion contract so manual and loop behavior stay consistent.
+
+Invocation:
+
+```text
+asl verify <plan-dir> --session <ID> --cwd <repo-root> --json
+```
+
+- `--session <ID>` is required and must be the exact selected session id (e.g., `2`, `2.1`).
+- `--cwd <repo-root>` should point at the repository root where the implementation work happened. When the skill is invoked from inside that repository, pass the current working directory; otherwise omit `--cwd` and let `asl verify` use its own cwd.
+- `--json` is mandatory because the skill needs the stable `reason` field for branching.
+- Exit code is the gate decision: `0` means every check passed; any non-zero exit is a hard pause. The skill can rely on exit code alone for the gate decision.
+
+Parse the JSON body to read the stable `reason` field. Recognized failure reasons are `verify-failed`, `no-contract`, `malformed-contract`, `cwd-error`, and `invalid-session`. On a pass, the JSON shape is `{"ok": true, "command": "verify", "reason": "ok", "passed": true, ...}`. On failure, it has `ok: false`, `paused: false`, a stable `reason`, an `error` string, and — for `verify-failed` and `no-contract` — the same `passed`, `recipe`, and `checks` keys as the pass payload. Per-check rows include `stdout`/`stderr` snippets and a stable `failure_reason` enum (`command-failed`, `command-timeout`, `command-not-found`, `command-error`, `file-missing`, `file-error`, `regex-not-matched`); mirror these names verbatim if the skill prints check summaries.
+
+On any non-zero exit, fail closed without advancing:
+
+1. Use the Edit tool to revert the handoff `- **Status**: complete` line back to `- **Status**: pending` in `session-<ID>.md`. Do not rewrite the entire handoff — flip just the status line.
+2. Append a short bullet under `- **Notes**:` summarizing the failure. Prefer the JSON `error` string and a short per-check summary when available, e.g., `- verification failed: <reason> - <error>` or `- verification failed: 1/3 checks failed (first failure: <name> - <failure_reason>)`.
+3. Emit `RUNNER_PAUSE: <reason> - <short summary>` using the JSON `reason` field verbatim so it greps cleanly alongside `asl run` loop output.
+4. Skip Step 6b and Step 6c. Proceed to Step 7 and print the report, but **do not** advance the `Next command:` to another session — Step 7 will naturally point back at the same selected session because the handoff was reverted to `pending`.
+
+`reason: no-contract` handling: the runner skips verification entirely when the operator passed `--allow-not-loop-ready` and the session lacks a `## Completion Contract` section. The skill has no equivalent flag and therefore must fail closed by default with the same revert + pause sequence above. Users who need to bypass the contract requirement should switch to `asl run --allow-not-loop-ready`, or repair the plan first by adding a completion contract and re-marking the plan loop-ready via `session-split` Step 10a / `asl preflight --mark-loop-ready`.
+
+`reason: cwd-error` and `reason: invalid-session` indicate the skill itself called `asl verify` incorrectly (bad `--cwd` or bad `--session`); revert the handoff and pause exactly the same way, but the corrective action is for the skill caller to fix the invocation, not the plan.
+
+If verification passes (`ok: true`, exit `0`), continue to Step 6b. Do not write a parallel verification artifact — the `## Handoff` mutations plus any `RUNNER_PAUSE:` line are the complete record. The runner writes a per-turn `result.json` under a `verification` key; the skill does not need to duplicate that.
+
+If text output is captured instead of JSON (e.g., legacy invocation without `--json`), `asl verify` writes the pass/fail summary on **stderr** when verification fails and on **stdout** when it passes. Always capture both streams.
 
 ### Step 6b: Inject Notes for Future Sessions
 
@@ -185,7 +241,7 @@ For runner-friendly output, you may print one or more machine-readable lines imm
 
 - `Runner status: complete` after a successful session handoff update.
 - `Runner status: paused` when stopping without completing the selected session because user input, validation, plan repair, dependency resolution, or another recoverable intervention is required.
-- `RUNNER_PAUSE: <reason> - <short detail>` to describe a pause in a stable, grep-friendly form. Prefer existing fail-closed vocabulary such as `malformed-plan`, `unknown-status`, `lock-contention`, `blocked`, `unsafe`, `dependent`, or `unresolved-prerequisite` when it applies.
+- `RUNNER_PAUSE: <reason> - <short detail>` to describe a pause in a stable, grep-friendly form. Prefer existing fail-closed vocabulary such as `malformed-plan`, `unknown-status`, `lock-contention`, `blocked`, `unsafe`, `dependent`, `unresolved-prerequisite`, `verify-failed`, `no-contract`, or `malformed-contract` when it applies. Do not invent new reason strings; reuse the runner-side vocabulary so manual and loop output grep together.
 
 These runner-readable lines are optional for manual use and must not replace the final `Next command:` line when that line is part of the report.
 
@@ -208,6 +264,11 @@ Use the original plan directory argument provided by the user for `<plan-dir>` w
 - If `parallel-validation.md` exists, read it and treat it as authoritative over manifest/session parallel metadata
 - Expansion notes (`session-<ID>.expand.md`) take precedence over the session file for factual claims (file paths, line numbers, function signatures)
 - The session file is the source of truth for what to implement; expansion notes only correct factual details
+- A non-clean `## Contract Issues` section in the expansion file is a pre-implementation pause with reason `malformed-contract`. Do not attempt to repair contract bodies during session-run.
+- A non-`none` `## Plan Readiness` divergence in `parallel-validation.md` is a pre-implementation pause with reason `unsafe`. Do not advance the readiness lifecycle from this skill.
+- `## Preflight Snapshot` in `parallel-validation.md` is informational; do not gate on it.
+- Always run `asl verify <plan-dir> --session <ID> --json` (with `--cwd <repo-root>` when the repo root is known) after writing the `complete` handoff. Non-zero exit reverts the handoff to `pending`, appends a failure note, and emits `RUNNER_PAUSE: <reason> - <summary>` using the stable JSON `reason` field.
+- The skill has no `--allow-not-loop-ready` equivalent. `reason: no-contract` fails closed; users who must bypass should use `asl run --allow-not-loop-ready` or repair the plan and re-mark it loop-ready.
 - Never modify the original plan file
 - Modify `context.md` only for clear derived session-status table sync described in Step 6c
 - In directory auto-advance mode, if a session's status is already `complete`, skip it and move to the next pending one

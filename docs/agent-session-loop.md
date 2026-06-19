@@ -66,11 +66,30 @@ executable, next pending session, generated prompt, and argv.
 Both `run` and `doctor` default to the current directory; pass
 `--cwd REPO_ROOT` to run the harness somewhere else.
 
-## Workflow After Session Expand
+## Workflow: Split, Expand, Repair, Verify, Run
 
-1. Create the split plan with `session-split`.
-2. Run `session-expand` on the plan directory so expansion notes and parallel
-   validation are available.
+The canonical loop-ready lifecycle is **split → expand → repair if needed →
+run**. In directory mode, `session-expand` validates the split plan and then
+runs final preflight with `--mark-loop-ready`; a clean plan is left ready for
+`session-run`. The runner hard-gates on the `loop-ready` readiness state, and
+each session is gated on its `## Completion Contract` `### Verify` recipe.
+
+1. Create the split plan with `session-split`. The skill writes
+   `manifest.md` with three readiness lines populated as
+   `**Readiness**: draft`, `**Readiness SHA-256**`, and
+   `**Readiness checked at**`. Every `session-<id>.md` is emitted with a
+   `## Completion Contract` block containing `### Done when` bullets and a
+   `### Verify` JSON block. The default contract skeleton is intentionally
+   minimal (one `command` check running `python3 -m unittest -q` plus a
+   placeholder `Done when` bullet); replace the placeholder with a real
+   criterion and refine the check command per session.
+
+2. Run `session-expand` on the plan directory so expansion notes,
+   `parallel-validation.md`, and per-session `## Contract Issues` sections are
+   available. Expansion validates each session contract against the actual
+   codebase, runs final `asl preflight --mark-loop-ready`, and prints
+   `session-run` only when the plan is loop-ready.
+
 3. If a pending session is still too large, resplit that session and regenerate
    expansion guidance before running the loop:
 
@@ -85,13 +104,35 @@ $session-expand ~/.local/share/agent-plans/example-plan/
 asl status ~/.local/share/agent-plans/example-plan/
 ```
 
-5. Preview the first harness turn:
+5. If expansion reports blocking preflight findings, repair them before running:
+
+   Final preflight reports red and yellow findings with stable machine-readable
+   `repair_hints`. Repair findings by hand, or drive the guided Q&A repair
+   loop. Re-run `session-expand` after repair so it can refresh expansion notes
+   and mark the plan loop-ready:
+
+```text
+$plan-preflight-iterate ~/.local/share/agent-plans/example-plan/
+/plan-preflight-iterate ~/.local/share/agent-plans/example-plan/
+$session-expand ~/.local/share/agent-plans/example-plan/
+```
+
+   You can also run the final gate manually. `--mark-loop-ready` repairs
+   manifest-readiness-only findings (missing readiness lines, stale SHA, or
+   `draft`/`reviewed` state), but it still refuses when non-readiness red/yellow
+   findings remain:
+
+```bash
+asl preflight ~/.local/share/agent-plans/example-plan/ --cwd $PWD --json --mark-loop-ready
+```
+
+6. Preview the first harness turn:
 
 ```bash
 asl run ~/.local/share/agent-plans/example-plan/ --harness codex --dry-run
 ```
 
-6. Run the loop:
+7. Run the loop:
 
 ```bash
 asl run ~/.local/share/agent-plans/example-plan/ --harness codex
@@ -101,6 +142,110 @@ The runner stops when every `session-<id>.md` handoff status is `complete`, when
 `--max-sessions` is reached, when an operator requests stop-after-current, or
 when a pause condition requires review. Resume a paused run by re-running the
 same command after fixing the blocker.
+
+`asl run` hard-refuses any plan whose `**Readiness**` is not `loop-ready`.
+Override with `--allow-not-loop-ready` for emergency execution; preflight
+findings are still reported in the run payload. The override also suppresses
+the per-session verification gate's `no-contract` pause, but it does not
+suppress failures from contracts that are present — a malformed or failing
+contract still pauses the run.
+
+## Completion Contracts
+
+Each `session-<id>.md` carries a `## Completion Contract` block with two
+required subsections:
+
+```markdown
+## Completion Contract
+
+### Done when
+
+- Replace this with a verifiable success criterion.
+
+### Verify
+
+```json
+{
+  "session": "<id>",
+  "checks": [
+    {
+      "name": "unit-suite",
+      "type": "command",
+      "argv": ["python3", "-m", "unittest", "-q"],
+      "timeout_seconds": 180
+    }
+  ]
+}
+```
+```
+
+The fenced block is JSON-only because the package is stdlib-only. The parser
+lives in `agent_session_loop.contracts` and is authoritative for accepted
+shapes. Required and optional fields:
+
+- `session` (optional): when present, must match the canonical session ID of
+  the host file.
+- `checks` (required): non-empty array of check objects.
+- Each check object has `name` (string), `type` (one of `command`,
+  `file_exists`, `regex_in_file`), and type-specific fields.
+- `command`: `argv` (non-empty array of strings, no shell), optional
+  `timeout_seconds` (defaults to 60, max 3600), optional `cwd`.
+- `file_exists`: `path` (string, repo-root-relative).
+- `regex_in_file`: `path` (string, repo-root-relative), `pattern` (regex
+  string).
+
+`session-expand` validates each contract against the codebase and records any
+problems in a per-session `## Contract Issues` section in
+`session-<id>.expand.md`. `session-run` refuses to advance when issues are
+flagged; `asl run` enforces the same gate per turn.
+
+After writing a `- **Status**: complete` handoff, the runner and the
+`session-run` skill both invoke:
+
+```bash
+asl verify ~/.local/share/agent-plans/example-plan/ --session 2 --json
+```
+
+`asl verify` runs the recipe in order. Exit 0 means every check passed;
+non-zero exit is a hard pause. The JSON body carries a stable `reason` field
+(`ok`, `verify-failed`, `no-contract`, `malformed-contract`, `cwd-error`, or
+`invalid-session`) plus per-check rows with `failure_reason` enums
+(`command-failed`, `command-timeout`, `command-not-found`, `command-error`,
+`file-missing`, `file-error`, `regex-not-matched`). On verification failure,
+the skill reverts the session handoff back to `pending` and the runner pauses
+with `reason: verify-failed`.
+
+## Migration From Older Split Plans
+
+Older split plans that pre-date this lifecycle lack the three `**Readiness**`
+lines in `manifest.md` and the `## Completion Contract` block in every
+`session-<id>.md`. `asl run` will refuse such plans because they cannot be
+marked `loop-ready`.
+
+To migrate an existing plan in place:
+
+1. Run `asl preflight ~/.local/share/agent-plans/old-plan/ --json` to enumerate
+   missing artifacts. Findings carry `repair_hints` that name the exact
+   `fix_category` (`plan-edit`, `manifest-update`, `session-recipe-edit`, etc.)
+   needed for each gap.
+2. Either drive the guided repair skill —
+   `$plan-preflight-iterate ~/.local/share/agent-plans/old-plan/` — which asks
+   targeted questions and applies the edits, or repair by hand:
+   - Add `**Readiness**: draft`, `**Readiness SHA-256**`, and
+     `**Readiness checked at**` lines to `manifest.md`.
+   - Add a `## Completion Contract` block (above the final `## Handoff`) to
+     every `session-<id>.md`, with at least one `### Done when` bullet and a
+     `### Verify` JSON block holding a non-empty `checks` array.
+3. Run `session-expand` to refresh per-session expansion notes,
+   `parallel-validation.md`, and final preflight readiness against the new
+   contract shape. When final preflight succeeds, the plan is marked
+   `loop-ready`.
+4. Resume the loop with `asl run`.
+
+For one-off emergency execution of an unmigrated plan, pass
+`--allow-not-loop-ready` to `asl run`. Sessions without a `## Completion
+Contract` will still skip verification under the override; sessions that do
+carry a contract are still gated by it.
 
 `session-resplit` is plan maintenance, not a runner subcommand. It archives one
 pending parent `session-<id>.md`, writes nested pending children such as
@@ -121,7 +266,9 @@ without running the final `--commit-at-end` commit.
 ## Commands
 
 ```text
-asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--json] [--dry-run]
+asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--allow-not-loop-ready] [--json] [--dry-run]
+asl preflight PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--mark-loop-ready] [--json]
+asl verify PLAN_DIR --session ID [--cwd REPO_ROOT] [--json]
 asl status PLAN_DIR [--state-dir DIR] [--json]
 asl tail PLAN_DIR [--state-dir DIR] [--lines N] [--no-follow]
 asl doctor --harness codex|claude|copilot [--model MODEL] [--effort EFFORT] [--cwd REPO_ROOT] --plan-dir PLAN_DIR [--unsafe-bypass|--no-unsafe-bypass] [--json]
@@ -130,8 +277,35 @@ asl unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
 
 `run` acquires a per-plan lock, inspects the first pending session, invokes the
 selected harness, records turn artifacts, and verifies that exactly the expected
-session changed from `pending` to `complete`. `--commit-per-session` then runs
+session changed from `pending` to `complete`. `run` also enforces the loop-ready
+gate: it refuses any plan whose `manifest.md` `**Readiness**` line is not
+`loop-ready`, unless `--allow-not-loop-ready` is passed. After each completed
+session, the runner invokes the same `asl verify` recipe; a non-zero exit pauses
+the run with `reason: verify-failed`. `--allow-not-loop-ready` also suppresses
+the verification gate's `no-contract` pause for sessions that lack a
+`## Completion Contract`, but it never suppresses a failing contract that is
+present. `--commit-per-session` then runs
 `spec commit --yes --no-verify` before the next harness turn starts.
+
+`preflight` inspects the plan without invoking a harness and reports every
+finding needed to clear the loop-ready gate: missing readiness lines, contract
+schema problems, manifest/session drift, environment prerequisites, and
+harness/commit-mode prerequisites when `--cwd`, `--harness`, or a commit-mode
+flag is supplied. JSON output carries a stable shape with `findings`,
+`findings_by_severity`, `repair_hints`, `readiness`,
+`expected_readiness_sha256`, `mark_loop_ready_requested`, and
+`marked_loop_ready` fields. `--mark-loop-ready` flips `**Readiness**` to
+`loop-ready` and re-stamps the SHA and timestamp when the only blocking
+findings are manifest-readiness findings. It refuses when any non-readiness red
+or yellow finding remains.
+
+`verify` reads a session's `## Completion Contract` and executes its `### Verify`
+recipe against `--cwd` (defaults to the current directory). Exit code is the
+gate decision: 0 when every check passes, non-zero otherwise. JSON output
+includes `passed`, `recipe`, `checks`, and a stable `reason` (`ok`,
+`verify-failed`, `no-contract`, `malformed-contract`, `cwd-error`, or
+`invalid-session`). Per-check rows include stdout/stderr snippets and a stable
+`failure_reason` enum.
 `--commit-at-end` runs the same command once after all pending sessions finish
 successfully in that runner invocation. `--commit-at-end` cannot be combined
 with `--max-sessions` unless `--max-sessions` is high enough to complete every
@@ -412,6 +586,15 @@ Common pause reasons:
   the lock is released, and `pause_details` identifies the session, requested
   harness, configured executable, resolved executable when available, config
   path, and error.
+- `not-loop-ready`: the plan's `manifest.md` `**Readiness**` is not `loop-ready`
+  and the run did not pass `--allow-not-loop-ready`. The pause payload includes
+  the readiness state and the preflight finding summary.
+- `verify-failed`: `asl verify` returned non-zero after a completed session.
+  The pause payload includes the verification `reason` and per-check results.
+- `no-contract`: the completed session lacks a `## Completion Contract` and the
+  run was not started with `--allow-not-loop-ready`.
+- `malformed-contract`: the completed session's contract failed to parse or
+  validate (see `agent_session_loop.contracts` errors).
 
 ## Troubleshooting
 

@@ -1,6 +1,6 @@
 ---
 name: session-expand
-description: Validate and expand split session files against the actual codebase. Verifies file paths, signatures, assumptions, and parallel-safety metadata. Takes a plan directory or single session file path.
+description: Validate and expand split session files against the actual codebase. Verifies file paths, signatures, assumptions, parallel-safety metadata, completion contracts, and manifest readiness. Takes a plan directory or single session file path.
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 ---
 
@@ -8,7 +8,7 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 
 ## Purpose
 
-Research the actual codebase to validate and expand claims in session files produced by `session-split`. For each session, verify that referenced file paths exist, function/struct/class names are correct, code patterns match reality, and inter-session dependencies are satisfiable. In directory mode, validate parallel metadata across all sessions and write authoritative safety findings that `session-run` can use to override manifest guidance. Write a concise annotations file alongside each session with findings, corrections, concrete details (line numbers, exact signatures, patterns to reuse), and parallel-safety notes when cross-session context is available. Optionally fix issues in the session files.
+Research the actual codebase to validate and expand claims in session files produced by `session-split`. For each session, verify that referenced file paths exist, function/struct/class names are correct, code patterns match reality, and inter-session dependencies are satisfiable. In directory mode, validate parallel metadata across all sessions and write authoritative safety findings that `session-run` can use to override manifest guidance. Validate each session's `## Completion Contract` against the schema enforced by `agent_session_loop.contracts.parse_completion_contract`, re-resolve referenced paths/commands against the live codebase, re-hash the manifest readiness block so divergence between recorded and recomputed state is surfaced, then run final preflight with `--mark-loop-ready` so clean expanded plans are ready for `session-run`. Write a concise annotations file alongside each session with findings, corrections, concrete details (line numbers, exact signatures, patterns to reuse), parallel-safety notes when cross-session context is available, and contract issues when the contract is malformed or its references are stale. Optionally fix factual issues in the session files.
 
 ## Input
 
@@ -101,6 +101,16 @@ Required prior session and allowed concurrent session references may use dotted 
 
 Treat these as scheduling claims to validate during the directory-mode cross-session check. Do not count missing parallel metadata as a path/signature/field/dependency/behavior/naming issue.
 
+Separately collect each session's `## Completion Contract` section when present:
+
+- The raw text under `### Done when` (bullet list of human-readable exit criteria).
+- The fenced ```json``` block under `### Verify` (the executable recipe).
+- The optional top-level `"session"` JSON field when one is supplied.
+
+Treat the contract as its own structural artifact validated in Step 3 under "Contract claims (C)". Do not extract `argv`, `path`, or `pattern` references from inside the contract as P/S/F/D/B/N claims — they are validated by the contract-specific checks instead so the same path or command is not double-reported.
+
+In **directory mode**, also extract the manifest's readiness metadata block when present: the `**Readiness**`, `**Readiness SHA-256**`, and `**Readiness checked at**` lines emitted by `session-split` (Step 10a). Hold the recorded SHA for the Step 4 readiness check. Do not treat missing readiness metadata as a path/signature claim issue; surface it through the readiness check instead.
+
 ### Step 3: Research the Codebase
 
 Verify each claim using the most efficient tool:
@@ -138,6 +148,42 @@ Verify each claim using the most efficient tool:
 
 - Use `Grep` to confirm the name exists in the codebase.
 - Record the actual location if found, or flag as missing.
+
+**Contract claims (C)** (per session, when a `## Completion Contract` section was captured in Step 2):
+
+The parser at `agent_session_loop.contracts.parse_completion_contract` is the authoritative schema enforcer; do not re-implement its rules in this skill. Call it directly via a small `Bash` heredoc that loads the package the same way `asl` does (the `asl` wrapper on `$PATH` resolves to the package). Pass the raw session text and the canonical session id derived from the filename, then turn each raised `PlanError` into a "Contract Issues" entry. Example shape:
+
+```bash
+python3 - <<'PY' "<plan-dir>/session-<ID>.md" "<ID>"
+import sys, pathlib
+asl = pathlib.Path(__import__("shutil").which("asl")).resolve()
+sys.path.insert(0, str(asl.parents[3]))
+from agent_session_loop import contracts
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+try:
+    contract = contracts.parse_completion_contract(text, session_id=sys.argv[2])
+except Exception as error:
+    print(f"SCHEMA: {error}")
+    raise SystemExit(0)
+if contract is None:
+    print("MISSING")
+    raise SystemExit(0)
+for check in contract.verify.checks:
+    print(f"OK {check.kind} {check.name}")
+PY
+```
+
+Use the resulting `SCHEMA:` / `MISSING` / `OK …` lines to populate the "Contract Issues" section of the expansion file. Specifically:
+
+- Report `SCHEMA:` messages verbatim under "Contract Issues" — the parser names the offending field, session id, and rule (e.g. `session 2 contract check #1 'type' must be one of: command, file_exists, regex_in_file`).
+- Report `MISSING` as a "Contract Issues" entry asking the user to add a `## Completion Contract` section. Do not flag this when the session was deliberately split without a contract skeleton; the canonical split skill always emits one, so missing contracts indicate the session file was edited.
+- For each successfully parsed `command` check, run `command -v <argv[0]>` and surface a yellow factual issue when the executable is not on `$PATH`. Allow well-known names (e.g. `python3`, `pytest`, `just`, `ruff`, `npm`, `cargo`, `go`) — when those are missing, the user almost certainly needs to install the tool before `asl run` is possible.
+- For each successfully parsed `file_exists` check, resolve `path` against the codebase root. Missing files become factual issues, not schema issues.
+- For each successfully parsed `regex_in_file` check, resolve `path` against the codebase root and run `re.search` over the file contents. A missing file is a factual issue. A pattern that matches zero times is also a factual issue (the pattern is almost always stale).
+- If the JSON object includes a top-level `"session"` field, the parser already rejects mismatches; surface a clearer suggestion when the parser raises, naming both the wrong value and the canonical id derived from the filename and session heading.
+- Flag the default skeleton placeholder bullet (`<one concrete human-readable exit criterion derived from the session>` or any other angle-bracketed `<...>` text in `Done when`) as a "Contract Issues" entry asking the user to replace it with a real criterion. The preflight ambiguity scanner already catches this, but surfacing it during expansion gives the user the fix near the rest of the contract feedback.
+
+Bundle every successfully parsed contract into the per-session verified-claims tally so the summary counts reflect the work, but do not surface the OK checks as separate "Verified Claims" rows — they would be noisy. Reserve the "Verified Claims" table for the P/S/F/D/B/N taxonomy.
 
 **Token efficiency rules**:
 
@@ -177,6 +223,16 @@ Record these outcomes:
 - Any required prior sessions added by validation
 
 `serial-required` means "not safe for concurrent execution"; it does not by itself block explicit serial execution after all required prior sessions are complete. Only mark a session blocked when validation identifies an unresolved dependency, ownership conflict, or unsafe run condition.
+
+**Manifest readiness check (directory mode only)**:
+
+When the manifest readiness block was captured in Step 2, recompute the structural hash by calling `agent_session_loop.plans.stable_readiness_sha256(plan_dir)` via the same `python3 -` heredoc pattern used for contract validation. Compare it to the SHA recorded in the manifest:
+
+- If the recorded SHA is missing or malformed, flag it as a "Plan Readiness" finding asking the user to re-run the split skill's Step 10a or to run `asl preflight --mark-loop-ready` after repair.
+- If the recorded SHA differs from the recomputed value, flag it as a "Plan Readiness" finding identical in shape to `asl preflight`'s red `manifest-readiness` finding. Hash divergence at expansion time almost always means a session file was edited (structural content or contract skeleton) between `session-split` and `session-expand`.
+- If the recorded SHA matches the recomputed value, do not emit a finding; the plan is structurally consistent.
+
+Record the readiness state (`draft`, `reviewed`, `loop-ready`, `running`, `complete`) alongside the SHA comparison so the report can echo it. Do not edit readiness lines directly during this check; the final directory-mode preflight step below is the only place this skill may advance readiness, and it must do so by invoking `asl preflight --mark-loop-ready`.
 
 ### Step 5: Identify Patterns to Reuse
 
@@ -257,7 +313,18 @@ For each session file `session-<ID>.md`, write `session-<ID>.expand.md` in the s
 - **Allowed concurrent sessions**: <none | session IDs validated as disjoint>
 - **Ownership findings**: <none | unsafe overlaps, broad ownership, ambiguous ownership, forbidden/shared path conflicts>
 - **Session-run markers**: <none | blocked | unsafe to run now | ownership-conflicted | dependent on unresolved work>
+
+## Contract Issues
+
+<!-- Always emitted when the session had a `## Completion Contract` section to evaluate. Omit when no contract was present and Step 2 captured no contract content (e.g., single-session mode on a session that deliberately had its skeleton removed); the report should mention the omission. -->
+
+- `<session-id>: <issue>: <suggested fix>`
+- ...
+
+_no contract issues found_
 ```
+
+Use one bullet per issue in the form `<session-id>: <issue>: <suggested fix>`. When there are zero issues, replace the bullet list with the literal italic line `_no contract issues found_` so downstream readers can distinguish "checked and clean" from "not checked".
 
 **Directory-mode parallel validation file**:
 
@@ -299,6 +366,21 @@ Use this structure:
 
 - <none | session/path/reason>
 
+## Plan Readiness
+
+- **Recorded state**: <draft | reviewed | loop-ready | running | complete | missing>
+- **Recorded SHA-256**: <hex | missing>
+- **Recomputed SHA-256**: <hex>
+- **Divergence**: <none | recorded SHA differs from recomputed SHA — re-run split Step 10a or run `asl preflight --mark-loop-ready` after repair | manifest readiness metadata is missing — add **Readiness**, **Readiness SHA-256**, **Readiness checked at** lines>
+
+## Preflight Snapshot
+
+- **Command**: `asl preflight <plan-dir> --cwd <codebase-root> --json --mark-loop-ready`
+- **Findings**: <red>R / <yellow>Y / <green>G
+- **Reason**: <preflight-red | preflight-yellow | ok | loop-ready-marked | loop-ready-refused | loop-ready-write-failed>
+- **Marked loop-ready**: <true | false>
+- **Ready for session-run**: <yes | no>
+
 ## Session-Run Precedence
 
 `session-run` must treat this file as authoritative over manifest and session-file parallel metadata for dependency, ownership, and safety claims. Handoff status lines in session files remain the source of truth for completion.
@@ -321,9 +403,24 @@ Rules:
 - Claims about code to be _created_ (new files, new functions) should be marked "N/A — to be created" in the Verified Claims table, not flagged as issues. Only flag them if they conflict with something already existing (e.g., a function name already taken with a different signature).
 - Omit empty sections entirely (e.g., if no issues, omit `## Issues`; if no dependencies, omit `## Session Dependencies`).
 - Include `## Parallel Safety` only when directory-mode expansion had enough cross-session context to validate the selected session against the rest of the plan.
-- Do not rewrite `manifest.md`; `parallel-validation.md` and `## Parallel Safety` sections are authoritative corrections to manifest/session parallel guidance.
+- Do not edit `manifest.md` by hand; `parallel-validation.md` and `## Parallel Safety` sections are authoritative corrections to manifest/session parallel guidance. The only allowed manifest readiness mutation is the final `asl preflight --mark-loop-ready` command in Step 7.
 
 ### Step 7: Report and Offer Fixes
+
+In **directory mode**, after every other check is complete and any factual fixes have been applied, invoke final preflight once with `Bash`:
+
+```text
+asl preflight <plan-dir> --cwd <codebase-root> --json --mark-loop-ready
+```
+
+Use the codebase root resolved in Step 1. If the codebase root is unknown, omit `--cwd` and say so in the summary. Treat the JSON response as the authoritative cross-cutting finding set and readiness gate — this skill should not re-implement every preflight rule. The command is expected to repair manifest-readiness-only findings (missing readiness lines, stale SHA, or `draft`/`reviewed` state) and mark the plan `loop-ready` when no other red/yellow findings remain. Capture and surface in the summary:
+
+- The total counts from `findings_by_severity` (red / yellow / green).
+- The `reason` field (e.g., `preflight-red`, `preflight-yellow`, `ok`, `loop-ready-marked`).
+- `marked_loop_ready` and the final `readiness.state`.
+- A short list of categories present in the red and yellow findings (e.g., `manifest-readiness`, `missing-contract`, `malformed-contract`, `ambiguity-sentinel`, `path-reference`).
+
+Gate the ready-to-run recommendation on this final preflight result. If the command exits non-zero, `marked_loop_ready` is false, or the final JSON `ok` is false, do **not** print `session-run` as the next command; instead print the blocking red/yellow categories and recommend `<skill-prefix>plan-preflight-iterate <plan-dir>` before execution. Green informational findings such as `env-amx` do not block. Skip this invocation in single-session mode, and mention that complete plan-level finding counts and auto-marking require directory-mode expansion.
 
 Print a concise summary:
 
@@ -332,25 +429,30 @@ Print a concise summary:
 3. Per-session one-liner: `session-<ID>: <claims> checked / <issues> issues — <worst issue description or "clean">`
 4. Blocking issues highlighted prominently (wrong file paths, missing dependencies)
 5. Parallel validation summary when directory-mode validation was performed
-6. List of annotation files created and whether `parallel-validation.md` was written
+6. Contract issues summary: total contract issues found across the plan and a per-session breakdown only when non-zero; cite the canonical source (`agent_session_loop.contracts.parse_completion_contract`) when surfacing schema errors
+7. Plan readiness summary (directory mode): recorded state, divergence outcome, and recomputed SHA prefix (first 12 hex chars) when divergence was detected
+8. Final preflight snapshot (directory mode): red/yellow/green counts, `reason`, `marked_loop_ready`, final readiness state, and whether `session-run` is clean to start
+9. List of annotation files created and whether `parallel-validation.md` was written
 
 **If issues were found**:
 
 - Use `Edit` to immediately fix factual errors (wrong paths, incorrect signatures, wrong names) in the session `.md` files — do not ask the user first
 - Only correct factual claims — never alter implementation logic, plan structure, or approach
 - Report the corrections that were applied alongside the issue list
+- Do **not** auto-edit contract bodies. Contract issues are emitted as suggestions in the "Contract Issues" section of each expansion file; the user must repair them by re-running `session-split` Step 10a, editing the contract by hand, or using `<skill-prefix>plan-preflight-iterate <plan-dir>` before final preflight can mark the plan loop-ready.
 
 **If zero issues**:
 
-- Tell the user the plan is validated and they can proceed to execution
+- Tell the user the plan is validated and can proceed to execution only if final preflight marked or confirmed loop-ready
 - Note they can optionally read the `.expand.md` files for concrete line numbers and patterns
 - If directory-mode parallel validation found no unsafe overlaps or unresolved dependencies, report the validated concurrent sets; otherwise recommend the serial fallback or explicit sessions that remain safe.
+- When final preflight fails despite zero expansion issues, report the remaining preflight categories and recommend `<skill-prefix>plan-preflight-iterate <plan-dir>` before `session-run`.
 
-**In both cases**, end by printing the ready-to-paste `<skill-prefix>session-run <plan-directory>/` command so the user can proceed directly to execution without switching context.
+Only when final preflight succeeds with `ok: true` and readiness is `loop-ready`, end by printing the ready-to-paste `<skill-prefix>session-run <plan-directory>/` command so the user can proceed directly to execution without switching context. Otherwise, end with the ready-to-paste `<skill-prefix>plan-preflight-iterate <plan-directory>/` command.
 
 ## Important Notes
 
-- Never modify `context.md` or `manifest.md`
+- Never modify `context.md`; never modify `manifest.md` except through the final `asl preflight --mark-loop-ready` invocation in directory mode
 - The `.expand.md` suffix keeps annotation files visually grouped with their session files
 - Skip sessions whose Handoff status is not "pending" — the codebase has already been modified by that session's execution, so checking stale claims would be misleading. Note skipped sessions in the summary.
 - Generate `parallel-validation.md` only in directory mode, after all session files and manifest guidance are available. In single-session mode, mention that complete cross-session parallel validation requires directory-mode expansion.
@@ -361,3 +463,7 @@ Print a concise summary:
 - If the codebase root is a different repository from the current working directory, `cd` to it before running Glob/Grep/Read operations
 - When applying fixes to session files, only correct factual errors — never rewrite implementation logic, change the approach, or restructure the plan
 - Prefer `Grep` with `output_mode: "content"` and line numbers for signature verification — this gives the executor exact references
+- Contract validation calls `agent_session_loop.contracts.parse_completion_contract` directly — never re-implement schema rules in this skill. Surface `PlanError` messages verbatim under "Contract Issues" so the wording stays aligned with `asl preflight` and `asl verify`.
+- Contract issues are advisory: surface them in the `.expand.md` file's `## Contract Issues` section, but do **not** auto-edit contract bodies or default skeleton placeholders. The user repairs these and re-runs this skill or `<skill-prefix>plan-preflight-iterate <plan-dir>` so final preflight can clear the findings and mark loop-ready.
+- The readiness SHA recomputation must use `agent_session_loop.plans.stable_readiness_sha256(plan_dir)` so the comparison matches the value `asl preflight` records and validates. Hash divergence is a cross-cutting plan finding, not a per-session finding.
+- The `asl preflight --json --mark-loop-ready` invocation at the end of directory-mode expansion is the readiness gate for `session-run`. It may include environment findings (`env-lock`, `env-amx`, `env-turn-budget`); red/yellow findings block the ready-to-run command, while green findings are informational.

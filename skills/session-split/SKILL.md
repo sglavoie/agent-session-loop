@@ -274,7 +274,7 @@ For each session, write `<output_dir>/session-N.md` where N is the canonical ses
 
 **File structure**:
 
-```markdown
+````markdown
 # Session N: <title>
 
 > **Before starting**: Read `context.md` in this directory for shared project context.
@@ -296,6 +296,29 @@ For each session, write `<output_dir>/session-N.md` where N is the canonical ses
 
 ---
 
+## Completion Contract
+
+### Done when
+
+- <one concrete human-readable exit criterion derived from the session>
+
+### Verify
+
+```json
+{
+  "session": "<canonical session id>",
+  "checks": [
+    {
+      "type": "command",
+      "argv": ["python3", "-m", "unittest", "-q"],
+      "timeout_seconds": 60
+    }
+  ]
+}
+```
+
+---
+
 ## Handoff
 
 <!-- Fill this section when the session is complete -->
@@ -305,7 +328,7 @@ For each session, write `<output_dir>/session-N.md` where N is the canonical ses
 - **Key decisions**: (none yet)
 - **Blockers for next session**: (none)
 - **Notes**:
-```
+````
 
 Rules:
 
@@ -317,9 +340,21 @@ Rules:
 - If `Optional internal tracks` is not `none`, add an `### Internal Track Worker Prompts` subsection directly below the metadata with one prompt per track.
 - Emit intra-session worker prompts only when optional internal tracks have disjoint ownership. Track workers must not edit `manifest.md`, `context.md`, session handoffs, or files outside their ownership; the coordinator integrates results, updates the session handoff, and lets `session-run` sync derived status tables.
 
+**Completion contract emission rules** (the contract is consumed by `agent_session_loop.contracts.parse_completion_contract` and by `asl verify` / `asl run` verification enforcement, so the shape must be exact):
+
+- Place the `## Completion Contract` block between the preserved original content and the `## Handoff` block, separated from both by `---` rules as shown.
+- The contract must always sit above the final `## Handoff` heading; the parser ignores anything inside the handoff.
+- `### Done when` must contain at least one non-trivial bullet. Use the session's own goal (from its title or first sentence) to populate the first bullet; do not leave generic placeholders that read like `<criterion>`.
+- `### Verify` must contain exactly one fenced code block whose language is `json` (or no language tag). Other languages are rejected by the parser.
+- The JSON object must include a non-empty `"checks"` list. The default skeleton emits one `"command"` check running `python3 -m unittest -q` because the package is stdlib-only; replace this with the session-appropriate command, `file_exists` path, or `regex_in_file` pattern when the surface scan or session content makes a better default obvious.
+- The optional top-level `"session"` field must match the enclosing canonical session id exactly (no leading zeroes, dotted form). Always emit it so `session-expand` can confirm contract/file alignment.
+- Check `"type"` must be one of `command`, `file_exists`, `regex_in_file`. For `command`, `argv` must be a non-empty list of non-empty strings (no shell strings); `timeout_seconds` defaults to `60` and must be `<= 3600`. For `file_exists`, emit a repo-relative `path`. For `regex_in_file`, emit a repo-relative `path` and a Python-`re.compile`-valid `pattern`.
+- Check `name` is optional. When omitted, the parser assigns `check-<index>` automatically; when supplied, names must be unique within the recipe.
+- Never emit ambiguity sentinels (`TBD`, `TODO`, `FIXME`, `XXX`, `<placeholder>`, `<fill in>`) above the handoff. They would be caught by `asl preflight` as yellow `ambiguity-sentinel` findings.
+
 ### Step 10: Write manifest.md
 
-Write `<output_dir>/manifest.md`:
+Write `<output_dir>/manifest.md`. The three readiness metadata lines are required so that `asl preflight` can parse the manifest immediately; their values are populated in Step 10a below.
 
 ````markdown
 # <Plan Title>
@@ -330,6 +365,9 @@ Write `<output_dir>/manifest.md`:
 **Content SHA-256**: `<content_sha256>`
 **Sessions**: <N>
 **Split date**: <YYYY-MM-DD>
+**Readiness**: draft
+**Readiness SHA-256**: `<readiness_sha256>`
+**Readiness checked at**: <readiness_checked_at>
 
 ## Sessions
 
@@ -433,6 +471,54 @@ Replace all `<placeholders>` with actual computed values.
 
 **Note**: Omit the Execution Weight section entirely if the surface scan was skipped (< 5 file references).
 
+### Step 10a: Populate Readiness Metadata
+
+After every `session-N.md`, `context.md`, and `manifest.md` file has been written, compute the stable readiness SHA-256 for the just-written directory and overwrite the two placeholder fields (`<readiness_sha256>` and `<readiness_checked_at>`) in `manifest.md`. The readiness state stays at `draft`; only `asl preflight --mark-loop-ready` (after the user repairs all yellow/red findings) may advance the state to `loop-ready`.
+
+Use `agent_session_loop.plans.stable_readiness_sha256` so the hash matches the one `asl preflight` recomputes. The `asl` CLI wrapper exposes the repository root that holds the `agent_session_loop` package, so locating it from `$(command -v asl)` works on any machine where this loop is installed:
+
+```bash
+readiness_payload="$(
+  OUTPUT_DIR="$output_dir" python3 - <<'PY'
+import os
+import shutil
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+asl_path = shutil.which("asl")
+if asl_path is not None:
+    repo_root = Path(asl_path).resolve().parents[3]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+from agent_session_loop.plans import (
+    ReadinessMetadata,
+    write_readiness_metadata,
+    stable_readiness_sha256,
+)
+
+plan_dir = os.environ["OUTPUT_DIR"]
+sha = stable_readiness_sha256(plan_dir)
+checked_at = datetime.now(timezone.utc).isoformat()
+metadata = ReadinessMetadata(
+    state="draft",
+    readiness_sha256=sha,
+    checked_at=checked_at,
+)
+write_readiness_metadata(plan_dir, metadata)
+print(f"{sha}\t{checked_at}")
+PY
+)"
+```
+
+Behavior requirements:
+
+- Compute the SHA after every other generated file is finalized; the hash depends on the contents of the session, context, manifest, expansion (if any), and `parallel-validation.md` (if any) files. Recomputing earlier produces a hash that the next `asl preflight` will treat as a red `manifest-readiness` finding.
+- Always emit `**Readiness**: draft`. Do not advance the state in `session-split`; directory-mode `session-expand` runs final `asl preflight --mark-loop-ready` after validation, and manual preflight may do the same after repair.
+- The timestamp must be a UTC ISO-8601 string. The parser only checks non-emptiness, but consumers (preflight repair hints, guided skill) display the value verbatim.
+- If `agent_session_loop` cannot be imported (for example when running the skill outside this repo), fail fast with a clear error pointing to `asl --version`; do not write a placeholder SHA. A placeholder would cause `asl preflight` to emit a red `manifest-readiness` finding and block `--mark-loop-ready` until the user repairs the manifest by hand.
+
 ### Step 11: Report Results
 
 Print a concise summary:
@@ -445,7 +531,8 @@ Print a concise summary:
 6. Estimated token savings percentage
 7. If the Execution Weight table was generated, highlight any "heavy" session and suggest the user consider splitting it further
 8. Mention whether the manifest includes a Parallel Execution section and whether any sessions are `parallel-safe`
-9. Suggest running `<skill-prefix>session-expand <output-directory>` as the next step to validate file paths, signatures, ownership, dependencies, and assumptions against the actual codebase before execution
+9. State that the plan ships as `**Readiness**: draft` with a stable readiness SHA-256, and that `session-expand` will run final preflight with `--mark-loop-ready` so a clean plan is ready for `session-run`.
+10. Suggest running `<skill-prefix>session-expand <output-directory>` next to validate file paths, signatures, ownership, dependencies, contract entries, assumptions, and final loop-ready preflight against the actual codebase before execution.
 
 ## Important Notes
 
@@ -457,3 +544,5 @@ Print a concise summary:
 - Always use `<skill-prefix>session-run` in generated execution instructions — it auto-advances through sessions and runs within the active harness conversation.
 - Never promote parallel execution above correctness; uncertain ownership or dependencies must become `parallel-candidate` or `serial-required`.
 - Parallel worker commands must use explicit `--session N`; never recommend concurrent auto-advance invocations.
+- Every emitted `session-N.md` must include a parseable `## Completion Contract` above its `## Handoff`. Plans without contracts will be rejected by `asl preflight` (red `missing-contract` findings) and by `asl run`'s verification gate, which pauses with `reason="no-contract"` unless `--allow-not-loop-ready` is passed.
+- `manifest.md` must carry the three readiness lines (`**Readiness**`, `**Readiness SHA-256**`, `**Readiness checked at**`) with a stable SHA produced by `agent_session_loop.plans.stable_readiness_sha256`. The initial state is always `draft`; directory-mode `session-expand` or manual `asl preflight --mark-loop-ready` may advance it after validation.

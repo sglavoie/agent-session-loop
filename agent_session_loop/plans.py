@@ -16,8 +16,19 @@ from typing import Literal, Mapping, NoReturn
 
 
 StatusValue = Literal["pending", "complete", "empty", "unknown"]
+ReadinessState = Literal["draft", "reviewed", "loop-ready", "running", "complete"]
+READINESS_STATES: tuple[ReadinessState, ...] = (
+    "draft",
+    "reviewed",
+    "loop-ready",
+    "running",
+    "complete",
+)
 STATUS_PREFIX = "- **Status**:"
 HANDOFF_HEADING = "## Handoff"
+READINESS_PREFIX = "**Readiness**:"
+READINESS_SHA_PREFIX = "**Readiness SHA-256**:"
+READINESS_CHECKED_PREFIX = "**Readiness checked at**:"
 SESSION_ID_PATTERN = r"[1-9][0-9]*(?:\.[1-9][0-9]*)*"
 SESSION_ID_RE = re.compile(rf"^{SESSION_ID_PATTERN}$")
 SESSION_FILE_RE = re.compile(rf"^session-({SESSION_ID_PATTERN})\.md$")
@@ -248,6 +259,15 @@ class PlanSnapshot:
             for session in self.sessions
             if session.session_id.is_integer
         }
+
+
+@dataclass(frozen=True)
+class ReadinessMetadata:
+    """Readiness state recorded in a plan manifest."""
+
+    state: ReadinessState
+    readiness_sha256: str
+    checked_at: str
 
 
 def canonicalize_path(path: str | Path) -> Path:
@@ -628,6 +648,269 @@ def plan_fingerprint(plan_dir: str | Path, content_hash: str) -> str:
     digest.update(str(canonical_dir).encode("utf-8", "surrogateescape"))
     digest.update(b"\0")
     digest.update(content_hash.encode("ascii"))
+    return digest.hexdigest()
+
+
+def _strip_inline_code_ticks(value: str) -> str:
+    text = value.strip()
+    if len(text) >= 2 and text[0] == "`" and text[-1] == "`":
+        return text[1:-1].strip()
+    return text
+
+
+def parse_readiness_state(value: str) -> ReadinessState:
+    """Parse and validate a readiness state name."""
+    normalized = value.strip().lower()
+    if normalized in READINESS_STATES:
+        return normalized  # type: ignore[return-value]
+    raise PlanError(f"invalid readiness state: {value!r}")
+
+
+def _is_readiness_line(line: str) -> bool:
+    stripped = line.lstrip()
+    return (
+        stripped.startswith(READINESS_PREFIX)
+        or stripped.startswith(READINESS_SHA_PREFIX)
+        or stripped.startswith(READINESS_CHECKED_PREFIX)
+    )
+
+
+def parse_readiness_metadata(manifest_text: str) -> ReadinessMetadata | None:
+    """Parse `**Readiness**`, `**Readiness SHA-256**`, `**Readiness checked at**` lines."""
+    state: ReadinessState | None = None
+    sha: str | None = None
+    checked_at: str | None = None
+
+    for raw_line in manifest_text.splitlines():
+        line = raw_line.strip()
+        if line.startswith(READINESS_SHA_PREFIX):
+            payload = _strip_inline_code_ticks(line[len(READINESS_SHA_PREFIX) :])
+            if not payload:
+                raise PlanError("manifest readiness SHA-256 is empty")
+            sha = payload
+        elif line.startswith(READINESS_CHECKED_PREFIX):
+            payload = _strip_inline_code_ticks(line[len(READINESS_CHECKED_PREFIX) :])
+            if not payload:
+                raise PlanError("manifest readiness checked-at timestamp is empty")
+            checked_at = payload
+        elif line.startswith(READINESS_PREFIX):
+            payload = _strip_inline_code_ticks(line[len(READINESS_PREFIX) :])
+            if not payload:
+                raise PlanError("manifest readiness state is empty")
+            state = parse_readiness_state(payload)
+
+    if state is None and sha is None and checked_at is None:
+        return None
+    if state is None:
+        raise PlanError("manifest readiness state missing")
+    if sha is None:
+        raise PlanError("manifest readiness SHA-256 missing")
+    if checked_at is None:
+        raise PlanError("manifest readiness checked-at timestamp missing")
+    return ReadinessMetadata(state=state, readiness_sha256=sha, checked_at=checked_at)
+
+
+def read_readiness_metadata(plan_dir: str | Path) -> ReadinessMetadata | None:
+    """Read readiness metadata from `manifest.md` in a plan directory."""
+    canonical_dir = canonicalize_path(plan_dir)
+    manifest_path = canonical_dir / "manifest.md"
+    if not _is_file(manifest_path):
+        raise PlanError(f"missing manifest.md in plan directory: {canonical_dir}")
+    try:
+        text = manifest_path.read_text(encoding="utf-8")
+    except OSError as error:
+        _raise_read_error(manifest_path, error)
+    return parse_readiness_metadata(text)
+
+
+def _render_readiness_metadata_lines(metadata: ReadinessMetadata) -> list[str]:
+    return [
+        f"**Readiness**: {metadata.state}",
+        f"**Readiness SHA-256**: `{metadata.readiness_sha256}`",
+        f"**Readiness checked at**: {metadata.checked_at}",
+    ]
+
+
+def _find_readiness_insertion_index(lines: list[str]) -> int:
+    h2_index = next(
+        (index for index, line in enumerate(lines) if line.startswith("## ")),
+        len(lines),
+    )
+    last_metadata = -1
+    for index in range(h2_index):
+        if lines[index].lstrip().startswith("**"):
+            last_metadata = index
+    if last_metadata == -1:
+        return 0
+    return last_metadata + 1
+
+
+def replace_readiness_metadata_in_text(
+    text: str, metadata: ReadinessMetadata
+) -> str:
+    """Insert or replace readiness metadata lines in manifest text."""
+    new_block = _render_readiness_metadata_lines(metadata)
+    lines = text.splitlines(keepends=False)
+    existing = [index for index, line in enumerate(lines) if _is_readiness_line(line)]
+
+    if existing:
+        insertion_index = existing[0]
+        kept = [
+            line for index, line in enumerate(lines) if not _is_readiness_line(line)
+        ]
+        result = kept[:insertion_index] + new_block + kept[insertion_index:]
+    else:
+        insertion_index = _find_readiness_insertion_index(lines)
+        result = lines[:insertion_index] + new_block + lines[insertion_index:]
+
+    suffix = "\n" if text.endswith("\n") else ""
+    return "\n".join(result) + suffix
+
+
+def write_readiness_metadata(
+    plan_dir: str | Path, metadata: ReadinessMetadata
+) -> bool:
+    """Write readiness metadata to `manifest.md`. Returns True if the file changed."""
+    canonical_dir = canonicalize_path(plan_dir)
+    manifest_path = canonical_dir / "manifest.md"
+    if not _is_file(manifest_path):
+        raise PlanError(f"missing manifest.md in plan directory: {canonical_dir}")
+    try:
+        original = manifest_path.read_text(encoding="utf-8")
+    except OSError as error:
+        _raise_read_error(manifest_path, error)
+    updated = replace_readiness_metadata_in_text(original, metadata)
+    if updated == original:
+        return False
+    _write_text(manifest_path, updated)
+    return True
+
+
+def _strip_final_handoff_block(text: str) -> str:
+    lines = text.splitlines(keepends=False)
+    handoff_start = _final_handoff_start(lines)
+    if handoff_start is None:
+        return text
+    suffix = "\n" if text.endswith("\n") else ""
+    return "\n".join(lines[:handoff_start]) + suffix
+
+
+def _strip_readiness_lines(text: str) -> str:
+    lines = text.splitlines(keepends=False)
+    kept = [line for line in lines if not _is_readiness_line(line)]
+    suffix = "\n" if text.endswith("\n") else ""
+    return "\n".join(kept) + suffix
+
+
+def _clear_status_cells_block(block: list[str]) -> list[str]:
+    if len(block) < 2:
+        return block
+
+    header = _split_table_row(block[0])
+    separator = _split_table_row(block[1])
+    if header is None or separator is None or not _is_separator_row(separator[1]):
+        return block
+
+    headers = [_normalize_table_header(cell) for cell in header[1]]
+    try:
+        status_index = headers.index("status")
+    except ValueError:
+        return block
+
+    session_index = next(
+        (
+            index
+            for index, name in enumerate(headers)
+            if name in SESSION_STATUS_TABLE_HEADERS
+        ),
+        None,
+    )
+    if session_index is None:
+        return block
+
+    updated = list(block)
+    for row_index, row in enumerate(block[2:], start=2):
+        parsed = _split_table_row(row)
+        if parsed is None:
+            continue
+        leading, cells = parsed
+        if max(session_index, status_index) >= len(cells):
+            continue
+        if _session_id_from_cell(cells[session_index]) is None:
+            continue
+        cleared = _replace_cell_content(cells[status_index], "")
+        if cells[status_index] != cleared:
+            cells[status_index] = cleared
+            updated[row_index] = _join_table_row(leading, cells)
+    return updated
+
+
+def _clear_status_cells_in_text(text: str) -> str:
+    lines = text.splitlines(keepends=False)
+    out: list[str] = []
+    index = 0
+
+    while index < len(lines):
+        if not lines[index].lstrip().startswith("|"):
+            out.append(lines[index])
+            index += 1
+            continue
+
+        block_start = index
+        while index < len(lines) and lines[index].lstrip().startswith("|"):
+            index += 1
+        block = lines[block_start:index]
+        out.extend(_clear_status_cells_block(block))
+
+    suffix = "\n" if text.endswith("\n") else ""
+    return "\n".join(out) + suffix
+
+
+def _normalize_for_readiness(filename: str, text: str) -> str:
+    if SESSION_FILE_RE.fullmatch(filename):
+        return _strip_final_handoff_block(text)
+    if filename == "manifest.md":
+        return _clear_status_cells_in_text(_strip_readiness_lines(text))
+    if filename == "context.md":
+        return _clear_status_cells_in_text(text)
+    return text
+
+
+def stable_readiness_sha256(
+    plan_dir: str | Path,
+    sessions: tuple[SessionFile, ...] | None = None,
+) -> str:
+    """Hash structural plan content, ignoring final handoffs and status bookkeeping."""
+    canonical_dir = canonicalize_path(plan_dir)
+    selected_sessions = (
+        discover_session_files(canonical_dir) if sessions is None else sessions
+    )
+    selected_sessions = tuple(
+        sorted(selected_sessions, key=lambda session: session.session_id.sort_key)
+    )
+    relative_names = ["context.md", "manifest.md"]
+
+    if _is_file(canonical_dir / "parallel-validation.md"):
+        relative_names.append("parallel-validation.md")
+
+    for session in selected_sessions:
+        relative_names.append(session.filename)
+        expansion_name = session.expansion_filename
+        if _is_file(canonical_dir / expansion_name):
+            relative_names.append(expansion_name)
+
+    digest = hashlib.sha256()
+    for relative_name in relative_names:
+        file_path = canonical_dir / relative_name
+        try:
+            text = file_path.read_text(encoding="utf-8")
+        except OSError as error:
+            _raise_read_error(file_path, error)
+        normalized = _normalize_for_readiness(relative_name, text)
+        digest.update(relative_name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(normalized.encode("utf-8"))
+        digest.update(b"\0")
     return digest.hexdigest()
 
 

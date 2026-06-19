@@ -22,13 +22,16 @@ from unittest import mock
 from agent_session_loop import (
     cli,
     config,
+    contracts,
     events,
     harnesses,
     plans,
+    preflight,
     run_control,
     runner,
     state,
     tail,
+    verification,
 )
 from agent_session_loop.formatting import format_duration_seconds
 
@@ -69,55 +72,79 @@ def patched_env(**updates: str | None):
                 os.environ[name] = value
 
 
-def write_plan(plan_dir: Path, statuses: tuple[str, ...]) -> None:
+def write_plan(
+    plan_dir: Path,
+    statuses: tuple[str, ...],
+    *,
+    contracts_by_id: dict[str, str] | None = None,
+) -> None:
     plan_dir.mkdir(parents=True, exist_ok=True)
     (plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
     (plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
+    contracts_by_id = contracts_by_id or {}
     for number, status_value in enumerate(statuses, start=1):
+        contract_block = contracts_by_id.get(str(number), "")
+        body = [
+            f"# Session {number}: Test",
+            "",
+            "Instructions.",
+            "",
+        ]
+        if contract_block:
+            body.extend([contract_block, ""])
+        body.extend(
+            [
+                "## Handoff",
+                "",
+                f"- **Status**: {status_value}",
+                "- **Files modified**: (none)",
+                "- **Key decisions**: (none)",
+                "- **Blockers for next session**: (none)",
+                "- **Notes**:",
+                "",
+            ]
+        )
         (plan_dir / f"session-{number}.md").write_text(
-            "\n".join(
-                [
-                    f"# Session {number}: Test",
-                    "",
-                    "Instructions.",
-                    "",
-                    "## Handoff",
-                    "",
-                    f"- **Status**: {status_value}",
-                    "- **Files modified**: (none)",
-                    "- **Key decisions**: (none)",
-                    "- **Blockers for next session**: (none)",
-                    "- **Notes**:",
-                    "",
-                ]
-            ),
+            "\n".join(body),
             encoding="utf-8",
         )
 
 
-def write_plan_with_ids(plan_dir: Path, statuses: tuple[tuple[str, str], ...]) -> None:
+def write_plan_with_ids(
+    plan_dir: Path,
+    statuses: tuple[tuple[str, str], ...],
+    *,
+    contracts_by_id: dict[str, str] | None = None,
+) -> None:
     plan_dir.mkdir(parents=True, exist_ok=True)
     (plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
     (plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
+    contracts_by_id = contracts_by_id or {}
     for session_id, status_value in statuses:
         display_label = plans.session_id_display_label(session_id)
+        contract_block = contracts_by_id.get(session_id, "")
+        body = [
+            f"# {display_label}: Test",
+            "",
+            "Instructions.",
+            "",
+        ]
+        if contract_block:
+            body.extend([contract_block, ""])
+        body.extend(
+            [
+                "## Handoff",
+                "",
+                f"- **Status**: {status_value}",
+                "- **Files modified**: (none)",
+                "- **Key decisions**: (none)",
+                "- **Blockers for next session**: (none)",
+                "- **Notes**:",
+                "",
+            ]
+        )
         (plan_dir / plans.session_id_to_filename(session_id)).write_text(
-            "\n".join(
-                [
-                    f"# {display_label}: Test",
-                    "",
-                    "Instructions.",
-                    "",
-                    "## Handoff",
-                    "",
-                    f"- **Status**: {status_value}",
-                    "- **Files modified**: (none)",
-                    "- **Key decisions**: (none)",
-                    "- **Blockers for next session**: (none)",
-                    "- **Notes**:",
-                    "",
-                ]
-            ),
+            "\n".join(body),
             encoding="utf-8",
         )
 
@@ -831,6 +858,823 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertIn("permission denied", message.lower())
             self.assertIsInstance(raised.exception.__cause__, PermissionError)
 
+    def test_readiness_states_cover_full_lifecycle(self) -> None:
+        self.assertEqual(
+            ("draft", "reviewed", "loop-ready", "running", "complete"),
+            plans.READINESS_STATES,
+        )
+        for state_value in plans.READINESS_STATES:
+            with self.subTest(state=state_value):
+                self.assertEqual(state_value, plans.parse_readiness_state(state_value))
+        self.assertEqual("loop-ready", plans.parse_readiness_state("  LOOP-READY  "))
+        for invalid in ("", "ready", "loop_ready", "DONE"):
+            with self.subTest(value=invalid):
+                with self.assertRaises(plans.PlanError):
+                    plans.parse_readiness_state(invalid)
+
+    def test_parse_readiness_metadata_reads_all_three_lines(self) -> None:
+        manifest_text = "\n".join(
+            [
+                "# Plan",
+                "",
+                "**Sessions**: 2",
+                "**Readiness**: reviewed",
+                "**Readiness SHA-256**: `abc123`",
+                "**Readiness checked at**: 2026-06-19T12:34:56Z",
+                "",
+                "## Sessions",
+                "",
+            ]
+        )
+
+        metadata = plans.parse_readiness_metadata(manifest_text)
+
+        self.assertIsNotNone(metadata)
+        self.assertEqual("reviewed", metadata.state)
+        self.assertEqual("abc123", metadata.readiness_sha256)
+        self.assertEqual("2026-06-19T12:34:56Z", metadata.checked_at)
+
+    def test_parse_readiness_metadata_returns_none_when_absent(self) -> None:
+        manifest_text = "# Plan\n\n**Sessions**: 1\n\n## Sessions\n"
+
+        self.assertIsNone(plans.parse_readiness_metadata(manifest_text))
+
+    def test_parse_readiness_metadata_rejects_partial_or_invalid_blocks(self) -> None:
+        cases = (
+            (
+                "missing state",
+                "**Readiness SHA-256**: `abc`\n**Readiness checked at**: now\n",
+            ),
+            (
+                "missing sha",
+                "**Readiness**: draft\n**Readiness checked at**: now\n",
+            ),
+            (
+                "missing checked_at",
+                "**Readiness**: draft\n**Readiness SHA-256**: `abc`\n",
+            ),
+            (
+                "invalid state",
+                "**Readiness**: green\n"
+                "**Readiness SHA-256**: `abc`\n"
+                "**Readiness checked at**: now\n",
+            ),
+            (
+                "empty sha",
+                "**Readiness**: draft\n"
+                "**Readiness SHA-256**: ``\n"
+                "**Readiness checked at**: now\n",
+            ),
+        )
+
+        for label, text in cases:
+            with self.subTest(label=label):
+                with self.assertRaises(plans.PlanError):
+                    plans.parse_readiness_metadata(text)
+
+    def test_write_readiness_metadata_inserts_after_front_matter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+            manifest_path = plan_dir / "manifest.md"
+            manifest_path.write_text(
+                "\n".join(
+                    [
+                        "# Plan",
+                        "",
+                        "**Split from**: `/source.md`",
+                        "**Sessions**: 1",
+                        "",
+                        "## Sessions",
+                        "",
+                        "| # | Title | Status |",
+                        "|---|---|---|",
+                        "| 1 | One | pending |",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            metadata = plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256="deadbeef",
+                checked_at="2026-06-19T00:00:00Z",
+            )
+            changed = plans.write_readiness_metadata(plan_dir, metadata)
+
+            self.assertTrue(changed)
+            text = manifest_path.read_text(encoding="utf-8")
+            self.assertIn("**Readiness**: loop-ready", text)
+            self.assertIn("**Readiness SHA-256**: `deadbeef`", text)
+            self.assertIn("**Readiness checked at**: 2026-06-19T00:00:00Z", text)
+
+            sessions_index = text.index("## Sessions")
+            readiness_index = text.index("**Readiness**:")
+            sessions_count_index = text.index("**Sessions**: 1")
+            self.assertLess(sessions_count_index, readiness_index)
+            self.assertLess(readiness_index, sessions_index)
+
+            roundtrip = plans.parse_readiness_metadata(text)
+            self.assertEqual(metadata, roundtrip)
+
+            unchanged = plans.write_readiness_metadata(plan_dir, metadata)
+            self.assertFalse(unchanged)
+
+    def test_write_readiness_metadata_replaces_existing_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+            manifest_path = plan_dir / "manifest.md"
+            manifest_path.write_text(
+                "\n".join(
+                    [
+                        "# Plan",
+                        "",
+                        "**Sessions**: 1",
+                        "**Readiness**: draft",
+                        "**Readiness SHA-256**: `oldhash`",
+                        "**Readiness checked at**: 2026-01-01T00:00:00Z",
+                        "",
+                        "## Sessions",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            updated = plans.ReadinessMetadata(
+                state="reviewed",
+                readiness_sha256="newhash",
+                checked_at="2026-06-19T12:00:00Z",
+            )
+            changed = plans.write_readiness_metadata(plan_dir, updated)
+
+            self.assertTrue(changed)
+            text = manifest_path.read_text(encoding="utf-8")
+            self.assertEqual(1, text.count("**Readiness**:"))
+            self.assertEqual(1, text.count("**Readiness SHA-256**:"))
+            self.assertEqual(1, text.count("**Readiness checked at**:"))
+            self.assertIn("**Readiness**: reviewed", text)
+            self.assertIn("`newhash`", text)
+            self.assertNotIn("oldhash", text)
+            self.assertNotIn("2026-01-01", text)
+            self.assertEqual(updated, plans.parse_readiness_metadata(text))
+
+    def test_stable_readiness_sha256_ignores_handoff_status_mutations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending", "pending"))
+
+            baseline = plans.stable_readiness_sha256(plan_dir)
+
+            (plan_dir / "session-1.md").write_text(
+                "\n".join(
+                    [
+                        "# Session 1: Test",
+                        "",
+                        "Instructions.",
+                        "",
+                        "## Handoff",
+                        "",
+                        "- **Status**: complete",
+                        "- **Files modified**: src/foo.py",
+                        "- **Key decisions**: chose option A",
+                        "- **Blockers for next session**: (none)",
+                        "- **Notes**: tests green",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(baseline, plans.stable_readiness_sha256(plan_dir))
+
+    def test_stable_readiness_sha256_ignores_status_table_mutations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending", "pending"))
+            manifest_path = plan_dir / "manifest.md"
+            manifest_path.write_text(
+                "\n".join(
+                    [
+                        "# Plan",
+                        "",
+                        "**Sessions**: 2",
+                        "",
+                        "## Sessions",
+                        "",
+                        "| # | Title | Status |",
+                        "|---|---|---|",
+                        "| 1 | One | pending |",
+                        "| 2 | Two | pending |",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            baseline = plans.stable_readiness_sha256(plan_dir)
+
+            manifest_path.write_text(
+                "\n".join(
+                    [
+                        "# Plan",
+                        "",
+                        "**Sessions**: 2",
+                        "",
+                        "## Sessions",
+                        "",
+                        "| # | Title | Status |",
+                        "|---|---|---|",
+                        "| 1 | One | complete |",
+                        "| 2 | Two | complete |",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(baseline, plans.stable_readiness_sha256(plan_dir))
+
+    def test_stable_readiness_sha256_ignores_readiness_metadata_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+
+            baseline = plans.stable_readiness_sha256(plan_dir)
+
+            plans.write_readiness_metadata(
+                plan_dir,
+                plans.ReadinessMetadata(
+                    state="loop-ready",
+                    readiness_sha256=baseline,
+                    checked_at="2026-06-19T00:00:00Z",
+                ),
+            )
+            self.assertEqual(baseline, plans.stable_readiness_sha256(plan_dir))
+
+            plans.write_readiness_metadata(
+                plan_dir,
+                plans.ReadinessMetadata(
+                    state="reviewed",
+                    readiness_sha256="differenthash",
+                    checked_at="2027-01-01T00:00:00Z",
+                ),
+            )
+            self.assertEqual(baseline, plans.stable_readiness_sha256(plan_dir))
+
+    def test_stable_readiness_sha256_changes_when_instructions_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+
+            baseline = plans.stable_readiness_sha256(plan_dir)
+
+            session_path = plan_dir / "session-1.md"
+            text = session_path.read_text(encoding="utf-8")
+            session_path.write_text(
+                text.replace("Instructions.", "Instructions changed."),
+                encoding="utf-8",
+            )
+
+            self.assertNotEqual(baseline, plans.stable_readiness_sha256(plan_dir))
+
+    def test_stable_readiness_sha256_tracks_expansion_and_validation_files(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+
+            baseline = plans.stable_readiness_sha256(plan_dir)
+
+            expansion = plan_dir / "session-1.expand.md"
+            expansion.write_text("notes\n", encoding="utf-8")
+            with_expansion = plans.stable_readiness_sha256(plan_dir)
+            self.assertNotEqual(baseline, with_expansion)
+
+            validation = plan_dir / "parallel-validation.md"
+            validation.write_text("validation\n", encoding="utf-8")
+            with_validation = plans.stable_readiness_sha256(plan_dir)
+            self.assertNotEqual(with_expansion, with_validation)
+
+    def test_parse_completion_contract_returns_none_when_section_absent(self) -> None:
+        text = "\n".join(
+            [
+                "# Session 1: No contract",
+                "",
+                "Instructions.",
+                "",
+                "## Handoff",
+                "",
+                "- **Status**: pending",
+                "",
+            ]
+        )
+
+        self.assertIsNone(contracts.parse_completion_contract(text, session_id="1"))
+
+    def test_parse_completion_contract_parses_done_when_bullets_and_recipe(
+        self,
+    ) -> None:
+        text = "\n".join(
+            [
+                "# Session 2: Contract Parser",
+                "",
+                "Instructions.",
+                "",
+                "## Completion Contract",
+                "",
+                "### Done when",
+                "- contracts.py exists",
+                "- parser returns CompletionContract",
+                "",
+                "### Verify",
+                "",
+                "```json",
+                "{",
+                '  "session": "2",',
+                '  "checks": [',
+                "    {",
+                '      "name": "module-exists",',
+                '      "type": "file_exists",',
+                '      "path": "agent_session_loop/contracts.py"',
+                "    },",
+                "    {",
+                '      "type": "command",',
+                '      "argv": ["python3", "-m", "unittest", "tests.t"],',
+                '      "timeout_seconds": 30',
+                "    },",
+                "    {",
+                '      "type": "regex_in_file",',
+                '      "path": "agent_session_loop/contracts.py",',
+                r'      "pattern": "^def parse_completion_contract"',
+                "    }",
+                "  ]",
+                "}",
+                "```",
+                "",
+                "## Handoff",
+                "",
+                "- **Status**: pending",
+                "",
+            ]
+        )
+
+        contract = contracts.parse_completion_contract(text, session_id=2)
+
+        self.assertIsNotNone(contract)
+        self.assertEqual("2", contract.session_id.value)
+        self.assertEqual(
+            ("contracts.py exists", "parser returns CompletionContract"),
+            contract.done_when,
+        )
+        kinds = [check.kind for check in contract.verify.checks]
+        self.assertEqual(["file_exists", "command", "regex_in_file"], kinds)
+        file_check, command_check, regex_check = contract.verify.checks
+        self.assertEqual("module-exists", file_check.name)
+        self.assertEqual("agent_session_loop/contracts.py", file_check.path)
+        self.assertEqual("check-2", command_check.name)
+        self.assertEqual(
+            ("python3", "-m", "unittest", "tests.t"), command_check.argv
+        )
+        self.assertEqual(30.0, command_check.timeout_seconds)
+        self.assertIsNone(command_check.cwd)
+        self.assertEqual("check-3", regex_check.name)
+        self.assertEqual("^def parse_completion_contract", regex_check.pattern)
+
+    def test_parse_completion_contract_requires_done_when_bullets(self) -> None:
+        text = "\n".join(
+            [
+                "## Completion Contract",
+                "",
+                "### Done when",
+                "",
+                "### Verify",
+                "",
+                "```json",
+                '{"checks": [{"type": "file_exists", "path": "a"}]}',
+                "```",
+                "",
+                "## Handoff",
+                "- **Status**: pending",
+            ]
+        )
+
+        with self.assertRaisesRegex(plans.PlanError, "Done when"):
+            contracts.parse_completion_contract(text, session_id="1")
+
+    def test_parse_completion_contract_requires_json_fenced_block(self) -> None:
+        text = "\n".join(
+            [
+                "## Completion Contract",
+                "",
+                "### Done when",
+                "- something",
+                "",
+                "### Verify",
+                "",
+                "We forgot to add a fenced JSON block.",
+                "",
+                "## Handoff",
+                "- **Status**: pending",
+            ]
+        )
+
+        with self.assertRaisesRegex(plans.PlanError, "fenced code block"):
+            contracts.parse_completion_contract(text, session_id="1")
+
+    def test_parse_completion_contract_rejects_non_json_fence_language(self) -> None:
+        text = "\n".join(
+            [
+                "## Completion Contract",
+                "",
+                "### Done when",
+                "- something",
+                "",
+                "### Verify",
+                "",
+                "```yaml",
+                "checks: []",
+                "```",
+                "",
+                "## Handoff",
+                "- **Status**: pending",
+            ]
+        )
+
+        with self.assertRaisesRegex(plans.PlanError, "json"):
+            contracts.parse_completion_contract(text, session_id="1")
+
+    def test_parse_completion_contract_validates_session_id_field(self) -> None:
+        text = "\n".join(
+            [
+                "## Completion Contract",
+                "",
+                "### Done when",
+                "- something",
+                "",
+                "### Verify",
+                "",
+                "```json",
+                "{",
+                '  "session": "3",',
+                '  "checks": [{"type": "file_exists", "path": "a"}]',
+                "}",
+                "```",
+                "",
+                "## Handoff",
+                "- **Status**: pending",
+            ]
+        )
+
+        with self.assertRaisesRegex(plans.PlanError, "expected '2'"):
+            contracts.parse_completion_contract(text, session_id="2")
+
+    def test_parse_completion_contract_requires_non_empty_checks_list(self) -> None:
+        text = "\n".join(
+            [
+                "## Completion Contract",
+                "",
+                "### Done when",
+                "- something",
+                "",
+                "### Verify",
+                "",
+                "```json",
+                '{"checks": []}',
+                "```",
+                "",
+                "## Handoff",
+                "- **Status**: pending",
+            ]
+        )
+
+        with self.assertRaisesRegex(plans.PlanError, "non-empty list"):
+            contracts.parse_completion_contract(text, session_id="1")
+
+    def test_parse_completion_contract_rejects_unknown_check_type(self) -> None:
+        text = "\n".join(
+            [
+                "## Completion Contract",
+                "",
+                "### Done when",
+                "- something",
+                "",
+                "### Verify",
+                "",
+                "```json",
+                '{"checks": [{"type": "shell", "argv": ["echo", "hi"]}]}',
+                "```",
+                "",
+                "## Handoff",
+                "- **Status**: pending",
+            ]
+        )
+
+        with self.assertRaisesRegex(plans.PlanError, "'type' must be one of"):
+            contracts.parse_completion_contract(text, session_id="1")
+
+    def test_parse_completion_contract_validates_command_argv_and_timeout(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "empty argv",
+                '{"checks": [{"type": "command", "argv": []}]}',
+                "non-empty list",
+            ),
+            (
+                "non-string argv element",
+                '{"checks": [{"type": "command", "argv": ["py", 3]}]}',
+                "non-empty string",
+            ),
+            (
+                "zero timeout",
+                '{"checks": [{"type": "command", "argv": ["x"], '
+                '"timeout_seconds": 0}]}',
+                "positive number",
+            ),
+            (
+                "negative timeout",
+                '{"checks": [{"type": "command", "argv": ["x"], '
+                '"timeout_seconds": -1}]}',
+                "positive number",
+            ),
+            (
+                "timeout too large",
+                '{"checks": [{"type": "command", "argv": ["x"], '
+                '"timeout_seconds": 99999}]}',
+                "<=",
+            ),
+            (
+                "non-numeric timeout",
+                '{"checks": [{"type": "command", "argv": ["x"], '
+                '"timeout_seconds": "fast"}]}',
+                "positive number",
+            ),
+            (
+                "boolean timeout",
+                '{"checks": [{"type": "command", "argv": ["x"], '
+                '"timeout_seconds": true}]}',
+                "positive number",
+            ),
+        )
+
+        for label, json_block, pattern in cases:
+            with self.subTest(label=label):
+                text = "\n".join(
+                    [
+                        "## Completion Contract",
+                        "",
+                        "### Done when",
+                        "- something",
+                        "",
+                        "### Verify",
+                        "",
+                        "```json",
+                        json_block,
+                        "```",
+                        "",
+                        "## Handoff",
+                        "- **Status**: pending",
+                    ]
+                )
+                with self.assertRaisesRegex(plans.PlanError, pattern):
+                    contracts.parse_completion_contract(text, session_id="1")
+
+    def test_parse_completion_contract_command_check_defaults_and_cwd(self) -> None:
+        text = "\n".join(
+            [
+                "## Completion Contract",
+                "",
+                "### Done when",
+                "- something",
+                "",
+                "### Verify",
+                "",
+                "```json",
+                "{",
+                '  "checks": [{',
+                '    "type": "command",',
+                '    "argv": ["python3", "-V"],',
+                '    "cwd": "subdir"',
+                "  }]",
+                "}",
+                "```",
+                "",
+                "## Handoff",
+                "- **Status**: pending",
+            ]
+        )
+
+        contract = contracts.parse_completion_contract(text, session_id="1")
+
+        check = contract.verify.checks[0]
+        self.assertEqual(contracts.DEFAULT_COMMAND_TIMEOUT_SECONDS, check.timeout_seconds)
+        self.assertEqual("subdir", check.cwd)
+
+    def test_parse_completion_contract_validates_file_exists_check(self) -> None:
+        cases = (
+            (
+                "missing path",
+                '{"checks": [{"type": "file_exists"}]}',
+                "non-empty string",
+            ),
+            (
+                "non-string path",
+                '{"checks": [{"type": "file_exists", "path": 42}]}',
+                "non-empty string",
+            ),
+            (
+                "empty path",
+                '{"checks": [{"type": "file_exists", "path": ""}]}',
+                "non-empty string",
+            ),
+        )
+
+        for label, json_block, pattern in cases:
+            with self.subTest(label=label):
+                text = "\n".join(
+                    [
+                        "## Completion Contract",
+                        "",
+                        "### Done when",
+                        "- something",
+                        "",
+                        "### Verify",
+                        "",
+                        "```json",
+                        json_block,
+                        "```",
+                        "",
+                        "## Handoff",
+                        "- **Status**: pending",
+                    ]
+                )
+                with self.assertRaisesRegex(plans.PlanError, pattern):
+                    contracts.parse_completion_contract(text, session_id="1")
+
+    def test_parse_completion_contract_validates_regex_in_file_check(self) -> None:
+        cases = (
+            (
+                "missing path",
+                '{"checks": [{"type": "regex_in_file", "pattern": "x"}]}',
+                "'path'",
+            ),
+            (
+                "missing pattern",
+                '{"checks": [{"type": "regex_in_file", "path": "a"}]}',
+                "'pattern'",
+            ),
+            (
+                "invalid regex",
+                '{"checks": [{"type": "regex_in_file", "path": "a", '
+                '"pattern": "("}]}',
+                "not a valid regex",
+            ),
+        )
+
+        for label, json_block, pattern in cases:
+            with self.subTest(label=label):
+                text = "\n".join(
+                    [
+                        "## Completion Contract",
+                        "",
+                        "### Done when",
+                        "- something",
+                        "",
+                        "### Verify",
+                        "",
+                        "```json",
+                        json_block,
+                        "```",
+                        "",
+                        "## Handoff",
+                        "- **Status**: pending",
+                    ]
+                )
+                with self.assertRaisesRegex(plans.PlanError, pattern):
+                    contracts.parse_completion_contract(text, session_id="1")
+
+    def test_parse_completion_contract_rejects_duplicate_check_names(self) -> None:
+        text = "\n".join(
+            [
+                "## Completion Contract",
+                "",
+                "### Done when",
+                "- something",
+                "",
+                "### Verify",
+                "",
+                "```json",
+                "{",
+                '  "checks": [',
+                '    {"name": "same", "type": "file_exists", "path": "a"},',
+                '    {"name": "same", "type": "file_exists", "path": "b"}',
+                "  ]",
+                "}",
+                "```",
+                "",
+                "## Handoff",
+                "- **Status**: pending",
+            ]
+        )
+
+        with self.assertRaisesRegex(plans.PlanError, "duplicated"):
+            contracts.parse_completion_contract(text, session_id="1")
+
+    def test_parse_completion_contract_reports_malformed_json(self) -> None:
+        text = "\n".join(
+            [
+                "## Completion Contract",
+                "",
+                "### Done when",
+                "- something",
+                "",
+                "### Verify",
+                "",
+                "```json",
+                "{not valid json}",
+                "```",
+                "",
+                "## Handoff",
+                "- **Status**: pending",
+            ]
+        )
+
+        with self.assertRaisesRegex(plans.PlanError, "Verify JSON is invalid"):
+            contracts.parse_completion_contract(text, session_id="1")
+
+    def test_parse_completion_contract_ignores_handoff_section_content(self) -> None:
+        text = "\n".join(
+            [
+                "## Completion Contract",
+                "",
+                "### Done when",
+                "- something",
+                "",
+                "### Verify",
+                "",
+                "```json",
+                '{"checks": [{"type": "file_exists", "path": "a"}]}',
+                "```",
+                "",
+                "## Handoff",
+                "",
+                "- **Status**: pending",
+                "- **Notes**: some prose that mentions ### Verify and ### Done when",
+                "",
+            ]
+        )
+
+        contract = contracts.parse_completion_contract(text, session_id="1")
+        self.assertEqual(("something",), contract.done_when)
+        self.assertEqual(1, len(contract.verify.checks))
+
+    def test_read_completion_contract_loads_from_plan_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            contract_block = "\n".join(
+                [
+                    "## Completion Contract",
+                    "",
+                    "### Done when",
+                    "- tests pass",
+                    "",
+                    "### Verify",
+                    "",
+                    "```json",
+                    "{",
+                    '  "checks": [',
+                    '    {"type": "file_exists", "path": "agent_session_loop/contracts.py"}',
+                    "  ]",
+                    "}",
+                    "```",
+                ]
+            )
+            write_plan(
+                plan_dir,
+                ("pending",),
+                contracts_by_id={"1": contract_block},
+            )
+
+            contract = contracts.read_completion_contract(plan_dir, "1")
+
+            self.assertIsNotNone(contract)
+            self.assertEqual("1", contract.session_id.value)
+            self.assertEqual(("tests pass",), contract.done_when)
+            self.assertEqual(1, len(contract.verify.checks))
+
+    def test_read_completion_contract_raises_for_missing_session_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+
+            with self.assertRaisesRegex(plans.PlanError, "missing session file"):
+                contracts.read_completion_contract(plan_dir, "9")
+
     def test_acquire_lock_rejects_active_lock_and_replaces_stale_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
@@ -866,6 +1710,216 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertTrue(payload["state_path"].endswith("/state.json"))
             self.assertTrue(payload["events_path"].endswith("/events.jsonl"))
             self.assertEqual(1, payload["counts"]["pending"])
+
+
+class VerificationExecutorTests(unittest.TestCase):
+    def _session_id(self, value: str = "1") -> plans.SessionId:
+        return plans.parse_session_id(value)
+
+    def _contract(
+        self, checks: tuple[contracts.VerificationCheck, ...]
+    ) -> contracts.CompletionContract:
+        return contracts.CompletionContract(
+            session_id=self._session_id(),
+            done_when=("done",),
+            verify=contracts.VerifyRecipe(checks=checks),
+        )
+
+    def test_command_check_passes_when_argv_exits_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            check = contracts.CommandCheck(
+                name="echo",
+                argv=("python3", "-c", "import sys; sys.exit(0)"),
+                timeout_seconds=10.0,
+            )
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("pass", result.status)
+            self.assertEqual("echo", result.name)
+            self.assertEqual("command", result.kind)
+            self.assertEqual(0, result.returncode)
+            self.assertIsNone(result.failure_reason)
+
+    def test_command_check_fails_on_nonzero_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            check = contracts.CommandCheck(
+                name="exit-1",
+                argv=("python3", "-c", "import sys; sys.exit(7)"),
+                timeout_seconds=10.0,
+            )
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("fail", result.status)
+            self.assertEqual("command-failed", result.failure_reason)
+            self.assertEqual(7, result.returncode)
+            self.assertIn("exited 7", result.detail)
+
+    def test_command_check_fails_on_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            check = contracts.CommandCheck(
+                name="sleeper",
+                argv=("python3", "-c", "import time; time.sleep(5)"),
+                timeout_seconds=0.1,
+            )
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("fail", result.status)
+            self.assertEqual("command-timeout", result.failure_reason)
+            self.assertIsNone(result.returncode)
+            self.assertIn("timed out", result.detail)
+
+    def test_command_check_reports_command_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            check = contracts.CommandCheck(
+                name="missing",
+                argv=("definitely-not-a-real-binary-xyz",),
+                timeout_seconds=5.0,
+            )
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("fail", result.status)
+            self.assertEqual("command-not-found", result.failure_reason)
+            self.assertIn("definitely-not-a-real-binary-xyz", result.detail)
+
+    def test_command_check_resolves_cwd_under_repo_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            sub = repo_root / "nested"
+            sub.mkdir()
+            check = contracts.CommandCheck(
+                name="pwd",
+                argv=(
+                    "python3",
+                    "-c",
+                    "import os, sys; sys.stdout.write(os.getcwd())",
+                ),
+                timeout_seconds=10.0,
+                cwd="nested",
+            )
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("pass", result.status)
+            self.assertEqual(
+                str(plans.canonicalize_path(sub)),
+                str(plans.canonicalize_path(result.stdout)),
+            )
+
+    def test_file_exists_check_passes_when_file_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "target.txt").write_text("data\n", encoding="utf-8")
+            check = contracts.FileExistsCheck(name="target", path="target.txt")
+
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("pass", result.status)
+            self.assertIsNone(result.failure_reason)
+
+    def test_file_exists_check_fails_when_file_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            check = contracts.FileExistsCheck(name="absent", path="nope.txt")
+
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("fail", result.status)
+            self.assertEqual("file-missing", result.failure_reason)
+            self.assertIn("nope.txt", result.detail)
+
+    def test_regex_in_file_check_passes_when_pattern_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "module.py").write_text(
+                "def parse_completion_contract():\n    pass\n",
+                encoding="utf-8",
+            )
+            check = contracts.RegexInFileCheck(
+                name="symbol",
+                path="module.py",
+                pattern=r"^def parse_completion_contract",
+            )
+
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("pass", result.status)
+
+    def test_regex_in_file_check_fails_when_pattern_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "module.py").write_text("nothing\n", encoding="utf-8")
+            check = contracts.RegexInFileCheck(
+                name="symbol",
+                path="module.py",
+                pattern=r"^def parse_completion_contract",
+            )
+
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("fail", result.status)
+            self.assertEqual("regex-not-matched", result.failure_reason)
+            self.assertIn("module.py", result.detail)
+
+    def test_regex_in_file_check_fails_when_file_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            check = contracts.RegexInFileCheck(
+                name="symbol",
+                path="missing.py",
+                pattern=r"anything",
+            )
+
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("fail", result.status)
+            self.assertEqual("file-missing", result.failure_reason)
+
+    def test_run_verification_aggregates_all_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "present.txt").write_text("hi\n", encoding="utf-8")
+            contract = self._contract(
+                checks=(
+                    contracts.FileExistsCheck(name="present", path="present.txt"),
+                    contracts.FileExistsCheck(name="absent", path="absent.txt"),
+                    contracts.CommandCheck(
+                        name="ok",
+                        argv=("python3", "-c", "import sys; sys.exit(0)"),
+                        timeout_seconds=10.0,
+                    ),
+                )
+            )
+
+            result = verification.run_verification(contract, repo_root=repo_root)
+
+            self.assertEqual("1", result.session_id.value)
+            self.assertEqual(3, len(result.checks))
+            self.assertFalse(result.passed)
+            failure_names = {failure.name for failure in result.failures}
+            self.assertEqual({"absent"}, failure_names)
+
+    def test_run_verification_passes_when_all_checks_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "present.txt").write_text("hi\n", encoding="utf-8")
+            contract = self._contract(
+                checks=(
+                    contracts.FileExistsCheck(name="present", path="present.txt"),
+                    contracts.CommandCheck(
+                        name="ok",
+                        argv=("python3", "-c", "import sys; sys.exit(0)"),
+                        timeout_seconds=10.0,
+                    ),
+                )
+            )
+
+            result = verification.run_verification(contract, repo_root=repo_root)
+
+            self.assertTrue(result.passed)
+            self.assertEqual((), result.failures)
 
 
 class TailFollowerTests(unittest.TestCase):
@@ -2071,6 +3125,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             commit_mode=commit_mode,
             model=model,
             effort=effort,
+            allow_not_loop_ready=True,
         )
         env_updates = {
             "XDG_CONFIG_HOME": str(config_home),
@@ -2196,6 +3251,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             "--state-dir",
             str(state_dir),
             "--json",
+            "--allow-not-loop-ready",
         ]
         if timeout is not None:
             command.extend(["--timeout", str(timeout)])
@@ -2383,6 +3439,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     "--state-dir",
                     str(state_dir),
                     "--json",
+                    "--allow-not-loop-ready",
                 ],
                 cwd=caller_dir,
                 env=env,
@@ -2547,6 +3604,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             "codex",
             "--state-dir",
             str(state_dir),
+            "--allow-not-loop-ready",
         ]
         if max_sessions is not None:
             command.extend(["--max-sessions", str(max_sessions)])
@@ -5716,6 +6774,2471 @@ class JsonCliTests(unittest.TestCase):
                 str(plans.canonicalize_path(plan_dir)),
                 payload["details"]["plan_dir"],
             )
+
+
+def _contract_block(check_payload: str, *, session: str = "1") -> str:
+    return "\n".join(
+        [
+            "## Completion Contract",
+            "",
+            "### Done when",
+            "- recipe runs",
+            "",
+            "### Verify",
+            "",
+            "```json",
+            f'{{"session": "{session}", "checks": [{check_payload}]}}',
+            "```",
+        ]
+    )
+
+
+class VerifyCliTests(unittest.TestCase):
+    def _run_verify(
+        self,
+        plan_dir: Path,
+        *,
+        session: str,
+        cwd: Path,
+        json_output: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        argv = [
+            sys.executable,
+            "-m",
+            "agent_session_loop",
+            "verify",
+            str(plan_dir),
+            "--session",
+            session,
+            "--cwd",
+            str(cwd),
+        ]
+        if json_output:
+            argv.append("--json")
+        return subprocess.run(
+            argv,
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_verify_json_passes_when_all_checks_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            (repo_root / "target.txt").write_text("ok\n", encoding="utf-8")
+            contract = _contract_block(
+                '{"type": "file_exists", "path": "target.txt", "name": "target"}'
+            )
+            write_plan(
+                plan_dir, ("pending",), contracts_by_id={"1": contract}
+            )
+
+            completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertEqual("", completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertTrue(payload["passed"])
+            self.assertEqual("verify", payload["command"])
+            self.assertEqual("ok", payload["reason"])
+            self.assertEqual("1", payload["session"])
+            self.assertEqual(
+                str(plans.canonicalize_path(repo_root)), payload["cwd"]
+            )
+            self.assertEqual(str(plan_dir), payload["plan_dir"])
+            self.assertEqual(1, payload["recipe"]["check_count"])
+            self.assertEqual(["file_exists"], payload["recipe"]["kinds"])
+            self.assertEqual(["target"], payload["recipe"]["names"])
+            self.assertEqual(1, len(payload["checks"]))
+            check = payload["checks"][0]
+            self.assertEqual("target", check["name"])
+            self.assertEqual("file_exists", check["kind"])
+            self.assertEqual("pass", check["status"])
+            self.assertIsNone(check["failure_reason"])
+
+    def test_verify_json_failure_reports_check_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            contract = _contract_block(
+                '{"type": "file_exists", "path": "absent.txt", "name": "absent"}'
+            )
+            write_plan(
+                plan_dir, ("pending",), contracts_by_id={"1": contract}
+            )
+
+            completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
+
+            self.assertEqual(1, completed.returncode)
+            self.assertEqual("", completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertFalse(payload["passed"])
+            self.assertFalse(payload["paused"])
+            self.assertEqual("verify-failed", payload["reason"])
+            self.assertEqual("1", payload["session"])
+            self.assertIn("verification check", payload["error"])
+            self.assertEqual(1, len(payload["checks"]))
+            check = payload["checks"][0]
+            self.assertEqual("absent", check["name"])
+            self.assertEqual("fail", check["status"])
+            self.assertEqual("file-missing", check["failure_reason"])
+            self.assertIn("absent.txt", check["detail"])
+
+    def test_verify_json_no_contract_returns_no_contract_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            write_plan(plan_dir, ("pending",))
+
+            completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
+
+            self.assertEqual(1, completed.returncode)
+            self.assertEqual("", completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("no-contract", payload["reason"])
+            self.assertEqual("1", payload["session"])
+            self.assertEqual([], payload["checks"])
+            self.assertEqual(0, payload["recipe"]["check_count"])
+            self.assertFalse(payload["passed"])
+
+    def test_verify_json_malformed_contract_reports_plan_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            contract = "\n".join(
+                [
+                    "## Completion Contract",
+                    "",
+                    "### Done when",
+                    "- something",
+                    "",
+                    "### Verify",
+                    "",
+                    "```json",
+                    "{not valid json",
+                    "```",
+                ]
+            )
+            write_plan(
+                plan_dir, ("pending",), contracts_by_id={"1": contract}
+            )
+
+            completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
+
+            self.assertEqual(1, completed.returncode)
+            self.assertEqual("", completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("malformed-contract", payload["reason"])
+            self.assertEqual("1", payload["session"])
+            self.assertIn("Verify JSON is invalid", payload["error"])
+
+    def test_verify_json_invalid_session_id_reports_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            write_plan(plan_dir, ("pending",))
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_session_loop",
+                    "verify",
+                    str(plan_dir),
+                    "--session",
+                    "not-a-session",
+                    "--cwd",
+                    str(repo_root),
+                    "--json",
+                ],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(1, completed.returncode)
+            self.assertEqual("", completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("invalid-session", payload["reason"])
+            self.assertEqual("not-a-session", payload["session"])
+
+    def test_verify_text_output_shows_per_check_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            (repo_root / "present.txt").write_text("yes\n", encoding="utf-8")
+            contract = _contract_block(
+                '{"type": "file_exists", "path": "present.txt", "name": "present"}'
+            )
+            write_plan(
+                plan_dir, ("pending",), contracts_by_id={"1": contract}
+            )
+
+            completed = self._run_verify(
+                plan_dir, session="1", cwd=repo_root, json_output=False
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertIn("Session: 1", completed.stdout)
+            self.assertIn("[PASS] file_exists present", completed.stdout)
+            self.assertIn("Verify: passed", completed.stdout)
+
+    def test_verify_text_output_reports_failure_on_stderr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            contract = _contract_block(
+                '{"type": "file_exists", "path": "absent.txt", "name": "absent"}'
+            )
+            write_plan(
+                plan_dir, ("pending",), contracts_by_id={"1": contract}
+            )
+
+            completed = self._run_verify(
+                plan_dir, session="1", cwd=repo_root, json_output=False
+            )
+
+            self.assertEqual(1, completed.returncode)
+            self.assertIn("[FAIL] file_exists absent", completed.stdout)
+            self.assertIn("Verify: failed", completed.stderr)
+
+
+def _write_loop_ready_plan(
+    plan_dir: Path,
+    statuses: tuple[str, ...],
+    *,
+    contracts_by_id: dict[str, str] | None = None,
+    state: plans.ReadinessState = "loop-ready",
+) -> plans.ReadinessMetadata:
+    """Write a plan with valid contracts and a synced readiness block."""
+    contract_blocks: dict[str, str] = {}
+    for number in range(1, len(statuses) + 1):
+        key = str(number)
+        contract_blocks[key] = (
+            contracts_by_id or {}
+        ).get(
+            key,
+            _contract_block(
+                '{"type": "file_exists", "path": "README.md", '
+                f'"name": "readme-{number}"}}',
+                session=key,
+            ),
+        )
+    write_plan(plan_dir, statuses, contracts_by_id=contract_blocks)
+    expected = plans.stable_readiness_sha256(plan_dir)
+    metadata = plans.ReadinessMetadata(
+        state=state,
+        readiness_sha256=expected,
+        checked_at="2026-06-19T00:00:00Z",
+    )
+    plans.write_readiness_metadata(plan_dir, metadata)
+    return metadata
+
+
+class PreflightCoreTests(unittest.TestCase):
+    def test_missing_plan_directory_emits_red_plan_structure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "does-not-exist"
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            self.assertFalse(report.ok)
+            self.assertIsNone(report.snapshot)
+            self.assertEqual(1, len(report.findings))
+            finding = report.findings[0]
+            self.assertEqual("red", finding.severity)
+            self.assertEqual("plan-structure", finding.category)
+            self.assertIn("does not exist", finding.message)
+
+    def test_missing_context_or_manifest_emits_red_plan_structure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+            (plan_dir / "context.md").unlink()
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            self.assertFalse(report.ok)
+            categories = {finding.category for finding in report.findings}
+            self.assertIn("plan-structure", categories)
+            structure = [
+                finding
+                for finding in report.findings
+                if finding.category == "plan-structure"
+            ]
+            self.assertTrue(structure)
+            self.assertEqual("red", structure[0].severity)
+            self.assertIn("context.md", structure[0].message)
+
+    def test_non_canonical_session_filenames_emit_red_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            (plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
+            (plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
+            (plan_dir / "session-01.md").write_text(
+                "# Session 01\n\n## Handoff\n\n- **Status**: pending\n",
+                encoding="utf-8",
+            )
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            self.assertFalse(report.ok)
+            canonical_findings = [
+                finding
+                for finding in report.findings
+                if finding.category == "canonical-session-id"
+            ]
+            self.assertEqual(1, len(canonical_findings))
+            finding = canonical_findings[0]
+            self.assertEqual("red", finding.severity)
+            self.assertIn("session-01.md", finding.message)
+            self.assertIn("session-1.md", finding.detail)
+
+    def test_missing_readiness_metadata_emits_red(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            self.assertFalse(report.ok)
+            readiness_findings = [
+                finding
+                for finding in report.findings
+                if finding.category == "manifest-readiness"
+            ]
+            self.assertEqual(1, len(readiness_findings))
+            finding = readiness_findings[0]
+            self.assertEqual("red", finding.severity)
+            self.assertIn("missing readiness", finding.message)
+            self.assertIsNone(report.readiness)
+            self.assertIsNotNone(report.expected_readiness_sha256)
+
+    def test_readiness_sha_mismatch_emits_red(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            _write_loop_ready_plan(plan_dir, ("pending",))
+            stored = plans.parse_readiness_metadata(
+                (plan_dir / "manifest.md").read_text(encoding="utf-8")
+            )
+            assert stored is not None
+            plans.write_readiness_metadata(
+                plan_dir,
+                plans.ReadinessMetadata(
+                    state=stored.state,
+                    readiness_sha256="00" * 32,
+                    checked_at=stored.checked_at,
+                ),
+            )
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            mismatches = [
+                finding
+                for finding in report.findings
+                if finding.category == "manifest-readiness"
+            ]
+            self.assertTrue(mismatches)
+            self.assertEqual("red", mismatches[0].severity)
+            self.assertIn("SHA-256", mismatches[0].message)
+            self.assertIn(report.expected_readiness_sha256, mismatches[0].detail)
+
+    def test_draft_readiness_state_is_yellow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            _write_loop_ready_plan(plan_dir, ("pending",), state="draft")
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            yellow = [
+                finding
+                for finding in report.findings
+                if finding.category == "manifest-readiness"
+            ]
+            self.assertEqual(1, len(yellow))
+            self.assertEqual("yellow", yellow[0].severity)
+            self.assertIn("draft", yellow[0].message)
+            self.assertFalse(report.ok)
+
+    def test_missing_completion_contract_emits_red(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+            plans.write_readiness_metadata(
+                plan_dir,
+                plans.ReadinessMetadata(
+                    state="loop-ready",
+                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    checked_at="2026-06-19T00:00:00Z",
+                ),
+            )
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            missing = [
+                finding
+                for finding in report.findings
+                if finding.category == "missing-contract"
+            ]
+            self.assertEqual(1, len(missing))
+            self.assertEqual("red", missing[0].severity)
+            self.assertEqual("1", missing[0].session_id)
+            self.assertIn("Completion Contract", missing[0].message)
+            self.assertEqual({}, report.contracts_by_session)
+
+    def test_malformed_completion_contract_emits_red(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            broken_contract = "\n".join(
+                [
+                    "## Completion Contract",
+                    "",
+                    "### Done when",
+                    "- something",
+                    "",
+                    "### Verify",
+                    "",
+                    "```json",
+                    "{not valid json",
+                    "```",
+                ]
+            )
+            write_plan(
+                plan_dir, ("pending",), contracts_by_id={"1": broken_contract}
+            )
+            plans.write_readiness_metadata(
+                plan_dir,
+                plans.ReadinessMetadata(
+                    state="loop-ready",
+                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    checked_at="2026-06-19T00:00:00Z",
+                ),
+            )
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            malformed = [
+                finding
+                for finding in report.findings
+                if finding.category == "malformed-contract"
+            ]
+            self.assertEqual(1, len(malformed))
+            self.assertEqual("red", malformed[0].severity)
+            self.assertEqual("1", malformed[0].session_id)
+            self.assertIn("malformed", malformed[0].message)
+
+    def test_valid_loop_ready_plan_is_green(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            _write_loop_ready_plan(plan_dir, ("pending", "pending"))
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            self.assertTrue(
+                report.ok,
+                msg=[
+                    (finding.category, finding.severity, finding.message)
+                    for finding in report.findings
+                ],
+            )
+            self.assertEqual((), report.findings)
+            self.assertIsNotNone(report.snapshot)
+            self.assertIsNotNone(report.readiness)
+            self.assertEqual({"1", "2"}, set(report.contracts_by_session))
+
+    def test_ambiguity_sentinel_emits_yellow_above_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            _write_loop_ready_plan(plan_dir, ("pending",))
+            session_path = plan_dir / "session-1.md"
+            text = session_path.read_text(encoding="utf-8")
+            text = text.replace("Instructions.", "Instructions. TODO finalize.")
+            session_path.write_text(text, encoding="utf-8")
+            plans.write_readiness_metadata(
+                plan_dir,
+                plans.ReadinessMetadata(
+                    state="loop-ready",
+                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    checked_at="2026-06-19T00:00:00Z",
+                ),
+            )
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            sentinels = [
+                finding
+                for finding in report.findings
+                if finding.category == "ambiguity-sentinel"
+            ]
+            self.assertEqual(1, len(sentinels))
+            self.assertEqual("yellow", sentinels[0].severity)
+            self.assertEqual("1", sentinels[0].session_id)
+            self.assertIn("TODO", sentinels[0].message)
+            self.assertIsNotNone(sentinels[0].line)
+            self.assertFalse(report.ok)
+
+    def test_ambiguity_sentinel_ignores_handoff_template_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            _write_loop_ready_plan(plan_dir, ("pending",))
+            session_path = plan_dir / "session-1.md"
+            text = session_path.read_text(encoding="utf-8")
+            session_path.write_text(
+                text + "\n- **Notes**: TODO follow up here\n",
+                encoding="utf-8",
+            )
+            plans.write_readiness_metadata(
+                plan_dir,
+                plans.ReadinessMetadata(
+                    state="loop-ready",
+                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    checked_at="2026-06-19T00:00:00Z",
+                ),
+            )
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            sentinels = [
+                finding
+                for finding in report.findings
+                if finding.category == "ambiguity-sentinel"
+            ]
+            self.assertEqual([], sentinels)
+
+    def test_path_reference_flags_absolute_paths_as_yellow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            contract = _contract_block(
+                '{"type": "file_exists", "path": "/etc/hosts", "name": "abs"}',
+                session="1",
+            )
+            write_plan(
+                plan_dir, ("pending",), contracts_by_id={"1": contract}
+            )
+            plans.write_readiness_metadata(
+                plan_dir,
+                plans.ReadinessMetadata(
+                    state="loop-ready",
+                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    checked_at="2026-06-19T00:00:00Z",
+                ),
+            )
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            path_findings = [
+                finding
+                for finding in report.findings
+                if finding.category == "path-reference"
+            ]
+            self.assertEqual(1, len(path_findings))
+            self.assertEqual("yellow", path_findings[0].severity)
+            self.assertIn("absolute", path_findings[0].message)
+            self.assertEqual("1", path_findings[0].session_id)
+
+    def test_path_reference_flags_parent_traversal_as_yellow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            contract = _contract_block(
+                '{"type": "regex_in_file", "path": "../escape.txt", '
+                '"pattern": "x", "name": "escape"}',
+                session="1",
+            )
+            write_plan(
+                plan_dir, ("pending",), contracts_by_id={"1": contract}
+            )
+            plans.write_readiness_metadata(
+                plan_dir,
+                plans.ReadinessMetadata(
+                    state="loop-ready",
+                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    checked_at="2026-06-19T00:00:00Z",
+                ),
+            )
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            path_findings = [
+                finding
+                for finding in report.findings
+                if finding.category == "path-reference"
+            ]
+            self.assertEqual(1, len(path_findings))
+            self.assertEqual("yellow", path_findings[0].severity)
+            self.assertIn("escapes", path_findings[0].message)
+
+    def test_report_ok_only_when_no_red_or_yellow_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            _write_loop_ready_plan(plan_dir, ("pending",))
+
+            ok_report = preflight.run_core_preflight(plan_dir)
+            self.assertTrue(ok_report.ok)
+
+            session_path = plan_dir / "session-1.md"
+            session_path.write_text(
+                session_path.read_text(encoding="utf-8").replace(
+                    "Instructions.", "Instructions. FIXME me later."
+                ),
+                encoding="utf-8",
+            )
+            plans.write_readiness_metadata(
+                plan_dir,
+                plans.ReadinessMetadata(
+                    state="loop-ready",
+                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    checked_at="2026-06-19T00:00:00Z",
+                ),
+            )
+
+            yellow_report = preflight.run_core_preflight(plan_dir)
+            self.assertFalse(yellow_report.ok)
+            self.assertEqual((), yellow_report.red_findings)
+            self.assertEqual(1, len(yellow_report.yellow_findings))
+
+
+_FIX_CATEGORIES = {
+    "plan-recreate",
+    "filename-rename",
+    "manifest-update",
+    "plan-edit",
+    "invocation-fix",
+    "env-install",
+    "env-state",
+    "session-recipe-edit",
+    "informational",
+}
+
+
+class PreflightRepairHintTests(unittest.TestCase):
+    def test_every_preflight_category_has_a_default_hint(self) -> None:
+        for category in preflight.PREFLIGHT_CATEGORIES:
+            with self.subTest(category=category):
+                hint = preflight.REPAIR_HINTS[category]
+                self.assertEqual(category, hint.category)
+                self.assertTrue(hint.check_id)
+                self.assertTrue(hint.message)
+                self.assertTrue(hint.question_template)
+                self.assertIn(hint.fix_category, _FIX_CATEGORIES)
+
+    def test_all_repair_hint_check_ids_are_unique(self) -> None:
+        check_ids: list[str] = []
+        for hint in preflight.REPAIR_HINTS.values():
+            check_ids.append(hint.check_id)
+        for hint in preflight._CATEGORY_HINT_OVERRIDES.values():
+            check_ids.append(hint.check_id)
+        for hint in preflight.RUNTIME_REPAIR_HINTS.values():
+            check_ids.append(hint.check_id)
+        self.assertEqual(
+            len(check_ids),
+            len(set(check_ids)),
+            msg=f"duplicate check_ids in repair-hint tables: {check_ids}",
+        )
+
+    def test_missing_contract_finding_resolves_to_add_hint(self) -> None:
+        finding = preflight.PreflightFinding(
+            severity="red",
+            category="missing-contract",
+            message="session 1 is missing a ## Completion Contract section",
+            session_id="1",
+            path="session-1.md",
+        )
+        hint = preflight.repair_hint_for_finding(finding)
+        self.assertEqual("missing-contract.add", hint.check_id)
+        self.assertEqual("missing-contract", hint.category)
+        self.assertEqual("plan-edit", hint.fix_category)
+
+    def test_manifest_readiness_missing_resolves_to_override(self) -> None:
+        finding = preflight.PreflightFinding(
+            severity="red",
+            category="manifest-readiness",
+            message="manifest is missing readiness metadata",
+            path="manifest.md",
+        )
+        hint = preflight.repair_hint_for_finding(finding)
+        self.assertEqual("manifest-readiness.missing", hint.check_id)
+        self.assertEqual("manifest-update", hint.fix_category)
+
+    def test_manifest_readiness_sha_mismatch_resolves_to_override(self) -> None:
+        finding = preflight.PreflightFinding(
+            severity="red",
+            category="manifest-readiness",
+            message="manifest readiness SHA-256 does not match current plan content",
+            path="manifest.md",
+            detail="recorded 00; expected aa",
+        )
+        hint = preflight.repair_hint_for_finding(finding)
+        self.assertEqual("manifest-readiness.sha-mismatch", hint.check_id)
+
+    def test_manifest_readiness_state_resolves_to_override(self) -> None:
+        finding = preflight.PreflightFinding(
+            severity="yellow",
+            category="manifest-readiness",
+            message="plan readiness state is 'draft'",
+            path="manifest.md",
+        )
+        hint = preflight.repair_hint_for_finding(finding)
+        self.assertEqual(
+            "manifest-readiness.state-not-loop-ready", hint.check_id
+        )
+        self.assertEqual("yellow", hint.severity_hint)
+
+    def test_env_git_outside_worktree_resolves_to_override(self) -> None:
+        finding = preflight.PreflightFinding(
+            severity="red",
+            category="env-git",
+            message="cwd is not inside a git repository: /tmp/x",
+            path="/tmp/x",
+        )
+        hint = preflight.repair_hint_for_finding(finding)
+        self.assertEqual("env-git.outside-worktree", hint.check_id)
+        self.assertEqual("invocation-fix", hint.fix_category)
+
+    def test_env_git_dirty_worktree_resolves_to_override(self) -> None:
+        finding = preflight.PreflightFinding(
+            severity="yellow",
+            category="env-git",
+            message="git worktree is dirty; commit-mode runs require a clean tree",
+            path="/tmp/repo",
+            detail="commit-mode: per-session",
+        )
+        hint = preflight.repair_hint_for_finding(finding)
+        self.assertEqual("env-git.dirty-worktree", hint.check_id)
+        self.assertEqual("env-state", hint.fix_category)
+
+    def test_env_lock_stale_resolves_to_override(self) -> None:
+        finding = preflight.PreflightFinding(
+            severity="yellow",
+            category="env-lock",
+            message="stale lock present at /tmp/lock",
+            path="/tmp/lock",
+        )
+        hint = preflight.repair_hint_for_finding(finding)
+        self.assertEqual("env-lock.stale", hint.check_id)
+
+    def test_env_lock_active_resolves_to_override(self) -> None:
+        finding = preflight.PreflightFinding(
+            severity="red",
+            category="env-lock",
+            message="active lock held by pid 1234 at /tmp/lock",
+            path="/tmp/lock",
+        )
+        hint = preflight.repair_hint_for_finding(finding)
+        self.assertEqual("env-lock.active", hint.check_id)
+
+    def test_env_amx_green_finding_resolves_to_optional(self) -> None:
+        finding = preflight.PreflightFinding(
+            severity="green",
+            category="env-amx",
+            message="amx hook indicator not on PATH",
+        )
+        hint = preflight.repair_hint_for_finding(finding)
+        self.assertEqual("env-amx.optional", hint.check_id)
+        self.assertEqual("informational", hint.fix_category)
+
+    def test_env_turn_budget_yellow_resolves_to_split(self) -> None:
+        finding = preflight.PreflightFinding(
+            severity="yellow",
+            category="env-turn-budget",
+            message="30 pending sessions exceeds yellow threshold 25",
+        )
+        hint = preflight.repair_hint_for_finding(finding)
+        self.assertEqual("env-turn-budget.split", hint.check_id)
+        self.assertEqual("plan-edit", hint.fix_category)
+
+    def test_env_turn_budget_green_resolves_to_healthy(self) -> None:
+        finding = preflight.PreflightFinding(
+            severity="green",
+            category="env-turn-budget",
+            message="5 session(s) pending; rough turn budget ~15 turns",
+        )
+        hint = preflight.repair_hint_for_finding(finding)
+        self.assertEqual("env-turn-budget.healthy", hint.check_id)
+        self.assertEqual("informational", hint.fix_category)
+
+    def test_report_repair_hints_align_with_findings_one_to_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            _write_loop_ready_plan(plan_dir, ("pending",), state="draft")
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            self.assertEqual(len(report.findings), len(report.repair_hints))
+            for finding, hint in zip(report.findings, report.repair_hints):
+                self.assertEqual(finding.category, hint.category)
+
+    def test_runtime_no_contract_resolves(self) -> None:
+        hint = preflight.runtime_repair_hint("no-contract")
+        self.assertIsNotNone(hint)
+        assert hint is not None
+        self.assertEqual("runtime.no-contract", hint.check_id)
+        self.assertEqual("plan-edit", hint.fix_category)
+
+    def test_runtime_malformed_contract_resolves(self) -> None:
+        hint = preflight.runtime_repair_hint("malformed-contract")
+        self.assertIsNotNone(hint)
+        assert hint is not None
+        self.assertEqual("runtime.malformed-contract", hint.check_id)
+
+    def test_runtime_verify_failed_without_failure_reason_returns_none(
+        self,
+    ) -> None:
+        self.assertIsNone(preflight.runtime_repair_hint("verify-failed"))
+
+    def test_runtime_verify_failed_command_not_found_resolves(self) -> None:
+        hint = preflight.runtime_repair_hint(
+            "verify-failed", failure_reason="command-not-found"
+        )
+        self.assertIsNotNone(hint)
+        assert hint is not None
+        self.assertEqual(
+            "runtime.verify-failed.command-not-found", hint.check_id
+        )
+        self.assertEqual("env-install", hint.fix_category)
+
+    def test_runtime_verify_failed_every_failure_reason_resolves(self) -> None:
+        # Every failure_reason emitted by verification.py must resolve so the
+        # guided skill can surface a fix for any per-check failure.
+        for failure_reason in (
+            "command-failed",
+            "command-timeout",
+            "command-not-found",
+            "command-error",
+            "file-missing",
+            "file-error",
+            "regex-not-matched",
+        ):
+            with self.subTest(failure_reason=failure_reason):
+                hint = preflight.runtime_repair_hint(
+                    "verify-failed", failure_reason=failure_reason
+                )
+                self.assertIsNotNone(hint)
+                assert hint is not None
+                self.assertEqual(
+                    f"runtime.verify-failed.{failure_reason}", hint.check_id
+                )
+                self.assertEqual("verify-failed", hint.category)
+
+    def test_unknown_runtime_reason_returns_none(self) -> None:
+        self.assertIsNone(preflight.runtime_repair_hint("nonexistent"))
+
+
+class PreflightEnvironmentTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._tmp.name)
+        self.xdg_config = self.tmp_path / "xdg-config"
+        self.xdg_state = self.tmp_path / "xdg-state"
+        self.path_dir = self.tmp_path / "path"
+        self.xdg_config.mkdir()
+        self.xdg_state.mkdir()
+        self.path_dir.mkdir()
+        self._env_ctx = patched_env(
+            XDG_CONFIG_HOME=str(self.xdg_config),
+            XDG_STATE_HOME=str(self.xdg_state),
+        )
+        self._env_ctx.__enter__()
+        self.plan_dir = self.tmp_path / "plan"
+        _write_loop_ready_plan(self.plan_dir, ("pending",))
+
+    def tearDown(self) -> None:
+        self._env_ctx.__exit__(None, None, None)
+        self._tmp.cleanup()
+
+    def _drop_executable(self, directory: Path, name: str) -> Path:
+        target = directory / name
+        target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        target.chmod(0o755)
+        return target
+
+    def _path_with(self, *names: str, base: Path | None = None) -> str:
+        base = base or self.path_dir
+        for name in names:
+            self._drop_executable(base, name)
+        return str(base)
+
+    def test_env_repo_root_missing_emits_red(self) -> None:
+        missing = self.tmp_path / "absent"
+        report = preflight.run_environment_preflight(self.plan_dir, cwd=missing)
+        repo_findings = [f for f in report.findings if f.category == "env-repo-root"]
+        self.assertEqual(1, len(repo_findings))
+        self.assertEqual("red", repo_findings[0].severity)
+        self.assertIn("does not exist", repo_findings[0].message)
+        self.assertFalse(report.ok)
+
+    def test_env_repo_root_not_directory_emits_red(self) -> None:
+        file_cwd = self.tmp_path / "file.txt"
+        file_cwd.write_text("nope", encoding="utf-8")
+        report = preflight.run_environment_preflight(self.plan_dir, cwd=file_cwd)
+        repo_findings = [f for f in report.findings if f.category == "env-repo-root"]
+        self.assertEqual(1, len(repo_findings))
+        self.assertEqual("red", repo_findings[0].severity)
+        self.assertIn("not a directory", repo_findings[0].message)
+
+    def test_env_git_outside_repo_emits_red(self) -> None:
+        cwd = self.tmp_path / "non-git"
+        cwd.mkdir()
+        report = preflight.run_environment_preflight(self.plan_dir, cwd=cwd)
+        git_findings = [f for f in report.findings if f.category == "env-git"]
+        self.assertEqual(1, len(git_findings))
+        self.assertEqual("red", git_findings[0].severity)
+        self.assertIn("not inside a git repository", git_findings[0].message)
+
+    def test_env_git_inside_repo_is_silent_without_commit_mode(self) -> None:
+        repo_dir = self.tmp_path / "repo"
+        init_git_repo(repo_dir)
+        report = preflight.run_environment_preflight(self.plan_dir, cwd=repo_dir)
+        git_findings = [f for f in report.findings if f.category == "env-git"]
+        self.assertEqual([], git_findings)
+
+    def test_env_git_dirty_with_commit_mode_emits_yellow(self) -> None:
+        repo_dir = self.tmp_path / "repo"
+        init_git_repo(repo_dir)
+        (repo_dir / "dirty.txt").write_text("uncommitted\n", encoding="utf-8")
+        report = preflight.run_environment_preflight(
+            self.plan_dir, cwd=repo_dir, commit_mode="per-session"
+        )
+        git_findings = [f for f in report.findings if f.category == "env-git"]
+        self.assertEqual(1, len(git_findings))
+        self.assertEqual("yellow", git_findings[0].severity)
+        self.assertIn("dirty", git_findings[0].message)
+        self.assertIn("per-session", git_findings[0].detail)
+
+    def test_env_git_clean_with_commit_mode_is_silent(self) -> None:
+        repo_dir = self.tmp_path / "repo"
+        init_git_repo(repo_dir)
+        report = preflight.run_environment_preflight(
+            self.plan_dir, cwd=repo_dir, commit_mode="end"
+        )
+        git_findings = [f for f in report.findings if f.category == "env-git"]
+        self.assertEqual([], git_findings)
+
+    def test_env_harness_unsupported_name_emits_red(self) -> None:
+        report = preflight.run_environment_preflight(self.plan_dir, harness="bogus")
+        harness_findings = [f for f in report.findings if f.category == "env-harness"]
+        self.assertEqual(1, len(harness_findings))
+        self.assertEqual("red", harness_findings[0].severity)
+        self.assertIn("unsupported harness", harness_findings[0].message)
+
+    def test_env_harness_missing_executable_emits_red(self) -> None:
+        empty_path = self.tmp_path / "empty-path"
+        empty_path.mkdir()
+        with patched_env(PATH=str(empty_path)):
+            report = preflight.run_environment_preflight(
+                self.plan_dir, harness="codex"
+            )
+        harness_findings = [f for f in report.findings if f.category == "env-harness"]
+        self.assertEqual(1, len(harness_findings))
+        self.assertEqual("red", harness_findings[0].severity)
+        self.assertIn("not found on PATH", harness_findings[0].message)
+
+    def test_env_harness_present_executable_is_silent(self) -> None:
+        path_str = self._path_with("codex")
+        with patched_env(PATH=path_str):
+            report = preflight.run_environment_preflight(
+                self.plan_dir, harness="codex"
+            )
+        harness_findings = [f for f in report.findings if f.category == "env-harness"]
+        self.assertEqual([], harness_findings)
+
+    def test_env_spec_missing_emits_red(self) -> None:
+        empty_path = self.tmp_path / "empty-path"
+        empty_path.mkdir()
+        with patched_env(PATH=str(empty_path)):
+            report = preflight.run_environment_preflight(
+                self.plan_dir, commit_mode="per-session"
+            )
+        spec_findings = [f for f in report.findings if f.category == "env-spec"]
+        self.assertEqual(1, len(spec_findings))
+        self.assertEqual("red", spec_findings[0].severity)
+        self.assertIn("spec executable not found", spec_findings[0].message)
+
+    def test_env_spec_present_is_silent(self) -> None:
+        path_str = self._path_with("spec")
+        with patched_env(PATH=path_str):
+            report = preflight.run_environment_preflight(
+                self.plan_dir, commit_mode="end"
+            )
+        spec_findings = [f for f in report.findings if f.category == "env-spec"]
+        self.assertEqual([], spec_findings)
+
+    def test_env_lock_absent_emits_no_finding(self) -> None:
+        report = preflight.run_environment_preflight(
+            self.plan_dir, state_dir=self.xdg_state
+        )
+        lock_findings = [f for f in report.findings if f.category == "env-lock"]
+        self.assertEqual([], lock_findings)
+
+    def test_env_lock_stale_emits_yellow(self) -> None:
+        plan_state = state.plan_state_dir(self.plan_dir, self.xdg_state)
+        plan_state.mkdir(parents=True, exist_ok=True)
+        lock_path = state.lock_path_for_plan(self.plan_dir, self.xdg_state)
+        canonical_plan = plans.canonicalize_path(self.plan_dir)
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "pid": 0,
+                    "plan_dir": str(canonical_plan),
+                    "created_at": "2026-06-19T00:00:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+        report = preflight.run_environment_preflight(
+            self.plan_dir, state_dir=self.xdg_state
+        )
+        lock_findings = [f for f in report.findings if f.category == "env-lock"]
+        self.assertEqual(1, len(lock_findings))
+        self.assertEqual("yellow", lock_findings[0].severity)
+        self.assertIn("stale lock", lock_findings[0].message)
+
+    def test_env_lock_active_emits_red(self) -> None:
+        lock_info = state.acquire_lock(self.plan_dir, self.xdg_state)
+        try:
+            report = preflight.run_environment_preflight(
+                self.plan_dir, state_dir=self.xdg_state
+            )
+        finally:
+            state.release_lock(self.plan_dir, self.xdg_state)
+        lock_findings = [f for f in report.findings if f.category == "env-lock"]
+        self.assertEqual(1, len(lock_findings))
+        self.assertEqual("red", lock_findings[0].severity)
+        self.assertIn(str(lock_info.pid), lock_findings[0].message)
+
+    def test_env_amx_present_emits_green(self) -> None:
+        path_str = self._path_with("amx")
+        with patched_env(PATH=path_str):
+            report = preflight.run_environment_preflight(
+                self.plan_dir, state_dir=self.xdg_state
+            )
+        amx_findings = [f for f in report.findings if f.category == "env-amx"]
+        self.assertEqual(1, len(amx_findings))
+        self.assertEqual("green", amx_findings[0].severity)
+        self.assertIn("available", amx_findings[0].message)
+
+    def test_env_amx_absent_emits_green(self) -> None:
+        empty_path = self.tmp_path / "empty-path"
+        empty_path.mkdir()
+        with patched_env(PATH=str(empty_path)):
+            report = preflight.run_environment_preflight(
+                self.plan_dir, state_dir=self.xdg_state
+            )
+        amx_findings = [f for f in report.findings if f.category == "env-amx"]
+        self.assertEqual(1, len(amx_findings))
+        self.assertEqual("green", amx_findings[0].severity)
+        self.assertIn("not on PATH", amx_findings[0].message)
+
+    def test_env_turn_budget_green_with_pending_count(self) -> None:
+        report = preflight.run_environment_preflight(
+            self.plan_dir, state_dir=self.xdg_state
+        )
+        budget_findings = [
+            f for f in report.findings if f.category == "env-turn-budget"
+        ]
+        self.assertEqual(1, len(budget_findings))
+        self.assertEqual("green", budget_findings[0].severity)
+        self.assertIn("1 session(s) pending", budget_findings[0].message)
+
+    def test_env_turn_budget_yellow_above_threshold(self) -> None:
+        many_plan = self.tmp_path / "many-plan"
+        _write_loop_ready_plan(
+            many_plan,
+            tuple(["pending"] * preflight.TURN_BUDGET_YELLOW_THRESHOLD),
+        )
+        report = preflight.run_environment_preflight(
+            many_plan, state_dir=self.xdg_state
+        )
+        budget_findings = [
+            f for f in report.findings if f.category == "env-turn-budget"
+        ]
+        self.assertEqual(1, len(budget_findings))
+        self.assertEqual("yellow", budget_findings[0].severity)
+        self.assertIn("exceeds", budget_findings[0].message)
+
+    def test_env_turn_budget_complete_plan_is_green(self) -> None:
+        complete_plan = self.tmp_path / "complete-plan"
+        _write_loop_ready_plan(complete_plan, ("complete", "complete"))
+        report = preflight.run_environment_preflight(
+            complete_plan, state_dir=self.xdg_state
+        )
+        budget_findings = [
+            f for f in report.findings if f.category == "env-turn-budget"
+        ]
+        self.assertEqual(1, len(budget_findings))
+        self.assertEqual("green", budget_findings[0].severity)
+        self.assertIn("all sessions complete", budget_findings[0].message)
+
+    def test_run_environment_preflight_emits_no_core_findings(self) -> None:
+        # Break readiness so core would emit a red. Environment-only must skip it.
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256="00" * 32,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        report = preflight.run_environment_preflight(
+            self.plan_dir, state_dir=self.xdg_state
+        )
+        categories = {f.category for f in report.findings}
+        self.assertNotIn("manifest-readiness", categories)
+        self.assertNotIn("plan-structure", categories)
+
+    def test_run_preflight_composes_core_and_env(self) -> None:
+        repo_dir = self.tmp_path / "repo"
+        init_git_repo(repo_dir)
+        # Prepend the controlled dir to system PATH so git remains discoverable
+        # while the fake codex/spec/amx executables take precedence.
+        for name in ("codex", "spec", "amx"):
+            self._drop_executable(self.path_dir, name)
+        path_str = os.pathsep.join([str(self.path_dir), os.environ.get("PATH", "")])
+        with patched_env(PATH=path_str):
+            report = preflight.run_preflight(
+                self.plan_dir,
+                cwd=repo_dir,
+                harness="codex",
+                commit_mode="per-session",
+                state_dir=self.xdg_state,
+            )
+        # Core fields surface.
+        self.assertIsNotNone(report.snapshot)
+        self.assertIsNotNone(report.readiness)
+        self.assertEqual({"1"}, set(report.contracts_by_session))
+        # Env findings are present (env-amx + env-turn-budget at minimum, both green).
+        categories = {f.category for f in report.findings}
+        self.assertIn("env-amx", categories)
+        self.assertIn("env-turn-budget", categories)
+        # No red/yellow → ok.
+        self.assertTrue(
+            report.ok,
+            msg=[(f.category, f.severity, f.message) for f in report.findings],
+        )
+
+
+class PreflightCliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._tmp.name)
+        self.xdg_config = self.tmp_path / "xdg-config"
+        self.xdg_state = self.tmp_path / "xdg-state"
+        self.path_dir = self.tmp_path / "path"
+        self.xdg_config.mkdir()
+        self.xdg_state.mkdir()
+        self.path_dir.mkdir()
+        self.plan_dir = self.tmp_path / "plan"
+        self.repo_root = self.tmp_path / "repo"
+        init_git_repo(self.repo_root)
+        _write_loop_ready_plan(
+            self.plan_dir,
+            ("pending",),
+            contracts_by_id={
+                "1": _contract_block(
+                    '{"type": "file_exists", "path": "README.md", '
+                    '"name": "readme-1"}',
+                    session="1",
+                ),
+            },
+        )
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _path_value(self, *names: str) -> str:
+        for name in names:
+            target = self.path_dir / name
+            target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            target.chmod(0o755)
+        return os.pathsep.join([str(self.path_dir), os.environ.get("PATH", "")])
+
+    def _run_preflight(
+        self,
+        *,
+        json_output: bool = True,
+        cwd: Path | None = None,
+        harness: str | None = None,
+        commit_mode: str | None = None,
+        mark_loop_ready: bool = False,
+        path_value: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        argv = [
+            sys.executable,
+            "-m",
+            "agent_session_loop",
+            "preflight",
+            str(self.plan_dir),
+            "--state-dir",
+            str(self.xdg_state),
+        ]
+        if cwd is not None:
+            argv.extend(["--cwd", str(cwd)])
+        if harness is not None:
+            argv.extend(["--harness", harness])
+        if commit_mode == "per-session":
+            argv.append("--commit-per-session")
+        elif commit_mode == "end":
+            argv.append("--commit-at-end")
+        if json_output:
+            argv.append("--json")
+        if mark_loop_ready:
+            argv.append("--mark-loop-ready")
+        env = os.environ.copy()
+        env["XDG_CONFIG_HOME"] = str(self.xdg_config)
+        env["XDG_STATE_HOME"] = str(self.xdg_state)
+        if path_value is not None:
+            env["PATH"] = path_value
+        return subprocess.run(
+            argv,
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env,
+        )
+
+    def test_preflight_json_ok_when_ready_plan(self) -> None:
+        path_value = self._path_value("codex", "spec", "amx")
+        completed = self._run_preflight(
+            cwd=self.repo_root,
+            harness="codex",
+            commit_mode="per-session",
+            path_value=path_value,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual("", completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("preflight", payload["command"])
+        self.assertEqual("ok", payload["reason"])
+        self.assertEqual(str(self.plan_dir), payload["plan_dir"])
+        self.assertEqual(str(self.repo_root), payload["cwd"])
+        self.assertEqual("codex", payload["harness"])
+        self.assertEqual("per-session", payload["commit_mode"])
+        self.assertFalse(payload["mark_loop_ready_requested"])
+        self.assertFalse(payload["marked_loop_ready"])
+        # No red/yellow findings present.
+        counts = payload["findings_by_severity"]
+        self.assertEqual(0, counts["red"])
+        self.assertEqual(0, counts["yellow"])
+        # All green findings still surface (env-amx and env-turn-budget at minimum).
+        categories = {finding["category"] for finding in payload["findings"]}
+        self.assertIn("env-amx", categories)
+        self.assertIn("env-turn-budget", categories)
+        # Readiness and expected sha-256 surface as serializable values.
+        self.assertEqual("loop-ready", payload["readiness"]["state"])
+        self.assertEqual(
+            payload["readiness"]["readiness_sha256"],
+            payload["expected_readiness_sha256"],
+        )
+
+    def test_preflight_json_red_when_readiness_breaks(self) -> None:
+        # Break readiness sha to produce a red manifest-readiness finding.
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256="00" * 32,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        completed = self._run_preflight()
+        self.assertEqual(1, completed.returncode)
+        self.assertEqual("", completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("preflight-red", payload["reason"])
+        self.assertFalse(payload["paused"])
+        categories = {finding["category"] for finding in payload["findings"]}
+        self.assertIn("manifest-readiness", categories)
+        # findings keep the dataclass shape exactly.
+        sample = payload["findings"][0]
+        for key in (
+            "severity",
+            "category",
+            "message",
+            "session_id",
+            "path",
+            "line",
+            "detail",
+        ):
+            self.assertIn(key, sample)
+
+    def test_preflight_json_yellow_when_ambiguity_only(self) -> None:
+        # Inject a yellow ambiguity sentinel into session-1.md instructions.
+        session_path = self.plan_dir / "session-1.md"
+        text = session_path.read_text(encoding="utf-8")
+        text = text.replace("Instructions.", "Instructions. TODO: revisit later")
+        session_path.write_text(text, encoding="utf-8")
+        # Recompute readiness so manifest-readiness stays green.
+        expected = plans.stable_readiness_sha256(self.plan_dir)
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=expected,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        completed = self._run_preflight()
+        self.assertEqual(1, completed.returncode)
+        payload = json.loads(completed.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("preflight-yellow", payload["reason"])
+        categories_by_severity = {
+            (finding["severity"], finding["category"])
+            for finding in payload["findings"]
+        }
+        self.assertIn(("yellow", "ambiguity-sentinel"), categories_by_severity)
+
+    def test_preflight_mark_loop_ready_writes_manifest(self) -> None:
+        # The fixture is already loop-ready; --mark-loop-ready refreshes the
+        # checked_at timestamp once preflight succeeds.
+        original_sha = plans.stable_readiness_sha256(self.plan_dir)
+        original = plans.read_readiness_metadata(self.plan_dir)
+        self.assertIsNotNone(original)
+        self.assertEqual("loop-ready", original.state)
+        self.assertEqual(original_sha, original.readiness_sha256)
+        path_value = self._path_value("codex", "spec", "amx")
+        completed = self._run_preflight(
+            cwd=self.repo_root,
+            harness="codex",
+            commit_mode="per-session",
+            mark_loop_ready=True,
+            path_value=path_value,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("loop-ready-marked", payload["reason"])
+        self.assertTrue(payload["mark_loop_ready_requested"])
+        self.assertTrue(payload["marked_loop_ready"])
+        refreshed = plans.read_readiness_metadata(self.plan_dir)
+        self.assertIsNotNone(refreshed)
+        self.assertEqual("loop-ready", refreshed.state)
+        self.assertEqual(original_sha, refreshed.readiness_sha256)
+        self.assertNotEqual(original.checked_at, refreshed.checked_at)
+
+    def test_preflight_mark_loop_ready_promotes_draft_or_reviewed(self) -> None:
+        for readiness_state in ("draft", "reviewed"):
+            with self.subTest(readiness_state=readiness_state):
+                _write_loop_ready_plan(
+                    self.plan_dir,
+                    ("pending",),
+                    contracts_by_id={
+                        "1": _contract_block(
+                            '{"type": "file_exists", "path": "README.md", '
+                            '"name": "readme-1"}',
+                            session="1",
+                        ),
+                    },
+                    state=readiness_state,
+                )
+
+                completed = self._run_preflight(mark_loop_ready=True)
+
+                self.assertEqual(0, completed.returncode, completed.stderr)
+                payload = json.loads(completed.stdout)
+                self.assertTrue(payload["ok"])
+                self.assertEqual("loop-ready-marked", payload["reason"])
+                self.assertTrue(payload["marked_loop_ready"])
+                self.assertEqual("loop-ready", payload["readiness"]["state"])
+                self.assertEqual(0, payload["findings_by_severity"]["red"])
+                self.assertEqual(0, payload["findings_by_severity"]["yellow"])
+                metadata = plans.read_readiness_metadata(self.plan_dir)
+                self.assertIsNotNone(metadata)
+                self.assertEqual("loop-ready", metadata.state)
+
+    def test_preflight_mark_loop_ready_repairs_missing_readiness(self) -> None:
+        write_plan(
+            self.plan_dir,
+            ("pending",),
+            contracts_by_id={
+                "1": _contract_block(
+                    '{"type": "file_exists", "path": "README.md", '
+                    '"name": "readme-1"}',
+                    session="1",
+                )
+            },
+        )
+
+        completed = self._run_preflight(mark_loop_ready=True)
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("loop-ready-marked", payload["reason"])
+        self.assertTrue(payload["marked_loop_ready"])
+        self.assertEqual("loop-ready", payload["readiness"]["state"])
+        metadata = plans.read_readiness_metadata(self.plan_dir)
+        self.assertIsNotNone(metadata)
+        self.assertEqual("loop-ready", metadata.state)
+        self.assertEqual(
+            plans.stable_readiness_sha256(self.plan_dir),
+            metadata.readiness_sha256,
+        )
+
+    def test_preflight_mark_loop_ready_repairs_stale_readiness_sha(self) -> None:
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256="00" * 32,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+
+        completed = self._run_preflight(mark_loop_ready=True)
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("loop-ready-marked", payload["reason"])
+        self.assertTrue(payload["marked_loop_ready"])
+        self.assertEqual("loop-ready", payload["readiness"]["state"])
+        self.assertEqual(
+            payload["expected_readiness_sha256"],
+            payload["readiness"]["readiness_sha256"],
+        )
+
+    def test_preflight_mark_loop_ready_refused_when_non_readiness_not_ok(
+        self,
+    ) -> None:
+        session_path = self.plan_dir / "session-1.md"
+        text = session_path.read_text(encoding="utf-8")
+        session_path.write_text(
+            text.replace("Instructions.", "Instructions. TODO: revisit later"),
+            encoding="utf-8",
+        )
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="draft",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+
+        completed = self._run_preflight(mark_loop_ready=True)
+
+        self.assertEqual(1, completed.returncode)
+        payload = json.loads(completed.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("preflight-yellow", payload["reason"])
+        self.assertTrue(payload["mark_loop_ready_requested"])
+        self.assertFalse(payload["marked_loop_ready"])
+        self.assertIn("non-readiness", payload["mark_error"])
+        readiness = plans.read_readiness_metadata(self.plan_dir)
+        self.assertIsNotNone(readiness)
+        self.assertEqual("draft", readiness.state)
+
+    def test_preflight_text_output_lists_findings(self) -> None:
+        path_value = self._path_value("codex", "spec", "amx")
+        completed = self._run_preflight(
+            json_output=False,
+            cwd=self.repo_root,
+            harness="codex",
+            commit_mode="per-session",
+            path_value=path_value,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn(f"Plan: {self.plan_dir}", completed.stdout)
+        self.assertIn("Sessions: 1", completed.stdout)
+        self.assertIn("Harness: codex", completed.stdout)
+        self.assertIn("Commit mode: per-session", completed.stdout)
+        self.assertIn("Preflight: ok", completed.stdout)
+        self.assertIn("[GREEN] env-amx", completed.stdout)
+        self.assertIn("[GREEN] env-turn-budget", completed.stdout)
+
+    def test_preflight_text_output_failure_routes_summary_to_stderr(self) -> None:
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256="00" * 32,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        completed = self._run_preflight(json_output=False)
+        self.assertEqual(1, completed.returncode)
+        self.assertIn("[RED] manifest-readiness", completed.stdout)
+        self.assertIn("Preflight: failed", completed.stderr)
+
+    def test_preflight_json_includes_repair_hints_aligned_with_findings(
+        self,
+    ) -> None:
+        # Break readiness to force a red manifest-readiness finding so we have
+        # at least one finding to align a repair hint with.
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256="00" * 32,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        completed = self._run_preflight()
+        self.assertEqual(1, completed.returncode)
+        payload = json.loads(completed.stdout)
+        self.assertIn("repair_hints", payload)
+        self.assertIsInstance(payload["repair_hints"], list)
+        self.assertEqual(
+            len(payload["findings"]), len(payload["repair_hints"])
+        )
+        # Each hint exposes the documented stable keys.
+        for hint in payload["repair_hints"]:
+            for key in (
+                "category",
+                "check_id",
+                "severity_hint",
+                "message",
+                "question_template",
+                "fix_category",
+            ):
+                self.assertIn(key, hint)
+        # The manifest-readiness finding resolves to the sha-mismatch override.
+        manifest_hints = [
+            hint
+            for hint, finding in zip(payload["repair_hints"], payload["findings"])
+            if finding["category"] == "manifest-readiness"
+        ]
+        self.assertTrue(manifest_hints)
+        self.assertEqual(
+            "manifest-readiness.sha-mismatch", manifest_hints[0]["check_id"]
+        )
+
+
+class SkillInstructionTests(unittest.TestCase):
+    def test_session_expand_auto_marks_loop_ready_before_session_run(self) -> None:
+        text = (REPO_ROOT / "skills/session-expand/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "asl preflight <plan-dir> --cwd <codebase-root> --json --mark-loop-ready",
+            text,
+        )
+        self.assertIn("marked_loop_ready", text)
+        self.assertIn(
+            "Only when final preflight succeeds with `ok: true` and readiness is `loop-ready`",
+            text,
+        )
+        self.assertIn("<skill-prefix>plan-preflight-iterate", text)
+
+    def test_session_split_names_current_contract_categories(self) -> None:
+        text = (REPO_ROOT / "skills/session-split/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("missing-contract", text)
+        self.assertNotIn("session-contract", text)
+
+
+class RunReadinessGateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+        self.repo_root = self.tmp_path / "repo"
+        self.config_home = self.tmp_path / "config"
+        init_git_repo(self.repo_root)
+        self.fake_codex = install_fake_codex(self.tmp_path)
+        config_path = (
+            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        )
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps({"codex": {"executable": str(self.fake_codex)}}),
+            encoding="utf-8",
+        )
+
+    def _write_plan(
+        self,
+        statuses: tuple[str, ...] = ("pending",),
+        *,
+        readiness: str | None = "loop-ready",
+        sha_override: str | None = None,
+    ) -> plans.ReadinessMetadata | None:
+        contracts = {
+            str(index): _contract_block(
+                '{"type": "file_exists", "path": "README.md", '
+                f'"name": "readme-{index}"}}',
+                session=str(index),
+            )
+            for index in range(1, len(statuses) + 1)
+        }
+        write_plan(self.plan_dir, statuses, contracts_by_id=contracts)
+        if readiness is None:
+            return None
+        sha = sha_override or plans.stable_readiness_sha256(self.plan_dir)
+        metadata = plans.ReadinessMetadata(
+            state=readiness,
+            readiness_sha256=sha,
+            checked_at="2026-06-19T00:00:00Z",
+        )
+        plans.write_readiness_metadata(self.plan_dir, metadata)
+        return metadata
+
+    def _run(
+        self,
+        *,
+        mode: str = "success",
+        max_sessions: int | None = None,
+        allow_not_loop_ready: bool = False,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+        argv = [
+            sys.executable,
+            "-m",
+            "agent_session_loop",
+            "run",
+            str(self.plan_dir),
+            "--cwd",
+            str(self.repo_root),
+            "--harness",
+            "codex",
+            "--state-dir",
+            str(self.state_dir),
+            "--json",
+        ]
+        if allow_not_loop_ready:
+            argv.append("--allow-not-loop-ready")
+        if max_sessions is not None:
+            argv.extend(["--max-sessions", str(max_sessions)])
+        env = os.environ.copy()
+        env.update(
+            {
+                "XDG_CONFIG_HOME": str(self.config_home),
+                "FAKE_CODEX_MODE": mode,
+                "FAKE_CODEX_SLEEP": "5",
+                "PYTHONPATH": str(REPO_ROOT)
+                + os.pathsep
+                + env.get("PYTHONPATH", ""),
+            }
+        )
+        completed = subprocess.run(
+            argv,
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+        return completed, json.loads(completed.stdout)
+
+    def test_run_refuses_when_readiness_metadata_missing(self) -> None:
+        self._write_plan(("pending",), readiness=None)
+
+        completed, payload = self._run()
+
+        self.assertEqual(1, completed.returncode)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["paused"])
+        self.assertEqual("not-loop-ready", payload["pause_reason"])
+        self.assertIn("readiness metadata", payload["pause_message"])
+        gate = payload["readiness_gate"]
+        self.assertFalse(gate["ok"])
+        self.assertIsNone(gate["readiness_state"])
+        self.assertIsNone(payload["readiness_state_initial"])
+        self.assertIsNone(payload["readiness_state_final"])
+        self.assertIsNone(plans.read_readiness_metadata(self.plan_dir))
+
+    def test_run_refuses_when_state_is_reviewed(self) -> None:
+        self._write_plan(("pending",), readiness="reviewed")
+
+        completed, payload = self._run()
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("not-loop-ready", payload["pause_reason"])
+        gate = payload["readiness_gate"]
+        self.assertFalse(gate["ok"])
+        self.assertEqual("reviewed", gate["readiness_state"])
+        self.assertEqual("reviewed", payload["readiness_state_initial"])
+        self.assertEqual(
+            "reviewed", plans.read_readiness_metadata(self.plan_dir).state
+        )
+
+    def test_run_refuses_when_recorded_sha_does_not_match(self) -> None:
+        self._write_plan(
+            ("pending",),
+            readiness="loop-ready",
+            sha_override="0" * 64,
+        )
+
+        completed, payload = self._run()
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("not-loop-ready", payload["pause_reason"])
+        gate = payload["readiness_gate"]
+        self.assertFalse(gate["ok"])
+        self.assertFalse(gate["preflight_ok"])
+        self.assertEqual("0" * 64, gate["recorded_readiness_sha256"])
+        self.assertNotEqual(
+            gate["recorded_readiness_sha256"],
+            gate["expected_readiness_sha256"],
+        )
+        manifest_readiness_findings = [
+            finding
+            for finding in gate["findings"]
+            if finding["category"] == "manifest-readiness"
+        ]
+        self.assertTrue(manifest_readiness_findings)
+
+    def test_allow_not_loop_ready_lets_run_proceed_and_reports_findings(
+        self,
+    ) -> None:
+        self._write_plan(("pending",), readiness=None)
+
+        completed, payload = self._run(allow_not_loop_ready=True)
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+        self.assertTrue(payload["allow_not_loop_ready"])
+        gate = payload["readiness_gate"]
+        self.assertFalse(gate["ok"])
+        self.assertIsNone(gate["readiness_state"])
+        self.assertTrue(
+            any(
+                finding["category"] == "manifest-readiness"
+                for finding in gate["findings"]
+            )
+        )
+        # No readiness existed, so the lifecycle never engages.
+        self.assertIsNone(payload["readiness_state_initial"])
+        self.assertIsNone(payload["readiness_state_final"])
+        self.assertIsNone(plans.read_readiness_metadata(self.plan_dir))
+
+    def test_lifecycle_transitions_to_complete_when_all_sessions_finish(
+        self,
+    ) -> None:
+        self._write_plan(("pending",), readiness="loop-ready")
+
+        completed, payload = self._run()
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("loop-ready", payload["readiness_state_initial"])
+        self.assertEqual("complete", payload["readiness_state_final"])
+        metadata = plans.read_readiness_metadata(self.plan_dir)
+        self.assertEqual("complete", metadata.state)
+        self.assertEqual(
+            plans.stable_readiness_sha256(self.plan_dir),
+            metadata.readiness_sha256,
+        )
+
+    def test_lifecycle_returns_to_loop_ready_when_max_sessions_leaves_pending(
+        self,
+    ) -> None:
+        self._write_plan(("pending", "pending"), readiness="loop-ready")
+
+        completed, payload = self._run(max_sessions=1)
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("loop-ready", payload["readiness_state_initial"])
+        self.assertEqual("loop-ready", payload["readiness_state_final"])
+        metadata = plans.read_readiness_metadata(self.plan_dir)
+        self.assertEqual("loop-ready", metadata.state)
+        self.assertEqual(
+            plans.stable_readiness_sha256(self.plan_dir),
+            metadata.readiness_sha256,
+        )
+
+    def test_lifecycle_marks_reviewed_when_run_pauses_on_failure(self) -> None:
+        self._write_plan(("pending",), readiness="loop-ready")
+
+        completed, payload = self._run(mode="failure")
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("loop-ready", payload["readiness_state_initial"])
+        self.assertEqual("reviewed", payload["readiness_state_final"])
+        metadata = plans.read_readiness_metadata(self.plan_dir)
+        self.assertEqual("reviewed", metadata.state)
+
+
+class RunVerificationEnforcementTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+        self.repo_root = self.tmp_path / "repo"
+        self.config_home = self.tmp_path / "config"
+        init_git_repo(self.repo_root)
+        self.fake_codex = install_fake_codex(self.tmp_path)
+        config_path = (
+            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        )
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps({"codex": {"executable": str(self.fake_codex)}}),
+            encoding="utf-8",
+        )
+
+    def _write_plan(
+        self,
+        statuses: tuple[str, ...],
+        *,
+        contracts_by_id: dict[str, str] | None,
+        readiness: str | None = "loop-ready",
+    ) -> None:
+        write_plan(self.plan_dir, statuses, contracts_by_id=contracts_by_id)
+        if readiness is None:
+            return
+        sha = plans.stable_readiness_sha256(self.plan_dir)
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state=readiness,
+                readiness_sha256=sha,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+
+    def _run(
+        self,
+        *,
+        allow_not_loop_ready: bool = True,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+        argv = [
+            sys.executable,
+            "-m",
+            "agent_session_loop",
+            "run",
+            str(self.plan_dir),
+            "--cwd",
+            str(self.repo_root),
+            "--harness",
+            "codex",
+            "--state-dir",
+            str(self.state_dir),
+            "--json",
+        ]
+        if allow_not_loop_ready:
+            argv.append("--allow-not-loop-ready")
+        env = os.environ.copy()
+        env.update(
+            {
+                "XDG_CONFIG_HOME": str(self.config_home),
+                "FAKE_CODEX_MODE": "success",
+                "FAKE_CODEX_SLEEP": "5",
+                "PYTHONPATH": str(REPO_ROOT)
+                + os.pathsep
+                + env.get("PYTHONPATH", ""),
+            }
+        )
+        completed = subprocess.run(
+            argv,
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+        return completed, json.loads(completed.stdout)
+
+    def test_verify_passing_contract_allows_session_to_complete(self) -> None:
+        contracts_by_id = {
+            "1": _contract_block(
+                '{"type": "file_exists", "path": "README.md", '
+                '"name": "readme"}',
+                session="1",
+            )
+        }
+        self._write_plan(("pending",), contracts_by_id=contracts_by_id)
+
+        completed, payload = self._run()
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual("all-complete", payload["reason"])
+        session_file = self.plan_dir / "session-1.md"
+        text = session_file.read_text(encoding="utf-8")
+        self.assertIn("- **Status**: complete", text)
+        turns = payload["turns"]
+        self.assertEqual(1, len(turns))
+        verify_payload = turns[0]["verification"]
+        self.assertEqual("ok", verify_payload["reason"])
+        self.assertTrue(verify_payload["passed"])
+
+    def test_verify_failing_contract_pauses_and_reverts_status(self) -> None:
+        contracts_by_id = {
+            "1": _contract_block(
+                '{"type": "file_exists", "path": "MISSING.md", '
+                '"name": "missing"}',
+                session="1",
+            )
+        }
+        self._write_plan(("pending",), contracts_by_id=contracts_by_id)
+
+        completed, payload = self._run()
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("verify-failed", payload["pause_reason"])
+        self.assertIn("verification failed", payload["pause_message"])
+        pause_details = payload["pause_details"]
+        self.assertFalse(pause_details["passed"])
+        self.assertEqual(["missing"], pause_details["recipe"]["names"])
+        self.assertEqual(1, len(pause_details["failures"]))
+        failure = pause_details["failures"][0]
+        self.assertEqual("missing", failure["name"])
+        self.assertEqual("file_exists", failure["kind"])
+        self.assertEqual("file-missing", failure["failure_reason"])
+        session_file = self.plan_dir / "session-1.md"
+        text = session_file.read_text(encoding="utf-8")
+        self.assertIn("- **Status**: pending", text)
+        self.assertNotIn("- **Status**: complete", text)
+        self.assertIn("verification failed", text)
+        self.assertIn("file-missing", text)
+        final_snapshot = payload["final_snapshot"]
+        self.assertEqual(1, final_snapshot["counts"]["pending"])
+        self.assertEqual(0, final_snapshot["counts"]["complete"])
+
+    def test_verify_missing_contract_pauses_when_gate_enforced(self) -> None:
+        self._write_plan(("pending",), contracts_by_id=None)
+
+        completed, payload = self._run(allow_not_loop_ready=False)
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        # Preflight gate fails first because contracts are required for
+        # loop-ready plans, so the runner pauses on `not-loop-ready` before
+        # verification runs.
+        self.assertEqual("not-loop-ready", payload["pause_reason"])
+
+    def test_verify_missing_contract_is_skipped_when_gate_bypassed(self) -> None:
+        self._write_plan(
+            ("pending",), contracts_by_id=None, readiness=None
+        )
+
+        completed, payload = self._run(allow_not_loop_ready=True)
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+        verify_payload = payload["turns"][0]["verification"]
+        self.assertEqual("no-contract", verify_payload["reason"])
+        self.assertFalse(verify_payload["enforced"])
+
+    def test_verify_malformed_contract_pauses_with_malformed_contract(self) -> None:
+        bad_contract = "\n".join(
+            [
+                "## Completion Contract",
+                "",
+                "### Done when",
+                "- recipe runs",
+                "",
+                "### Verify",
+                "",
+                "```json",
+                '{"session": "1", "checks": [{"type": "command", '
+                '"argv": ["echo"], "timeout_seconds": -1}]}',
+                "```",
+            ]
+        )
+        self._write_plan(
+            ("pending",),
+            contracts_by_id={"1": bad_contract},
+            readiness=None,
+        )
+
+        completed, payload = self._run(allow_not_loop_ready=True)
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("malformed-contract", payload["pause_reason"])
+        session_file = self.plan_dir / "session-1.md"
+        text = session_file.read_text(encoding="utf-8")
+        self.assertIn("- **Status**: pending", text)
+        self.assertIn("verification skipped", text)
+
+    def test_verify_failed_pause_is_listed_in_pause_reasons(self) -> None:
+        self.assertIn("verify-failed", events.PAUSE_REASONS)
+        self.assertIn("no-contract", events.PAUSE_REASONS)
+        self.assertIn("malformed-contract", events.PAUSE_REASONS)
+
+
+class EndToEndQATests(unittest.TestCase):
+    """Synthetic end-to-end coverage that wires preflight + run + verify.
+
+    Unit-level coverage already exercises every preflight finding, every
+    runner pause reason, and every verify outcome individually. These tests
+    intentionally chain those subsystems together through the CLI surface,
+    because the loop-readiness contract introduced in this plan only holds
+    when the pieces compose correctly. Each test is the integration analog
+    of a smoke step from ``docs/agent-session-loop.md``.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+        self.repo_root = self.tmp_path / "repo"
+        self.config_home = self.tmp_path / "config"
+        self.path_dir = self.tmp_path / "path"
+        self.path_dir.mkdir()
+        init_git_repo(self.repo_root)
+        self.fake_codex = install_fake_codex(self.tmp_path)
+        config_path = (
+            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        )
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps({"codex": {"executable": str(self.fake_codex)}}),
+            encoding="utf-8",
+        )
+
+    def _path_value(self, *names: str) -> str:
+        for name in names:
+            target = self.path_dir / name
+            target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            target.chmod(0o755)
+        return os.pathsep.join([str(self.path_dir), os.environ.get("PATH", "")])
+
+    def _base_env(self, *, mode: str = "success") -> dict[str, str]:
+        env = os.environ.copy()
+        env.update(
+            {
+                "XDG_CONFIG_HOME": str(self.config_home),
+                "XDG_STATE_HOME": str(self.state_dir),
+                "FAKE_CODEX_MODE": mode,
+                "FAKE_CODEX_SLEEP": "5",
+                "PYTHONPATH": str(REPO_ROOT)
+                + os.pathsep
+                + env.get("PYTHONPATH", ""),
+            }
+        )
+        return env
+
+    def _run_preflight(
+        self,
+        *,
+        mark_loop_ready: bool = False,
+        commit_mode: str | None = None,
+        path_value: str | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+        argv = [
+            sys.executable,
+            "-m",
+            "agent_session_loop",
+            "preflight",
+            str(self.plan_dir),
+            "--cwd",
+            str(self.repo_root),
+            "--harness",
+            "codex",
+            "--state-dir",
+            str(self.state_dir),
+            "--json",
+        ]
+        if commit_mode == "per-session":
+            argv.append("--commit-per-session")
+        elif commit_mode == "end":
+            argv.append("--commit-at-end")
+        if mark_loop_ready:
+            argv.append("--mark-loop-ready")
+        env = self._base_env()
+        if path_value is not None:
+            env["PATH"] = path_value
+        completed = subprocess.run(
+            argv,
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+        payload = json.loads(completed.stdout) if completed.stdout else {}
+        return completed, payload
+
+    def _run_run(
+        self,
+        *,
+        allow_not_loop_ready: bool = False,
+        max_sessions: int | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+        argv = [
+            sys.executable,
+            "-m",
+            "agent_session_loop",
+            "run",
+            str(self.plan_dir),
+            "--cwd",
+            str(self.repo_root),
+            "--harness",
+            "codex",
+            "--state-dir",
+            str(self.state_dir),
+            "--json",
+        ]
+        if allow_not_loop_ready:
+            argv.append("--allow-not-loop-ready")
+        if max_sessions is not None:
+            argv.extend(["--max-sessions", str(max_sessions)])
+        completed = subprocess.run(
+            argv,
+            cwd=REPO_ROOT,
+            env=self._base_env(),
+            text=True,
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+        payload = json.loads(completed.stdout)
+        return completed, payload
+
+    def _write_legacy_plan(self) -> None:
+        """A pre-loop-readiness plan: no manifest readiness, no contract."""
+        write_plan(self.plan_dir, ("pending",))
+
+    def _repair_legacy_plan_to_draft(self) -> None:
+        """Repair legacy content while leaving readiness for preflight to mark."""
+        contract = _contract_block(
+            '{"type": "file_exists", "path": "README.md", "name": "readme"}',
+            session="1",
+        )
+        write_plan(
+            self.plan_dir, ("pending",), contracts_by_id={"1": contract}
+        )
+        sha = plans.stable_readiness_sha256(self.plan_dir)
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="draft",
+                readiness_sha256=sha,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+
+    def test_full_lifecycle_repairs_legacy_plan_and_runs_to_completion(
+        self,
+    ) -> None:
+        """Legacy plan → preflight red → repair → mark → run → verify pass."""
+        self._write_legacy_plan()
+        path_value = self._path_value("codex", "spec", "amx")
+
+        # Step 1: preflight surfaces red findings on the legacy plan.
+        before, before_payload = self._run_preflight(
+            commit_mode="per-session", path_value=path_value
+        )
+        self.assertEqual(1, before.returncode)
+        self.assertFalse(before_payload["ok"])
+        before_categories = {
+            f["category"] for f in before_payload["findings"]
+        }
+        self.assertIn("manifest-readiness", before_categories)
+        self.assertIn("missing-contract", before_categories)
+        # Repair hints stay aligned with findings 1:1 for the guided skill.
+        self.assertEqual(
+            len(before_payload["findings"]),
+            len(before_payload["repair_hints"]),
+        )
+
+        # Step 2: repair (add contract, write draft readiness).
+        self._repair_legacy_plan_to_draft()
+        readiness_before_mark = plans.read_readiness_metadata(self.plan_dir)
+        self.assertEqual("draft", readiness_before_mark.state)
+
+        # Step 3: --mark-loop-ready promotes a clean draft plan.
+        marked, marked_payload = self._run_preflight(
+            commit_mode="per-session",
+            mark_loop_ready=True,
+            path_value=path_value,
+        )
+        self.assertEqual(0, marked.returncode, marked.stderr)
+        self.assertTrue(marked_payload["ok"])
+        self.assertEqual("loop-ready-marked", marked_payload["reason"])
+        self.assertTrue(marked_payload["marked_loop_ready"])
+        readiness_after_mark = plans.read_readiness_metadata(self.plan_dir)
+        self.assertIsNotNone(readiness_after_mark)
+        self.assertEqual("loop-ready", readiness_after_mark.state)
+        self.assertEqual(
+            plans.stable_readiness_sha256(self.plan_dir),
+            readiness_after_mark.readiness_sha256,
+        )
+        self.assertNotEqual(readiness_before_mark.state, readiness_after_mark.state)
+
+        # Step 4: asl run completes the plan with verification passing.
+        run_completed, run_payload = self._run_run()
+        self.assertEqual(0, run_completed.returncode, run_completed.stderr)
+        self.assertTrue(run_payload["ok"])
+        self.assertFalse(run_payload["paused"])
+        self.assertEqual("all-complete", run_payload["reason"])
+        self.assertEqual("complete", run_payload["readiness_state_final"])
+        session_text = (self.plan_dir / "session-1.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("- **Status**: complete", session_text)
+        verify_payload = run_payload["turns"][0]["verification"]
+        self.assertEqual("ok", verify_payload["reason"])
+        self.assertTrue(verify_payload["passed"])
+
+    def test_verification_failure_pauses_then_resumes_after_repair(self) -> None:
+        """`verify-failed` reverts status; re-running after repair completes."""
+        contract = _contract_block(
+            '{"type": "file_exists", "path": "later.txt", "name": "later"}',
+            session="1",
+        )
+        write_plan(
+            self.plan_dir, ("pending",), contracts_by_id={"1": contract}
+        )
+        sha = plans.stable_readiness_sha256(self.plan_dir)
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=sha,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+
+        # First run: verify fails, status reverts to pending.
+        first_completed, first_payload = self._run_run()
+        self.assertEqual(1, first_completed.returncode)
+        self.assertTrue(first_payload["paused"])
+        self.assertEqual("verify-failed", first_payload["pause_reason"])
+        pause_details = first_payload["pause_details"]
+        self.assertEqual(["later"], pause_details["recipe"]["names"])
+        self.assertEqual("file-missing", pause_details["failures"][0][
+            "failure_reason"
+        ])
+        session_path = self.plan_dir / "session-1.md"
+        session_text = session_path.read_text(encoding="utf-8")
+        self.assertIn("- **Status**: pending", session_text)
+        self.assertIn("verification failed", session_text)
+
+        # A verify-failed pause flips readiness to `reviewed`; after the
+        # underlying issue is repaired, preflight can re-mark the plan.
+        reviewed_metadata = plans.read_readiness_metadata(self.plan_dir)
+        self.assertEqual("reviewed", reviewed_metadata.state)
+
+        # Repair: create the missing file so the contract will now pass.
+        (self.repo_root / "later.txt").write_text("done\n", encoding="utf-8")
+
+        remark_completed, remark_payload = self._run_preflight(mark_loop_ready=True)
+        self.assertEqual(0, remark_completed.returncode, remark_completed.stderr)
+        self.assertTrue(remark_payload["marked_loop_ready"])
+        self.assertEqual("loop-ready", remark_payload["readiness"]["state"])
+
+        # Second run: the still-pending session is picked up and completes.
+        second_completed, second_payload = self._run_run()
+        self.assertEqual(0, second_completed.returncode, second_completed.stderr)
+        self.assertTrue(second_payload["ok"])
+        self.assertFalse(second_payload["paused"])
+        self.assertEqual("all-complete", second_payload["reason"])
+        final_session = session_path.read_text(encoding="utf-8")
+        self.assertIn("- **Status**: complete", final_session)
+        # Readiness lifecycle resolves to complete after the resumed run.
+        final_metadata = plans.read_readiness_metadata(self.plan_dir)
+        self.assertEqual("complete", final_metadata.state)
+
+    def test_stale_lock_surfaces_in_preflight_cli_with_repair_hint(
+        self,
+    ) -> None:
+        """A stale lock JSON-fingerprints to env-lock.stale via the CLI."""
+        _write_loop_ready_plan(
+            self.plan_dir,
+            ("pending",),
+            contracts_by_id={
+                "1": _contract_block(
+                    '{"type": "file_exists", "path": "README.md", '
+                    '"name": "readme"}',
+                    session="1",
+                )
+            },
+        )
+        plan_state = state.plan_state_dir(self.plan_dir, self.state_dir)
+        plan_state.mkdir(parents=True, exist_ok=True)
+        lock_path = state.lock_path_for_plan(self.plan_dir, self.state_dir)
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "pid": 0,
+                    "plan_dir": str(plans.canonicalize_path(self.plan_dir)),
+                    "created_at": "2026-06-19T00:00:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+        path_value = self._path_value("codex", "spec", "amx")
+        completed, payload = self._run_preflight(
+            commit_mode="per-session", path_value=path_value
+        )
+        self.assertEqual(1, completed.returncode)
+        self.assertFalse(payload["ok"])
+        lock_findings = [
+            f for f in payload["findings"] if f["category"] == "env-lock"
+        ]
+        self.assertEqual(1, len(lock_findings))
+        self.assertEqual("yellow", lock_findings[0]["severity"])
+        self.assertIn("stale lock", lock_findings[0]["message"])
+        # Each finding pairs with a stable repair hint check id.
+        lock_hints = [
+            hint
+            for hint, finding in zip(
+                payload["repair_hints"], payload["findings"]
+            )
+            if finding["category"] == "env-lock"
+        ]
+        self.assertEqual(1, len(lock_hints))
+        self.assertEqual("env-lock.stale", lock_hints[0]["check_id"])
+
+    def test_commit_mode_dirty_worktree_emits_yellow_via_preflight_cli(
+        self,
+    ) -> None:
+        """`--commit-per-session` plus a dirty worktree surfaces env-git yellow."""
+        _write_loop_ready_plan(
+            self.plan_dir,
+            ("pending",),
+            contracts_by_id={
+                "1": _contract_block(
+                    '{"type": "file_exists", "path": "README.md", '
+                    '"name": "readme"}',
+                    session="1",
+                )
+            },
+        )
+        (self.repo_root / "dirty.txt").write_text(
+            "uncommitted\n", encoding="utf-8"
+        )
+        path_value = self._path_value("codex", "spec", "amx")
+        completed, payload = self._run_preflight(
+            commit_mode="per-session", path_value=path_value
+        )
+        self.assertEqual(1, completed.returncode)
+        self.assertFalse(payload["ok"])
+        git_findings = [
+            f for f in payload["findings"] if f["category"] == "env-git"
+        ]
+        self.assertEqual(1, len(git_findings))
+        self.assertEqual("yellow", git_findings[0]["severity"])
+        self.assertIn("dirty", git_findings[0]["message"])
+        # Marking loop-ready must be refused while yellow findings remain.
+        completed_mark, payload_mark = self._run_preflight(
+            commit_mode="per-session",
+            mark_loop_ready=True,
+            path_value=path_value,
+        )
+        self.assertEqual(1, completed_mark.returncode)
+        self.assertFalse(payload_mark["marked_loop_ready"])
+
+    def test_json_contracts_share_stable_keys_across_preflight_and_verify(
+        self,
+    ) -> None:
+        """The JSON shape published in the docs must hold at the CLI surface."""
+        contract = _contract_block(
+            '{"type": "file_exists", "path": "README.md", "name": "readme"}',
+            session="1",
+        )
+        write_plan(
+            self.plan_dir, ("pending",), contracts_by_id={"1": contract}
+        )
+        sha = plans.stable_readiness_sha256(self.plan_dir)
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=sha,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        path_value = self._path_value("codex", "spec", "amx")
+
+        # Preflight JSON: documented top-level keys.
+        preflight_completed, preflight_payload = self._run_preflight(
+            commit_mode="per-session", path_value=path_value
+        )
+        self.assertEqual(0, preflight_completed.returncode)
+        for key in (
+            "ok",
+            "command",
+            "reason",
+            "findings",
+            "findings_by_severity",
+            "repair_hints",
+            "readiness",
+            "expected_readiness_sha256",
+            "mark_loop_ready_requested",
+            "marked_loop_ready",
+        ):
+            self.assertIn(key, preflight_payload)
+        self.assertEqual("preflight", preflight_payload["command"])
+
+        # Verify JSON: documented top-level keys including stable reason enum.
+        verify_argv = [
+            sys.executable,
+            "-m",
+            "agent_session_loop",
+            "verify",
+            str(self.plan_dir),
+            "--session",
+            "1",
+            "--cwd",
+            str(self.repo_root),
+            "--json",
+        ]
+        verify_completed = subprocess.run(
+            verify_argv,
+            cwd=REPO_ROOT,
+            env=self._base_env(),
+            text=True,
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+        self.assertEqual(0, verify_completed.returncode, verify_completed.stderr)
+        verify_payload = json.loads(verify_completed.stdout)
+        for key in (
+            "ok",
+            "command",
+            "reason",
+            "passed",
+            "recipe",
+            "checks",
+            "session",
+            "cwd",
+            "plan_dir",
+        ):
+            self.assertIn(key, verify_payload)
+        self.assertEqual("verify", verify_payload["command"])
+        self.assertEqual("ok", verify_payload["reason"])
 
 
 if __name__ == "__main__":

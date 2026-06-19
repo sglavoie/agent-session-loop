@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 from datetime import datetime, timezone
 import json
 import os
@@ -13,7 +14,19 @@ import threading
 from pathlib import Path
 from typing import Any, TextIO
 
-from . import config, events, harnesses, plans, responses, run_control, state, tail
+from . import (
+    config,
+    contracts,
+    events,
+    harnesses,
+    plans,
+    preflight,
+    responses,
+    run_control,
+    state,
+    tail,
+    verification,
+)
 from .formatting import format_duration_seconds
 
 
@@ -1844,11 +1857,48 @@ def _finish_run(
             _duration_seconds(started_at, finished_at) if started_at is not None else None
         )
         payload["active_turn"] = None
+        _finalize_readiness_lifecycle(payload)
         persistence.append_event(event_path, "run_finished", payload)
         persistence.write_state(payload)
     _notify_agent_mux_loop_finished(payload)
     if progress is not None:
         progress.run_finished(payload)
+
+
+def _final_readiness_state_from_payload(
+    payload: dict[str, Any],
+) -> plans.ReadinessState:
+    if payload.get("paused") or not payload.get("ok"):
+        return "reviewed"
+    final_snapshot = payload.get("final_snapshot")
+    counts: dict[str, Any] | None = None
+    if isinstance(final_snapshot, dict):
+        snapshot_counts = final_snapshot.get("counts")
+        if isinstance(snapshot_counts, dict):
+            counts = snapshot_counts
+    if counts is not None:
+        pending = int(counts.get("pending", 0) or 0)
+        empty = int(counts.get("empty", 0) or 0)
+        unknown = int(counts.get("unknown", 0) or 0)
+        if pending == 0 and empty == 0 and unknown == 0:
+            return "complete"
+    return "loop-ready"
+
+
+def _finalize_readiness_lifecycle(payload: dict[str, Any]) -> None:
+    if not payload.get("readiness_state_active"):
+        return
+    plan_dir_value = payload.get("plan_dir")
+    if not isinstance(plan_dir_value, str) or not plan_dir_value:
+        return
+    final_state = _final_readiness_state_from_payload(payload)
+    success, error = _write_readiness_state(Path(plan_dir_value), final_state)
+    if success:
+        payload["readiness_state_final"] = final_state
+        payload["readiness_state_current"] = final_state
+    else:
+        payload["readiness_state_final"] = None
+        payload["readiness_state_write_error"] = error
 
 
 def _set_pause(
@@ -1921,6 +1971,422 @@ def _consume_run_control_stop(
     return True
 
 
+def _allow_not_loop_ready(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "allow_not_loop_ready", False))
+
+
+def _readiness_gate_payload(
+    report: preflight.PreflightReport,
+) -> dict[str, Any]:
+    readiness = report.readiness
+    return {
+        "ok": _readiness_gate_passed(report),
+        "preflight_ok": report.ok,
+        "readiness_state": readiness.state if readiness is not None else None,
+        "expected_readiness_sha256": report.expected_readiness_sha256,
+        "recorded_readiness_sha256": (
+            readiness.readiness_sha256 if readiness is not None else None
+        ),
+        "findings_by_severity": {
+            "red": len(report.red_findings),
+            "yellow": len(report.yellow_findings),
+            "green": len(report.green_findings),
+        },
+        "findings": [
+            {
+                "severity": finding.severity,
+                "category": finding.category,
+                "message": finding.message,
+                "session_id": finding.session_id,
+                "path": finding.path,
+                "line": finding.line,
+                "detail": finding.detail,
+            }
+            for finding in report.findings
+        ],
+    }
+
+
+def _readiness_gate_passed(report: preflight.PreflightReport) -> bool:
+    if not report.ok:
+        return False
+    readiness = report.readiness
+    if readiness is None:
+        return False
+    if readiness.state != "loop-ready":
+        return False
+    return True
+
+
+def _readiness_gate_failure_message(
+    report: preflight.PreflightReport,
+) -> str:
+    if report.readiness is None:
+        return "plan manifest is missing readiness metadata"
+    if not report.ok:
+        return (
+            "preflight failed: "
+            f"{len(report.red_findings)} red, "
+            f"{len(report.yellow_findings)} yellow finding(s)"
+        )
+    return (
+        f"plan readiness state is {report.readiness.state!r}; "
+        "run preflight --mark-loop-ready first"
+    )
+
+
+def _write_readiness_state(
+    plan_dir: Path,
+    new_state: plans.ReadinessState,
+    *,
+    expected_sha256: str | None = None,
+) -> tuple[bool, str | None]:
+    sha = expected_sha256
+    if sha is None:
+        try:
+            sha = plans.stable_readiness_sha256(plan_dir)
+        except plans.PlanError as error:
+            return False, str(error)
+    metadata = plans.ReadinessMetadata(
+        state=new_state,
+        readiness_sha256=sha,
+        checked_at=_isoformat(_utc_now()),
+    )
+    try:
+        plans.write_readiness_metadata(plan_dir, metadata)
+    except plans.PlanError as error:
+        return False, str(error)
+    return True, None
+
+
+def _final_readiness_state(
+    payload: dict[str, Any],
+    snapshot: plans.PlanSnapshot,
+) -> plans.ReadinessState:
+    if payload.get("paused") or not payload.get("ok"):
+        return "reviewed"
+    if _all_sessions_complete(snapshot):
+        return "complete"
+    return "loop-ready"
+
+
+def _strip_own_lock_findings(
+    report: preflight.PreflightReport,
+    *,
+    lock_info: state.LockInfo,
+) -> preflight.PreflightReport:
+    """Drop env-lock findings that point at the runner's own active lock."""
+    own_pid = os.getpid()
+    own_lock_path = str(lock_info.path)
+
+    def is_self_lock(finding: preflight.PreflightFinding) -> bool:
+        if finding.category != "env-lock":
+            return False
+        if finding.path != own_lock_path:
+            return False
+        if lock_info.pid is not None and lock_info.pid != own_pid:
+            return False
+        return True
+
+    filtered = tuple(
+        finding for finding in report.findings if not is_self_lock(finding)
+    )
+    if len(filtered) == len(report.findings):
+        return report
+    return preflight.PreflightReport(
+        plan_dir=report.plan_dir,
+        findings=filtered,
+        snapshot=report.snapshot,
+        readiness=report.readiness,
+        expected_readiness_sha256=report.expected_readiness_sha256,
+        contracts_by_session=report.contracts_by_session,
+    )
+
+
+def _verification_failure_summary(
+    result: verification.VerificationResult,
+) -> str:
+    failures = result.failures
+    total = len(result.checks)
+    parts = [
+        f"{check.name} ({check.failure_reason or 'failed'})"
+        for check in failures
+    ]
+    rendered = "; ".join(parts) if parts else "no checks reported"
+    return (
+        f"{len(failures)} of {total} verification check(s) failed: {rendered}"
+    )
+
+
+def _verification_failure_details(
+    result: verification.VerificationResult,
+    contract: contracts.CompletionContract,
+) -> dict[str, Any]:
+    return {
+        "session": result.session_id.value,
+        "recipe": {
+            "check_count": len(contract.verify.checks),
+            "kinds": [check.kind for check in contract.verify.checks],
+            "names": [check.name for check in contract.verify.checks],
+        },
+        "passed": result.passed,
+        "checks": [asdict(check) for check in result.checks],
+        "failures": [asdict(check) for check in result.failures],
+    }
+
+
+def _session_path_in_snapshot(
+    snapshot: plans.PlanSnapshot, session_id: str
+) -> Path | None:
+    for session in snapshot.sessions:
+        if session.id == session_id:
+            return session.path
+    return None
+
+
+def _revert_session_status_to_pending(
+    snapshot: plans.PlanSnapshot,
+    session_id: str,
+    *,
+    failure_note: str,
+) -> Path | None:
+    path = _session_path_in_snapshot(snapshot, session_id)
+    if path is None:
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    lines = text.splitlines(keepends=False)
+    handoff_index: int | None = None
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index].strip() == plans.HANDOFF_HEADING:
+            handoff_index = index
+            break
+    if handoff_index is None:
+        return None
+    section_end = len(lines)
+    for index in range(handoff_index + 1, len(lines)):
+        if lines[index].startswith("## "):
+            section_end = index
+            break
+    for index in range(handoff_index + 1, section_end):
+        if lines[index].startswith(plans.STATUS_PREFIX):
+            lines[index] = f"{plans.STATUS_PREFIX} pending"
+            break
+    lines = _append_handoff_note(
+        lines,
+        handoff_index=handoff_index,
+        section_end=section_end,
+        note=failure_note,
+    )
+    suffix = "\n" if text.endswith("\n") else ""
+    path.write_text("\n".join(lines) + suffix, encoding="utf-8")
+    return path
+
+
+def _enforce_session_verification(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    persistence: _RunPersistence,
+    before: plans.PlanSnapshot,
+    after: plans.PlanSnapshot,
+    cwd: Path,
+    session_id: str,
+    session_label: str,
+    session_details: dict[str, Any],
+    allow_not_loop_ready: bool,
+    turn_payload: dict[str, Any],
+    paths: dict[str, Path],
+) -> bool:
+    """Run the session's `Verify` recipe and pause on failure or contract problems.
+
+    Returns ``True`` when the run should pause (the caller must ``break``);
+    ``False`` when verification passed and the loop should continue.
+    """
+    try:
+        contract = contracts.read_completion_contract(before.plan_dir, session_id)
+    except plans.PlanError as error:
+        failure_note = (
+            f"verification skipped: malformed completion contract ({error})"
+        )
+        reverted = _revert_session_status_to_pending(
+            after, session_id, failure_note=failure_note
+        )
+        snapshot_after = _reinspect_after_revert(before.plan_dir, after, reverted)
+        with persistence.lock:
+            payload["final_snapshot"] = _snapshot_payload(snapshot_after)
+            turn_payload["verification"] = {
+                "session": session_id,
+                "reason": "malformed-contract",
+                "error": str(error),
+            }
+            _write_json_file(paths["result"], turn_payload)
+        _pause_run(
+            event_path,
+            payload,
+            reason="malformed-contract",
+            message=(
+                f"completion contract for {session_label} is malformed: {error}"
+            ),
+            details={**session_details, "error": str(error)},
+            persistence=persistence,
+        )
+        return True
+
+    if contract is None:
+        if allow_not_loop_ready:
+            with persistence.lock:
+                turn_payload["verification"] = {
+                    "session": session_id,
+                    "reason": "no-contract",
+                    "enforced": False,
+                }
+                _write_json_file(paths["result"], turn_payload)
+            return False
+        failure_note = (
+            "verification skipped: session is missing a Completion Contract section"
+        )
+        reverted = _revert_session_status_to_pending(
+            after, session_id, failure_note=failure_note
+        )
+        snapshot_after = _reinspect_after_revert(before.plan_dir, after, reverted)
+        with persistence.lock:
+            payload["final_snapshot"] = _snapshot_payload(snapshot_after)
+            turn_payload["verification"] = {
+                "session": session_id,
+                "reason": "no-contract",
+                "enforced": True,
+            }
+            _write_json_file(paths["result"], turn_payload)
+        _pause_run(
+            event_path,
+            payload,
+            reason="no-contract",
+            message=(
+                f"{session_label} has no Completion Contract section to verify"
+            ),
+            details={**session_details},
+            persistence=persistence,
+        )
+        return True
+
+    try:
+        result = verification.run_verification(contract, repo_root=cwd)
+    except OSError as error:
+        failure_note = (
+            f"verification failed to execute: {error}"
+        )
+        reverted = _revert_session_status_to_pending(
+            after, session_id, failure_note=failure_note
+        )
+        snapshot_after = _reinspect_after_revert(before.plan_dir, after, reverted)
+        with persistence.lock:
+            payload["final_snapshot"] = _snapshot_payload(snapshot_after)
+            turn_payload["verification"] = {
+                "session": session_id,
+                "reason": "verify-failed",
+                "error": str(error),
+            }
+            _write_json_file(paths["result"], turn_payload)
+        _pause_run(
+            event_path,
+            payload,
+            reason="verify-failed",
+            message=f"verification for {session_label} could not run: {error}",
+            details={**session_details, "error": str(error)},
+            persistence=persistence,
+        )
+        return True
+
+    details = _verification_failure_details(result, contract)
+    with persistence.lock:
+        turn_payload["verification"] = {
+            "session": session_id,
+            "reason": (
+                verification.VERIFY_EXIT_REASON_OK
+                if result.passed
+                else verification.VERIFY_EXIT_REASON_FAILED
+            ),
+            "passed": result.passed,
+            "recipe": details["recipe"],
+            "checks": details["checks"],
+        }
+        _write_json_file(paths["result"], turn_payload)
+
+    if result.passed:
+        return False
+
+    summary = _verification_failure_summary(result)
+    reverted = _revert_session_status_to_pending(
+        after,
+        session_id,
+        failure_note=f"verification failed: {summary}",
+    )
+    snapshot_after = _reinspect_after_revert(before.plan_dir, after, reverted)
+    with persistence.lock:
+        payload["final_snapshot"] = _snapshot_payload(snapshot_after)
+    _pause_run(
+        event_path,
+        payload,
+        reason="verify-failed",
+        message=(
+            f"verification failed for {session_label}: {summary}"
+        ),
+        details={**session_details, **details},
+        persistence=persistence,
+    )
+    return True
+
+
+def _reinspect_after_revert(
+    plan_dir: Path,
+    fallback: plans.PlanSnapshot,
+    reverted_path: Path | None,
+) -> plans.PlanSnapshot:
+    if reverted_path is None:
+        return fallback
+    try:
+        return plans.inspect_plan(plan_dir)
+    except plans.PlanError:
+        return fallback
+
+
+def _append_handoff_note(
+    lines: list[str],
+    *,
+    handoff_index: int,
+    section_end: int,
+    note: str,
+) -> list[str]:
+    new_bullet = f"  - {note}"
+    notes_index: int | None = None
+    for index in range(handoff_index + 1, section_end):
+        if lines[index].lstrip().startswith("- **Notes**"):
+            notes_index = index
+            break
+    if notes_index is None:
+        insert_at = section_end
+        while insert_at - 1 > handoff_index and lines[insert_at - 1].strip() == "":
+            insert_at -= 1
+        return (
+            lines[:insert_at]
+            + ["- **Notes**:", new_bullet]
+            + lines[insert_at:]
+        )
+    insert_at = notes_index + 1
+    while insert_at < section_end:
+        candidate = lines[insert_at]
+        stripped = candidate.lstrip()
+        leading = candidate[: len(candidate) - len(stripped)]
+        if len(leading) >= 2 and stripped.startswith("-"):
+            insert_at += 1
+            continue
+        break
+    return lines[:insert_at] + [new_bullet] + lines[insert_at:]
+
+
 def _initial_payload(
     *,
     args: argparse.Namespace,
@@ -1970,6 +2436,10 @@ def _initial_payload(
         control=_initial_control_payload(),
         initial_snapshot=_snapshot_payload(snapshot),
         final_snapshot=_snapshot_payload(snapshot),
+        allow_not_loop_ready=_allow_not_loop_ready(args),
+        readiness_gate=None,
+        readiness_state_initial=None,
+        readiness_state_final=None,
     )
 
 
@@ -2118,6 +2588,39 @@ def _run_locked(
         _finish_run(event_path, payload, progress, persistence=persistence)
         return 0, payload
 
+    allow_not_loop_ready = _allow_not_loop_ready(args)
+    preflight_report = preflight.run_preflight(
+        snapshot.plan_dir,
+        cwd=cwd,
+        harness=args.harness,
+        commit_mode=commit_mode,
+        state_dir=args.state_dir,
+    )
+    preflight_report = _strip_own_lock_findings(
+        preflight_report, lock_info=lock_info
+    )
+    gate_payload = _readiness_gate_payload(preflight_report)
+    gate_passed = gate_payload["ok"]
+    with persistence.lock:
+        payload["readiness_gate"] = gate_payload
+        if preflight_report.readiness is not None:
+            payload["readiness_state_initial"] = preflight_report.readiness.state
+
+    if not gate_passed and not allow_not_loop_ready:
+        gate_message = _readiness_gate_failure_message(preflight_report)
+        with persistence.lock:
+            payload["final_snapshot"] = _snapshot_payload(snapshot)
+        _pause_run(
+            event_path,
+            payload,
+            reason="not-loop-ready",
+            message=gate_message,
+            details=gate_payload,
+            persistence=persistence,
+        )
+        _finish_run(event_path, payload, progress, persistence=persistence)
+        return 1, payload
+
     try:
         if commit_mode == COMMIT_MODE_END:
             _validate_commit_at_end_scope(
@@ -2145,6 +2648,23 @@ def _run_locked(
         )
         _finish_run(event_path, payload, progress, persistence=persistence)
         return 1, payload
+
+    should_transition = gate_passed or (
+        allow_not_loop_ready and preflight_report.readiness is not None
+    )
+    if should_transition:
+        running_success, running_error = _write_readiness_state(
+            snapshot.plan_dir,
+            "running",
+            expected_sha256=preflight_report.expected_readiness_sha256,
+        )
+        with persistence.lock:
+            if running_success:
+                payload["readiness_state_active"] = True
+                payload["readiness_state_current"] = "running"
+            else:
+                payload["readiness_state_active"] = False
+                payload["readiness_state_write_error"] = running_error
 
     run_control_lock = persistence.lock
     run_control_context: dict[str, Any] | None = None
@@ -2518,6 +3038,22 @@ def _run_locked(
                 },
                 persistence=persistence,
             )
+            break
+
+        if _enforce_session_verification(
+            event_path=event_path,
+            payload=payload,
+            persistence=persistence,
+            before=before,
+            after=after,
+            cwd=cwd,
+            session_id=session_id,
+            session_label=session_label,
+            session_details=session_details,
+            allow_not_loop_ready=allow_not_loop_ready,
+            turn_payload=turn_payload,
+            paths=paths,
+        ):
             break
 
         try:

@@ -52,6 +52,10 @@ PAUSE_REASONS: tuple[str, ...] = (
     "commit-preflight",
     "commit-failed",
     "harness-unavailable",
+    "not-loop-ready",
+    "verify-failed",
+    "no-contract",
+    "malformed-contract",
 )
 _EVENT_WRITE_LOCK = threading.Lock()
 
