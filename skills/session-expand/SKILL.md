@@ -8,7 +8,7 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 
 ## Purpose
 
-Research the actual codebase to validate and expand claims in session files produced by `session-split`. For each session, verify that referenced file paths exist, function/struct/class names are correct, code patterns match reality, and inter-session dependencies are satisfiable. In directory mode, validate parallel metadata across all sessions and write authoritative safety findings that `session-run` can use to override manifest guidance. Validate each session's `## Completion Contract` against the schema enforced by `agent_session_loop.contracts.parse_completion_contract`, re-resolve referenced paths/commands against the live codebase, re-hash the manifest readiness block so divergence between recorded and recomputed state is surfaced, then run final preflight with `--mark-loop-ready` so clean expanded plans are ready for `session-run`. Write a concise annotations file alongside each session with findings, corrections, concrete details (line numbers, exact signatures, patterns to reuse), parallel-safety notes when cross-session context is available, and contract issues when the contract is malformed or its references are stale. Optionally fix factual issues in the session files.
+Research the actual codebase to validate and expand claims in session files produced by `session-split`. For each session, verify that referenced file paths exist, function/struct/class names are correct, code patterns match reality, and inter-session dependencies are satisfiable. In directory mode, validate parallel metadata across all sessions and write authoritative safety findings that `session-run` can use to override manifest guidance. Validate each session's `## Completion Contract` against the schema enforced by `agent_session_loop.contracts.parse_completion_contract`, re-resolve referenced paths/commands against the live codebase, record a manifest readiness snapshot for operator visibility, then run final preflight with `--mark-loop-ready` so clean expanded plans are ready for `session-run`. Write a concise annotations file alongside each session with findings, corrections, concrete details (line numbers, exact signatures, patterns to reuse), parallel-safety notes when cross-session context is available, and contract issues when the contract is malformed or its references are stale. Optionally fix factual issues in the session files.
 
 ## Input
 
@@ -232,7 +232,7 @@ When the manifest readiness block was captured in Step 2, recompute the structur
 - If the recorded SHA differs from the recomputed value, flag it as a "Plan Readiness" finding identical in shape to `asl preflight`'s red `manifest-readiness` finding. Hash divergence at expansion time almost always means a session file was edited (structural content or contract skeleton) between `session-split` and `session-expand`.
 - If the recorded SHA matches the recomputed value, do not emit a finding; the plan is structurally consistent.
 
-Record the readiness state (`draft`, `reviewed`, `loop-ready`, `running`, `complete`) alongside the SHA comparison so the report can echo it. Do not edit readiness lines directly during this check; the final directory-mode preflight step below is the only place this skill may advance readiness, and it must do so by invoking `asl preflight --mark-loop-ready`.
+Record the readiness state (`draft`, `reviewed`, `loop-ready`, `running`, `complete`) alongside the SHA comparison so the report can echo it. This is a snapshot for the expansion report; `session-run` must validate the current manifest before implementation because the final preflight step below may refresh readiness after `parallel-validation.md` is written. Do not edit readiness lines directly during this check; the final directory-mode preflight step below is the only place this skill may advance readiness, and it must do so by invoking `asl preflight --mark-loop-ready`.
 
 ### Step 5: Identify Patterns to Reuse
 
@@ -373,6 +373,8 @@ Use this structure:
 - **Recomputed SHA-256**: <hex>
 - **Divergence**: <none | recorded SHA differs from recomputed SHA — re-run split Step 10a or run `asl preflight --mark-loop-ready` after repair | manifest readiness metadata is missing — add **Readiness**, **Readiness SHA-256**, **Readiness checked at** lines>
 
+This section and `## Preflight Snapshot` are derived snapshots. They are intentionally ignored by `agent_session_loop.plans.stable_readiness_sha256` and must not be used as live readiness gates by `session-run`.
+
 ## Preflight Snapshot
 
 - **Command**: `asl preflight <plan-dir> --cwd <codebase-root> --json --mark-loop-ready`
@@ -465,5 +467,5 @@ Only when final preflight succeeds with `ok: true` and readiness is `loop-ready`
 - Prefer `Grep` with `output_mode: "content"` and line numbers for signature verification — this gives the executor exact references
 - Contract validation calls `agent_session_loop.contracts.parse_completion_contract` directly — never re-implement schema rules in this skill. Surface `PlanError` messages verbatim under "Contract Issues" so the wording stays aligned with `asl preflight` and `asl verify`.
 - Contract issues are advisory: surface them in the `.expand.md` file's `## Contract Issues` section, but do **not** auto-edit contract bodies or default skeleton placeholders. The user repairs these and re-runs this skill or `<skill-prefix>plan-preflight-iterate <plan-dir>` so final preflight can clear the findings and mark loop-ready.
-- The readiness SHA recomputation must use `agent_session_loop.plans.stable_readiness_sha256(plan_dir)` so the comparison matches the value `asl preflight` records and validates. Hash divergence is a cross-cutting plan finding, not a per-session finding.
+- The readiness SHA recomputation must use `agent_session_loop.plans.stable_readiness_sha256(plan_dir)` so the comparison matches the value `asl preflight` records and validates. The hash ignores `parallel-validation.md`'s derived `## Plan Readiness` and `## Preflight Snapshot` sections, but still includes dependency, ownership, and other validation content. Hash divergence is a cross-cutting plan finding, not a per-session finding.
 - The `asl preflight --json --mark-loop-ready` invocation at the end of directory-mode expansion is the readiness gate for `session-run`. It may include environment findings (`env-lock`, `env-amx`, `env-turn-budget`); red/yellow findings block the ready-to-run command, while green findings are informational.

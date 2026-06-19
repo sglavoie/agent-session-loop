@@ -866,6 +866,41 @@ def _clear_status_cells_in_text(text: str) -> str:
     return "\n".join(out) + suffix
 
 
+VOLATILE_PARALLEL_VALIDATION_SECTIONS = frozenset(
+    {
+        "Plan Readiness",
+        "Preflight Snapshot",
+    }
+)
+
+
+def _strip_markdown_sections(text: str, headings: frozenset[str]) -> str:
+    """Remove whole H2 sections whose contents are derived snapshots."""
+    lines = text.splitlines(keepends=False)
+    out: list[str] = []
+    index = 0
+
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith("## ") and line[3:].strip() in headings:
+            if out and out[-1] == "":
+                out.pop()
+            index += 1
+            while index < len(lines) and not lines[index].startswith("## "):
+                index += 1
+            while index < len(lines) and lines[index] == "":
+                index += 1
+            if index < len(lines) and out and out[-1] != "":
+                out.append("")
+            continue
+
+        out.append(line)
+        index += 1
+
+    suffix = "\n" if text.endswith("\n") else ""
+    return "\n".join(out) + suffix
+
+
 def _normalize_for_readiness(filename: str, text: str) -> str:
     if SESSION_FILE_RE.fullmatch(filename):
         return _strip_final_handoff_block(text)
@@ -873,6 +908,8 @@ def _normalize_for_readiness(filename: str, text: str) -> str:
         return _clear_status_cells_in_text(_strip_readiness_lines(text))
     if filename == "context.md":
         return _clear_status_cells_in_text(text)
+    if filename == "parallel-validation.md":
+        return _strip_markdown_sections(text, VOLATILE_PARALLEL_VALIDATION_SECTIONS)
     return text
 
 

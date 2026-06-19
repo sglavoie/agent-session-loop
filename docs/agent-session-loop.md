@@ -150,6 +150,12 @@ the per-session verification gate's `no-contract` pause, but it does not
 suppress failures from contracts that are present — a malformed or failing
 contract still pauses the run.
 
+`parallel-validation.md` is authoritative for dependency and ownership safety
+claims. Its `## Plan Readiness` and `## Preflight Snapshot` sections are
+informational snapshots from expansion time; the stable readiness hash ignores
+those sections, and `session-run` validates the current manifest readiness
+state/SHA before implementation.
+
 ## Completion Contracts
 
 Each `session-<id>.md` carries a `## Completion Contract` block with two
@@ -298,6 +304,10 @@ flag is supplied. JSON output carries a stable shape with `findings`,
 `loop-ready` and re-stamps the SHA and timestamp when the only blocking
 findings are manifest-readiness findings. It refuses when any non-readiness red
 or yellow finding remains.
+
+The readiness hash includes session files, expansion notes, and substantive
+parallel-validation safety content, but excludes derived readiness/preflight
+snapshot sections inside `parallel-validation.md`.
 
 `verify` reads a session's `## Completion Contract` and executes its `### Verify`
 recipe against `--cwd` (defaults to the current directory). Exit code is the

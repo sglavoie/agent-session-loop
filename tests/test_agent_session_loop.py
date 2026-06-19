@@ -1155,9 +1155,103 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertNotEqual(baseline, with_expansion)
 
             validation = plan_dir / "parallel-validation.md"
-            validation.write_text("validation\n", encoding="utf-8")
+            validation.write_text(
+                "\n".join(
+                    [
+                        "# Parallel Validation",
+                        "",
+                        "## Summary",
+                        "",
+                        "- **Safe concurrent sessions**: none",
+                        "",
+                        "## Plan Readiness",
+                        "",
+                        "- **Recorded state**: draft",
+                        "- **Recorded SHA-256**: old",
+                        "- **Recomputed SHA-256**: new",
+                        "- **Divergence**: recorded SHA differs from recomputed SHA",
+                        "",
+                        "## Preflight Snapshot",
+                        "",
+                        "- **Findings**: 1R / 1Y / 0G",
+                        "- **Reason**: preflight-red",
+                        "",
+                        "## Session-Run Precedence",
+                        "",
+                        "Dependency and ownership claims remain authoritative.",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
             with_validation = plans.stable_readiness_sha256(plan_dir)
             self.assertNotEqual(with_expansion, with_validation)
+
+            validation.write_text(
+                "\n".join(
+                    [
+                        "# Parallel Validation",
+                        "",
+                        "## Summary",
+                        "",
+                        "- **Safe concurrent sessions**: none",
+                        "",
+                        "## Plan Readiness",
+                        "",
+                        "- **Recorded state**: loop-ready",
+                        "- **Recorded SHA-256**: current",
+                        "- **Recomputed SHA-256**: current",
+                        "- **Divergence**: none",
+                        "",
+                        "## Preflight Snapshot",
+                        "",
+                        "- **Findings**: 0R / 0Y / 2G",
+                        "- **Reason**: loop-ready-marked",
+                        "",
+                        "## Session-Run Precedence",
+                        "",
+                        "Dependency and ownership claims remain authoritative.",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                with_validation, plans.stable_readiness_sha256(plan_dir)
+            )
+
+            validation.write_text(
+                "\n".join(
+                    [
+                        "# Parallel Validation",
+                        "",
+                        "## Summary",
+                        "",
+                        "- **Safe concurrent sessions**: 1, 2",
+                        "",
+                        "## Plan Readiness",
+                        "",
+                        "- **Recorded state**: loop-ready",
+                        "- **Recorded SHA-256**: current",
+                        "- **Recomputed SHA-256**: current",
+                        "- **Divergence**: none",
+                        "",
+                        "## Preflight Snapshot",
+                        "",
+                        "- **Findings**: 0R / 0Y / 2G",
+                        "- **Reason**: loop-ready-marked",
+                        "",
+                        "## Session-Run Precedence",
+                        "",
+                        "Dependency and ownership claims remain authoritative.",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            self.assertNotEqual(
+                with_validation, plans.stable_readiness_sha256(plan_dir)
+            )
 
     def test_parse_completion_contract_returns_none_when_section_absent(self) -> None:
         text = "\n".join(
@@ -7268,6 +7362,75 @@ class PreflightCoreTests(unittest.TestCase):
             self.assertIsNotNone(report.snapshot)
             self.assertIsNotNone(report.readiness)
             self.assertEqual({"1", "2"}, set(report.contracts_by_session))
+
+    def test_stale_parallel_validation_readiness_snapshot_does_not_block(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            _write_loop_ready_plan(plan_dir, ("pending",))
+            validation = plan_dir / "parallel-validation.md"
+            validation.write_text(
+                "\n".join(
+                    [
+                        "# Parallel Validation",
+                        "",
+                        "## Summary",
+                        "",
+                        "- **Safe concurrent sessions**: none",
+                        "",
+                        "## Plan Readiness",
+                        "",
+                        "- **Recorded state**: draft",
+                        "- **Recorded SHA-256**: old",
+                        "- **Recomputed SHA-256**: new",
+                        "- **Divergence**: recorded SHA differs from recomputed SHA",
+                        "",
+                        "## Preflight Snapshot",
+                        "",
+                        "- **Findings**: 1R / 1Y / 0G",
+                        "- **Reason**: preflight-red",
+                        "",
+                        "## Session-Run Precedence",
+                        "",
+                        "Dependency and ownership claims remain authoritative.",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            current_sha = plans.stable_readiness_sha256(plan_dir)
+            plans.write_readiness_metadata(
+                plan_dir,
+                plans.ReadinessMetadata(
+                    state="loop-ready",
+                    readiness_sha256=current_sha,
+                    checked_at="2026-06-19T00:00:00Z",
+                ),
+            )
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            self.assertTrue(
+                report.ok,
+                msg=[
+                    (finding.category, finding.severity, finding.message)
+                    for finding in report.findings
+                ],
+            )
+            self.assertEqual(current_sha, report.expected_readiness_sha256)
+
+            validation.write_text(
+                validation.read_text(encoding="utf-8").replace(
+                    "- **Findings**: 1R / 1Y / 0G",
+                    "- **Findings**: 0R / 0Y / 2G",
+                ),
+                encoding="utf-8",
+            )
+
+            refreshed_report = preflight.run_core_preflight(plan_dir)
+            self.assertTrue(refreshed_report.ok)
+            self.assertEqual(current_sha, refreshed_report.expected_readiness_sha256)
 
     def test_ambiguity_sentinel_emits_yellow_above_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

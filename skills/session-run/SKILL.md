@@ -137,13 +137,15 @@ Before executing any implementation work, run these fail-closed checks against t
 
   If the `## Contract Issues` section is missing entirely (e.g., the expansion file pre-dates session 11), treat the contract as "not checked" — proceed but mention in the report that expansion did not validate the contract.
 
-- **Plan readiness divergence** (plan-wide, from `parallel-validation.md`): if a `## Plan Readiness` section records a `Divergence` verdict other than `none` (hash mismatch or missing metadata), stop. Emit:
+- **Plan readiness snapshot** (plan-wide, from `parallel-validation.md`): treat any `## Plan Readiness` section as a stale-prone snapshot, not as a hard gate. The Python runner already holds the active plan lock and has run the authoritative preflight gate before invoking this skill, so do not run full `asl preflight` here. Instead, read the current manifest readiness metadata and recompute the current structural SHA with `agent_session_loop.plans.stable_readiness_sha256(plan_dir)`.
+
+  Stop only when the current manifest metadata is missing or malformed, the current readiness SHA differs from the recomputed SHA, or the current readiness state is neither `loop-ready` nor `running`. Emit:
 
   ```text
-  RUNNER_PAUSE: unsafe - plan readiness diverged from recorded SHA; rerun `session-split` Step 10a or `asl preflight --mark-loop-ready` before continuing
+  RUNNER_PAUSE: unsafe - plan readiness is not current; run `asl preflight --mark-loop-ready` before continuing
   ```
 
-  Hash divergence at run time almost always means a session file has been edited since the readiness was recorded, and `asl run` would refuse the plan anyway.
+  A `running` state is valid when this skill is invoked by `asl run`; `loop-ready` is valid for direct manual `/session-run` or `$session-run` invocations. If the snapshot says `Divergence: recorded SHA differs...` but the current manifest SHA matches the recomputed SHA, continue and mention in the report that `parallel-validation.md` has stale readiness text.
 
 - **Preflight snapshot** (plan-wide, from `parallel-validation.md`): treat any `## Preflight Snapshot` section as **informational only**. Red counts > 0 do not block explicit-mode session execution because `asl run`'s hard gate already enforces `loop-ready`. Surface the snapshot in the report so the user understands the pre-execution state, but do not duplicate the gate decision.
 
@@ -265,7 +267,7 @@ Use the original plan directory argument provided by the user for `<plan-dir>` w
 - Expansion notes (`session-<ID>.expand.md`) take precedence over the session file for factual claims (file paths, line numbers, function signatures)
 - The session file is the source of truth for what to implement; expansion notes only correct factual details
 - A non-clean `## Contract Issues` section in the expansion file is a pre-implementation pause with reason `malformed-contract`. Do not attempt to repair contract bodies during session-run.
-- A non-`none` `## Plan Readiness` divergence in `parallel-validation.md` is a pre-implementation pause with reason `unsafe`. Do not advance the readiness lifecycle from this skill.
+- `## Plan Readiness` in `parallel-validation.md` is informational snapshot text. Before implementation, validate only the current manifest readiness state/SHA; do not advance the readiness lifecycle from this skill.
 - `## Preflight Snapshot` in `parallel-validation.md` is informational; do not gate on it.
 - Always run `asl verify <plan-dir> --session <ID> --json` (with `--cwd <repo-root>` when the repo root is known) after writing the `complete` handoff. Non-zero exit reverts the handoff to `pending`, appends a failure note, and emits `RUNNER_PAUSE: <reason> - <summary>` using the stable JSON `reason` field.
 - The skill has no `--allow-not-loop-ready` equivalent. `reason: no-contract` fails closed; users who must bypass should use `asl run --allow-not-loop-ready` or repair the plan and re-mark it loop-ready.
