@@ -388,8 +388,8 @@ copilot -C <cwd> --add-dir <plan-dir> --allow-all-tools --allow-all-paths --no-a
 Harness prompts use the expected skill prefix:
 
 ```text
-$session-run <plan-dir>/
-/session-run <plan-dir>/
+$session-run <plan-dir>/ --runner-managed
+/session-run <plan-dir>/ --runner-managed
 ```
 
 Codex writes a last-message file with `-o`. Claude and Copilot do not use that
@@ -599,6 +599,10 @@ Common pause reasons:
 - `not-loop-ready`: the plan's `manifest.md` `**Readiness**` is not `loop-ready`
   and the run did not pass `--allow-not-loop-ready`. The pause payload includes
   the readiness state and the preflight finding summary.
+- `unsafe`, `blocked`, `dependent`, `unresolved-prerequisite`: a
+  `RUNNER_PAUSE: <reason> - ...` line from the invoked `session-run` skill
+  carried a structured pause reason. The runner preserves that reason instead
+  of collapsing the pause to `runner-pause`.
 - `verify-failed`: `asl verify` returned non-zero after a completed session.
   The pause payload includes the verification `reason` and per-check results.
 - `no-contract`: the completed session lacks a `## Completion Contract` and the

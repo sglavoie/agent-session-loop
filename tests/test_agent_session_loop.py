@@ -2448,6 +2448,10 @@ class CommandAndConfigTests(unittest.TestCase):
                 "$session-run "
             )
         )
+        self.assertIn(
+            runner.RUNNER_MANAGED_SESSION_ARG,
+            runner.build_session_prompt("codex", "/tmp/plan"),
+        )
         self.assertTrue(
             runner.build_session_prompt("claude", "/tmp/plan").startswith(
                 "/session-run "
@@ -6241,6 +6245,21 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual("operator requested pause", turn["runner_pause"])
         self.assertEqual("last_message", turn["runner_pause_source"])
 
+    def test_structured_runner_pause_signal_uses_embedded_reason(self) -> None:
+        completed, payload, _plan_dir, _state_dir, _fake_codex = self.run_loop(
+            mode="runner-pause-unsafe",
+            statuses=("pending",),
+        )
+
+        self.assertEqual(1, completed.returncode)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["paused"])
+        self.assertEqual("unsafe", payload["pause_reason"])
+        self.assertEqual("unsafe", payload["reason"])
+        self.assertIn("plan readiness is not current", payload["pause_message"])
+        self.assertIn(payload["pause_reason"], events.PAUSE_REASONS)
+        self.assertEqual("unsafe", payload["turns"][0]["status_result"])
+
     def test_malformed_after_turn_reports_malformed_plan_pause(self) -> None:
         completed, payload, _plan_dir, _state_dir, _fake_codex = self.run_loop(
             mode="malformed-after-turn",
@@ -8733,6 +8752,40 @@ class RunReadinessGateTests(unittest.TestCase):
         self.assertEqual(
             plans.stable_readiness_sha256(self.plan_dir),
             metadata.readiness_sha256,
+        )
+
+    def test_lifecycle_refreshes_running_sha_after_future_session_notes(
+        self,
+    ) -> None:
+        self._write_plan(("pending", "pending"), readiness="loop-ready")
+        original_metadata = plans.read_readiness_metadata(self.plan_dir)
+        self.assertIsNotNone(original_metadata)
+
+        completed, payload = self._run(
+            mode="success-future-note",
+            max_sessions=1,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("max-sessions", payload["reason"])
+        self.assertEqual("loop-ready", payload["readiness_state_final"])
+        self.assertIsNone(payload.get("readiness_state_refresh_error"))
+        self.assertIsNotNone(payload.get("readiness_state_refreshed_at"))
+        future_session = self.plan_dir / "session-2.md"
+        self.assertIn(
+            "Generated future-session note",
+            future_session.read_text(encoding="utf-8"),
+        )
+        refreshed_metadata = plans.read_readiness_metadata(self.plan_dir)
+        self.assertEqual("loop-ready", refreshed_metadata.state)
+        self.assertEqual(
+            plans.stable_readiness_sha256(self.plan_dir),
+            refreshed_metadata.readiness_sha256,
+        )
+        self.assertNotEqual(
+            original_metadata.readiness_sha256,
+            refreshed_metadata.readiness_sha256,
         )
 
     def test_lifecycle_marks_reviewed_when_run_pauses_on_failure(self) -> None:

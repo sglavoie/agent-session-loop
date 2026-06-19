@@ -1,6 +1,6 @@
 ---
 name: session-run
-description: Execute the next pending or explicitly selected session from a split plan directory. Supports parallel-safe explicit session scheduling with dependency validation while preserving serial auto-advance. Runs `asl verify` after each session and pauses on contract issues, readiness divergence, or verification failure. Companion to session-split and session-expand.
+description: Execute the next pending or explicitly selected session from a split plan directory. Supports parallel-safe explicit session scheduling with dependency validation while preserving serial auto-advance. Delegates authoritative status, readiness, and verification checks to `asl` scripts; `asl run` invokes this skill with `--runner-managed` so Python owns postflight enforcement. Companion to session-split and session-expand.
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 ---
 
@@ -13,6 +13,8 @@ Execute one session from a split plan directory. Directory-only input preserves 
 ## Input
 
 The user provides a plan directory path, a plan directory plus an explicit session selector, or a direct session file path as the host agent command or skill invocation argument.
+
+`asl run` appends `--runner-managed` to the skill invocation it sends to the harness. Treat that flag as an internal execution-mode marker, not as user-facing syntax: in runner-managed mode the Python runner already holds the plan lock, has run the authoritative readiness gate, and will run verification, handoff revert, derived ledger sync, and readiness refresh after this skill returns.
 
 Determine `<skill-prefix>` once for the active harness and use it for every user-facing skill invocation you print:
 
@@ -44,6 +46,7 @@ Accepted input forms:
 - **Directory auto-advance**: `<plan-dir>/` keeps the serial workflow and selects the first pending session.
 - **Explicit flag**: `<plan-dir>/ --session <ID>` runs exactly `session-<ID>.md`, where `<ID>` is a session ID such as `2` or `2.1`.
 - **Direct session file**: `<plan-dir>/session-<ID>.md` runs exactly that session.
+- **Runner-managed suffix**: any accepted form may end with `--runner-managed` when invoked by `asl run`; remove this marker before resolving paths and session IDs, but keep the execution mode.
 
 Concurrent auto-advance invocations are unsafe because multiple workers can select the same pending session. Parallel workers must use an explicit session target assigned by a coordinator.
 
@@ -56,11 +59,13 @@ Trim trailing whitespace from the invocation argument and determine the executio
 - **Directory auto-advance mode**: the input is a directory path with no extra selector.
 - **Explicit flag mode**: the input is a directory path followed by exactly `--session <ID>`, where `<ID>` matches `[1-9][0-9]*(\.[1-9][0-9]*)*`.
 - **Direct file mode**: the input is a path ending in `session-<ID>.md`; derive the plan directory from the file's parent directory and the selected session ID from the filename.
+- **Runner-managed mode**: if the final token is exactly `--runner-managed`, remove it before the mode checks above and set `runner_managed=true`.
 
 Reject malformed inputs and stop without making changes:
 
 - Unknown flags or extra positional arguments
 - `--session` without a valid session ID
+- `--runner-managed` anywhere except the final token
 - A direct file path whose basename is not exactly `session-<ID>.md` with a valid session ID
 - A selected session file that does not exist
 
@@ -76,28 +81,23 @@ If `<plan-dir>/parallel-validation.md` exists, read it before selecting or imple
 
 ### Step 3: Build Session Status Map
 
-Build the exact session file list first (`session-<ID>.md`, excluding `session-<ID>.expand.md`). Session IDs must match `[1-9][0-9]*(\.[1-9][0-9]*)*`.
+Run the status script and use its JSON as the authoritative session list and handoff status map:
 
-Sort session files by dotted numeric order: compare dot-separated components as integers, and when all compared components are equal, the shorter ID sorts first. For example, `2` sorts before `2.1`, and `2.10` sorts after `2.2`.
+```text
+asl status <plan-dir> --json
+```
 
-For each session file, read the status from the final exact `## Handoff` block:
-
-- Find the last line whose trimmed text is exactly `## Handoff`.
-- Within that block, read the first line that starts with `- **Status**:`.
-- Ignore any `- **Status**:` lines above the final handoff, including preserved original-plan templates such as `**Handoff (fill on completion)**`.
-- Treat a missing final handoff or missing populated status line as a malformed plan.
-
-Build `(session-id, status)` pairs from those final handoff statuses. Valid runnable statuses are exactly `pending` and `complete`.
-
-- If **no session files exist**: print an error and stop.
+If `asl status` exits non-zero or the JSON has `ok: false`, stop without making changes. Use the JSON `reason`/`error` fields in the report and emit a `RUNNER_PAUSE: malformed-plan - <summary>` line when `runner_managed=true`.
 
 In **directory auto-advance mode**, find the first session with status `pending` in dotted numeric order.
+
+- Prefer `next_pending_id` from the `asl status --json` payload; it is already resolved by the same parser used by `asl run`.
 
 - If **no sessions are pending** (all are `complete`): print `Next command: All sessions implemented - nothing left to run.` and stop.
 
 In **explicit mode**, select only the requested session ID:
 
-- If the selected session is missing from the status map, print an error and stop.
+- If the selected session is missing from the `sessions` array, print an error and stop.
 - If the selected session is already `complete`, print an error and stop.
 - If the selected session status is anything other than `pending`, print an error and stop.
 - Never fall back to another pending session.
@@ -125,29 +125,31 @@ In explicit mode, read the **Handoff** section for every required prior session 
 
 ### Step 4a: Pre-Implementation Contract and Readiness Checks
 
-Before executing any implementation work, run these fail-closed checks against the artifacts emitted by `session-expand`. Each pause here happens **before** the handoff is touched, so no revert is needed — emit the pause line, do not run Step 5, do not modify the handoff, and let Step 7 print the report with the `Next command:` line pointing back at the same selected session.
+Before executing any implementation work, delegate plan-wide safety checks to the Python scripts. Each pause here happens **before** the handoff is touched, so no revert is needed — emit the pause line, do not run Step 5, do not modify the handoff, and let Step 7 print the report with the `Next command:` line pointing back at the same selected session.
 
-- **Contract issues** (per-session, from `session-<ID>.expand.md`): if a `## Contract Issues` section exists for the selected session and is **not** the literal `_no contract issues found_`, stop. Emit:
+When `runner_managed=true`:
 
-  ```text
-  RUNNER_PAUSE: malformed-contract - expansion flagged contract issues for session <ID>; run `asl verify <plan-dir> --session <ID>` for the canonical finding set
-  ```
+- Do not run `asl preflight`.
+- Do not recompute readiness SHA values in the skill.
+- Do not parse `parallel-validation.md` readiness snapshots as gates.
+- Trust the active `asl run` process to own the lock, readiness lifecycle, verification gate, handoff revert, derived ledger sync, and readiness refresh.
+- You may still surface non-blocking context from expansion or validation files in the final report.
 
-  Do not try to fix contract bodies during session-run. The user repairs them through `session-split` Step 10a or by hand, then re-runs `session-expand` and this skill.
+When `runner_managed=false`, run:
 
-  If the `## Contract Issues` section is missing entirely (e.g., the expansion file pre-dates session 11), treat the contract as "not checked" — proceed but mention in the report that expansion did not validate the contract.
+```text
+asl preflight <plan-dir> --json
+```
 
-- **Plan readiness snapshot** (plan-wide, from `parallel-validation.md`): treat any `## Plan Readiness` section as a stale-prone snapshot, not as a hard gate. The Python runner already holds the active plan lock and has run the authoritative preflight gate before invoking this skill, so do not run full `asl preflight` here. Instead, read the current manifest readiness metadata and recompute the current structural SHA with `agent_session_loop.plans.stable_readiness_sha256(plan_dir)`.
+Stop unless the command exits zero, `ok` is true, and the payload's readiness state is `loop-ready`. Emit:
 
-  Stop only when the current manifest metadata is missing or malformed, the current readiness SHA differs from the recomputed SHA, or the current readiness state is neither `loop-ready` nor `running`. Emit:
+```text
+RUNNER_PAUSE: unsafe - plan is not loop-ready; run `asl preflight <plan-dir> --mark-loop-ready` before continuing
+```
 
-  ```text
-  RUNNER_PAUSE: unsafe - plan readiness is not current; run `asl preflight --mark-loop-ready` before continuing
-  ```
+Do not repair readiness from the skill except by telling the user the exact `asl preflight --mark-loop-ready` command. If `preflight` reports contract findings, surface its `repair_hints` rather than interpreting `session-<ID>.expand.md` contract prose as authoritative.
 
-  A `running` state is valid when this skill is invoked by `asl run`; `loop-ready` is valid for direct manual `/session-run` or `$session-run` invocations. If the snapshot says `Divergence: recorded SHA differs...` but the current manifest SHA matches the recomputed SHA, continue and mention in the report that `parallel-validation.md` has stale readiness text.
-
-- **Preflight snapshot** (plan-wide, from `parallel-validation.md`): treat any `## Preflight Snapshot` section as **informational only**. Red counts > 0 do not block explicit-mode session execution because `asl run`'s hard gate already enforces `loop-ready`. Surface the snapshot in the report so the user understands the pre-execution state, but do not duplicate the gate decision.
+Always treat any `## Plan Readiness` or `## Preflight Snapshot` section in `parallel-validation.md` as informational snapshot text. The live `asl` command output is canonical.
 
 ### Step 5: Implement
 
@@ -171,7 +173,11 @@ Use the Edit tool to update the handoff in place — do not rewrite the entire f
 
 ### Step 6a: Verify Before Final Commit
 
-Mirror the `asl run` loop policy: after writing the `complete` handoff in Step 6, invoke `asl verify` to execute the session's `Verify` recipe. The skill is the manual path that runs one session per harness invocation; the runner is the loop path. Both must enforce the same completion contract so manual and loop behavior stay consistent.
+Mirror the `asl run` loop policy without duplicating runner-managed postflight.
+
+When `runner_managed=true`, **do not run `asl verify` from the skill** and **do not revert handoff status from the skill**. The Python runner will inspect the handoff after this turn, run the same verification engine, revert to `pending` with a failure note on any contract or verification failure, sync derived ledgers after success, and refresh readiness metadata before the next turn.
+
+When `runner_managed=false`, after writing the `complete` handoff in Step 6, invoke `asl verify` to execute the session's `Verify` recipe. The skill is the manual path that runs one session per harness invocation; the runner is the loop path. Both must enforce the same completion contract through the same `asl verify` script.
 
 Invocation:
 
@@ -216,7 +222,11 @@ The current session's own handoff (Step 6) is for _results of this session_. Ste
 
 ### Step 6c: Sync Derived Status Ledgers
 
-After the selected handoff is updated and any future-session notes are injected, rebuild the status map from final handoff blocks and sync derived status tables where it is safe:
+After the selected handoff is updated and any future-session notes are injected, sync derived ledgers only when the Python runner is not already doing it.
+
+When `runner_managed=true`, skip this step. `asl run` rebuilds the status map from final handoff blocks and syncs recognized derived status tables after verification succeeds. Skipping here avoids racing the runner and keeps postflight behavior centralized.
+
+When `runner_managed=false`, rebuild the status map from final handoff blocks and sync derived status tables where it is safe:
 
 - In directory auto-advance mode, sync recognized status tables after every completed session.
 - In explicit mode, if any session remains `pending`, skip shared `manifest.md`/`context.md` status-table sync to avoid concurrent workers racing on shared files.
@@ -247,6 +257,8 @@ For runner-friendly output, you may print one or more machine-readable lines imm
 
 These runner-readable lines are optional for manual use and must not replace the final `Next command:` line when that line is part of the report.
 
+In `runner_managed=true` mode, print `Runner status: complete` only after the selected handoff has been changed to `complete`. If you stop before making that handoff change, print `Runner status: paused` and a `RUNNER_PAUSE: <reason> - <detail>` line so the Python runner records a structured pause instead of `no-status-change`.
+
 End every successful report with exactly one `Next command:` line:
 
 - In directory auto-advance mode, if another pending session remains, print `Next command: <skill-prefix>session-run <plan-dir>/`
@@ -261,15 +273,17 @@ Use the original plan directory argument provided by the user for `<plan-dir>` w
 ## Important Notes
 
 - One session per invocation — never implement more than one session
+- Honor `--runner-managed` as an internal mode from `asl run`: implement the selected session and update its handoff, but leave readiness, verification, handoff revert, and derived ledger sync to the Python runner.
+- Use `asl status <plan-dir> --json` as the authoritative parser for session lists, final handoff statuses, and `next_pending_id`; do not reimplement that parser in prose when the script can answer it.
+- In manual mode, use `asl preflight <plan-dir> --json` before implementation and `asl verify <plan-dir> --session <ID> --json` after marking the handoff complete.
 - Always read `context.md` before starting implementation
 - Always read `manifest.md`; use its parallel metadata as guidance, not as the completion source of truth
 - If `parallel-validation.md` exists, read it and treat it as authoritative over manifest/session parallel metadata
 - Expansion notes (`session-<ID>.expand.md`) take precedence over the session file for factual claims (file paths, line numbers, function signatures)
 - The session file is the source of truth for what to implement; expansion notes only correct factual details
-- A non-clean `## Contract Issues` section in the expansion file is a pre-implementation pause with reason `malformed-contract`. Do not attempt to repair contract bodies during session-run.
-- `## Plan Readiness` in `parallel-validation.md` is informational snapshot text. Before implementation, validate only the current manifest readiness state/SHA; do not advance the readiness lifecycle from this skill.
-- `## Preflight Snapshot` in `parallel-validation.md` is informational; do not gate on it.
-- Always run `asl verify <plan-dir> --session <ID> --json` (with `--cwd <repo-root>` when the repo root is known) after writing the `complete` handoff. Non-zero exit reverts the handoff to `pending`, appends a failure note, and emits `RUNNER_PAUSE: <reason> - <summary>` using the stable JSON `reason` field.
+- Treat expansion-file `## Contract Issues` as context only; canonical contract findings come from `asl preflight` before manual implementation and from runner/`asl verify` after completion.
+- `## Plan Readiness` and `## Preflight Snapshot` in `parallel-validation.md` are informational; do not gate on them when a live `asl` command is available.
+- In manual mode, always run `asl verify <plan-dir> --session <ID> --json` (with `--cwd <repo-root>` when the repo root is known) after writing the `complete` handoff. Non-zero exit reverts the handoff to `pending`, appends a failure note, and emits `RUNNER_PAUSE: <reason> - <summary>` using the stable JSON `reason` field.
 - The skill has no `--allow-not-loop-ready` equivalent. `reason: no-contract` fails closed; users who must bypass should use `asl run --allow-not-loop-ready` or repair the plan and re-mark it loop-ready.
 - Never modify the original plan file
 - Modify `context.md` only for clear derived session-status table sync described in Step 6c

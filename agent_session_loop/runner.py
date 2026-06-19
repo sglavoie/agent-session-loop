@@ -36,6 +36,7 @@ COMMIT_MODE_PER_SESSION = "per-session"
 COMMIT_MODE_END = "end"
 COMMIT_MODES = (COMMIT_MODE_PER_SESSION, COMMIT_MODE_END)
 COMMIT_ARGV: tuple[str, ...] = ("spec", "commit", "--yes", "--no-verify")
+RUNNER_MANAGED_SESSION_ARG = "--runner-managed"
 APPROVAL_SIGNAL_PATTERNS: tuple[str, ...] = (
     "approval required",
     "requires approval",
@@ -94,7 +95,10 @@ def _prompt_plan_dir(plan_dir: str | Path) -> str:
 def build_session_prompt(harness: str, plan_dir: str | Path) -> str:
     """Build the one-turn prompt, keeping the skill invocation first."""
     adapter = harnesses.get_adapter(harness)
-    return f"{adapter.skill_prefix}session-run {_prompt_plan_dir(plan_dir)}"
+    return (
+        f"{adapter.skill_prefix}session-run {_prompt_plan_dir(plan_dir)} "
+        f"{RUNNER_MANAGED_SESSION_ARG}"
+    )
 
 
 def build_harness_invocation(
@@ -470,6 +474,16 @@ def _runner_signals(result: harnesses.HarnessResult) -> dict[str, Any]:
     return signals
 
 
+def _runner_pause_reason(message: str) -> str:
+    """Resolve a structured RUNNER_PAUSE reason, preserving legacy fallback."""
+    text = message.strip()
+    for separator in (" - ", ": "):
+        prefix, found, _detail = text.partition(separator)
+        if found and prefix in events.PAUSE_REASONS:
+            return prefix
+    return "runner-pause"
+
+
 def _preview_text(text: str, *, limit: int = 160) -> str:
     collapsed = " ".join(text.strip().split())
     if len(collapsed) <= limit:
@@ -705,8 +719,9 @@ def _turn_status_result(
         return "timeout"
     if plan_error is not None:
         return "malformed-plan"
-    if runner_signals.get("runner_pause") is not None:
-        return "runner-pause"
+    runner_pause = runner_signals.get("runner_pause")
+    if runner_pause is not None:
+        return _runner_pause_reason(str(runner_pause))
     if result.returncode != 0:
         return "nonzero-exit"
     if not status_changes:
@@ -2059,6 +2074,25 @@ def _write_readiness_state(
     return True, None
 
 
+def _refresh_active_readiness_state(
+    payload: dict[str, Any],
+    plan_dir: Path,
+    persistence: _RunPersistence,
+) -> None:
+    """Keep an active run's recorded structural SHA current between turns."""
+    if not payload.get("readiness_state_active"):
+        return
+    success, error = _write_readiness_state(plan_dir, "running")
+    with persistence.lock:
+        if success:
+            payload["readiness_state_current"] = "running"
+            payload["readiness_state_refresh_error"] = None
+            payload["readiness_state_refreshed_at"] = _isoformat(_utc_now())
+        else:
+            payload["readiness_state_refresh_error"] = error
+        persistence.write_state(payload)
+
+
 def _final_readiness_state(
     payload: dict[str, Any],
     snapshot: plans.PlanSnapshot,
@@ -2944,12 +2978,13 @@ def _run_locked(
 
         runner_pause = turn_payload.get("runner_pause")
         if runner_pause is not None:
+            pause_reason = _runner_pause_reason(str(runner_pause))
             with persistence.lock:
                 payload["final_snapshot"] = _snapshot_payload(after)
             _pause_run(
                 event_path,
                 payload,
-                reason="runner-pause",
+                reason=pause_reason,
                 message=str(runner_pause),
                 details={
                     **session_details,
@@ -3095,6 +3130,8 @@ def _run_locked(
                 turn_payload["ledger_updates"] = [str(path) for path in ledger_updates]
                 turn_payload["after"] = _snapshot_payload(after)
                 _write_json_file(paths["result"], turn_payload)
+
+        _refresh_active_readiness_state(payload, after.plan_dir, persistence)
 
         if commit_mode == COMMIT_MODE_PER_SESSION:
             commit_payload = _run_auto_commit(

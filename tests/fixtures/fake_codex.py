@@ -125,6 +125,26 @@ def _mark_complete(path: Path) -> None:
         return
 
 
+def _append_future_note(path: Path, *, source_session_id: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index].strip() != HANDOFF_HEADING:
+            continue
+        note = [
+            f"## Notes from session-{source_session_id}",
+            "",
+            "- Generated future-session note from fake harness.",
+            "",
+        ]
+        suffix = "\n" if text.endswith("\n") else ""
+        path.write_text(
+            "\n".join(lines[:index] + note + lines[index:]) + suffix,
+            encoding="utf-8",
+        )
+        return
+
+
 def _write_last_message(text: str) -> None:
     last_message = _arg_value("-o")
     if last_message is None:
@@ -183,6 +203,14 @@ def main() -> int:
         print("runner requested pause")
         return 0
 
+    if mode == "runner-pause-unsafe":
+        _write_last_message(
+            "RUNNER_PAUSE: unsafe - plan readiness is not current; "
+            "run `asl preflight --mark-loop-ready` before continuing\n"
+        )
+        print("runner requested unsafe pause")
+        return 0
+
     if mode == "malformed-after-turn":
         (plan_dir / "context.md").unlink(missing_ok=True)
         _write_last_message("Runner status: complete\n")
@@ -201,6 +229,35 @@ def main() -> int:
             _mark_complete(pending[0])
         _write_last_message("Runner status: complete\nNext command: $session-run plan/\n")
         print("completed one session")
+        return 0
+
+    if mode == "success-future-note":
+        selected = _selected_session(plan_dir)
+        if (
+            selected is not None
+            and selected.is_file()
+            and _handoff_status_line(selected) == STATUS_PENDING
+        ):
+            target = selected
+        elif pending:
+            target = pending[0]
+        else:
+            target = None
+        if target is not None:
+            source_session_id = _session_label(target)
+            _mark_complete(target)
+            remaining = [
+                path
+                for path in _pending_sessions(plan_dir)
+                if _session_sort_key(path) > _session_sort_key(target)
+            ]
+            if remaining:
+                _append_future_note(
+                    remaining[0],
+                    source_session_id=source_session_id,
+                )
+        _write_last_message("Runner status: complete\nNext command: $session-run plan/\n")
+        print("completed one session and added a future note")
         return 0
 
     if mode == "streaming-success":
