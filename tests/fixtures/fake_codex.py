@@ -67,6 +67,13 @@ def _prompt_tokens() -> list[str]:
     return []
 
 
+def _prompt_contains_reply_context() -> bool:
+    for value in sys.argv[1:]:
+        if "## ASL reply context" in value:
+            return True
+    return False
+
+
 def _selected_session(plan_dir: Path) -> Path | None:
     tokens = _prompt_tokens()
     for index, token in enumerate(tokens):
@@ -145,6 +152,25 @@ def _append_future_note(path: Path, *, source_session_id: str) -> None:
         return
 
 
+def _blocked_last_message() -> str:
+    """Return a realistic multi-question blocked-pause last-message body."""
+    return (
+        "I need decisions on a few open questions before I can continue:\n"
+        "\n"
+        "1. Should the new endpoint use (a) cursor-based pagination or "
+        "(b) offset-based pagination?\n"
+        "2. For request authentication, do we (a) reuse the existing "
+        "middleware or (b) introduce a per-route guard?\n"
+        "3. For audit logging, (a) log every request synchronously or "
+        "(b) batch writes every 30 seconds?\n"
+        "\n"
+        "Reply with one selection per question (e.g., `1a, 2a, 3b`).\n"
+        "\n"
+        "Runner status: paused\n"
+        "RUNNER_PAUSE: blocked - interactive decision gates require user answers\n"
+    )
+
+
 def _write_last_message(text: str) -> None:
     last_message = _arg_value("-o")
     if last_message is None:
@@ -215,6 +241,31 @@ def main() -> int:
             "run `asl preflight --mark-loop-ready` before continuing\n"
         )
         print("runner requested unsafe pause")
+        return 0
+
+    if mode == "reply-blocked":
+        _write_last_message(_blocked_last_message())
+        print("runner pause: blocked on operator answers")
+        return 0
+
+    if mode == "reply-aware":
+        if _prompt_contains_reply_context():
+            selected = _selected_session(plan_dir)
+            if (
+                selected is not None
+                and selected.is_file()
+                and _handoff_status_line(selected) == STATUS_PENDING
+            ):
+                _mark_complete(selected)
+            elif pending:
+                _mark_complete(pending[0])
+            _write_last_message(
+                "Runner status: complete\nNext command: $session-run plan/\n"
+            )
+            print("completed one session after consuming operator reply")
+            return 0
+        _write_last_message(_blocked_last_message())
+        print("runner pause: blocked on operator answers")
         return 0
 
     if mode == "malformed-after-turn":

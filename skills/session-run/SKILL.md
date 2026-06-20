@@ -16,6 +16,8 @@ The user provides a plan directory path, a plan directory plus an explicit sessi
 
 `asl run` appends `--runner-managed` to the skill invocation it sends to the harness. Treat that flag as an internal execution-mode marker, not as user-facing syntax: in runner-managed mode the Python runner already holds the plan lock, has run the authoritative readiness gate, and will run verification, handoff revert, derived ledger sync, and readiness refresh after this skill returns.
 
+Runner-managed prompts may carry extra context beyond the first invocation line. When `asl run --reply TEXT` resumes a paused session, the runner prepends the `<skill-prefix>session-run <plan-dir>/ --runner-managed` invocation on line 1 and appends an `## ASL reply context` block containing the operator reply, the previous pause metadata, the paused turn's last message, and resume instructions. The first line is the only CLI invocation — everything below the `## ASL reply context` heading is prompt context for this skill, not additional CLI syntax. Do not try to parse the reply block as flags or session selectors; parse only the first line for paths and `--session`/`--runner-managed` tokens.
+
 Determine `<skill-prefix>` once for the active harness and use it for every user-facing skill invocation you print:
 
 - Codex: `$`
@@ -70,6 +72,33 @@ Reject malformed inputs and stop without making changes:
 - A selected session file that does not exist
 
 Verify the resolved plan directory exists and contains `manifest.md` and `context.md`.
+
+### Step 1a: Honor Runner-Managed Reply Context
+
+If the prompt contains an `## ASL reply context` block (always immediately after the first invocation line in runner-managed reply mode), treat that block as authoritative operator-supplied answers for the paused session. The block's structure is:
+
+- `### Operator reply` — the literal text the operator passed to `asl run --reply TEXT`.
+- `### Previous pause` — `Reason`, `Message`, `Session ID`, `Turn index`, `Run ID` bullets describing the prior pause.
+- `### Pause details` — JSON object (sorted keys) or `(none)` when empty.
+- `### Previous paused last message` — the verbatim last-message text from the paused turn (no code fence).
+- `### Instructions` — explicit resume rules.
+
+Behavior:
+
+- Use the `### Operator reply` text as the answer to whatever interactive question paused the previous turn. Do not ask the user again. Do not reopen the question to the operator before consulting the reply.
+- The runner injects this prompt only on the **first** resumed turn after `--reply`; turn 2+ on the same run carry the plain session prompt with no reply block. Do not expect the block to repeat.
+- The operator reply text is not persisted in `events.jsonl` or `state.json` — only its character count via `REPLY_PROVIDED_EVENT`. Treat the in-prompt block as the single source of truth for the reply text within this turn.
+- If the reply answers all blocking questions, proceed through Step 5 (Implement) using those answers and complete the session normally.
+- If the reply is genuinely incomplete or contradictory and you cannot resolve the remaining ambiguity from the reply text plus existing plan context, stop before mutating the handoff and emit:
+
+  ```text
+  Runner status: paused
+  RUNNER_PAUSE: blocked - interactive decision gates require user answers
+  ```
+
+  Then exit. The runner records the pause and the operator can rerun `asl run --reply TEXT` with a more complete answer.
+
+- Never escalate to a new question when the reply already supplies the answer — pausing again after a complete reply wastes a runner turn.
 
 ### Step 2: Read Context and Manifest
 
@@ -319,6 +348,7 @@ Use the original plan directory argument provided by the user for `<plan-dir>` w
 
 - One session per invocation — never implement more than one session
 - Honor `--runner-managed` as an internal mode from `asl run`: implement the selected session and update its handoff, but leave readiness, verification, handoff revert, and derived ledger sync to the Python runner.
+- When the prompt carries an `## ASL reply context` block (only on the first turn after `asl run --reply TEXT`), use the `### Operator reply` text as the answers to the paused question and resume the session without re-asking the operator. If the reply is genuinely incomplete, emit `Runner status: paused` and `RUNNER_PAUSE: blocked - interactive decision gates require user answers` before mutating the handoff.
 - Use `asl status <plan-dir> --json` as the authoritative parser for session lists, final handoff statuses, and `next_pending_id`; do not reimplement that parser in prose when the script can answer it.
 - In manual mode, use `asl preflight <plan-dir> --json` before implementation and `asl verify <plan-dir> --session <ID> --json` after marking the handoff complete.
 - Always read `context.md` before starting implementation

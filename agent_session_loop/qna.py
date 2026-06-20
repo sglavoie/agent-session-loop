@@ -1,0 +1,564 @@
+"""Paused-run question-and-answer context loader.
+
+The runner pauses a session when its harness ends without completing the
+session, often because the agent is asking the human a clarifying question.
+This module loads the latest paused turn's context from the runner state file
+and exposes a structured payload that downstream commands (``asl questions``,
+``asl run --reply``, resolver prompt builders) can consume without duplicating
+state parsing logic.
+
+The plan directory remains the durable source of truth for completion. The
+loader only reads state and never mutates it.
+"""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+import json
+from pathlib import Path
+import sys
+from typing import Any
+
+from . import events, plans, responses, state
+
+
+REASON_NO_PAUSED_RUN = "no-paused-run"
+REASON_MISSING_QUESTION_CONTEXT = "missing-question-context"
+REASON_REPLY_CONTEXT_MISMATCH = "reply-context-mismatch"
+
+QNA_ERROR_REASONS: tuple[str, ...] = (
+    REASON_NO_PAUSED_RUN,
+    REASON_MISSING_QUESTION_CONTEXT,
+    REASON_REPLY_CONTEXT_MISMATCH,
+)
+
+
+class QnAError(Exception):
+    """Raised when paused-run Q&A context cannot be loaded safely."""
+
+    def __init__(
+        self,
+        reason: str,
+        error: str,
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        self.reason = reason
+        self.error = error
+        self.details: dict[str, Any] = {} if details is None else dict(details)
+        super().__init__(error)
+
+
+@dataclass(frozen=True)
+class QnAContext:
+    """Structured paused-run question context for resolver prompts."""
+
+    plan_dir: Path
+    state_dir: Path
+    state_path: Path
+    run_id: str | None
+    run_dir: Path | None
+    pause_reason: str | None
+    pause_message: str | None
+    pause_details: dict[str, Any]
+    harness: str | None
+    model: str | None
+    model_source: str | None
+    effort: str | None
+    effort_source: str | None
+    session_id: str
+    next_pending_id: str
+    turn_index: int | None
+    artifact_dir: Path | None
+    stdout_path: Path | None
+    stderr_path: Path | None
+    last_message_path: Path
+    result_path: Path | None
+    last_message: str
+
+
+def load_qna_context(
+    plan_dir: str | Path,
+    *,
+    state_dir: str | Path | None = None,
+) -> QnAContext:
+    """Load and validate the latest paused-run question context.
+
+    Raises :class:`QnAError` with a stable ``reason`` on every recognized
+    failure path:
+
+    - ``no-paused-run`` when the state file is missing, unreadable, not paused,
+      or has no completed turn that recorded a session id.
+    - ``missing-question-context`` when the paused turn does not point at a
+      readable, non-empty ``last-message`` artifact.
+    - ``reply-context-mismatch`` when the paused turn's session id no longer
+      matches the plan's current ``next_pending_id``.
+    """
+    snapshot = plans.inspect_plan(plan_dir)
+    plan_state = state.plan_state_dir(snapshot.plan_dir, state_dir)
+    state_path = plan_state / events.STATE_FILE_NAME
+
+    next_pending = snapshot.next_pending
+    if next_pending is None:
+        raise QnAError(
+            REASON_NO_PAUSED_RUN,
+            "plan has no pending session waiting on a reply",
+            details={
+                "plan_dir": str(snapshot.plan_dir),
+                "state_path": str(state_path),
+            },
+        )
+
+    payload = _read_state_payload(state_path)
+
+    if not _is_paused(payload):
+        raise QnAError(
+            REASON_NO_PAUSED_RUN,
+            "latest runner state is not paused",
+            details={
+                "state_path": str(state_path),
+                "paused": payload.get("paused"),
+            },
+        )
+
+    turn = _latest_completed_turn(payload, state_path=state_path)
+
+    session_id = _turn_session_id(turn, state_path=state_path)
+    if session_id != next_pending.id:
+        raise QnAError(
+            REASON_REPLY_CONTEXT_MISMATCH,
+            (
+                f"paused session {session_id!r} no longer matches the "
+                f"current pending session {next_pending.id!r}"
+            ),
+            details={
+                "paused_session_id": session_id,
+                "next_pending_id": next_pending.id,
+                "state_path": str(state_path),
+            },
+        )
+
+    last_message_path = _coerce_path(turn.get("last_message_path"))
+    if last_message_path is None:
+        raise QnAError(
+            REASON_MISSING_QUESTION_CONTEXT,
+            "latest paused turn does not record a last-message artifact path",
+            details={
+                "state_path": str(state_path),
+                "session_id": session_id,
+            },
+        )
+
+    last_message = _read_last_message(last_message_path, session_id=session_id)
+
+    return QnAContext(
+        plan_dir=snapshot.plan_dir,
+        state_dir=plan_state,
+        state_path=state_path,
+        run_id=_optional_str(payload.get("run_id")),
+        run_dir=_coerce_path(payload.get("run_dir")),
+        pause_reason=_optional_str(
+            payload.get("pause_reason") or payload.get("reason")
+        ),
+        pause_message=_optional_str(payload.get("pause_message")),
+        pause_details=_coerce_dict(
+            payload.get("pause_details") or payload.get("details")
+        ),
+        harness=_optional_str(turn.get("harness") or payload.get("harness")),
+        model=_optional_str(turn.get("model") or payload.get("model")),
+        model_source=_optional_str(
+            turn.get("model_source") or payload.get("model_source")
+        ),
+        effort=_optional_str(turn.get("effort") or payload.get("effort")),
+        effort_source=_optional_str(
+            turn.get("effort_source") or payload.get("effort_source")
+        ),
+        session_id=session_id,
+        next_pending_id=next_pending.id,
+        turn_index=_optional_int(turn.get("turn_index")),
+        artifact_dir=_coerce_path(turn.get("artifact_dir")),
+        stdout_path=_coerce_path(turn.get("stdout_path")),
+        stderr_path=_coerce_path(turn.get("stderr_path")),
+        last_message_path=last_message_path,
+        result_path=_coerce_path(turn.get("result_path")),
+        last_message=last_message,
+    )
+
+
+def qna_context_payload(context: QnAContext) -> dict[str, Any]:
+    """Render a :class:`QnAContext` as a JSON-friendly payload."""
+    return {
+        "plan_dir": str(context.plan_dir),
+        "state_dir": str(context.state_dir),
+        "state_path": str(context.state_path),
+        "run_id": context.run_id,
+        "run_dir": str(context.run_dir) if context.run_dir is not None else None,
+        "pause_reason": context.pause_reason,
+        "pause_message": context.pause_message,
+        "pause_details": dict(context.pause_details),
+        "harness": context.harness,
+        "model": context.model,
+        "model_source": context.model_source,
+        "effort": context.effort,
+        "effort_source": context.effort_source,
+        "session_id": context.session_id,
+        "next_pending_id": context.next_pending_id,
+        "turn_index": context.turn_index,
+        "artifact_dir": (
+            str(context.artifact_dir) if context.artifact_dir is not None else None
+        ),
+        "stdout_path": (
+            str(context.stdout_path) if context.stdout_path is not None else None
+        ),
+        "stderr_path": (
+            str(context.stderr_path) if context.stderr_path is not None else None
+        ),
+        "last_message_path": str(context.last_message_path),
+        "result_path": (
+            str(context.result_path) if context.result_path is not None else None
+        ),
+        "last_message": context.last_message,
+    }
+
+
+def qna_error_payload(error: QnAError) -> dict[str, Any]:
+    """Render a :class:`QnAError` as a JSON-friendly payload."""
+    return {
+        "reason": error.reason,
+        "error": error.error,
+        "details": dict(error.details),
+    }
+
+
+def _read_state_payload(state_path: Path) -> dict[str, Any]:
+    if not state_path.exists():
+        raise QnAError(
+            REASON_NO_PAUSED_RUN,
+            f"runner state file does not exist: {state_path}",
+            details={"state_path": str(state_path)},
+        )
+    try:
+        raw = state_path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise QnAError(
+            REASON_NO_PAUSED_RUN,
+            f"runner state file is unreadable: {error}",
+            details={"state_path": str(state_path), "error": str(error)},
+        ) from error
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise QnAError(
+            REASON_NO_PAUSED_RUN,
+            f"runner state file is not valid JSON: {error}",
+            details={"state_path": str(state_path), "error": str(error)},
+        ) from error
+    if not isinstance(payload, dict):
+        raise QnAError(
+            REASON_NO_PAUSED_RUN,
+            "runner state file did not contain a JSON object",
+            details={"state_path": str(state_path)},
+        )
+    return payload
+
+
+def _is_paused(payload: dict[str, Any]) -> bool:
+    value = payload.get("paused")
+    return value is True
+
+
+def _latest_completed_turn(
+    payload: dict[str, Any],
+    *,
+    state_path: Path,
+) -> dict[str, Any]:
+    turns = payload.get("turns")
+    if not isinstance(turns, list) or not turns:
+        raise QnAError(
+            REASON_NO_PAUSED_RUN,
+            "runner state has no completed turns",
+            details={"state_path": str(state_path)},
+        )
+    for turn in reversed(turns):
+        if isinstance(turn, dict):
+            return turn
+    raise QnAError(
+        REASON_NO_PAUSED_RUN,
+        "runner state turns array did not contain a turn object",
+        details={"state_path": str(state_path)},
+    )
+
+
+def _turn_session_id(turn: dict[str, Any], *, state_path: Path) -> str:
+    value = turn.get("session_id")
+    if isinstance(value, str) and value:
+        return value
+    fallback = turn.get("session")
+    if isinstance(fallback, str) and fallback:
+        return fallback
+    if isinstance(fallback, int) and not isinstance(fallback, bool) and fallback > 0:
+        return str(fallback)
+    raise QnAError(
+        REASON_NO_PAUSED_RUN,
+        "latest paused turn does not record a session id",
+        details={"state_path": str(state_path)},
+    )
+
+
+def _read_last_message(path: Path, *, session_id: str) -> str:
+    if not path.exists():
+        raise QnAError(
+            REASON_MISSING_QUESTION_CONTEXT,
+            f"last-message artifact does not exist: {path}",
+            details={
+                "last_message_path": str(path),
+                "session_id": session_id,
+            },
+        )
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise QnAError(
+            REASON_MISSING_QUESTION_CONTEXT,
+            f"last-message artifact is unreadable: {error}",
+            details={
+                "last_message_path": str(path),
+                "session_id": session_id,
+                "error": str(error),
+            },
+        ) from error
+    if not text.strip():
+        raise QnAError(
+            REASON_MISSING_QUESTION_CONTEXT,
+            f"last-message artifact is empty: {path}",
+            details={
+                "last_message_path": str(path),
+                "session_id": session_id,
+            },
+        )
+    return text
+
+
+def _coerce_path(value: Any) -> Path | None:
+    if isinstance(value, str) and value:
+        return Path(value)
+    return None
+
+
+def _coerce_dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _optional_str(value: Any) -> str | None:
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _optional_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def artifact_paths_payload(context: QnAContext) -> dict[str, str | None]:
+    """Render the paused turn's artifact paths as a JSON-friendly dict."""
+    return {
+        "run_dir": str(context.run_dir) if context.run_dir is not None else None,
+        "artifact_dir": (
+            str(context.artifact_dir) if context.artifact_dir is not None else None
+        ),
+        "stdout_path": (
+            str(context.stdout_path) if context.stdout_path is not None else None
+        ),
+        "stderr_path": (
+            str(context.stderr_path) if context.stderr_path is not None else None
+        ),
+        "last_message_path": str(context.last_message_path),
+        "result_path": (
+            str(context.result_path) if context.result_path is not None else None
+        ),
+    }
+
+
+def render_resolver_prompt(context: QnAContext) -> str:
+    """Render a paused-run context as a ready-to-send resolver prompt.
+
+    The output is plain Markdown suitable for handing to another AI agent.
+    The agent is expected to ask the user the question(s) the original
+    harness paused on, then return a concise reply that ``asl run --reply``
+    can consume verbatim.
+    """
+    lines: list[str] = []
+    lines.append("# Paused Agent Session - Resolver Prompt")
+    lines.append("")
+    lines.append(
+        "An agent harness paused mid-session waiting on a clarifying answer. "
+        "Read the context below, ask the user the question(s) the previous "
+        "agent needed answered, then return a concise reply suitable for "
+        "`asl run --reply`."
+    )
+    lines.append("")
+
+    lines.append("## Plan")
+    lines.append(f"- Plan directory: {context.plan_dir}")
+    lines.append(f"- State file: {context.state_path}")
+    lines.append(f"- Run ID: {_display(context.run_id)}")
+    lines.append(f"- Session ID: {context.session_id}")
+    lines.append(f"- Turn index: {_display(context.turn_index)}")
+    lines.append("")
+
+    lines.append("## Harness")
+    lines.append(f"- Harness: {_display(context.harness)}")
+    lines.append(
+        f"- Model: {_display(context.model)}"
+        f"{_source_suffix(context.model_source)}"
+    )
+    lines.append(
+        f"- Effort: {_display(context.effort)}"
+        f"{_source_suffix(context.effort_source)}"
+    )
+    lines.append("")
+
+    lines.append("## Pause")
+    lines.append(f"- Reason: {_display(context.pause_reason)}")
+    lines.append(f"- Message: {_display(context.pause_message)}")
+    if context.pause_details:
+        details_json = json.dumps(context.pause_details, sort_keys=True)
+        lines.append(f"- Details: {details_json}")
+    else:
+        lines.append("- Details: (none)")
+    lines.append("")
+
+    lines.append("## Artifacts")
+    artifacts = artifact_paths_payload(context)
+    lines.append(f"- Run dir: {_display(artifacts['run_dir'])}")
+    lines.append(f"- Artifact dir: {_display(artifacts['artifact_dir'])}")
+    lines.append(f"- Stdout: {_display(artifacts['stdout_path'])}")
+    lines.append(f"- Stderr: {_display(artifacts['stderr_path'])}")
+    lines.append(f"- Last message: {artifacts['last_message_path']}")
+    lines.append(f"- Result: {_display(artifacts['result_path'])}")
+    lines.append("")
+
+    lines.append("## Previous Agent Message")
+    lines.append("")
+    lines.append(context.last_message.rstrip("\n"))
+    lines.append("")
+
+    lines.append("## Instructions")
+    lines.append("")
+    lines.append(
+        "1. Ask the user the question(s) the previous agent needed answered. "
+        "If the message contains multiple questions, ask each in order."
+    )
+    lines.append(
+        "2. Keep the reply concise. One short answer per question is best "
+        "(e.g., `1a, 2a, 3a`)."
+    )
+    lines.append(
+        "3. Return ONLY the user's answer text. Do not add commentary, "
+        "headings, or quoted context."
+    )
+    lines.append(
+        "4. The answer will be passed verbatim to "
+        "`asl run --reply` to resume the paused session."
+    )
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def questions_payload(context: QnAContext) -> dict[str, Any]:
+    """Render a paused-run context as the ``asl questions`` JSON payload."""
+    return responses.success_payload(
+        "questions",
+        plan_dir=str(context.plan_dir),
+        state_dir=str(context.state_dir),
+        state_path=str(context.state_path),
+        run_id=context.run_id,
+        session_id=context.session_id,
+        next_pending_id=context.next_pending_id,
+        turn_index=context.turn_index,
+        pause_reason=context.pause_reason,
+        pause_message=context.pause_message,
+        pause_details=dict(context.pause_details),
+        harness=context.harness,
+        model=context.model,
+        model_source=context.model_source,
+        effort=context.effort,
+        effort_source=context.effort_source,
+        artifact_paths=artifact_paths_payload(context),
+        last_message=context.last_message,
+        rendered_prompt=render_resolver_prompt(context),
+    )
+
+
+def questions_from_args(args: argparse.Namespace) -> int:
+    """Run the ``questions`` subcommand from CLI arguments."""
+    plan_dir_arg = args.plan_dir
+    state_dir_arg = args.state_dir
+    want_json = bool(args.json)
+
+    try:
+        context = load_qna_context(plan_dir_arg, state_dir=state_dir_arg)
+    except QnAError as error:
+        return _emit_questions_error(
+            want_json=want_json,
+            reason=error.reason,
+            error=error.error,
+            plan_dir=plan_dir_arg,
+            details=error.details,
+        )
+    except plans.PlanError as error:
+        return _emit_questions_error(
+            want_json=want_json,
+            reason="malformed-plan",
+            error=str(error),
+            plan_dir=plan_dir_arg,
+            details={"plan_dir": str(plan_dir_arg)},
+        )
+
+    if want_json:
+        responses.print_json(questions_payload(context))
+    else:
+        print(render_resolver_prompt(context))
+    return 0
+
+
+def _emit_questions_error(
+    *,
+    want_json: bool,
+    reason: str,
+    error: str,
+    plan_dir: str | Path,
+    details: dict[str, Any],
+) -> int:
+    if want_json:
+        responses.print_json(
+            responses.error_payload(
+                "questions",
+                reason=reason,
+                error=error,
+                paused=False,
+                details=dict(details),
+                plan_dir=str(plan_dir),
+            )
+        )
+    else:
+        print(f"agent-session-loop questions: {error}", file=sys.stderr)
+    return 1
+
+
+def _display(value: Any) -> str:
+    if value is None or value == "":
+        return "(unknown)"
+    return str(value)
+
+
+def _source_suffix(source: str | None) -> str:
+    if not source:
+        return ""
+    return f" ({source})"

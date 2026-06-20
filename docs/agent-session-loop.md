@@ -278,10 +278,11 @@ without running the final `--commit-at-end` commit.
 ## Commands
 
 ```text
-asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--review-harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--allow-not-loop-ready] [--json] [--dry-run]
+asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--review-harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--allow-not-loop-ready] [--reply TEXT] [--json] [--dry-run]
 asl preflight PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--mark-loop-ready] [--json]
 asl verify PLAN_DIR --session ID [--cwd REPO_ROOT] [--json]
 asl status PLAN_DIR [--state-dir DIR] [--json]
+asl questions PLAN_DIR [--state-dir DIR] [--json]
 asl tail PLAN_DIR [--state-dir DIR] [--lines N] [--no-follow]
 asl sessions [--running] [--recent] [--limit N] [--state-dir DIR] [--verbose] [--json]
 asl doctor --harness codex|claude|copilot [--model MODEL] [--effort EFFORT] [--cwd REPO_ROOT] --plan-dir PLAN_DIR [--unsafe-bypass|--no-unsafe-bypass] [--json]
@@ -425,6 +426,43 @@ scriptable prerequisite checks.
 `unlock` removes a stale lock. It refuses to remove an active lock unless
 `--force` is supplied. Use `--json` when automation needs the removed lock
 state or an active-lock failure payload.
+
+`asl questions` reads the durable paused turn for a plan and renders an external
+resolver prompt that another agent (or a human) can use to gather operator
+answers. It never invokes the harness, never mutates plan state, and never
+writes the operator's reply anywhere. Text output prints the rendered prompt
+preceded by a one-line hint that points back at `asl run --reply`; `--json`
+emits `ok`, `command: "questions"`, `session_id`, `next_pending_id`, the
+verbatim `last_message`, the assembled `rendered_prompt`, and `state_path`. If
+no paused turn exists, `--json` produces `ok: false` with a stable `reason`
+(`no-paused-run`, `missing-question-context`, or `malformed-plan`) and `asl run`
+exits cleanly without a pause stub. The `asl questions` resolver prompt is an
+external operator-facing prompt headed
+`# Paused Agent Session - Resolver Prompt`; it is intentionally distinct from
+the in-harness resume block headed `## ASL reply context`, though both surfaces
+include the paused question text and metadata needed to answer it.
+
+`asl run --reply TEXT` resumes a paused plan by injecting the operator's
+verbatim reply as a one-shot prefix on the next harness turn only. The reply is
+expanded into a `## ASL reply context` block above the regular session prompt;
+`build_reply_prompt` always reuses `build_session_prompt` byte-for-byte for the
+first line. The runner persists the resume metadata as a `reply_provided`
+event (no reply text) and tags the resumed turn with `prompt_kind: "reply"`
+plus a `reply_source` summary; the literal reply text is never stored in
+`state.json`, `events.jsonl`, `argv`, or turn artifacts (the persisted argv
+substitutes a placeholder like `<asl reply prompt redacted: N chars>` for the
+full in-harness reply prompt).
+Subsequent turns in the same run drop back to the plain session prompt. The
+flag is allowed only when the most recent turn paused with a non-empty
+`last-message.txt`; otherwise `run --reply` exits non-zero with `reason:
+no-paused-run`, `reason: missing-question-context`, `reason:
+reply-context-mismatch` (paused turn references a different session than the
+one currently pending), or `reason: empty-reply` (CLI-only validation; the
+flag's argument was empty or whitespace). `run --dry-run --reply TEXT` prints
+the additional `Resolver prompt:` block above the regular `Prompt:` and
+`Argv:` blocks so operators can preview both surfaces without touching the
+harness, consuming the paused state, or writing the preview payload to
+`state.json`/`events.jsonl`.
 
 ## Harness Commands
 
@@ -594,6 +632,8 @@ Use `--json` for runner integrations:
 ```bash
 asl run ~/.local/share/agent-plans/example-plan/ --harness codex --max-sessions 1 --json
 asl status ~/.local/share/agent-plans/example-plan/ --json
+asl questions ~/.local/share/agent-plans/example-plan/ --json
+asl run ~/.local/share/agent-plans/example-plan/ --harness codex --reply "1a, 2b, 3a" --json
 asl sessions --json
 asl sessions --running --json
 asl sessions --recent --limit 5 --json
@@ -610,6 +650,26 @@ error fields are `ok`, `command`, `reason`, `error`, `paused`, and `details`.
 `control`, `completed_sessions`, `completed_session_ids`, `turns`,
 `initial_snapshot`, `final_snapshot`, `state_path`, and `events_path`. Runs
 without commit flags report `commit_mode: null` and `commits: []`.
+
+Paused `run --json` payloads also carry an `interactive_help` object whenever
+the paused turn left a non-empty `last-message.txt` body (it is `null`
+otherwise). The block surfaces the data a wrapping coordinator needs to route
+the operator conversation without rebuilding state: `questions_command` and
+`reply_command` are ready-to-paste `asl questions` and `asl run --reply TEXT`
+invocations preserving the current `--state-dir`; `session_id` is the paused
+turn's session, `next_pending_id` is the canonical next pending ID,
+`turn_index` is the paused turn index, `artifact_paths` repeats the durable
+`last_message_path`/`stdout_path`/`stderr_path`/`result_path`/`artifact_dir`,
+and `rendered_prompt` is the same resolver prompt `asl questions` would emit
+(the operator reply text is never embedded). `asl questions --json` mirrors
+the same fields under `ok: true` (`session_id`, `next_pending_id`,
+`last_message`, `rendered_prompt`, `state_path`); failures use stable
+`reason` strings (`no-paused-run`, `missing-question-context`,
+`malformed-plan`). The reply turn itself is identifiable from
+`turns[*].prompt_kind` (`"session"` for plain session prompts,
+`"reply"` for the one-shot resume); reply turns also carry a `reply_source`
+summary (`run_id`, `session_id`, `turn_index`, `last_message_path`,
+`reply_length`) while the verbatim reply text is never persisted.
 
 Review-harness fields are present on every run payload. `review_requested` is
 `true` when `--review-harness` was supplied, `false` otherwise. `review_harness`
@@ -722,7 +782,21 @@ Common pause reasons:
 - `unsafe`, `blocked`, `dependent`, `unresolved-prerequisite`: a
   `RUNNER_PAUSE: <reason> - ...` line from the invoked `session-run` skill
   carried a structured pause reason. The runner preserves that reason instead
-  of collapsing the pause to `runner-pause`.
+  of collapsing the pause to `runner-pause`. `blocked` is the operator-answer
+  case: the paused JSON payload also carries an `interactive_help` block whose
+  `questions_command`, `reply_command`, and `rendered_prompt` mirror what `asl
+  questions` would print, so a wrapping coordinator can route the operator
+  conversation without re-reading turn artifacts.
+- `empty-reply`, `no-paused-run`, `missing-question-context`,
+  `reply-context-mismatch`: `asl run --reply TEXT` rejected the resume. The
+  first is a CLI-only validation (empty or whitespace argument) raised before
+  the plan lock is acquired. The other three come from
+  `qna.load_qna_context` before the runner sends the first turn:
+  `no-paused-run` (the last turn was not paused or the plan has never run),
+  `missing-question-context` (the paused turn produced no `last-message.txt`
+  body to feed the resolver prompt), and `reply-context-mismatch` (the paused
+  turn references a session whose current pending status no longer matches the
+  plan, typically because another runner already advanced past it).
 - `verify-failed`: `asl verify` returned non-zero after a completed session.
   The pause payload includes the verification `reason` and per-check results.
 - `no-contract`: the completed session lacks a `## Completion Contract` and the
@@ -791,6 +865,32 @@ asl unlock ~/.local/share/agent-plans/example-plan/ --force --json
 If a plan has no pending sessions but is not complete, inspect every final
 `session-<id>.md` handoff and normalize statuses to exactly `pending` or
 `complete`. Ignore older status templates preserved above the final handoff.
+
+### Interactive Q&A resume
+
+When a harness pauses with `RUNNER_PAUSE: blocked - ...` because it is waiting
+on operator answers, the runner records the structured pause and surfaces an
+`interactive_help` block. The recommended workflow is:
+
+```bash
+# 1. Run pauses with reason: blocked and prints interactive_help.
+asl run ~/.local/share/agent-plans/example-plan/ --harness codex --json
+
+# 2. Render the resolver prompt for a human or a wrapping agent.
+asl questions ~/.local/share/agent-plans/example-plan/
+
+# 3. After collecting answers, resume the same paused session with the
+#    operator's verbatim reply. The reply text is never persisted.
+asl run ~/.local/share/agent-plans/example-plan/ --harness codex --reply "1a, 2b, 3a"
+```
+
+The same `interactive_help.questions_command` and `interactive_help.reply_command`
+strings are the canonical paste-ready invocations a coordinator should use:
+they preserve the active `--state-dir` so the resume targets exactly the
+paused turn. Use `asl run --dry-run --reply TEXT` to inspect the resolver
+prompt and the in-harness reply prompt side-by-side without invoking the
+harness, consuming the paused state, or writing the preview payload to
+`state.json`/`events.jsonl`.
 
 ## Verification
 

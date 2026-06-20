@@ -11,6 +11,7 @@ from . import (
     harnesses,
     preflight,
     progress_cli,
+    qna,
     runner,
     session_overview,
     state,
@@ -129,7 +130,35 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
             "marked loop-ready (preflight findings are still reported)"
         ),
     )
+    run_parser.add_argument(
+        "--reply",
+        help=(
+            "Resume the latest paused session with an inline reply; the "
+            "text is sent as the operator answer for the first resumed turn"
+        ),
+    )
     run_parser.set_defaults(handler=runner.run_from_args)
+
+    questions_parser = subparsers.add_parser(
+        "questions",
+        help=(
+            "Print a resolver prompt for the latest paused run so a second "
+            "agent can collect a reply suitable for `asl run --reply`."
+        ),
+    )
+    questions_parser.add_argument(
+        "plan_dir", help="Split plan directory whose paused run to inspect"
+    )
+    questions_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    questions_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    questions_parser.set_defaults(handler=qna.questions_from_args)
 
     status_parser = subparsers.add_parser(
         "status",

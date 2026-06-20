@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import pty
 import select
+import shlex
 import shutil
 import signal
 import stat
@@ -29,6 +30,7 @@ from agent_session_loop import (
     plans,
     preflight,
     progress_cli,
+    qna,
     run_control,
     runner,
     state,
@@ -2904,6 +2906,1557 @@ class VerificationExecutorTests(unittest.TestCase):
 
             self.assertTrue(result.passed)
             self.assertEqual((), result.failures)
+
+
+class QnAContextLoaderTests(unittest.TestCase):
+    def _seed_plan(self, tmp_dir: Path) -> tuple[Path, Path, Path]:
+        plan_dir = tmp_dir / "plan"
+        state_dir = tmp_dir / "state"
+        write_plan(plan_dir, ("pending", "pending"))
+        plan_state = state.plan_state_dir(plan_dir, state_dir)
+        plan_state.mkdir(parents=True)
+        state_path = plan_state / events.STATE_FILE_NAME
+        return plan_dir, state_dir, state_path
+
+    def _write_state(
+        self,
+        state_path: Path,
+        *,
+        paused: bool = True,
+        session_id: str = "1",
+        last_message_path: str | None = None,
+        turn_overrides: dict[str, object] | None = None,
+        payload_overrides: dict[str, object] | None = None,
+        turns: list[dict[str, object]] | None = None,
+    ) -> None:
+        if last_message_path is None:
+            last_message_path = str(state_path.parent / "last-message.txt")
+        turn: dict[str, object] = {
+            "run_id": "run-1",
+            "turn_index": 1,
+            "session_id": session_id,
+            "session": 1,
+            "session_number": 1,
+            "harness": "fake",
+            "model": "test-model",
+            "model_source": "default",
+            "effort": "medium",
+            "effort_source": "default",
+            "artifact_dir": str(state_path.parent / "turn-0001"),
+            "stdout_path": str(state_path.parent / "stdout.log"),
+            "stderr_path": str(state_path.parent / "stderr.log"),
+            "last_message_path": last_message_path,
+            "result_path": str(state_path.parent / "result.json"),
+        }
+        if turn_overrides:
+            turn.update(turn_overrides)
+        payload: dict[str, object] = {
+            "ok": False if paused else True,
+            "paused": paused,
+            "reason": "runner-pause",
+            "pause_reason": "runner-pause",
+            "pause_message": "agent asked a question",
+            "pause_details": {"session": 1},
+            "details": {"session": 1},
+            "run_id": "run-1",
+            "run_dir": str(state_path.parent / "runs" / "run-1"),
+            "harness": "fake",
+            "model": "test-model",
+            "effort": "medium",
+            "turns": [turn] if turns is None else turns,
+        }
+        if payload_overrides:
+            payload.update(payload_overrides)
+        state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def _write_last_message(self, path: str, text: str = "Question?\n") -> None:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+
+    def test_load_qna_context_returns_structured_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path = self._seed_plan(tmp_dir)
+            last_message_path = str(tmp_dir / "last-message.txt")
+            self._write_state(state_path, last_message_path=last_message_path)
+            self._write_last_message(last_message_path, "Which option, 1a or 1b?\n")
+
+            context = qna.load_qna_context(plan_dir, state_dir=state_dir)
+
+            self.assertEqual("1", context.session_id)
+            self.assertEqual("1", context.next_pending_id)
+            self.assertEqual("run-1", context.run_id)
+            self.assertEqual("runner-pause", context.pause_reason)
+            self.assertEqual("agent asked a question", context.pause_message)
+            self.assertEqual({"session": 1}, context.pause_details)
+            self.assertEqual("fake", context.harness)
+            self.assertEqual("test-model", context.model)
+            self.assertEqual("medium", context.effort)
+            self.assertEqual(1, context.turn_index)
+            self.assertEqual(Path(last_message_path), context.last_message_path)
+            self.assertEqual("Which option, 1a or 1b?\n", context.last_message)
+            self.assertEqual(state_path, context.state_path)
+            self.assertEqual(plans.canonicalize_path(plan_dir), context.plan_dir)
+
+    def test_qna_context_payload_is_json_serializable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path = self._seed_plan(tmp_dir)
+            last_message_path = str(tmp_dir / "last-message.txt")
+            self._write_state(state_path, last_message_path=last_message_path)
+            self._write_last_message(last_message_path)
+
+            context = qna.load_qna_context(plan_dir, state_dir=state_dir)
+            payload = qna.qna_context_payload(context)
+            # Round-trip through json to confirm no Path leakage.
+            encoded = json.dumps(payload, sort_keys=True)
+            decoded = json.loads(encoded)
+            self.assertEqual("1", decoded["session_id"])
+            self.assertEqual("1", decoded["next_pending_id"])
+            self.assertEqual(last_message_path, decoded["last_message_path"])
+            self.assertEqual(str(plans.canonicalize_path(plan_dir)), decoded["plan_dir"])
+
+    def test_load_qna_context_raises_no_paused_run_when_state_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, _state_path = self._seed_plan(tmp_dir)
+
+            with self.assertRaises(qna.QnAError) as ctx:
+                qna.load_qna_context(plan_dir, state_dir=state_dir)
+
+            self.assertEqual(qna.REASON_NO_PAUSED_RUN, ctx.exception.reason)
+            self.assertIn("state", ctx.exception.error.lower())
+
+    def test_load_qna_context_raises_no_paused_run_when_state_invalid_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path = self._seed_plan(tmp_dir)
+            state_path.write_text("not json", encoding="utf-8")
+
+            with self.assertRaises(qna.QnAError) as ctx:
+                qna.load_qna_context(plan_dir, state_dir=state_dir)
+
+            self.assertEqual(qna.REASON_NO_PAUSED_RUN, ctx.exception.reason)
+            self.assertEqual(str(state_path), ctx.exception.details["state_path"])
+
+    def test_load_qna_context_raises_no_paused_run_when_not_paused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path = self._seed_plan(tmp_dir)
+            last_message_path = str(tmp_dir / "last-message.txt")
+            self._write_last_message(last_message_path)
+            self._write_state(
+                state_path,
+                paused=False,
+                last_message_path=last_message_path,
+            )
+
+            with self.assertRaises(qna.QnAError) as ctx:
+                qna.load_qna_context(plan_dir, state_dir=state_dir)
+
+            self.assertEqual(qna.REASON_NO_PAUSED_RUN, ctx.exception.reason)
+            self.assertFalse(ctx.exception.details["paused"])
+
+    def test_load_qna_context_raises_no_paused_run_when_no_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path = self._seed_plan(tmp_dir)
+            self._write_state(state_path, turns=[])
+
+            with self.assertRaises(qna.QnAError) as ctx:
+                qna.load_qna_context(plan_dir, state_dir=state_dir)
+
+            self.assertEqual(qna.REASON_NO_PAUSED_RUN, ctx.exception.reason)
+            self.assertIn("turn", ctx.exception.error.lower())
+
+    def test_load_qna_context_raises_missing_question_context_when_artifact_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path = self._seed_plan(tmp_dir)
+            last_message_path = str(tmp_dir / "missing.txt")
+            self._write_state(state_path, last_message_path=last_message_path)
+
+            with self.assertRaises(qna.QnAError) as ctx:
+                qna.load_qna_context(plan_dir, state_dir=state_dir)
+
+            self.assertEqual(
+                qna.REASON_MISSING_QUESTION_CONTEXT, ctx.exception.reason
+            )
+            self.assertEqual(
+                last_message_path, ctx.exception.details["last_message_path"]
+            )
+
+    def test_load_qna_context_raises_missing_question_context_when_artifact_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path = self._seed_plan(tmp_dir)
+            last_message_path = str(tmp_dir / "empty.txt")
+            self._write_last_message(last_message_path, "   \n")
+            self._write_state(state_path, last_message_path=last_message_path)
+
+            with self.assertRaises(qna.QnAError) as ctx:
+                qna.load_qna_context(plan_dir, state_dir=state_dir)
+
+            self.assertEqual(
+                qna.REASON_MISSING_QUESTION_CONTEXT, ctx.exception.reason
+            )
+
+    def test_load_qna_context_raises_missing_question_context_when_path_unset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path = self._seed_plan(tmp_dir)
+            self._write_state(
+                state_path,
+                turn_overrides={"last_message_path": ""},
+            )
+
+            with self.assertRaises(qna.QnAError) as ctx:
+                qna.load_qna_context(plan_dir, state_dir=state_dir)
+
+            self.assertEqual(
+                qna.REASON_MISSING_QUESTION_CONTEXT, ctx.exception.reason
+            )
+
+    def test_load_qna_context_raises_reply_context_mismatch_when_session_advanced(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            # Session 1 already complete; pending is now session 2.
+            write_plan(plan_dir, ("complete", "pending"))
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            plan_state.mkdir(parents=True)
+            state_path = plan_state / events.STATE_FILE_NAME
+            last_message_path = str(tmp_dir / "last-message.txt")
+            self._write_last_message(last_message_path)
+            self._write_state(
+                state_path,
+                session_id="1",
+                last_message_path=last_message_path,
+            )
+
+            with self.assertRaises(qna.QnAError) as ctx:
+                qna.load_qna_context(plan_dir, state_dir=state_dir)
+
+            self.assertEqual(
+                qna.REASON_REPLY_CONTEXT_MISMATCH, ctx.exception.reason
+            )
+            self.assertEqual("1", ctx.exception.details["paused_session_id"])
+            self.assertEqual("2", ctx.exception.details["next_pending_id"])
+
+    def test_load_qna_context_raises_no_paused_run_when_no_pending_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("complete", "complete"))
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            plan_state.mkdir(parents=True)
+            state_path = plan_state / events.STATE_FILE_NAME
+            last_message_path = str(tmp_dir / "last-message.txt")
+            self._write_last_message(last_message_path)
+            self._write_state(
+                state_path, last_message_path=last_message_path
+            )
+
+            with self.assertRaises(qna.QnAError) as ctx:
+                qna.load_qna_context(plan_dir, state_dir=state_dir)
+
+            self.assertEqual(qna.REASON_NO_PAUSED_RUN, ctx.exception.reason)
+
+    def test_qna_error_payload_exposes_stable_keys(self) -> None:
+        error = qna.QnAError(
+            qna.REASON_REPLY_CONTEXT_MISMATCH,
+            "mismatch",
+            details={"paused_session_id": "1", "next_pending_id": "2"},
+        )
+
+        payload = qna.qna_error_payload(error)
+
+        self.assertEqual(
+            {
+                "reason": "reply-context-mismatch",
+                "error": "mismatch",
+                "details": {"paused_session_id": "1", "next_pending_id": "2"},
+            },
+            payload,
+        )
+
+
+class QnAQuestionsCliTests(unittest.TestCase):
+    def _seed_paused_plan(
+        self,
+        tmp_dir: Path,
+        *,
+        last_message_text: str = "Should we use 1a or 1b?\n",
+        statuses: tuple[str, ...] = ("pending", "pending"),
+        paused_session_id: str = "1",
+        paused: bool = True,
+    ) -> tuple[Path, Path, Path]:
+        plan_dir = tmp_dir / "plan"
+        state_dir = tmp_dir / "state"
+        write_plan(plan_dir, statuses)
+        plan_state = state.plan_state_dir(plan_dir, state_dir)
+        plan_state.mkdir(parents=True)
+        state_path = plan_state / events.STATE_FILE_NAME
+        last_message_path = tmp_dir / "last-message.txt"
+        last_message_path.write_text(last_message_text, encoding="utf-8")
+        turn = {
+            "run_id": "run-1",
+            "turn_index": 2,
+            "session_id": paused_session_id,
+            "session": int(paused_session_id) if paused_session_id.isdigit() else 1,
+            "session_number": (
+                int(paused_session_id) if paused_session_id.isdigit() else 1
+            ),
+            "harness": "codex",
+            "model": "gpt-5",
+            "model_source": "flag",
+            "effort": "high",
+            "effort_source": "flag",
+            "artifact_dir": str(plan_state / "runs" / "run-1" / "turn-0002"),
+            "stdout_path": str(plan_state / "stdout.log"),
+            "stderr_path": str(plan_state / "stderr.log"),
+            "last_message_path": str(last_message_path),
+            "result_path": str(plan_state / "result.json"),
+        }
+        payload = {
+            "ok": not paused,
+            "paused": paused,
+            "reason": "runner-pause",
+            "pause_reason": "runner-pause",
+            "pause_message": "agent asked a question",
+            "pause_details": {"session": 1},
+            "details": {"session": 1},
+            "run_id": "run-1",
+            "run_dir": str(plan_state / "runs" / "run-1"),
+            "harness": "codex",
+            "model": "gpt-5",
+            "effort": "high",
+            "turns": [turn],
+        }
+        state_path.write_text(json.dumps(payload), encoding="utf-8")
+        return plan_dir, state_dir, last_message_path
+
+    def _run_questions(
+        self,
+        plan_dir: Path,
+        state_dir: Path,
+        *,
+        json_output: bool = False,
+    ) -> tuple[int, str, str]:
+        args = argparse.Namespace(
+            plan_dir=str(plan_dir),
+            state_dir=str(state_dir),
+            json=json_output,
+        )
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = qna.questions_from_args(args)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_text_output_renders_resolver_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir, last_message_path = self._seed_paused_plan(
+                Path(tmp),
+                last_message_text="Should we use 1a or 1b?\n",
+            )
+
+            code, out, err = self._run_questions(plan_dir, state_dir)
+
+            self.assertEqual(0, code, err)
+            self.assertEqual("", err)
+            self.assertIn("# Paused Agent Session - Resolver Prompt", out)
+            self.assertIn("## Plan", out)
+            self.assertIn("## Harness", out)
+            self.assertIn("## Pause", out)
+            self.assertIn("## Artifacts", out)
+            self.assertIn("## Previous Agent Message", out)
+            self.assertIn("Should we use 1a or 1b?", out)
+            self.assertIn("## Instructions", out)
+            self.assertIn("`asl run --reply`", out)
+            self.assertIn(str(last_message_path), out)
+            self.assertIn("- Session ID: 1", out)
+
+    def test_json_output_exposes_stable_top_level_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir, last_message_path = self._seed_paused_plan(
+                Path(tmp),
+                last_message_text="Pick 1a, 2b, or 3c?\n",
+            )
+
+            code, out, err = self._run_questions(
+                plan_dir, state_dir, json_output=True
+            )
+
+            self.assertEqual(0, code, err)
+            self.assertEqual("", err)
+            payload = json.loads(out)
+            self.assertTrue(payload["ok"])
+            self.assertEqual("questions", payload["command"])
+            for key in (
+                "plan_dir",
+                "state_path",
+                "run_id",
+                "session_id",
+                "turn_index",
+                "pause_reason",
+                "pause_message",
+                "artifact_paths",
+                "last_message",
+                "rendered_prompt",
+            ):
+                self.assertIn(key, payload)
+            self.assertEqual("1", payload["session_id"])
+            self.assertEqual("1", payload["next_pending_id"])
+            self.assertEqual("run-1", payload["run_id"])
+            self.assertEqual(2, payload["turn_index"])
+            self.assertEqual("runner-pause", payload["pause_reason"])
+            self.assertEqual(
+                "agent asked a question", payload["pause_message"]
+            )
+            self.assertEqual("Pick 1a, 2b, or 3c?\n", payload["last_message"])
+            self.assertEqual(
+                str(last_message_path),
+                payload["artifact_paths"]["last_message_path"],
+            )
+            self.assertIn(
+                "# Paused Agent Session - Resolver Prompt",
+                payload["rendered_prompt"],
+            )
+            self.assertIn(
+                "Pick 1a, 2b, or 3c?", payload["rendered_prompt"]
+            )
+
+    def test_text_error_prints_to_stderr_when_no_paused_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("pending",))
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            plan_state.mkdir(parents=True)
+
+            code, out, err = self._run_questions(plan_dir, state_dir)
+
+            self.assertEqual(1, code)
+            self.assertEqual("", out)
+            self.assertIn("agent-session-loop questions:", err)
+
+    def test_json_error_payload_uses_stable_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("pending",))
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            plan_state.mkdir(parents=True)
+
+            code, out, err = self._run_questions(
+                plan_dir, state_dir, json_output=True
+            )
+
+            self.assertEqual(1, code)
+            self.assertEqual("", err)
+            payload = json.loads(out)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("questions", payload["command"])
+            self.assertEqual(qna.REASON_NO_PAUSED_RUN, payload["reason"])
+            self.assertFalse(payload["paused"])
+            self.assertIn("plan_dir", payload)
+
+    def test_json_error_for_reply_context_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, _ = self._seed_paused_plan(
+                tmp_dir,
+                statuses=("complete", "pending"),
+                paused_session_id="1",
+            )
+
+            code, out, err = self._run_questions(
+                plan_dir, state_dir, json_output=True
+            )
+
+            self.assertEqual(1, code)
+            self.assertEqual("", err)
+            payload = json.loads(out)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(
+                qna.REASON_REPLY_CONTEXT_MISMATCH, payload["reason"]
+            )
+            self.assertEqual(
+                "1", payload["details"]["paused_session_id"]
+            )
+            self.assertEqual("2", payload["details"]["next_pending_id"])
+
+    def test_json_error_for_malformed_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            missing_plan = tmp_dir / "does-not-exist"
+            state_dir = tmp_dir / "state"
+
+            code, out, err = self._run_questions(
+                missing_plan, state_dir, json_output=True
+            )
+
+            self.assertEqual(1, code)
+            self.assertEqual("", err)
+            payload = json.loads(out)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("questions", payload["command"])
+            self.assertEqual("malformed-plan", payload["reason"])
+
+    def test_subprocess_questions_command_wired_into_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, _ = self._seed_paused_plan(tmp_dir)
+
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get(
+                "PYTHONPATH", ""
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_session_loop",
+                    "questions",
+                    str(plan_dir),
+                    "--state-dir",
+                    str(state_dir),
+                    "--json",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            payload = json.loads(completed.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertEqual("questions", payload["command"])
+            self.assertEqual("1", payload["session_id"])
+            self.assertIn(
+                "# Paused Agent Session - Resolver Prompt",
+                payload["rendered_prompt"],
+            )
+
+
+class ReplyPromptBuilderTests(unittest.TestCase):
+    def _make_context(
+        self,
+        *,
+        pause_reason: str | None = "agent-question",
+        pause_message: str | None = "Need clarification on option A vs B.",
+        pause_details: dict[str, object] | None = None,
+        session_id: str = "3",
+        turn_index: int | None = 2,
+        run_id: str | None = "run-abc",
+        last_message: str = (
+            "Should I implement variant 1a, 1b, or skip the migration step?\n"
+        ),
+    ) -> qna.QnAContext:
+        return qna.QnAContext(
+            plan_dir=Path("/tmp/plan"),
+            state_dir=Path("/tmp/state"),
+            state_path=Path("/tmp/state/state.json"),
+            run_id=run_id,
+            run_dir=None,
+            pause_reason=pause_reason,
+            pause_message=pause_message,
+            pause_details=dict(pause_details) if pause_details else {},
+            harness="codex",
+            model=None,
+            model_source=None,
+            effort=None,
+            effort_source=None,
+            session_id=session_id,
+            next_pending_id=session_id,
+            turn_index=turn_index,
+            artifact_dir=None,
+            stdout_path=None,
+            stderr_path=None,
+            last_message_path=Path("/tmp/last-message.txt"),
+            result_path=None,
+            last_message=last_message,
+        )
+
+    def test_first_line_matches_build_session_prompt_exactly(self) -> None:
+        context = self._make_context()
+        for harness in ("codex", "claude", "copilot"):
+            with self.subTest(harness=harness):
+                expected_first_line = runner.build_session_prompt(
+                    harness, "/tmp/plan"
+                )
+                prompt = runner.build_reply_prompt(
+                    harness,
+                    "/tmp/plan",
+                    reply="1a, 2a, 3a",
+                    context=context,
+                )
+                first_line = prompt.split("\n", 1)[0]
+                self.assertEqual(expected_first_line, first_line)
+                self.assertIn(
+                    runner.RUNNER_MANAGED_SESSION_ARG,
+                    first_line,
+                )
+
+    def test_first_line_uses_harness_skill_prefix(self) -> None:
+        context = self._make_context()
+        codex_prompt = runner.build_reply_prompt(
+            "codex", "/tmp/plan", reply="1a", context=context
+        )
+        claude_prompt = runner.build_reply_prompt(
+            "claude", "/tmp/plan", reply="1a", context=context
+        )
+        copilot_prompt = runner.build_reply_prompt(
+            "copilot", "/tmp/plan", reply="1a", context=context
+        )
+        self.assertTrue(codex_prompt.startswith("$session-run "))
+        self.assertTrue(claude_prompt.startswith("/session-run "))
+        self.assertTrue(copilot_prompt.startswith("/session-run "))
+
+    def test_prompt_contains_reply_context_block_and_metadata(self) -> None:
+        context = self._make_context(
+            pause_details={"question_index": 1, "tag": "needs-input"},
+        )
+        prompt = runner.build_reply_prompt(
+            "codex",
+            "/tmp/plan",
+            reply="1a, 2b",
+            context=context,
+        )
+        self.assertIn(runner.REPLY_CONTEXT_HEADING, prompt)
+        self.assertIn("## ASL reply context", prompt)
+        self.assertIn("### Operator reply", prompt)
+        self.assertIn("1a, 2b", prompt)
+        self.assertIn("### Previous pause", prompt)
+        self.assertIn("- Reason: agent-question", prompt)
+        self.assertIn(
+            "- Message: Need clarification on option A vs B.",
+            prompt,
+        )
+        self.assertIn("- Session ID: 3", prompt)
+        self.assertIn("- Turn index: 2", prompt)
+        self.assertIn("- Run ID: run-abc", prompt)
+        self.assertIn("### Pause details", prompt)
+        self.assertIn(
+            json.dumps(
+                {"question_index": 1, "tag": "needs-input"}, sort_keys=True
+            ),
+            prompt,
+        )
+        self.assertIn("### Previous paused last message", prompt)
+        self.assertIn(
+            "Should I implement variant 1a, 1b, or skip the migration step?",
+            prompt,
+        )
+        self.assertIn("### Instructions", prompt)
+        self.assertIn("operator reply", prompt.lower())
+        self.assertIn("incomplete or", prompt.lower())
+
+    def test_pause_details_omitted_when_empty(self) -> None:
+        prompt = runner.build_reply_prompt(
+            "codex",
+            "/tmp/plan",
+            reply="1a",
+            context=self._make_context(pause_details=None),
+        )
+        self.assertIn("### Pause details\n(none)", prompt)
+
+    def test_unknown_metadata_renders_placeholder(self) -> None:
+        context = self._make_context(
+            pause_reason=None,
+            pause_message=None,
+            turn_index=None,
+            run_id=None,
+        )
+        prompt = runner.build_reply_prompt(
+            "codex",
+            "/tmp/plan",
+            reply="1a",
+            context=context,
+        )
+        self.assertIn("- Reason: (unknown)", prompt)
+        self.assertIn("- Message: (unknown)", prompt)
+        self.assertIn("- Turn index: (unknown)", prompt)
+        self.assertIn("- Run ID: (unknown)", prompt)
+
+    def test_empty_reply_is_rejected(self) -> None:
+        context = self._make_context()
+        with self.assertRaises(ValueError):
+            runner.build_reply_prompt(
+                "codex", "/tmp/plan", reply="   \n  ", context=context
+            )
+
+    def test_reply_is_stripped(self) -> None:
+        context = self._make_context()
+        prompt = runner.build_reply_prompt(
+            "codex",
+            "/tmp/plan",
+            reply="\n  1a, 2a  \n",
+            context=context,
+        )
+        self.assertIn("\n1a, 2a\n", prompt)
+        self.assertNotIn("\n  1a, 2a  \n", prompt)
+
+    def test_plan_dir_is_canonical_in_first_line(self) -> None:
+        context = self._make_context()
+        prompt = runner.build_reply_prompt(
+            "codex",
+            "/tmp/plan",
+            reply="1a",
+            context=context,
+        )
+        first_line = prompt.split("\n", 1)[0]
+        self.assertIn("/tmp/plan/", first_line)
+
+
+class HarnessInvocationPromptOverrideTests(unittest.TestCase):
+    def test_default_invocation_uses_build_session_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = tmp_path / "plan"
+            plan_dir.mkdir()
+            cwd = tmp_path / "repo"
+            cwd.mkdir()
+            last_message = tmp_path / "last-message.txt"
+
+            invocation = runner.build_harness_invocation(
+                "codex",
+                cwd=cwd,
+                plan_dir=plan_dir,
+                last_message_path=last_message,
+            )
+            expected_prompt = runner.build_session_prompt("codex", plan_dir)
+            self.assertIn(expected_prompt, invocation.argv)
+
+    def test_prompt_override_is_passed_to_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = tmp_path / "plan"
+            plan_dir.mkdir()
+            cwd = tmp_path / "repo"
+            cwd.mkdir()
+            last_message = tmp_path / "last-message.txt"
+            override_prompt = "$session-run /custom/ --runner-managed\n\nextra"
+
+            invocation = runner.build_harness_invocation(
+                "codex",
+                cwd=cwd,
+                plan_dir=plan_dir,
+                last_message_path=last_message,
+                prompt=override_prompt,
+            )
+            self.assertIn(override_prompt, invocation.argv)
+            self.assertNotIn(
+                runner.build_session_prompt("codex", plan_dir),
+                invocation.argv,
+            )
+
+    def test_prompt_override_consistent_across_harnesses(self) -> None:
+        override_prompt = "/session-run /plan/ --runner-managed\n\nbody"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = tmp_path / "plan"
+            plan_dir.mkdir()
+            cwd = tmp_path / "repo"
+            cwd.mkdir()
+            last_message = tmp_path / "last-message.txt"
+
+            for harness in ("codex", "claude", "copilot"):
+                with self.subTest(harness=harness):
+                    invocation = runner.build_harness_invocation(
+                        harness,
+                        cwd=cwd,
+                        plan_dir=plan_dir,
+                        last_message_path=last_message,
+                        prompt=override_prompt,
+                    )
+                    self.assertIn(override_prompt, invocation.argv)
+
+
+class RunReplyResumeFlowTests(unittest.TestCase):
+    def _seed_paused_plan(
+        self,
+        tmp_dir: Path,
+        *,
+        last_message_text: str = "Should we use 1a or 1b?\n",
+        statuses: tuple[str, ...] = ("pending", "pending"),
+        paused_session_id: str = "1",
+    ) -> tuple[Path, Path, Path]:
+        plan_dir = tmp_dir / "plan"
+        state_dir = tmp_dir / "state"
+        write_plan(plan_dir, statuses)
+        plan_state = state.plan_state_dir(plan_dir, state_dir)
+        plan_state.mkdir(parents=True)
+        state_path = plan_state / events.STATE_FILE_NAME
+        last_message_path = tmp_dir / "last-message.txt"
+        last_message_path.write_text(last_message_text, encoding="utf-8")
+        turn = {
+            "run_id": "run-prev",
+            "turn_index": 2,
+            "session_id": paused_session_id,
+            "session": int(paused_session_id),
+            "session_number": int(paused_session_id),
+            "harness": "codex",
+            "model": "gpt-5",
+            "model_source": "flag",
+            "effort": "high",
+            "effort_source": "flag",
+            "artifact_dir": str(plan_state / "runs" / "run-prev" / "turn-0002"),
+            "stdout_path": str(plan_state / "stdout.log"),
+            "stderr_path": str(plan_state / "stderr.log"),
+            "last_message_path": str(last_message_path),
+            "result_path": str(plan_state / "result.json"),
+        }
+        payload = {
+            "ok": False,
+            "paused": True,
+            "reason": "runner-pause",
+            "pause_reason": "runner-pause",
+            "pause_message": "agent asked a question",
+            "pause_details": {"session": int(paused_session_id)},
+            "details": {"session": int(paused_session_id)},
+            "run_id": "run-prev",
+            "run_dir": str(plan_state / "runs" / "run-prev"),
+            "harness": "codex",
+            "model": "gpt-5",
+            "effort": "high",
+            "turns": [turn],
+        }
+        state_path.write_text(json.dumps(payload), encoding="utf-8")
+        return plan_dir, state_dir, last_message_path
+
+    def _build_args(
+        self,
+        plan_dir: Path,
+        state_dir: Path,
+        *,
+        reply: str | None,
+        dry_run: bool = False,
+        json_output: bool = True,
+        cwd: Path | None = None,
+    ) -> argparse.Namespace:
+        return argparse.Namespace(
+            plan_dir=str(plan_dir),
+            cwd=str(cwd if cwd is not None else REPO_ROOT),
+            harness="codex",
+            review_harness=None,
+            state_dir=str(state_dir),
+            json=json_output,
+            dry_run=dry_run,
+            unsafe_bypass=True,
+            timeout=None,
+            max_sessions=None,
+            commit_mode=None,
+            model=None,
+            effort=None,
+            note=None,
+            allow_not_loop_ready=True,
+            reply=reply,
+        )
+
+    def _run_capture(
+        self,
+        args: argparse.Namespace,
+    ) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = runner.run_from_args(args)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_empty_reply_returns_empty_reply_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir, _ = self._seed_paused_plan(Path(tmp))
+            args = self._build_args(plan_dir, state_dir, reply="   \n  ")
+
+            code, out, _err = self._run_capture(args)
+
+            self.assertEqual(1, code)
+            payload = json.loads(out)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("run", payload["command"])
+            self.assertEqual("empty-reply", payload["reason"])
+            self.assertFalse(payload["paused"])
+
+    def test_reply_without_paused_run_returns_no_paused_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("pending", "pending"))
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            plan_state.mkdir(parents=True)
+            args = self._build_args(
+                plan_dir, state_dir, reply="continue with option 1a"
+            )
+
+            code, out, _err = self._run_capture(args)
+
+            self.assertEqual(1, code)
+            payload = json.loads(out)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("run", payload["command"])
+            self.assertEqual(qna.REASON_NO_PAUSED_RUN, payload["reason"])
+
+    def test_reply_context_mismatch_when_paused_session_advanced(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir, _ = self._seed_paused_plan(
+                Path(tmp),
+                statuses=("complete", "pending"),
+                paused_session_id="1",
+            )
+            args = self._build_args(plan_dir, state_dir, reply="pick 1a")
+
+            code, out, _err = self._run_capture(args)
+
+            self.assertEqual(1, code)
+            payload = json.loads(out)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(
+                qna.REASON_REPLY_CONTEXT_MISMATCH, payload["reason"]
+            )
+            self.assertEqual("1", payload["details"]["paused_session_id"])
+            self.assertEqual("2", payload["details"]["next_pending_id"])
+
+    def test_dry_run_with_reply_emits_resolver_prompt_and_reply_invocation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, last_message_path = self._seed_paused_plan(
+                tmp_dir,
+                last_message_text="Pick 1a or 1b?\n",
+            )
+            state_path = (
+                state.plan_state_dir(plan_dir, state_dir)
+                / events.STATE_FILE_NAME
+            )
+            paused_state = state_path.read_text(encoding="utf-8")
+            args = self._build_args(
+                plan_dir,
+                state_dir,
+                reply="use 1a",
+                dry_run=True,
+                cwd=tmp_dir,
+            )
+
+            code, out, _err = self._run_capture(args)
+
+            self.assertEqual(0, code, out)
+            payload = json.loads(out)
+            self.assertTrue(payload["ok"])
+            planned = payload["planned"]
+            self.assertEqual("reply", planned["prompt_kind"])
+            self.assertIn(runner.REPLY_CONTEXT_HEADING, planned["prompt"])
+            self.assertIn("use 1a", planned["prompt"])
+            self.assertIsNotNone(planned["resolver_prompt"])
+            self.assertIn(
+                "# Paused Agent Session - Resolver Prompt",
+                planned["resolver_prompt"],
+            )
+            reply_source = planned["reply_source"]
+            self.assertEqual("run-prev", reply_source["run_id"])
+            self.assertEqual("1", reply_source["session_id"])
+            self.assertEqual(2, reply_source["turn_index"])
+            self.assertEqual(
+                str(last_message_path),
+                reply_source["last_message_path"],
+            )
+            self.assertEqual(len("use 1a"), reply_source["reply_length"])
+            invocation_argv = planned["invocation"]["argv"]
+            self.assertTrue(
+                any(
+                    runner.REPLY_CONTEXT_HEADING in str(token)
+                    for token in invocation_argv
+                ),
+                invocation_argv,
+            )
+            self.assertEqual(
+                paused_state,
+                state_path.read_text(encoding="utf-8"),
+            )
+            context = qna.load_qna_context(plan_dir, state_dir=state_dir)
+            self.assertEqual("1", context.session_id)
+
+    def test_dry_run_text_output_includes_resolver_prompt_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, _ = self._seed_paused_plan(tmp_dir)
+            args = self._build_args(
+                plan_dir,
+                state_dir,
+                reply="use 1a",
+                dry_run=True,
+                json_output=False,
+                cwd=tmp_dir,
+            )
+
+            code, out, _err = self._run_capture(args)
+
+            self.assertEqual(0, code, out)
+            self.assertIn("Resolver prompt:", out)
+            self.assertIn(
+                "# Paused Agent Session - Resolver Prompt", out
+            )
+            self.assertIn(runner.REPLY_CONTEXT_HEADING, out)
+
+    def test_dry_run_without_reply_keeps_session_prompt_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("pending", "pending"))
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            plan_state.mkdir(parents=True)
+            args = self._build_args(
+                plan_dir,
+                state_dir,
+                reply=None,
+                dry_run=True,
+                cwd=tmp_dir,
+            )
+
+            code, out, _err = self._run_capture(args)
+
+            self.assertEqual(0, code, out)
+            payload = json.loads(out)
+            planned = payload["planned"]
+            self.assertEqual("session", planned["prompt_kind"])
+            self.assertIsNone(planned["resolver_prompt"])
+            self.assertIsNone(planned["reply_source"])
+            self.assertNotIn(runner.REPLY_CONTEXT_HEADING, planned["prompt"])
+
+    def test_first_turn_uses_reply_prompt_and_emits_reply_provided_event(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, last_message_path = self._seed_paused_plan(
+                tmp_dir,
+                last_message_text="Pick 1a or 1b?\n",
+            )
+
+            def fake_run_harness(name, **kwargs):
+                plan = Path(kwargs["plan_dir"])
+                for session_file in sorted(plan.glob("session-*.md")):
+                    text = session_file.read_text(encoding="utf-8")
+                    if "- **Status**: pending" in text:
+                        session_file.write_text(
+                            text.replace(
+                                "- **Status**: pending",
+                                "- **Status**: complete",
+                                1,
+                            ),
+                            encoding="utf-8",
+                        )
+                        break
+                return harnesses.HarnessResult(
+                    name=name,
+                    argv=[name, "--prompt", str(kwargs.get("prompt", ""))],
+                    returncode=0,
+                    stdout="ok\n",
+                    stderr="",
+                )
+
+            args = self._build_args(
+                plan_dir, state_dir, reply="use 1a", cwd=tmp_dir
+            )
+
+            with mock.patch.object(
+                runner.harnesses, "run_harness", side_effect=fake_run_harness
+            ) as patched:
+                code, out, _err = self._run_capture(args)
+
+            self.assertEqual(0, code, out)
+            calls = patched.call_args_list
+            self.assertGreaterEqual(len(calls), 1)
+            first_prompt = calls[0].kwargs.get("prompt")
+            self.assertIsNotNone(first_prompt)
+            self.assertIn(runner.REPLY_CONTEXT_HEADING, first_prompt)
+            self.assertIn("use 1a", first_prompt)
+            if len(calls) >= 2:
+                second_prompt = calls[1].kwargs.get("prompt")
+                self.assertNotIn(
+                    runner.REPLY_CONTEXT_HEADING, second_prompt
+                )
+
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            events_path = plan_state / events.EVENTS_FILE_NAME
+            records = read_jsonl(events_path)
+            reply_events = [
+                record
+                for record in records
+                if record.get("name") == events.REPLY_PROVIDED_EVENT
+            ]
+            self.assertEqual(1, len(reply_events), records)
+            reply_payload = reply_events[0]["payload"]
+            self.assertEqual(1, reply_payload["turn_index"])
+            self.assertEqual("1", reply_payload["session_id"])
+            self.assertEqual(len("use 1a"), reply_payload["reply_length"])
+            source = reply_payload["source"]
+            self.assertEqual("run-prev", source["run_id"])
+            self.assertEqual("1", source["session_id"])
+            self.assertEqual(2, source["turn_index"])
+            self.assertEqual(
+                str(last_message_path), source["last_message_path"]
+            )
+            self.assertEqual(len("use 1a"), source["reply_length"])
+
+            state_path = plan_state / events.STATE_FILE_NAME
+            state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+            first_turn = state_payload["turns"][0]
+            self.assertEqual("reply", first_turn["prompt_kind"])
+            self.assertEqual("run-prev", first_turn["reply_source"]["run_id"])
+            if len(state_payload["turns"]) >= 2:
+                self.assertEqual(
+                    "session", state_payload["turns"][1]["prompt_kind"]
+                )
+                self.assertNotIn(
+                    "reply_source", state_payload["turns"][1]
+                )
+
+
+class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
+    def _seed_paused_plan(
+        self,
+        tmp_dir: Path,
+        *,
+        last_message_text: str = "Should we use 1a or 1b?\n",
+        statuses: tuple[str, ...] = ("pending", "pending"),
+        paused_session_id: str = "1",
+    ) -> tuple[Path, Path, Path]:
+        plan_dir = tmp_dir / "plan"
+        state_dir = tmp_dir / "state"
+        write_plan(plan_dir, statuses)
+        plan_state = state.plan_state_dir(plan_dir, state_dir)
+        plan_state.mkdir(parents=True)
+        state_path = plan_state / events.STATE_FILE_NAME
+        last_message_path = tmp_dir / "last-message.txt"
+        last_message_path.write_text(last_message_text, encoding="utf-8")
+        turn = {
+            "run_id": "run-prev",
+            "turn_index": 2,
+            "session_id": paused_session_id,
+            "session": int(paused_session_id),
+            "session_number": int(paused_session_id),
+            "harness": "codex",
+            "model": "gpt-5",
+            "model_source": "flag",
+            "effort": "high",
+            "effort_source": "flag",
+            "artifact_dir": str(plan_state / "runs" / "run-prev" / "turn-0002"),
+            "stdout_path": str(plan_state / "stdout.log"),
+            "stderr_path": str(plan_state / "stderr.log"),
+            "last_message_path": str(last_message_path),
+            "result_path": str(plan_state / "result.json"),
+        }
+        payload = {
+            "ok": False,
+            "paused": True,
+            "reason": "runner-pause",
+            "pause_reason": "runner-pause",
+            "pause_message": "agent asked a question",
+            "pause_details": {"session": int(paused_session_id)},
+            "details": {"session": int(paused_session_id)},
+            "run_id": "run-prev",
+            "run_dir": str(plan_state / "runs" / "run-prev"),
+            "harness": "codex",
+            "model": "gpt-5",
+            "effort": "high",
+            "turns": [turn],
+        }
+        state_path.write_text(json.dumps(payload), encoding="utf-8")
+        return plan_dir, state_dir, last_message_path
+
+    def _paused_args(
+        self,
+        plan_dir: Path,
+        state_dir: Path | None,
+    ) -> argparse.Namespace:
+        return argparse.Namespace(
+            plan_dir=str(plan_dir),
+            state_dir=str(state_dir) if state_dir is not None else None,
+        )
+
+    def test_questions_command_text_includes_state_dir_when_provided(self) -> None:
+        self.assertEqual(
+            "asl questions /tmp/plan",
+            runner._questions_command_text("/tmp/plan", None),
+        )
+        self.assertEqual(
+            "asl questions /tmp/plan --state-dir /tmp/state",
+            runner._questions_command_text("/tmp/plan", "/tmp/state"),
+        )
+
+    def test_reply_command_text_includes_state_dir_when_provided(self) -> None:
+        self.assertEqual(
+            "asl run /tmp/plan --reply TEXT",
+            runner._reply_command_text("/tmp/plan", None),
+        )
+        self.assertEqual(
+            "asl run /tmp/plan --state-dir /tmp/state --reply TEXT",
+            runner._reply_command_text("/tmp/plan", "/tmp/state"),
+        )
+
+    def test_interactive_help_commands_shell_quote_dynamic_paths(self) -> None:
+        questions = runner._questions_command_text(
+            "/tmp/plan dir",
+            "/tmp/state dir",
+        )
+        reply = runner._reply_command_text(
+            "/tmp/plan dir",
+            "/tmp/state dir",
+        )
+
+        self.assertEqual(
+            "asl questions '/tmp/plan dir' --state-dir '/tmp/state dir'",
+            questions,
+        )
+        self.assertEqual(
+            "asl run '/tmp/plan dir' --state-dir '/tmp/state dir' --reply TEXT",
+            reply,
+        )
+        self.assertEqual(
+            [
+                "asl",
+                "questions",
+                "/tmp/plan dir",
+                "--state-dir",
+                "/tmp/state dir",
+            ],
+            shlex.split(questions),
+        )
+        self.assertEqual(
+            [
+                "asl",
+                "run",
+                "/tmp/plan dir",
+                "--state-dir",
+                "/tmp/state dir",
+                "--reply",
+                "TEXT",
+            ],
+            shlex.split(reply),
+        )
+
+    def test_attach_interactive_help_populates_payload_when_qna_loads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir, last_message_path = self._seed_paused_plan(
+                Path(tmp)
+            )
+            args = self._paused_args(plan_dir, state_dir)
+            payload: dict[str, object] = {
+                "paused": True,
+                "plan_dir": str(plan_dir),
+            }
+
+            runner._attach_interactive_help(args, payload)
+
+            help_payload = payload["interactive_help"]
+            self.assertIsInstance(help_payload, dict)
+            self.assertEqual(
+                runner._questions_command_text(str(plan_dir), str(state_dir)),
+                help_payload["questions_command"],
+            )
+            self.assertEqual(
+                runner._reply_command_text(str(plan_dir), str(state_dir)),
+                help_payload["reply_command"],
+            )
+            self.assertEqual("1", help_payload["session_id"])
+            self.assertEqual("1", help_payload["next_pending_id"])
+            self.assertEqual(2, help_payload["turn_index"])
+            self.assertEqual(
+                str(last_message_path),
+                help_payload["artifact_paths"]["last_message_path"],
+            )
+            self.assertIn(
+                "# Paused Agent Session - Resolver Prompt",
+                help_payload["rendered_prompt"],
+            )
+
+    def test_attach_interactive_help_omits_when_no_paused_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("pending",))
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            plan_state.mkdir(parents=True)
+            args = self._paused_args(plan_dir, state_dir)
+            payload: dict[str, object] = {
+                "paused": True,
+                "plan_dir": str(plan_dir),
+            }
+
+            runner._attach_interactive_help(args, payload)
+
+            self.assertNotIn("interactive_help", payload)
+
+    def test_attach_interactive_help_skips_non_paused_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir, _ = self._seed_paused_plan(Path(tmp))
+            args = self._paused_args(plan_dir, state_dir)
+            payload: dict[str, object] = {
+                "paused": False,
+                "plan_dir": str(plan_dir),
+            }
+
+            runner._attach_interactive_help(args, payload)
+
+            self.assertNotIn("interactive_help", payload)
+
+    def test_paused_text_output_prints_questions_hint_after_last_message(
+        self,
+    ) -> None:
+        payload = {
+            "ok": False,
+            "paused": True,
+            "pause_reason": "runner-pause",
+            "pause_message": "agent asked a question",
+            "plan_dir": "/tmp/plan",
+            "harness": None,
+            "completed_sessions": [],
+            "commits": [],
+            "turns": [
+                {
+                    "stdout_path": "/tmp/plan/.state/stdout.log",
+                    "stderr_path": "/tmp/plan/.state/stderr.log",
+                    "last_message_path": "/tmp/plan/.state/last-message.txt",
+                }
+            ],
+            "interactive_help": {
+                "questions_command": (
+                    "asl questions /tmp/plan --state-dir /tmp/state"
+                ),
+            },
+        }
+        err = io.StringIO()
+        with redirect_stderr(err), redirect_stdout(io.StringIO()):
+            runner._print_text_outcome(payload)
+
+        err_text = err.getvalue()
+        self.assertIn(
+            "Last message: /tmp/plan/.state/last-message.txt", err_text
+        )
+        self.assertIn(
+            "Questions: asl questions /tmp/plan --state-dir /tmp/state",
+            err_text,
+        )
+        last_message_position = err_text.index("Last message:")
+        questions_position = err_text.index("Questions:")
+        self.assertLess(last_message_position, questions_position)
+
+    def test_paused_text_output_omits_questions_hint_without_help(self) -> None:
+        payload = {
+            "ok": False,
+            "paused": True,
+            "pause_reason": "runner-pause",
+            "pause_message": "agent asked a question",
+            "plan_dir": "/tmp/plan",
+            "harness": None,
+            "completed_sessions": [],
+            "commits": [],
+            "turns": [
+                {
+                    "stdout_path": "/tmp/plan/.state/stdout.log",
+                    "stderr_path": "/tmp/plan/.state/stderr.log",
+                    "last_message_path": "/tmp/plan/.state/last-message.txt",
+                }
+            ],
+        }
+        err = io.StringIO()
+        with redirect_stderr(err), redirect_stdout(io.StringIO()):
+            runner._print_text_outcome(payload)
+
+        self.assertNotIn("Questions:", err.getvalue())
+
+    def test_reply_turn_redacts_full_prompt_in_persisted_argv_and_events(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, _ = ArtifactSafetyAndPauseUxTests._seed_paused_plan(
+                self,
+                tmp_dir,
+                last_message_text="Pick 1a or 1b?\n",
+            )
+            reply_text = "use 1a verbatim secret"
+
+            def fake_run_harness(name, **kwargs):
+                plan = Path(kwargs["plan_dir"])
+                for session_file in sorted(plan.glob("session-*.md")):
+                    text = session_file.read_text(encoding="utf-8")
+                    if "- **Status**: pending" in text:
+                        session_file.write_text(
+                            text.replace(
+                                "- **Status**: pending",
+                                "- **Status**: complete",
+                                1,
+                            ),
+                            encoding="utf-8",
+                        )
+                        break
+                return harnesses.HarnessResult(
+                    name=name,
+                    argv=[name, "--prompt", str(kwargs.get("prompt", ""))],
+                    returncode=0,
+                    stdout="ok\n",
+                    stderr="",
+                )
+
+            args = argparse.Namespace(
+                plan_dir=str(plan_dir),
+                cwd=str(tmp_dir),
+                harness="codex",
+                review_harness=None,
+                state_dir=str(state_dir),
+                json=True,
+                dry_run=False,
+                unsafe_bypass=True,
+                timeout=None,
+                max_sessions=None,
+                commit_mode=None,
+                model=None,
+                effort=None,
+                note=None,
+                allow_not_loop_ready=True,
+                reply=reply_text,
+            )
+
+            with mock.patch.object(
+                runner.harnesses, "run_harness", side_effect=fake_run_harness
+            ):
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    code = runner.run_from_args(args)
+            self.assertEqual(0, code, out.getvalue())
+
+            placeholder = runner._reply_argv_placeholder(len(reply_text))
+
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            state_path = plan_state / events.STATE_FILE_NAME
+            state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+            first_turn = state_payload["turns"][0]
+            self.assertEqual("reply", first_turn["prompt_kind"])
+            for token in first_turn["argv"]:
+                self.assertNotIn(reply_text, str(token))
+                self.assertNotIn(runner.REPLY_CONTEXT_HEADING, str(token))
+            self.assertIn(placeholder, first_turn["argv"])
+
+            result_path = Path(first_turn["result_path"])
+            per_turn = json.loads(result_path.read_text(encoding="utf-8"))
+            for token in per_turn["argv"]:
+                self.assertNotIn(reply_text, str(token))
+            self.assertIn(placeholder, per_turn["argv"])
+
+            events_path = plan_state / events.EVENTS_FILE_NAME
+            records = read_jsonl(events_path)
+            turn_started = [
+                record
+                for record in records
+                if record.get("name") == "turn_started"
+            ]
+            self.assertTrue(turn_started)
+            first_turn_started = turn_started[0]["payload"]
+            self.assertEqual(placeholder, first_turn_started["prompt"])
+            self.assertNotIn(reply_text, first_turn_started["prompt"])
+
+            turn_finished = [
+                record
+                for record in records
+                if record.get("name") == "turn_finished"
+            ]
+            self.assertTrue(turn_finished)
+            first_turn_finished = turn_finished[0]["payload"]
+            for token in first_turn_finished["argv"]:
+                self.assertNotIn(reply_text, str(token))
+
+            reply_events = [
+                record
+                for record in records
+                if record.get("name") == events.REPLY_PROVIDED_EVENT
+            ]
+            self.assertEqual(1, len(reply_events))
+            self.assertEqual(
+                len(reply_text),
+                reply_events[0]["payload"]["reply_length"],
+            )
+            self.assertNotIn(reply_text, json.dumps(reply_events[0]))
+
+    def test_non_reply_turn_argv_is_not_redacted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("pending",))
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            plan_state.mkdir(parents=True)
+
+            captured_prompts: list[str] = []
+
+            def fake_run_harness(name, **kwargs):
+                captured_prompts.append(str(kwargs.get("prompt", "")))
+                plan = Path(kwargs["plan_dir"])
+                for session_file in sorted(plan.glob("session-*.md")):
+                    text = session_file.read_text(encoding="utf-8")
+                    if "- **Status**: pending" in text:
+                        session_file.write_text(
+                            text.replace(
+                                "- **Status**: pending",
+                                "- **Status**: complete",
+                                1,
+                            ),
+                            encoding="utf-8",
+                        )
+                        break
+                return harnesses.HarnessResult(
+                    name=name,
+                    argv=[name, "--prompt", str(kwargs.get("prompt", ""))],
+                    returncode=0,
+                    stdout="ok\n",
+                    stderr="",
+                )
+
+            args = argparse.Namespace(
+                plan_dir=str(plan_dir),
+                cwd=str(tmp_dir),
+                harness="codex",
+                review_harness=None,
+                state_dir=str(state_dir),
+                json=True,
+                dry_run=False,
+                unsafe_bypass=True,
+                timeout=None,
+                max_sessions=None,
+                commit_mode=None,
+                model=None,
+                effort=None,
+                note=None,
+                allow_not_loop_ready=True,
+                reply=None,
+            )
+
+            with mock.patch.object(
+                runner.harnesses, "run_harness", side_effect=fake_run_harness
+            ):
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    code = runner.run_from_args(args)
+
+            self.assertEqual(0, code, out.getvalue())
+            state_path = plan_state / events.STATE_FILE_NAME
+            state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+            first_turn = state_payload["turns"][0]
+            self.assertEqual("session", first_turn["prompt_kind"])
+            self.assertEqual(captured_prompts[0], first_turn["argv"][-1])
+            self.assertNotIn(
+                "<asl reply prompt redacted",
+                json.dumps(first_turn["argv"]),
+            )
 
 
 class TailFollowerTests(unittest.TestCase):
@@ -11057,6 +12610,164 @@ class SkillInstructionTests(unittest.TestCase):
         self.assertNotIn("session-contract", text)
 
 
+class SessionRunSkillReplyCompatibilityTests(unittest.TestCase):
+    SKILL_PATH = REPO_ROOT / "skills/session-run/SKILL.md"
+
+    def _skill_text(self) -> str:
+        return self.SKILL_PATH.read_text(encoding="utf-8")
+
+    def test_skill_documents_asl_reply_context_block(self) -> None:
+        text = self._skill_text()
+
+        self.assertIn("## ASL reply context", text)
+        self.assertIn("### Operator reply", text)
+        self.assertIn("### Previous pause", text)
+
+    def test_skill_documents_first_line_authority(self) -> None:
+        text = self._skill_text()
+
+        self.assertIn(
+            "The first line is the only CLI invocation",
+            text,
+        )
+
+    def test_skill_documents_blocked_pause_for_incomplete_reply(self) -> None:
+        text = self._skill_text()
+
+        self.assertIn(
+            "RUNNER_PAUSE: blocked - interactive decision gates require user answers",
+            text,
+        )
+        self.assertIn("Runner status: paused", text)
+
+    def test_skill_directs_skill_to_use_operator_reply_first(self) -> None:
+        text = self._skill_text()
+
+        self.assertIn(
+            "Use the `### Operator reply` text as the answer", text
+        )
+        self.assertIn("Do not ask the user again", text)
+
+    def _run_fake(
+        self,
+        *,
+        mode: str,
+        prompt_argv: str,
+        plan_dir: Path,
+        last_message_path: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        env["FAKE_CODEX_MODE"] = mode
+        env["FAKE_CODEX_STEP_SLEEP"] = "0"
+        return subprocess.run(
+            [
+                sys.executable,
+                str(FAKE_CODEX_FIXTURE),
+                "--add-dir",
+                str(plan_dir),
+                "-o",
+                str(last_message_path),
+                prompt_argv,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+    def test_fake_reply_blocked_mode_emits_blocked_pause(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            write_plan(plan_dir, ("pending",))
+            last_message_path = tmp_dir / "last-message.txt"
+
+            result = self._run_fake(
+                mode="reply-blocked",
+                prompt_argv="/session-run "
+                + str(plan_dir)
+                + "/ --runner-managed",
+                plan_dir=plan_dir,
+                last_message_path=last_message_path,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn(
+                "RUNNER_PAUSE: blocked - interactive decision gates require user answers",
+                last_message_path.read_text(encoding="utf-8"),
+            )
+            session_text = (plan_dir / "session-1.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("- **Status**: pending", session_text)
+
+    def test_fake_reply_aware_pauses_when_no_reply_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            write_plan(plan_dir, ("pending",))
+            last_message_path = tmp_dir / "last-message.txt"
+
+            result = self._run_fake(
+                mode="reply-aware",
+                prompt_argv="/session-run "
+                + str(plan_dir)
+                + "/ --runner-managed",
+                plan_dir=plan_dir,
+                last_message_path=last_message_path,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn(
+                "RUNNER_PAUSE: blocked - interactive decision gates require user answers",
+                last_message_path.read_text(encoding="utf-8"),
+            )
+            session_text = (plan_dir / "session-1.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("- **Status**: pending", session_text)
+
+    def test_fake_reply_aware_completes_when_reply_context_present(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            write_plan(plan_dir, ("pending",))
+            last_message_path = tmp_dir / "last-message.txt"
+            prompt = "\n".join(
+                [
+                    "/session-run " + str(plan_dir) + "/ --runner-managed",
+                    "",
+                    "## ASL reply context",
+                    "",
+                    "### Operator reply",
+                    "",
+                    "1a, 2a, 3a",
+                    "",
+                ]
+            )
+
+            result = self._run_fake(
+                mode="reply-aware",
+                prompt_argv=prompt,
+                plan_dir=plan_dir,
+                last_message_path=last_message_path,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            last_message = last_message_path.read_text(encoding="utf-8")
+            self.assertIn("Runner status: complete", last_message)
+            self.assertNotIn(
+                "RUNNER_PAUSE: blocked - interactive decision gates require user answers",
+                last_message,
+            )
+            session_text = (plan_dir / "session-1.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("- **Status**: complete", session_text)
+
+
 class RunReadinessGateTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -13407,6 +15118,435 @@ class EndToEndQATests(unittest.TestCase):
             self.assertIn(key, verify_payload)
         self.assertEqual("verify", verify_payload["command"])
         self.assertEqual("ok", verify_payload["reason"])
+
+
+class EndToEndReplyResumeFlowTests(unittest.TestCase):
+    """Subprocess-level coverage for the pause → questions → reply → resume flow.
+
+    Unit tests already cover empty-reply, no-paused-run, reply-context-mismatch,
+    and the dry-run shape via ``runner.run_from_args`` with a mocked harness.
+    These tests exercise the same flow through ``python -m agent_session_loop``
+    so the CLI wiring, fake harness, paused JSON help, and resume payload all
+    compose correctly at the process boundary the docs describe.
+    """
+
+    REPLY_TEXT = "1a, 2b, 3a"
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name).resolve()
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+        self.repo_root = self.tmp_path / "repo"
+        self.config_home = self.tmp_path / "config"
+        init_git_repo(self.repo_root)
+        self.fake_codex = install_fake_codex(self.tmp_path)
+        config_path = (
+            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        )
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps({"codex": {"executable": str(self.fake_codex)}}),
+            encoding="utf-8",
+        )
+
+    def _write_plan(
+        self,
+        statuses: tuple[str, ...] = ("pending",),
+        *,
+        contracts_by_id: dict[str, str] | None = None,
+    ) -> None:
+        if contracts_by_id is None:
+            contracts_by_id = {
+                str(index): _contract_block(
+                    '{"type": "file_exists", "path": "README.md", '
+                    f'"name": "readme-{index}"}}',
+                    session=str(index),
+                )
+                for index in range(1, len(statuses) + 1)
+            }
+        write_plan(self.plan_dir, statuses, contracts_by_id=contracts_by_id)
+
+    def _base_env(self, mode: str) -> dict[str, str]:
+        env = os.environ.copy()
+        env.update(
+            {
+                "XDG_CONFIG_HOME": str(self.config_home),
+                "FAKE_CODEX_MODE": mode,
+                "FAKE_CODEX_STEP_SLEEP": "0",
+                "PYTHONPATH": str(REPO_ROOT)
+                + os.pathsep
+                + env.get("PYTHONPATH", ""),
+            }
+        )
+        return env
+
+    def _run_run(
+        self,
+        *,
+        mode: str,
+        reply: str | None = None,
+        dry_run: bool = False,
+        json_output: bool = True,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+        argv = [
+            sys.executable,
+            "-m",
+            "agent_session_loop",
+            "run",
+            str(self.plan_dir),
+            "--cwd",
+            str(self.repo_root),
+            "--harness",
+            "codex",
+            "--state-dir",
+            str(self.state_dir),
+            "--allow-not-loop-ready",
+        ]
+        if json_output:
+            argv.append("--json")
+        if dry_run:
+            argv.append("--dry-run")
+        if reply is not None:
+            argv.extend(["--reply", reply])
+        completed = subprocess.run(
+            argv,
+            cwd=REPO_ROOT,
+            env=self._base_env(mode),
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        payload = json.loads(completed.stdout) if json_output else {}
+        return completed, payload
+
+    def _run_questions(
+        self,
+        *,
+        json_output: bool = True,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object] | str]:
+        argv = [
+            sys.executable,
+            "-m",
+            "agent_session_loop",
+            "questions",
+            str(self.plan_dir),
+            "--state-dir",
+            str(self.state_dir),
+        ]
+        if json_output:
+            argv.append("--json")
+        completed = subprocess.run(
+            argv,
+            cwd=REPO_ROOT,
+            env=self._base_env("reply-aware"),
+            text=True,
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+        if json_output:
+            return completed, json.loads(completed.stdout)
+        return completed, completed.stdout
+
+    def test_run_pauses_with_blocked_reason_and_interactive_help_payload(
+        self,
+    ) -> None:
+        self._write_plan()
+
+        completed, payload = self._run_run(mode="reply-aware")
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["paused"])
+        self.assertEqual("blocked", payload["pause_reason"])
+        help_payload = payload["interactive_help"]
+        self.assertIsInstance(help_payload, dict)
+        self.assertEqual(
+            f"asl questions {self.plan_dir} --state-dir {self.state_dir}",
+            help_payload["questions_command"],
+        )
+        self.assertEqual(
+            f"asl run {self.plan_dir} --state-dir {self.state_dir} --reply TEXT",
+            help_payload["reply_command"],
+        )
+        self.assertEqual("1", help_payload["session_id"])
+        self.assertEqual("1", help_payload["next_pending_id"])
+        rendered = help_payload["rendered_prompt"]
+        self.assertIn(
+            "# Paused Agent Session - Resolver Prompt", rendered
+        )
+        self.assertIn("cursor-based pagination", rendered)
+        session_text = (self.plan_dir / "session-1.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("- **Status**: pending", session_text)
+
+    def test_questions_command_renders_resolver_prompt_with_questions(
+        self,
+    ) -> None:
+        self._write_plan()
+        first_completed, first_payload = self._run_run(mode="reply-aware")
+        self.assertEqual(1, first_completed.returncode, first_completed.stderr)
+        self.assertTrue(first_payload["paused"])
+
+        questions_completed, questions_payload = self._run_questions()
+        assert isinstance(questions_payload, dict)
+
+        self.assertEqual(
+            0, questions_completed.returncode, questions_completed.stderr
+        )
+        self.assertTrue(questions_payload["ok"])
+        self.assertEqual("questions", questions_payload["command"])
+        self.assertEqual("1", questions_payload["session_id"])
+        self.assertEqual("1", questions_payload["next_pending_id"])
+        rendered = questions_payload["rendered_prompt"]
+        self.assertIn("# Paused Agent Session - Resolver Prompt", rendered)
+        self.assertIn("## Previous Agent Message", rendered)
+        self.assertIn("cursor-based pagination", rendered)
+        self.assertIn("(e.g., `1a, 2a, 3b`)", rendered)
+        last_message = questions_payload["last_message"]
+        self.assertIn("cursor-based pagination", last_message)
+        self.assertIn(
+            "RUNNER_PAUSE: blocked - interactive decision gates require user answers",
+            last_message,
+        )
+
+    def test_questions_text_output_prints_resolver_prompt(self) -> None:
+        self._write_plan()
+        first_completed, first_payload = self._run_run(mode="reply-aware")
+        self.assertEqual(1, first_completed.returncode, first_completed.stderr)
+        self.assertTrue(first_payload["paused"])
+
+        text_completed, text_output = self._run_questions(json_output=False)
+        assert isinstance(text_output, str)
+
+        self.assertEqual(0, text_completed.returncode, text_completed.stderr)
+        self.assertIn("# Paused Agent Session - Resolver Prompt", text_output)
+        self.assertIn("cursor-based pagination", text_output)
+        self.assertIn("`asl run --reply`", text_output)
+
+    def test_run_with_reply_resumes_and_completes_paused_session(self) -> None:
+        self._write_plan()
+        first_completed, first_payload = self._run_run(mode="reply-aware")
+        self.assertEqual(1, first_completed.returncode, first_completed.stderr)
+        self.assertTrue(first_payload["paused"])
+
+        resume_completed, resume_payload = self._run_run(
+            mode="reply-aware", reply=self.REPLY_TEXT
+        )
+
+        self.assertEqual(
+            0, resume_completed.returncode, resume_completed.stderr
+        )
+        self.assertTrue(resume_payload["ok"])
+        self.assertFalse(resume_payload["paused"])
+        self.assertEqual("all-complete", resume_payload["reason"])
+        session_text = (self.plan_dir / "session-1.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("- **Status**: complete", session_text)
+        # The first persisted turn should record the reply prompt kind, while
+        # the operator reply text is redacted at the persistence boundary.
+        plan_state = state.plan_state_dir(self.plan_dir, self.state_dir)
+        state_payload = json.loads(
+            (plan_state / events.STATE_FILE_NAME).read_text(encoding="utf-8")
+        )
+        first_turn = state_payload["turns"][0]
+        self.assertEqual("reply", first_turn["prompt_kind"])
+        for token in first_turn["argv"]:
+            self.assertNotIn(self.REPLY_TEXT, str(token))
+            self.assertNotIn(runner.REPLY_CONTEXT_HEADING, str(token))
+        # The structured reply event is emitted with only metadata, not the
+        # operator answer text.
+        records = read_jsonl(plan_state / events.EVENTS_FILE_NAME)
+        reply_events = [
+            record
+            for record in records
+            if record.get("name") == events.REPLY_PROVIDED_EVENT
+        ]
+        self.assertEqual(1, len(reply_events))
+        self.assertEqual(
+            len(self.REPLY_TEXT), reply_events[0]["payload"]["reply_length"]
+        )
+        self.assertNotIn(self.REPLY_TEXT, json.dumps(reply_events[0]))
+
+    def test_dry_run_reply_preview_preserves_paused_state_for_resume(self) -> None:
+        self._write_plan()
+        first_completed, first_payload = self._run_run(mode="reply-aware")
+        self.assertEqual(1, first_completed.returncode, first_completed.stderr)
+        self.assertTrue(first_payload["paused"])
+        plan_state = state.plan_state_dir(self.plan_dir, self.state_dir)
+        state_path = plan_state / events.STATE_FILE_NAME
+        events_path = plan_state / events.EVENTS_FILE_NAME
+        paused_state = state_path.read_text(encoding="utf-8")
+        paused_events = events_path.read_text(encoding="utf-8")
+
+        dry_completed, dry_payload = self._run_run(
+            mode="reply-aware",
+            reply=self.REPLY_TEXT,
+            dry_run=True,
+        )
+
+        self.assertEqual(0, dry_completed.returncode, dry_completed.stderr)
+        self.assertTrue(dry_payload["ok"])
+        self.assertEqual("dry-run", dry_payload["reason"])
+        self.assertEqual("reply", dry_payload["planned"]["prompt_kind"])
+        self.assertEqual(
+            paused_state,
+            state_path.read_text(encoding="utf-8"),
+        )
+        self.assertEqual(
+            paused_events,
+            events_path.read_text(encoding="utf-8"),
+        )
+        context = qna.load_qna_context(self.plan_dir, state_dir=self.state_dir)
+        self.assertEqual("1", context.session_id)
+
+        resume_completed, resume_payload = self._run_run(
+            mode="reply-aware",
+            reply=self.REPLY_TEXT,
+        )
+
+        self.assertEqual(
+            0, resume_completed.returncode, resume_completed.stderr
+        )
+        self.assertTrue(resume_payload["ok"])
+        self.assertFalse(resume_payload["paused"])
+        self.assertEqual("all-complete", resume_payload["reason"])
+
+    def test_run_with_reply_rejects_stale_paused_context(self) -> None:
+        # Plan session 1 is already complete, but the paused state.json still
+        # points at session 1 - the reply must be rejected with the stable
+        # reply-context-mismatch reason, not silently replayed.
+        self._write_plan(statuses=("complete", "pending"))
+        plan_state = state.plan_state_dir(self.plan_dir, self.state_dir)
+        plan_state.mkdir(parents=True, exist_ok=True)
+        last_message_path = self.tmp_path / "last-message.txt"
+        last_message_path.write_text(
+            "Should we ship now? RUNNER_PAUSE: blocked - need answer\n",
+            encoding="utf-8",
+        )
+        turn = {
+            "run_id": "run-stale",
+            "turn_index": 1,
+            "session_id": "1",
+            "session": 1,
+            "session_number": 1,
+            "harness": "codex",
+            "model": "gpt-5",
+            "model_source": "flag",
+            "effort": None,
+            "effort_source": "unresolved",
+            "artifact_dir": str(plan_state / "runs" / "run-stale" / "turn-0001"),
+            "stdout_path": str(plan_state / "stdout.log"),
+            "stderr_path": str(plan_state / "stderr.log"),
+            "last_message_path": str(last_message_path),
+            "result_path": str(plan_state / "result.json"),
+        }
+        state_payload = {
+            "ok": False,
+            "paused": True,
+            "reason": "runner-pause",
+            "pause_reason": "blocked",
+            "pause_message": "blocked on operator answers",
+            "pause_details": {"session": 1},
+            "details": {"session": 1},
+            "run_id": "run-stale",
+            "run_dir": str(plan_state / "runs" / "run-stale"),
+            "harness": "codex",
+            "model": "gpt-5",
+            "effort": None,
+            "turns": [turn],
+        }
+        (plan_state / events.STATE_FILE_NAME).write_text(
+            json.dumps(state_payload), encoding="utf-8"
+        )
+
+        completed, payload = self._run_run(
+            mode="reply-aware", reply=self.REPLY_TEXT
+        )
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("run", payload["command"])
+        self.assertEqual(
+            qna.REASON_REPLY_CONTEXT_MISMATCH, payload["reason"]
+        )
+        self.assertEqual("1", payload["details"]["paused_session_id"])
+        self.assertEqual("2", payload["details"]["next_pending_id"])
+        # The pending session is not advanced when the reply is rejected.
+        session_two = (self.plan_dir / "session-2.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("- **Status**: pending", session_two)
+
+    def test_run_with_empty_reply_returns_stable_empty_reply_reason(
+        self,
+    ) -> None:
+        self._write_plan()
+        first_completed, _first_payload = self._run_run(mode="reply-aware")
+        self.assertEqual(1, first_completed.returncode, first_completed.stderr)
+
+        completed, payload = self._run_run(
+            mode="reply-aware", reply="   \n  "
+        )
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("run", payload["command"])
+        self.assertEqual("empty-reply", payload["reason"])
+        self.assertFalse(payload["paused"])
+
+    def test_paused_json_payload_exposes_stable_scriptable_keys(self) -> None:
+        self._write_plan()
+
+        completed, payload = self._run_run(mode="reply-aware")
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        # Stable top-level keys the docs publish for scripted consumers.
+        for key in (
+            "ok",
+            "command",
+            "paused",
+            "pause_reason",
+            "pause_message",
+            "interactive_help",
+            "turns",
+            "state_path",
+            "events_path",
+        ):
+            self.assertIn(key, payload)
+        self.assertEqual("run", payload["command"])
+        self.assertEqual("blocked", payload["pause_reason"])
+        # interactive_help is the stable shape that operators script against.
+        help_payload = payload["interactive_help"]
+        for key in (
+            "questions_command",
+            "reply_command",
+            "session_id",
+            "next_pending_id",
+            "turn_index",
+            "artifact_paths",
+            "rendered_prompt",
+        ):
+            self.assertIn(key, help_payload)
+        # Artifact paths reuse qna.artifact_paths_payload so consumers can
+        # share the shape across asl questions and asl run pause output.
+        artifact_keys = {
+            "run_dir",
+            "artifact_dir",
+            "stdout_path",
+            "stderr_path",
+            "last_message_path",
+            "result_path",
+        }
+        self.assertEqual(
+            artifact_keys,
+            set(help_payload["artifact_paths"].keys()),
+        )
 
 
 if __name__ == "__main__":

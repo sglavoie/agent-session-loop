@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,7 @@ from . import (
     harnesses,
     plans,
     preflight,
+    qna,
     responses,
     run_control,
     state,
@@ -281,11 +283,19 @@ def build_harness_invocation(
     last_message_path: str | Path | None = None,
     model: str | None = None,
     effort: str | None = None,
+    prompt: str | None = None,
 ) -> harnesses.HarnessInvocation:
-    """Build the subprocess command for one pending-session harness turn."""
+    """Build the subprocess command for one pending-session harness turn.
+
+    When ``prompt`` is provided, it overrides the default
+    :func:`build_session_prompt` output. The override path is how reply
+    resumes ship a prepended ``ASL reply context`` block without changing
+    normal session execution.
+    """
     canonical_cwd = plans.canonicalize_path(cwd)
     canonical_plan_dir = plans.canonicalize_path(plan_dir)
-    prompt = build_session_prompt(harness, canonical_plan_dir)
+    if prompt is None:
+        prompt = build_session_prompt(harness, canonical_plan_dir)
     adapter = harnesses.get_adapter(harness)
     return adapter.build_invocation(
         cwd=canonical_cwd,
@@ -300,6 +310,159 @@ def build_harness_invocation(
         model=model,
         effort=effort,
     )
+
+
+REPLY_CONTEXT_HEADING = "## ASL reply context"
+
+
+def build_reply_prompt(
+    harness: str,
+    plan_dir: str | Path,
+    *,
+    reply: str,
+    context: qna.QnAContext,
+) -> str:
+    """Build the resumed-turn prompt for ``asl run --reply``.
+
+    The first line is exactly :func:`build_session_prompt` so the harness
+    still sees a stable runner-managed skill invocation. An ``ASL reply
+    context`` block is appended with the operator reply, the previous
+    pause metadata, the previous paused last-message text, and explicit
+    instructions to use the reply as the answers and only ask again if
+    the reply is incomplete.
+    """
+    base = build_session_prompt(harness, plan_dir)
+    reply_text = reply.strip()
+    if not reply_text:
+        raise ValueError("reply must contain non-whitespace content")
+
+    lines: list[str] = [base, "", REPLY_CONTEXT_HEADING, ""]
+    lines.append(
+        "The previous agent turn paused waiting on a clarifying answer. "
+        "Use the operator reply below as the answer to the question(s) "
+        "and resume the session immediately."
+    )
+    lines.append("")
+
+    lines.append("### Operator reply")
+    lines.append("")
+    lines.append(reply_text)
+    lines.append("")
+
+    lines.append("### Previous pause")
+    lines.append(f"- Reason: {_reply_display(context.pause_reason)}")
+    lines.append(f"- Message: {_reply_display(context.pause_message)}")
+    lines.append(f"- Session ID: {_reply_display(context.session_id)}")
+    lines.append(f"- Turn index: {_reply_display(context.turn_index)}")
+    lines.append(f"- Run ID: {_reply_display(context.run_id)}")
+    lines.append("")
+
+    lines.append("### Pause details")
+    if context.pause_details:
+        details_json = json.dumps(context.pause_details, sort_keys=True)
+        lines.append(details_json)
+    else:
+        lines.append("(none)")
+    lines.append("")
+
+    lines.append("### Previous paused last message")
+    lines.append("")
+    lines.append(context.last_message.rstrip("\n"))
+    lines.append("")
+
+    lines.append("### Instructions")
+    lines.append(
+        "- Treat the operator reply above as the authoritative answer to "
+        "the previous agent's question(s)."
+    )
+    lines.append(
+        "- Resume the paused session immediately. Do not ask the user the "
+        "same questions again."
+    )
+    lines.append(
+        "- Only pause again if the reply is genuinely incomplete or "
+        "contradictory; in that case, ask only about the parts that "
+        "remain unclear."
+    )
+
+    return "\n".join(lines)
+
+
+def _reply_display(value: Any) -> str:
+    if value is None or value == "":
+        return "(unknown)"
+    return str(value)
+
+
+def _reply_argv_placeholder(reply_length: int) -> str:
+    return f"<asl reply prompt redacted: {reply_length} chars>"
+
+
+def _sanitize_reply_argv(
+    argv: list[str] | tuple[str, ...],
+    *,
+    full_prompt: str,
+    reply_length: int,
+) -> list[str]:
+    placeholder = _reply_argv_placeholder(reply_length)
+    return [placeholder if token == full_prompt else token for token in argv]
+
+
+def _questions_command_text(plan_dir: str, state_dir_arg: str | None) -> str:
+    parts = ["asl", "questions", plan_dir]
+    if state_dir_arg:
+        parts.extend(["--state-dir", state_dir_arg])
+    return shlex.join(parts)
+
+
+def _reply_command_text(plan_dir: str, state_dir_arg: str | None) -> str:
+    parts = ["asl", "run", plan_dir]
+    if state_dir_arg:
+        parts.extend(["--state-dir", state_dir_arg])
+    parts.extend(["--reply", "TEXT"])
+    return shlex.join(parts)
+
+
+def _build_interactive_help(
+    args: argparse.Namespace,
+    plan_dir: str,
+) -> dict[str, Any] | None:
+    """Return a payload describing how an operator can resume a paused run.
+
+    Returns ``None`` when paused-run Q&A context cannot be loaded (no paused
+    state, missing artifacts, or session advanced underneath the pause), so
+    the caller can keep its existing payload shape unchanged.
+    """
+    state_dir_arg = getattr(args, "state_dir", None)
+    try:
+        context = qna.load_qna_context(plan_dir, state_dir=state_dir_arg)
+    except (qna.QnAError, plans.PlanError, OSError):
+        return None
+    return {
+        "questions_command": _questions_command_text(plan_dir, state_dir_arg),
+        "reply_command": _reply_command_text(plan_dir, state_dir_arg),
+        "session_id": context.session_id,
+        "next_pending_id": context.next_pending_id,
+        "turn_index": context.turn_index,
+        "artifact_paths": qna.artifact_paths_payload(context),
+        "rendered_prompt": qna.render_resolver_prompt(context),
+    }
+
+
+def _attach_interactive_help(
+    args: argparse.Namespace,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Attach ``interactive_help`` to a paused payload when Q&A context loads."""
+    if not payload.get("paused"):
+        return payload
+    plan_dir = payload.get("plan_dir") or getattr(args, "plan_dir", None)
+    if not plan_dir:
+        return payload
+    help_payload = _build_interactive_help(args, str(plan_dir))
+    if help_payload is not None:
+        payload["interactive_help"] = help_payload
+    return payload
 
 
 def _selected_model_effort_payload(
@@ -1058,6 +1221,7 @@ def _write_turn_artifacts(
     session_id: str,
     live_turn: dict[str, Any],
     plan_error: str | None = None,
+    unredacted_prompt: str | None = None,
 ) -> dict[str, Any]:
     _write_text(paths["stdout"], result.stdout)
     _write_text(paths["stderr"], result.stderr)
@@ -1074,6 +1238,19 @@ def _write_turn_artifacts(
         runner_signals=runner_signals,
         plan_error=plan_error,
     )
+    reply_source = live_turn.get("reply_source")
+    persisted_argv: list[str] | tuple[str, ...] = result.argv
+    if (
+        unredacted_prompt is not None
+        and live_turn.get("prompt_kind") == "reply"
+        and isinstance(reply_source, dict)
+        and isinstance(reply_source.get("reply_length"), int)
+    ):
+        persisted_argv = _sanitize_reply_argv(
+            result.argv,
+            full_prompt=unredacted_prompt,
+            reply_length=int(reply_source["reply_length"]),
+        )
     payload = {
         "run_id": run_id,
         "turn_index": turn_index,
@@ -1088,7 +1265,7 @@ def _write_turn_artifacts(
         "model_source": live_turn.get("model_source"),
         "effort": live_turn.get("effort"),
         "effort_source": live_turn.get("effort_source"),
-        "argv": result.argv,
+        "argv": persisted_argv,
         "returncode": result.returncode,
         "timed_out": result.timed_out,
         "interrupted": result.interrupted,
@@ -1120,6 +1297,12 @@ def _write_turn_artifacts(
         payload["action_required"] = live_turn["action_required"]
     if plan_error is not None:
         payload["plan_error"] = plan_error
+    prompt_kind = live_turn.get("prompt_kind")
+    if prompt_kind is not None:
+        payload["prompt_kind"] = prompt_kind
+    reply_source = live_turn.get("reply_source")
+    if reply_source is not None:
+        payload["reply_source"] = reply_source
     payload.update(runner_signals)
     _write_json_file(paths["result"], payload)
     return payload
@@ -1421,8 +1604,15 @@ def _append_event(event_path: Path, name: str, payload: dict[str, Any]) -> None:
 class _RunPersistence:
     """Serializes one run's mutable payload, state writes, and event appends."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        write_state: bool = True,
+        append_events: bool = True,
+    ) -> None:
         self.lock = threading.RLock()
+        self._write_state = write_state
+        self._append_events = append_events
 
     def append_event(
         self,
@@ -1430,10 +1620,14 @@ class _RunPersistence:
         name: str,
         payload: dict[str, Any],
     ) -> None:
+        if not self._append_events:
+            return
         with self.lock:
             _append_event(event_path, name, payload)
 
     def write_state(self, payload: dict[str, Any]) -> None:
+        if not self._write_state:
+            return
         with self.lock:
             _write_state_payload(payload)
 
@@ -2902,6 +3096,8 @@ def _dry_run_payload(
     snapshot: plans.PlanSnapshot,
     cwd: Path,
     run_dir: Path,
+    reply_text: str | None = None,
+    reply_context: qna.QnAContext | None = None,
 ) -> dict[str, Any]:
     model_effort = _selected_model_effort_payload(args)
     review_harness = getattr(args, "review_harness", None)
@@ -2918,6 +3114,9 @@ def _dry_run_payload(
             "next_pending_id": None,
             "prompt": None,
             "invocation": None,
+            "resolver_prompt": None,
+            "prompt_kind": "session",
+            "reply_source": None,
             "review_requested": review_requested,
             "review_harness": review_harness,
             "review_output_path": review_output_path,
@@ -2925,6 +3124,27 @@ def _dry_run_payload(
         }
 
     paths = _turn_paths(run_dir, turn_index=1, session_id=next_pending.id)
+    if reply_context is not None and reply_text is not None:
+        prompt = build_reply_prompt(
+            args.harness,
+            snapshot.plan_dir,
+            reply=reply_text,
+            context=reply_context,
+        )
+        prompt_kind = "reply"
+        resolver_prompt: str | None = qna.render_resolver_prompt(reply_context)
+        reply_source: dict[str, Any] | None = {
+            "run_id": reply_context.run_id,
+            "session_id": reply_context.session_id,
+            "turn_index": reply_context.turn_index,
+            "last_message_path": str(reply_context.last_message_path),
+            "reply_length": len(reply_text),
+        }
+    else:
+        prompt = build_session_prompt(args.harness, snapshot.plan_dir)
+        prompt_kind = "session"
+        resolver_prompt = None
+        reply_source = None
     invocation = build_harness_invocation(
         args.harness,
         cwd=cwd,
@@ -2933,15 +3153,19 @@ def _dry_run_payload(
         last_message_path=paths["last_message"],
         model=args.model,
         effort=args.effort,
+        prompt=prompt,
     )
     return {
         "next_pending": _session_compat_value(next_pending.id),
         "next_pending_id": next_pending.id,
-        "prompt": build_session_prompt(args.harness, snapshot.plan_dir),
+        "prompt": prompt,
         "invocation": _build_invocation_payload(
             invocation,
             model_effort=model_effort,
         ),
+        "resolver_prompt": resolver_prompt,
+        "prompt_kind": prompt_kind,
+        "reply_source": reply_source,
         "review_requested": review_requested,
         "review_harness": review_harness,
         "review_output_path": review_output_path,
@@ -2958,12 +3182,33 @@ def _run_locked(
     commit_mode: str | None,
     lock_info: state.LockInfo,
     run_id: str,
+    reply_text: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     snapshot = plans.inspect_plan(args.plan_dir)
     state_dir = state.plan_state_dir(snapshot.plan_dir, args.state_dir)
     run_dir = state_dir / "runs" / run_id
     event_path = state_dir / events.EVENTS_FILE_NAME
     state_path = state_dir / events.STATE_FILE_NAME
+
+    reply_context: qna.QnAContext | None = None
+    if reply_text is not None:
+        try:
+            reply_context = qna.load_qna_context(
+                snapshot.plan_dir,
+                state_dir=args.state_dir,
+            )
+        except qna.QnAError as error:
+            payload = _error_payload(
+                args,
+                reason=error.reason,
+                message=error.error,
+                paused=False,
+                cwd=cwd,
+                snapshot=snapshot,
+            )
+            payload["details"] = dict(error.details)
+            return 1, payload
+
     payload = _initial_payload(
         args=args,
         snapshot=snapshot,
@@ -2976,7 +3221,11 @@ def _run_locked(
         run_id=run_id,
         commit_mode=commit_mode,
     )
-    persistence = _RunPersistence()
+    persist_run_state = not (args.dry_run and reply_text is not None)
+    persistence = _RunPersistence(
+        write_state=persist_run_state,
+        append_events=persist_run_state,
+    )
     output = _StderrOutputCoordinator(enabled=not args.json)
     progress = _ProgressReporter(enabled=not args.json, output=output)
     inline_tail = _InlineTailController(
@@ -3076,6 +3325,8 @@ def _run_locked(
                 snapshot=snapshot,
                 cwd=cwd,
                 run_dir=run_dir,
+                reply_text=reply_text,
+                reply_context=reply_context,
             )
         _finish_run(event_path, payload, progress, persistence=persistence)
         return 0, payload
@@ -3439,7 +3690,33 @@ def _run_locked(
                 persistence=persistence,
             )
             break
-        prompt = build_session_prompt(turn_harness, before.plan_dir)
+        use_reply_prompt = (
+            reply_context is not None
+            and reply_text is not None
+            and turn_index == 1
+        )
+        if use_reply_prompt:
+            assert reply_context is not None and reply_text is not None
+            prompt = build_reply_prompt(
+                turn_harness,
+                before.plan_dir,
+                reply=reply_text,
+                context=reply_context,
+            )
+            prompt_kind = "reply"
+            reply_source_meta: dict[str, Any] | None = {
+                "run_id": reply_context.run_id,
+                "session_id": reply_context.session_id,
+                "turn_index": reply_context.turn_index,
+                "last_message_path": str(reply_context.last_message_path),
+                "reply_length": len(reply_text),
+            }
+            persisted_prompt = _reply_argv_placeholder(len(reply_text))
+        else:
+            prompt = build_session_prompt(turn_harness, before.plan_dir)
+            prompt_kind = "session"
+            reply_source_meta = None
+            persisted_prompt = prompt
         turn_started_at = _utc_now()
         turn_started_at_text = _isoformat(turn_started_at)
         idle_seconds_since_previous_turn = (
@@ -3460,7 +3737,7 @@ def _run_locked(
             "session_kind": session_kind,
             "total_sessions": total_sessions,
             "artifact_dir": str(paths["artifact_dir"]),
-            "prompt": prompt,
+            "prompt": persisted_prompt,
             "harness": turn_harness,
             "model": turn_model_effort["model"],
             "model_source": turn_model_effort["model_source"],
@@ -3484,6 +3761,8 @@ def _run_locked(
             "stdout_chars": 0,
             "stderr_chars": 0,
             "action_required": None,
+            "prompt_kind": prompt_kind,
+            "reply_source": reply_source_meta,
         }
         log_stream_callback = _prepare_stream_logs(paths)
         live_turn = _LiveTurn(
@@ -3500,6 +3779,19 @@ def _run_locked(
 
         with run_control_lock:
             run_control_context = dict(active_turn)
+        if use_reply_prompt:
+            assert reply_source_meta is not None and reply_text is not None
+            persistence.append_event(
+                event_path,
+                events.REPLY_PROVIDED_EVENT,
+                {
+                    "run_id": run_id,
+                    "turn_index": turn_index,
+                    "session_id": session_id,
+                    "reply_length": len(reply_text),
+                    "source": reply_source_meta,
+                },
+            )
         persistence.append_event(event_path, "turn_started", active_turn)
         review_fingerprint_before: dict[str, Any] | None = (
             _capture_review_repo_fingerprint(cwd, before.plan_dir)
@@ -3567,6 +3859,7 @@ def _run_locked(
             session_id=session_id,
             live_turn=live_turn_payload,
             plan_error=plan_error,
+            unredacted_prompt=prompt if use_reply_prompt else None,
         )
         with persistence.lock:
             payload["turns"].append(turn_payload)
@@ -4091,6 +4384,10 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
             print("Dry run: nothing to invoke")
             return
         print(f"Next pending: session {next_pending}")
+        resolver_prompt = planned.get("resolver_prompt")
+        if resolver_prompt:
+            print("Resolver prompt:")
+            print(resolver_prompt)
         print(f"Prompt: {planned['prompt']}")
         print("Argv:")
         for arg in planned["invocation"]["argv"]:
@@ -4113,6 +4410,11 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
             print(f"Stdout: {turn['stdout_path']}", file=sys.stderr)
             print(f"Stderr: {turn['stderr_path']}", file=sys.stderr)
             print(f"Last message: {turn['last_message_path']}", file=sys.stderr)
+        interactive_help = payload.get("interactive_help")
+        if isinstance(interactive_help, dict):
+            questions_command = interactive_help.get("questions_command")
+            if questions_command:
+                print(f"Questions: {questions_command}", file=sys.stderr)
         commit = _last_commit(payload)
         if commit is not None:
             print(f"Commit stdout: {commit['stdout_path']}", file=sys.stderr)
@@ -4132,6 +4434,14 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
         print(f"Review: {review_output_path}")
 
 
+def _emit_run_payload(args: argparse.Namespace, payload: dict[str, Any]) -> None:
+    _attach_interactive_help(args, payload)
+    if args.json:
+        responses.print_json(payload)
+    else:
+        _print_text_outcome(payload)
+
+
 def run_from_args(args: argparse.Namespace) -> int:
     """Run one or more pending sessions from CLI arguments."""
     try:
@@ -4143,10 +4453,19 @@ def run_from_args(args: argparse.Namespace) -> int:
             message=str(error),
             paused=False,
         )
-        if args.json:
-            responses.print_json(payload)
-        else:
-            _print_text_outcome(payload)
+        _emit_run_payload(args, payload)
+        return 1
+
+    reply_text = getattr(args, "reply", None)
+    if reply_text is not None and not reply_text.strip():
+        payload = _error_payload(
+            args,
+            reason="empty-reply",
+            message="--reply requires non-whitespace content",
+            paused=False,
+            cwd=cwd,
+        )
+        _emit_run_payload(args, payload)
         return 1
 
     try:
@@ -4159,10 +4478,7 @@ def run_from_args(args: argparse.Namespace) -> int:
             paused=True,
             cwd=cwd,
         )
-        if args.json:
-            responses.print_json(payload)
-        else:
-            _print_text_outcome(payload)
+        _emit_run_payload(args, payload)
         return 1
 
     run_id = _utc_run_id()
@@ -4178,10 +4494,7 @@ def run_from_args(args: argparse.Namespace) -> int:
             cwd=cwd,
             snapshot=initial_snapshot,
         )
-        if args.json:
-            responses.print_json(payload)
-        else:
-            _print_text_outcome(payload)
+        _emit_run_payload(args, payload)
         return 1
 
     try:
@@ -4194,6 +4507,7 @@ def run_from_args(args: argparse.Namespace) -> int:
                 commit_mode=commit_mode,
                 lock_info=lock_info,
                 run_id=run_id,
+                reply_text=reply_text,
             )
         finally:
             state.release_lock(initial_snapshot.plan_dir, args.state_dir)
@@ -4206,10 +4520,7 @@ def run_from_args(args: argparse.Namespace) -> int:
             cwd=cwd,
             snapshot=initial_snapshot,
         )
-        if args.json:
-            responses.print_json(payload)
-        else:
-            _print_text_outcome(payload)
+        _emit_run_payload(args, payload)
         return INTERRUPTED_EXIT
     except (
         config.ConfigError,
@@ -4227,16 +4538,10 @@ def run_from_args(args: argparse.Namespace) -> int:
             cwd=cwd,
             snapshot=initial_snapshot,
         )
-        if args.json:
-            responses.print_json(payload)
-        else:
-            _print_text_outcome(payload)
+        _emit_run_payload(args, payload)
         return 1
 
-    if args.json:
-        responses.print_json(payload)
-    else:
-        _print_text_outcome(payload)
+    _emit_run_payload(args, payload)
     return exit_code
 
 
