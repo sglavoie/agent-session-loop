@@ -11,6 +11,7 @@ bin/.local/bin/asl run ~/.local/share/agent-plans/example-plan/ --harness codex 
 bin/.local/bin/asl run ~/.local/share/agent-plans/example-plan/ --harness codex --commit-per-session
 bin/.local/bin/asl run ~/.local/share/agent-plans/example-plan/ --harness codex --commit-at-end
 bin/.local/bin/asl run ~/.local/share/agent-plans/example-plan/ --harness codex --note "operator reference"
+bin/.local/bin/asl run ~/.local/share/agent-plans/example-plan/ --harness codex --review-harness claude
 bin/.local/bin/asl run ~/.local/share/agent-plans/example-plan/ --harness codex --dry-run
 bin/.local/bin/asl status ~/.local/share/agent-plans/example-plan/
 bin/.local/bin/asl tail ~/.local/share/agent-plans/example-plan/
@@ -277,7 +278,7 @@ without running the final `--commit-at-end` commit.
 ## Commands
 
 ```text
-asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--allow-not-loop-ready] [--json] [--dry-run]
+asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--review-harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--allow-not-loop-ready] [--json] [--dry-run]
 asl preflight PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--mark-loop-ready] [--json]
 asl verify PLAN_DIR --session ID [--cwd REPO_ROOT] [--json]
 asl status PLAN_DIR [--state-dir DIR] [--json]
@@ -298,6 +299,34 @@ the verification gate's `no-contract` pause for sessions that lack a
 `## Completion Contract`, but it never suppresses a failing contract that is
 present. `--commit-per-session` then runs
 `spec commit --yes --no-verify` before the next harness turn starts.
+
+`--review-harness codex|claude|copilot` appends a final pure-critique session
+after the implementation sessions finish. The flag must differ from the startup
+`--harness`; otherwise the run exits with `reason: input-error` before any
+harness invocation. Implementation sessions run first. If `--commit-at-end` is
+set, the final commit runs after the implementation sessions complete and before
+the review session is created. The runner then appends or resumes a generated
+`session-<id>.md` review file in the plan directory, switches readiness back to
+`running` with a fresh SHA, and runs that session with the review harness
+forced (runtime harness switches via `1`/`2`/`3` do not override the review
+turn). The review session instructs the harness to write findings to
+`PLAN_DIR/final-review.md`, make no repo code changes, and mark only itself
+complete; `final-review.md` is overwritten by the latest successful review.
+Markdown findings inside `final-review.md` never fail the run. Only review
+execution failures (nonzero exit, timeout, verification failure on missing or
+empty `final-review.md`) or repo mutations outside the plan directory fail the
+run. A git mutation guard fingerprints dirty, staged, and untracked content
+outside `PLAN_DIR` before and after the review turn and pauses the run with
+`reason: review-mutated-worktree` if the fingerprint changes. Review turns are
+never auto-committed even under `--commit-per-session`. Review is skipped (with
+the reason recorded in `review_skipped_reason`) on `--max-sessions` reached,
+stop-after-current, verification failure, harness failure, commit failure, or
+any pause during the implementation phase. If the plan is already fully
+complete at run start, `--review-harness` still creates and runs the review
+session. If a pending generated review session already exists in the plan and
+the run is started without `--review-harness`, the run pauses with
+`reason: review-harness-required`. After a successful review, text runs print
+`Review: PLAN_DIR/final-review.md` in the final summary.
 
 `preflight` inspects the plan without invoking a harness and reports every
 finding needed to clear the loop-ready gate: missing readiness lines, contract
@@ -528,8 +557,13 @@ the run id, turn index, session ID, harness, prompt, model and effort metadata,
 artifact paths, elapsed and idle seconds, last activity metadata, heartbeat
 count, and any best-effort action-required signal. `events.jsonl` records
 `turn_started`, `turn_heartbeat`, `action_required`, `turn_finished`,
-`commit_started`, `commit_finished`, `run_control`, `run_paused`, and
-`run_finished` events as they happen. Commit events include the commit index,
+`commit_started`, `commit_finished`, `run_control`, `review_session_created`,
+`run_paused`, and `run_finished` events as they happen. `review_session_created`
+fires once per run, when the runner appends a fresh generated review session;
+resuming an existing pending review session does not re-emit it. Its payload
+carries `run_id`, the review `session_id`, `review_harness`,
+`review_session_path`, and `review_output_path`. `tail` renders it inline
+alongside other events. Commit events include the commit index,
 scope, session ID for per-session commits, argv, cwd, artifact paths, status
 result, duration, and commit SHA when one was created. `run_control` events
 record `stop-after-current-requested`, `stop-after-current-canceled`,
@@ -576,6 +610,25 @@ error fields are `ok`, `command`, `reason`, `error`, `paused`, and `details`.
 `control`, `completed_sessions`, `completed_session_ids`, `turns`,
 `initial_snapshot`, `final_snapshot`, `state_path`, and `events_path`. Runs
 without commit flags report `commit_mode: null` and `commits: []`.
+
+Review-harness fields are present on every run payload. `review_requested` is
+`true` when `--review-harness` was supplied, `false` otherwise. `review_harness`
+is the requested review harness name or `null`. `review_session_id` is the
+canonical ID of the generated review session once it has been appended or
+resumed, otherwise `null`. `review_output_path` is the absolute path to
+`PLAN_DIR/final-review.md` whenever review was requested, otherwise `null`.
+`review_completed` is `true` only after the review turn finished successfully.
+`review_skipped_reason` is `null` for clean review completions and for
+implementation-only runs; for review-requested runs that did not complete it
+records the terminal reason (`max-sessions`, `stopped`, a pause reason, etc.).
+`completed_sessions` and `completed_session_ids` continue to include every
+completed turn for backward compatibility; consumers that need to distinguish
+review from implementation turns read `turns[*].session_kind`, which is either
+`"implementation"` or `"review"`. The same `session_kind` field is also
+recorded on `active_turn` while a review turn is in flight and on the recent
+session overview rows surfaced by `asl sessions`. Dry-run `planned` payloads
+include `review_requested`, `review_harness`, and `review_output_path` so
+planners can preview the review path before any harness runs.
 
 Commit payloads include `commit_index`, `scope`, `session`, `session_id`,
 `artifact_dir`, `stdout_path`, `stderr_path`, `result_path`, `argv`, `cwd`,
@@ -676,6 +729,15 @@ Common pause reasons:
   run was not started with `--allow-not-loop-ready`.
 - `malformed-contract`: the completed session's contract failed to parse or
   validate (see `agent_session_loop.contracts` errors).
+- `review-harness-required`: the plan contains a pending generated review
+  session (a `session-<id>.md` carrying the `<!-- asl:generated-review-session -->`
+  marker) but the run was started without `--review-harness`. Rerun with
+  `--review-harness codex|claude|copilot`.
+- `review-mutated-worktree`: the review harness changed repo content outside
+  the plan directory. The pre/post fingerprint covers the working tree's
+  `HEAD`, tracked diff (with the plan directory excluded), and untracked files
+  outside the plan directory; any change trips the guard. The implementation
+  turns that ran before the review are preserved.
 - `interrupted`: the run was interrupted by Ctrl+C.
 
 ## Troubleshooting

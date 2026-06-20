@@ -96,6 +96,7 @@ class RecentRow:
     finished_at: str
     duration_seconds: float | None
     artifact_dir: Path
+    session_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -330,6 +331,7 @@ def _build_recent_row(
     artifact_dir = (
         Path(artifact_dir_value) if artifact_dir_value else result_path.parent
     )
+    session_kind = _coerce_nonempty_str(payload.get("session_kind"))
     return RecentRow(
         plan_dir=plan_dir,
         state_dir=state_dir,
@@ -341,6 +343,7 @@ def _build_recent_row(
         finished_at=finished_at,
         duration_seconds=duration_seconds,
         artifact_dir=artifact_dir,
+        session_kind=session_kind,
     )
 
 
@@ -685,6 +688,7 @@ def _recent_row_payload(row: RecentRow) -> dict[str, Any]:
         "finished_at": row.finished_at,
         "duration_seconds": row.duration_seconds,
         "artifact_dir": str(row.artifact_dir),
+        "session_kind": row.session_kind,
     }
 
 
@@ -784,12 +788,14 @@ def _print_recent_section(
         harness = row["harness"] or "unknown"
         run_id = row["run_id"] or "unknown"
         status = row["status"] or "unknown"
+        kind = row.get("session_kind")
+        kind_label = f" ({kind})" if kind else ""
         print(
             f"  finished {format_local_time(row['finished_at'])}"
             f"  dur {format_duration_seconds(row['duration_seconds'])}"
             f"  {status}"
             f"  harness {harness}"
-            f"  session {session_id}"
+            f"  session {session_id}{kind_label}"
             f"  run {run_id}"
             f"  plan {plan}"
         )

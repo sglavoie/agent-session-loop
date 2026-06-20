@@ -50,6 +50,16 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Agent harness to invoke",
     )
     run_parser.add_argument(
+        "--review-harness",
+        choices=harnesses.HARNESS_NAMES,
+        default=None,
+        help=(
+            "Append a generated final-review session to the plan and run it "
+            "with this harness after all implementation sessions complete; "
+            "must differ from --harness"
+        ),
+    )
+    run_parser.add_argument(
         "--model",
         help="Harness model to request",
     )

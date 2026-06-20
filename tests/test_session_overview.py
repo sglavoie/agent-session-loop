@@ -650,6 +650,7 @@ class BuildSessionsPayloadTests(unittest.TestCase):
                     "finished_at",
                     "duration_seconds",
                     "artifact_dir",
+                    "session_kind",
                 },
                 set(payload["recent"][0].keys()),
             )

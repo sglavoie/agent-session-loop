@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 import shutil
@@ -38,6 +39,14 @@ COMMIT_MODE_END = "end"
 COMMIT_MODES = (COMMIT_MODE_PER_SESSION, COMMIT_MODE_END)
 COMMIT_ARGV: tuple[str, ...] = ("spec", "commit", "--yes", "--no-verify")
 RUNNER_MANAGED_SESSION_ARG = "--runner-managed"
+FINAL_REVIEW_FILENAME = "final-review.md"
+REVIEW_SESSION_MARKER = "<!-- asl:generated-review-session -->"
+SESSION_KIND_IMPLEMENTATION = "implementation"
+SESSION_KIND_REVIEW = "review"
+SESSION_KINDS: tuple[str, ...] = (
+    SESSION_KIND_IMPLEMENTATION,
+    SESSION_KIND_REVIEW,
+)
 APPROVAL_SIGNAL_PATTERNS: tuple[str, ...] = (
     "approval required",
     "requires approval",
@@ -76,6 +85,157 @@ AGENT_MUX_NOTIFY_TIMEOUT_SECONDS = 1.0
 AGENT_MUX_FINISH_NOTIFY_TIMEOUT_SECONDS = AGENT_MUX_NOTIFY_TIMEOUT_SECONDS
 INLINE_TAIL_JOIN_TIMEOUT_SECONDS = 1.0
 INLINE_TAIL_INITIAL_LOG_LINES = 40
+
+
+def contains_review_session_marker(text: str) -> bool:
+    """Return True when a session file body carries the review marker."""
+    return REVIEW_SESSION_MARKER in text
+
+
+def is_generated_review_session_file(path: str | Path) -> bool:
+    """Return True when `path` is a session file marked as a generated review."""
+    try:
+        body = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return contains_review_session_marker(body)
+
+
+def final_review_output_path(plan_dir: str | Path) -> Path:
+    """Return the path where the final review output is written."""
+    return Path(plan_dir) / FINAL_REVIEW_FILENAME
+
+
+_GENERATED_REVIEW_VERIFY_SOURCE = (
+    "import pathlib, sys; "
+    f"text = pathlib.Path({FINAL_REVIEW_FILENAME!r}).read_text(encoding='utf-8'); "
+    "sys.exit(0 if text.strip() else 1)"
+)
+
+
+def _generated_review_contract_payload(
+    session_id: plans.SessionId, *, plan_dir: Path
+) -> dict[str, Any]:
+    return {
+        "session": session_id.value,
+        "checks": [
+            {
+                "type": "command",
+                "name": "final-review-output-non-empty",
+                "argv": ["python3", "-c", _GENERATED_REVIEW_VERIFY_SOURCE],
+                "cwd": str(plan_dir),
+                "timeout_seconds": 60,
+            }
+        ],
+    }
+
+
+def build_generated_review_session_body(
+    session_id: plans.SessionId,
+    *,
+    review_harness: str,
+    plan_dir: str | Path,
+) -> str:
+    """Render the markdown body of a generated review session file."""
+    canonical_plan_dir = plans.canonicalize_path(plan_dir)
+    contract_json = json.dumps(
+        _generated_review_contract_payload(session_id, plan_dir=canonical_plan_dir),
+        indent=2,
+    )
+    return "\n".join(
+        [
+            f"# {session_id.display_label}: Final Review",
+            "",
+            REVIEW_SESSION_MARKER,
+            "",
+            "## Instructions",
+            "",
+            (
+                f"- Executed by the `{review_harness}` harness as a generated "
+                "final-review session."
+            ),
+            (
+                "- Perform a critical review of the work completed in the prior "
+                "sessions of this plan."
+            ),
+            (
+                f"- Write review findings to `{FINAL_REVIEW_FILENAME}` inside "
+                "this plan directory."
+            ),
+            "- Do not modify any files in the repository under review.",
+            (
+                "- Mark only this session's handoff complete; do not change any "
+                "other handoff status."
+            ),
+            "",
+            "## Completion Contract",
+            "",
+            "### Done when",
+            "",
+            (
+                f"- `{FINAL_REVIEW_FILENAME}` exists in the plan directory and "
+                "contains non-whitespace text."
+            ),
+            "",
+            "### Verify",
+            "",
+            "```json",
+            contract_json,
+            "```",
+            "",
+            "## Handoff",
+            "",
+            "<!-- Fill this section when the session is complete -->",
+            "",
+            "- **Status**: pending",
+            "- **Files modified**: (none yet)",
+            "- **Key decisions**: (none yet)",
+            "- **Blockers for next session**: (none)",
+            "- **Notes**:",
+            "",
+        ]
+    )
+
+
+def find_pending_generated_review_session(
+    plan_dir: str | Path,
+) -> plans.SessionFile | None:
+    """Return the first pending generated review session file, if any."""
+    canonical_dir = plans.canonicalize_path(plan_dir)
+    for session in plans.discover_session_files(canonical_dir):
+        if not is_generated_review_session_file(session.path):
+            continue
+        status = plans.read_session_status(session)
+        if status.status == "pending":
+            return session
+    return None
+
+
+def ensure_generated_review_session(
+    plan_dir: str | Path,
+    *,
+    review_harness: str,
+) -> tuple[plans.SessionFile, bool]:
+    """Reuse a pending generated review session, or append a new one.
+
+    Returns the canonical ``SessionFile`` and ``True`` when a new session file
+    was written. The next top-level session id is one greater than the max
+    first component across all existing session ids.
+    """
+    canonical_dir = plans.canonicalize_path(plan_dir)
+    pending = find_pending_generated_review_session(canonical_dir)
+    if pending is not None:
+        return pending, False
+
+    session_id = plans.next_top_level_session_id(canonical_dir)
+    body = build_generated_review_session_body(
+        session_id,
+        review_harness=review_harness,
+        plan_dir=canonical_dir,
+    )
+    target_path = canonical_dir / session_id.filename
+    target_path.write_text(body, encoding="utf-8")
+    return plans.SessionFile(session_id=session_id, path=target_path), True
 
 
 class RunError(Exception):
@@ -571,6 +731,13 @@ def _validate_run_inputs(
     if max_sessions is not None and max_sessions <= 0:
         raise RunError("--max-sessions must be a positive integer")
 
+    review_harness = getattr(args, "review_harness", None)
+    if review_harness is not None and review_harness == args.harness:
+        raise RunError(
+            "--review-harness must differ from --harness "
+            f"(both set to {args.harness!r})"
+        )
+
     return cwd, timeout, max_sessions, commit_mode
 
 
@@ -600,6 +767,81 @@ def _read_git_head(cwd: Path) -> dict[str, Any]:
         "returncode": result.returncode,
         "stdout": result.stdout,
         "stderr": result.stderr,
+    }
+
+
+def _capture_review_repo_fingerprint(
+    cwd: str | Path,
+    plan_dir: str | Path,
+) -> dict[str, Any]:
+    """Snapshot repo content under `cwd` while excluding paths under `plan_dir`.
+
+    Returns ``{"git": False}`` when `cwd` is not inside a git repository — the
+    review mutation guard treats that case as "no guard applies". Otherwise
+    returns ``{"git": True, "head": <sha or "">, "diff_sha256": <sha>,
+    "untracked": [[rel, content_sha256], ...]}`` where ``diff_sha256`` covers
+    ``git diff HEAD`` (staged + unstaged tracked changes) and ``untracked``
+    enumerates every untracked path outside `plan_dir`.
+    """
+    cwd_path = Path(cwd)
+    try:
+        plan_path = Path(plan_dir).resolve()
+    except OSError:
+        plan_path = Path(plan_dir)
+
+    try:
+        repo_root_result = _run_git(cwd_path, ["rev-parse", "--show-toplevel"])
+    except RunError:
+        return {"git": False}
+    if repo_root_result.returncode != 0:
+        return {"git": False}
+    try:
+        repo_root = Path(repo_root_result.stdout.strip()).resolve()
+    except OSError:
+        return {"git": False}
+
+    head_result = _run_git(cwd_path, ["rev-parse", "--verify", "HEAD"])
+    head_sha = head_result.stdout.strip() if head_result.returncode == 0 else ""
+
+    diff_args = ["diff", "HEAD", "--", "."]
+    try:
+        rel_plan = plan_path.relative_to(repo_root)
+        diff_args.append(f":(exclude){rel_plan.as_posix()}")
+    except ValueError:
+        pass
+    diff_result = _run_git(cwd_path, diff_args)
+    diff_text = diff_result.stdout if diff_result.returncode == 0 else ""
+
+    untracked_result = _run_git(
+        cwd_path, ["ls-files", "--others", "--exclude-standard"]
+    )
+    untracked_payload: list[list[str]] = []
+    if untracked_result.returncode == 0:
+        for rel in sorted(untracked_result.stdout.splitlines()):
+            if not rel:
+                continue
+            try:
+                abs_path = (repo_root / rel).resolve()
+            except OSError:
+                continue
+            try:
+                abs_path.relative_to(plan_path)
+            except ValueError:
+                pass
+            else:
+                continue
+            try:
+                data = abs_path.read_bytes()
+            except OSError:
+                continue
+            sha = hashlib.sha256(data).hexdigest()
+            untracked_payload.append([rel, sha])
+
+    return {
+        "git": True,
+        "head": head_sha,
+        "diff_sha256": hashlib.sha256(diff_text.encode("utf-8")).hexdigest(),
+        "untracked": untracked_payload,
     }
 
 
@@ -797,6 +1039,9 @@ def _write_turn_artifacts(
         "run_id": run_id,
         "turn_index": turn_index,
         **_session_identity_payload(session_id),
+        "session_kind": live_turn.get(
+            "session_kind", SESSION_KIND_IMPLEMENTATION
+        ),
         "total_sessions": live_turn.get("total_sessions"),
         "artifact_dir": str(paths["artifact_dir"]),
         "harness": result.name,
@@ -2078,6 +2323,34 @@ def _readiness_gate_passed(report: preflight.PreflightReport) -> bool:
     return True
 
 
+def _review_only_complete_start(
+    report: preflight.PreflightReport,
+    *,
+    review_requested: bool,
+    snapshot: plans.PlanSnapshot,
+) -> bool:
+    """Return True for a review-only entry from a fully-complete plan.
+
+    Allows ``--review-harness`` to start a run when the manifest readiness state
+    is ``complete`` and the recorded SHA matches the expected stable SHA, even
+    though the normal loop-ready gate would refuse it.
+    """
+    if not review_requested:
+        return False
+    if not report.ok:
+        return False
+    if not _all_sessions_complete(snapshot):
+        return False
+    readiness = report.readiness
+    if readiness is None:
+        return False
+    if readiness.state != "complete":
+        return False
+    if readiness.readiness_sha256 != report.expected_readiness_sha256:
+        return False
+    return True
+
+
 def _readiness_gate_failure_message(
     report: preflight.PreflightReport,
 ) -> str:
@@ -2480,6 +2753,13 @@ def _initial_payload(
     commit_mode: str | None,
 ) -> dict[str, Any]:
     model_effort = _selected_model_effort_payload(args)
+    review_harness = getattr(args, "review_harness", None)
+    review_requested = review_harness is not None
+    review_output_path = (
+        str(final_review_output_path(snapshot.plan_dir))
+        if review_requested
+        else None
+    )
     return responses.success_payload(
         "run",
         paused=False,
@@ -2521,6 +2801,12 @@ def _initial_payload(
         readiness_gate=None,
         readiness_state_initial=None,
         readiness_state_final=None,
+        review_requested=review_requested,
+        review_harness=review_harness,
+        review_session_id=None,
+        review_output_path=review_output_path,
+        review_completed=False,
+        review_skipped_reason=None,
     )
 
 
@@ -2532,6 +2818,13 @@ def _dry_run_payload(
     run_dir: Path,
 ) -> dict[str, Any]:
     model_effort = _selected_model_effort_payload(args)
+    review_harness = getattr(args, "review_harness", None)
+    review_requested = review_harness is not None
+    review_output_path = (
+        str(final_review_output_path(snapshot.plan_dir))
+        if review_requested
+        else None
+    )
     next_pending = snapshot.next_pending
     if next_pending is None:
         return {
@@ -2539,6 +2832,9 @@ def _dry_run_payload(
             "next_pending_id": None,
             "prompt": None,
             "invocation": None,
+            "review_requested": review_requested,
+            "review_harness": review_harness,
+            "review_output_path": review_output_path,
             **model_effort,
         }
 
@@ -2560,6 +2856,9 @@ def _dry_run_payload(
             invocation,
             model_effort=model_effort,
         ),
+        "review_requested": review_requested,
+        "review_harness": review_harness,
+        "review_output_path": review_output_path,
         **model_effort,
     }
 
@@ -2641,6 +2940,8 @@ def _run_locked(
         _finish_run(event_path, payload, progress, persistence=persistence)
         return 1, payload
 
+    review_requested = getattr(args, "review_harness", None) is not None
+
     if snapshot.next_pending is None:
         if not _all_sessions_complete(snapshot):
             _pause_run(
@@ -2653,10 +2954,33 @@ def _run_locked(
             )
             _finish_run(event_path, payload, progress, persistence=persistence)
             return 1, payload
-        with persistence.lock:
-            payload["reason"] = "all-complete"
-        _finish_run(event_path, payload, progress, persistence=persistence)
-        return 0, payload
+        if not review_requested:
+            with persistence.lock:
+                payload["reason"] = "all-complete"
+            _finish_run(event_path, payload, progress, persistence=persistence)
+            return 0, payload
+
+    if not review_requested:
+        pending_review = find_pending_generated_review_session(snapshot.plan_dir)
+        if pending_review is not None:
+            with persistence.lock:
+                payload["final_snapshot"] = _snapshot_payload(snapshot)
+            _pause_run(
+                event_path,
+                payload,
+                reason="review-harness-required",
+                message=(
+                    "a pending generated review session is present; "
+                    "rerun with --review-harness to execute it"
+                ),
+                details={
+                    "session_id": pending_review.session_id.value,
+                    "session_path": str(pending_review.path),
+                },
+                persistence=persistence,
+            )
+            _finish_run(event_path, payload, progress, persistence=persistence)
+            return 1, payload
 
     if args.dry_run:
         with persistence.lock:
@@ -2683,12 +3007,21 @@ def _run_locked(
     )
     gate_payload = _readiness_gate_payload(preflight_report)
     gate_passed = gate_payload["ok"]
+    review_only_complete_start = _review_only_complete_start(
+        preflight_report,
+        review_requested=review_requested,
+        snapshot=snapshot,
+    )
     with persistence.lock:
         payload["readiness_gate"] = gate_payload
         if preflight_report.readiness is not None:
             payload["readiness_state_initial"] = preflight_report.readiness.state
 
-    if not gate_passed and not allow_not_loop_ready:
+    if (
+        not gate_passed
+        and not allow_not_loop_ready
+        and not review_only_complete_start
+    ):
         gate_message = _readiness_gate_failure_message(preflight_report)
         with persistence.lock:
             payload["final_snapshot"] = _snapshot_payload(snapshot)
@@ -2826,22 +3159,164 @@ def _run_locked(
 
     completed_count = 0
     previous_turn_finished_at: datetime | None = None
-    with persistence.lock:
-        total_sessions = sum(payload["initial_snapshot"]["counts"].values())
-    while snapshot.next_pending is not None:
-        if max_sessions is not None and completed_count >= max_sessions:
+    commit_at_end_attempted = False
+    review_appended = False
+    while True:
+        pending_session = snapshot.next_pending
+
+        if pending_session is None:
+            if not _all_sessions_complete(snapshot):
+                with persistence.lock:
+                    payload["final_snapshot"] = _snapshot_payload(snapshot)
+                _pause_run(
+                    event_path,
+                    payload,
+                    reason="no-pending-but-incomplete",
+                    message=(
+                        "no pending session was found, but not every "
+                        "session is complete"
+                    ),
+                    details={"snapshot": _snapshot_payload(snapshot)},
+                    persistence=persistence,
+                )
+                break
+
+            if commit_mode == COMMIT_MODE_END and not commit_at_end_attempted:
+                commit_at_end_attempted = True
+                with persistence.lock:
+                    payload["final_snapshot"] = _snapshot_payload(snapshot)
+                commit_payload = _run_auto_commit(
+                    event_path=event_path,
+                    payload=payload,
+                    progress=progress,
+                    cwd=cwd,
+                    run_dir=run_dir,
+                    run_id=run_id,
+                    session_id=None,
+                    persistence=persistence,
+                )
+                if not commit_payload["success"]:
+                    _pause_run(
+                        event_path,
+                        payload,
+                        reason="commit-failed",
+                        message=(
+                            "final auto-commit failed after all sessions "
+                            "completed"
+                        ),
+                        details={"commit": commit_payload},
+                        persistence=persistence,
+                    )
+                    break
+                continue
+
+            if review_requested and not review_appended:
+                try:
+                    review_file, review_created = ensure_generated_review_session(
+                        snapshot.plan_dir,
+                        review_harness=args.review_harness,
+                    )
+                except (plans.PlanError, OSError) as error:
+                    with persistence.lock:
+                        payload["final_snapshot"] = _snapshot_payload(snapshot)
+                    _pause_run(
+                        event_path,
+                        payload,
+                        reason="malformed-plan",
+                        message=(
+                            "could not create or reuse a generated review "
+                            f"session: {error}"
+                        ),
+                        details={"error": str(error)},
+                        persistence=persistence,
+                    )
+                    break
+                review_appended = True
+                with persistence.lock:
+                    payload["review_session_id"] = (
+                        review_file.session_id.value
+                    )
+                if review_created:
+                    persistence.append_event(
+                        event_path,
+                        events.REVIEW_SESSION_CREATED_EVENT,
+                        {
+                            "run_id": run_id,
+                            "session_id": review_file.session_id.value,
+                            "session": review_file.session_id.value,
+                            "review_harness": args.review_harness,
+                            "review_session_path": str(review_file.path),
+                            "review_output_path": (
+                                payload.get("review_output_path")
+                                or str(final_review_output_path(
+                                    snapshot.plan_dir
+                                ))
+                            ),
+                        },
+                    )
+                try:
+                    snapshot = plans.inspect_plan(snapshot.plan_dir)
+                except plans.PlanError as error:
+                    _pause_run(
+                        event_path,
+                        payload,
+                        reason="malformed-plan",
+                        message=(
+                            "plan could not be inspected after appending the "
+                            f"review session: {error}"
+                        ),
+                        details={"error": str(error)},
+                        persistence=persistence,
+                    )
+                    break
+                with persistence.lock:
+                    payload["final_snapshot"] = _snapshot_payload(snapshot)
+                running_success, running_error = _write_readiness_state(
+                    snapshot.plan_dir, "running"
+                )
+                with persistence.lock:
+                    if running_success:
+                        payload["readiness_state_active"] = True
+                        payload["readiness_state_current"] = "running"
+                        payload["readiness_state_refreshed_at"] = (
+                            _isoformat(_utc_now())
+                        )
+                        payload["readiness_state_refresh_error"] = None
+                    else:
+                        payload["readiness_state_refresh_error"] = (
+                            running_error
+                        )
+                    persistence.write_state(payload)
+                continue
+
+            with persistence.lock:
+                payload["final_snapshot"] = _snapshot_payload(snapshot)
+                payload["reason"] = "all-complete"
+            break
+
+        is_review_session = is_generated_review_session_file(
+            pending_session.path
+        )
+
+        if (
+            not is_review_session
+            and max_sessions is not None
+            and completed_count >= max_sessions
+        ):
             with persistence.lock:
                 payload["reason"] = "max-sessions"
             break
 
         before = snapshot
-        pending_session = before.next_pending
-        if pending_session is None:
-            break
         session_id = pending_session.id
         session_label = _session_label(session_id)
         session_identity = _session_identity_payload(session_id)
         session_details = _session_details_payload(session_id)
+
+        if is_review_session:
+            with persistence.lock:
+                if payload.get("review_session_id") != session_id:
+                    payload["review_session_id"] = session_id
 
         with persistence.lock:
             turn_index = len(payload["turns"]) + 1
@@ -2850,8 +3325,11 @@ def _run_locked(
             turn_index=turn_index,
             session_id=session_id,
         )
-        with run_control_lock:
-            turn_harness = _selected_future_harness(args, control_payload)
+        if is_review_session:
+            turn_harness = args.review_harness
+        else:
+            with run_control_lock:
+                turn_harness = _selected_future_harness(args, control_payload)
         turn_model_effort = _selected_model_effort_payload(
             args,
             harness=turn_harness,
@@ -2883,10 +3361,17 @@ def _run_locked(
             if previous_turn_finished_at is None
             else _duration_seconds(previous_turn_finished_at, turn_started_at)
         )
+        session_kind = (
+            SESSION_KIND_REVIEW
+            if is_review_session
+            else SESSION_KIND_IMPLEMENTATION
+        )
+        total_sessions = sum(_status_counts(before).values())
         active_turn = {
             "run_id": run_id,
             "turn_index": turn_index,
             **session_identity,
+            "session_kind": session_kind,
             "total_sessions": total_sessions,
             "artifact_dir": str(paths["artifact_dir"]),
             "prompt": prompt,
@@ -2930,6 +3415,11 @@ def _run_locked(
         with run_control_lock:
             run_control_context = dict(active_turn)
         persistence.append_event(event_path, "turn_started", active_turn)
+        review_fingerprint_before: dict[str, Any] | None = (
+            _capture_review_repo_fingerprint(cwd, before.plan_dir)
+            if is_review_session
+            else None
+        )
         live_turn.start()
         _notify_agent_mux_loop_turn_started(payload, active_turn)
         try:
@@ -3095,6 +3585,49 @@ def _run_locked(
             )
             break
 
+        if is_review_session and review_fingerprint_before is not None:
+            review_fingerprint_after = _capture_review_repo_fingerprint(
+                cwd, before.plan_dir
+            )
+            if review_fingerprint_after != review_fingerprint_before:
+                failure_note = (
+                    "review mutation guard failed: repository content changed "
+                    "outside the plan directory"
+                )
+                reverted = _revert_session_status_to_pending(
+                    after, session_id, failure_note=failure_note
+                )
+                snapshot_after = _reinspect_after_revert(
+                    before.plan_dir, after, reverted
+                )
+                details = {
+                    **session_details,
+                    "fingerprint_before": review_fingerprint_before,
+                    "fingerprint_after": review_fingerprint_after,
+                }
+                with persistence.lock:
+                    payload["final_snapshot"] = _snapshot_payload(snapshot_after)
+                    turn_payload["review_mutation_guard"] = {
+                        "passed": False,
+                        "reason": "review-mutated-worktree",
+                        "reverted_to_pending": reverted is not None,
+                        "fingerprint_before": review_fingerprint_before,
+                        "fingerprint_after": review_fingerprint_after,
+                    }
+                    _write_json_file(paths["result"], turn_payload)
+                _pause_run(
+                    event_path,
+                    payload,
+                    reason="review-mutated-worktree",
+                    message=(
+                        f"review session {session_label} mutated repository "
+                        "content outside the plan directory"
+                    ),
+                    details=details,
+                    persistence=persistence,
+                )
+                break
+
         expected_change = (
             _session_status_change_payload(
                 session_id,
@@ -3216,7 +3749,7 @@ def _run_locked(
 
         _refresh_active_readiness_state(payload, after.plan_dir, persistence)
 
-        if commit_mode == COMMIT_MODE_PER_SESSION:
+        if not is_review_session and commit_mode == COMMIT_MODE_PER_SESSION:
             commit_payload = _run_auto_commit(
                 event_path=event_path,
                 payload=payload,
@@ -3249,10 +3782,19 @@ def _run_locked(
         with persistence.lock:
             payload["completed_sessions"].append(_session_compat_value(session_id))
             payload.setdefault("completed_session_ids", []).append(session_id)
-        completed_count += 1
+            if is_review_session:
+                payload["review_completed"] = True
+        if not is_review_session:
+            completed_count += 1
         snapshot = after
         with persistence.lock:
             payload["final_snapshot"] = _snapshot_payload(snapshot)
+
+        if is_review_session:
+            with persistence.lock:
+                payload["reason"] = "all-complete"
+            break
+
         with run_control_lock:
             should_stop_after_current = _consume_run_control_stop(
                 run_controls,
@@ -3267,53 +3809,19 @@ def _run_locked(
             break
 
     with persistence.lock:
-        should_finalize_reason = payload["ok"] and payload["reason"] == ""
-
-    if should_finalize_reason:
-        if snapshot.next_pending is None:
-            if _all_sessions_complete(snapshot):
-                with persistence.lock:
-                    payload["final_snapshot"] = _snapshot_payload(snapshot)
-                if commit_mode == COMMIT_MODE_END:
-                    commit_payload = _run_auto_commit(
-                        event_path=event_path,
-                        payload=payload,
-                        progress=progress,
-                        cwd=cwd,
-                        run_dir=run_dir,
-                        run_id=run_id,
-                        session_id=None,
-                        persistence=persistence,
-                    )
-                    if not commit_payload["success"]:
-                        _pause_run(
-                            event_path,
-                            payload,
-                            reason="commit-failed",
-                            message=(
-                                "final auto-commit failed after all sessions completed"
-                            ),
-                            details={"commit": commit_payload},
-                            persistence=persistence,
-                        )
-                    else:
-                        with persistence.lock:
-                            payload["reason"] = "all-complete"
-                else:
-                    with persistence.lock:
-                        payload["reason"] = "all-complete"
-            else:
-                _pause_run(
-                    event_path,
-                    payload,
-                    reason="no-pending-but-incomplete",
-                    message="no pending session was found, but not every session is complete",
-                    details={"snapshot": _snapshot_payload(snapshot)},
-                    persistence=persistence,
-                )
-        else:
-            with persistence.lock:
-                payload["reason"] = "stopped"
+        if payload["ok"] and payload["reason"] == "":
+            payload["reason"] = "stopped"
+        if (
+            review_requested
+            and not payload.get("review_completed")
+            and payload.get("review_skipped_reason") is None
+        ):
+            if payload.get("paused"):
+                payload["review_skipped_reason"] = payload.get(
+                    "pause_reason"
+                ) or "paused"
+            elif payload["reason"] not in ("", "all-complete"):
+                payload["review_skipped_reason"] = payload["reason"]
 
     run_controls.stop()
     try:
@@ -3352,6 +3860,8 @@ def _error_payload(
     except OSError:
         plan_dir = str(args.plan_dir)
 
+    review_harness = getattr(args, "review_harness", None)
+    review_requested = review_harness is not None
     payload = responses.error_payload(
         "run",
         reason=reason,
@@ -3371,6 +3881,14 @@ def _error_payload(
         completed_sessions=[],
         completed_session_ids=[],
         turns=[],
+        review_requested=review_requested,
+        review_harness=review_harness,
+        review_session_id=None,
+        review_output_path=(
+            str(final_review_output_path(plan_dir)) if review_requested else None
+        ),
+        review_completed=False,
+        review_skipped_reason=reason if review_requested else None,
     )
     payload.update(_selected_model_effort_payload(args))
     if snapshot is not None:
@@ -3497,6 +4015,9 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
         print("Next pending: none")
     else:
         print(f"Next pending: session {next_pending}")
+    review_output_path = payload.get("review_output_path")
+    if payload.get("review_completed") and review_output_path:
+        print(f"Review: {review_output_path}")
 
 
 def run_from_args(args: argparse.Namespace) -> int:

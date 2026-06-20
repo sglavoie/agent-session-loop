@@ -3240,6 +3240,380 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertEqual(2, raised.exception.code)
         self.assertIn("unrecognized arguments: --interactive", stderr.getvalue())
 
+    def test_run_parser_review_harness_defaults_to_none(self) -> None:
+        parser = cli.build_parser()
+
+        args = parser.parse_args(["run", "/tmp/plan"])
+
+        self.assertIsNone(args.review_harness)
+
+    def test_run_parser_accepts_review_harness_choices(self) -> None:
+        parser = cli.build_parser()
+
+        for harness_name in harnesses.HARNESS_NAMES:
+            with self.subTest(harness=harness_name):
+                args = parser.parse_args(
+                    ["run", "/tmp/plan", "--review-harness", harness_name]
+                )
+                self.assertEqual(harness_name, args.review_harness)
+
+    def test_run_parser_rejects_unknown_review_harness(self) -> None:
+        parser = cli.build_parser()
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            parser.parse_args(
+                ["run", "/tmp/plan", "--review-harness", "not-a-harness"]
+            )
+
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("--review-harness", stderr.getvalue())
+
+    def test_validate_run_inputs_rejects_review_harness_equal_to_harness(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(
+                cwd=tmp,
+                harness="codex",
+                review_harness="codex",
+                timeout=None,
+                max_sessions=None,
+                commit_mode=None,
+            )
+            with self.assertRaises(runner.RunError) as raised:
+                runner._validate_run_inputs(args)
+
+            message = str(raised.exception)
+            self.assertIn("--review-harness must differ from --harness", message)
+            self.assertIn("'codex'", message)
+
+    def test_validate_run_inputs_accepts_distinct_review_harness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(
+                cwd=tmp,
+                harness="codex",
+                review_harness="claude",
+                timeout=None,
+                max_sessions=None,
+                commit_mode=None,
+            )
+
+            cwd, timeout, max_sessions, commit_mode = runner._validate_run_inputs(
+                args
+            )
+
+            self.assertEqual(Path(tmp).resolve(), cwd)
+            self.assertIsNone(timeout)
+            self.assertIsNone(max_sessions)
+            self.assertIsNone(commit_mode)
+
+    def test_validate_run_inputs_allows_missing_review_harness_attribute(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(
+                cwd=tmp,
+                harness="codex",
+                timeout=None,
+                max_sessions=None,
+                commit_mode=None,
+            )
+
+            runner._validate_run_inputs(args)
+
+    def test_review_session_kind_constants(self) -> None:
+        self.assertEqual("implementation", runner.SESSION_KIND_IMPLEMENTATION)
+        self.assertEqual("review", runner.SESSION_KIND_REVIEW)
+        self.assertEqual(
+            (
+                runner.SESSION_KIND_IMPLEMENTATION,
+                runner.SESSION_KIND_REVIEW,
+            ),
+            runner.SESSION_KINDS,
+        )
+        self.assertEqual("final-review.md", runner.FINAL_REVIEW_FILENAME)
+        self.assertIn("asl:generated-review-session", runner.REVIEW_SESSION_MARKER)
+
+    def test_review_pause_reasons_are_registered(self) -> None:
+        self.assertIn("review-harness-required", events.PAUSE_REASONS)
+        self.assertIn("review-mutated-worktree", events.PAUSE_REASONS)
+
+    def test_contains_review_session_marker_detects_marker(self) -> None:
+        body_with_marker = "\n".join(
+            [
+                "# Session 7: Final Review",
+                "",
+                runner.REVIEW_SESSION_MARKER,
+                "",
+                "## Handoff",
+                "",
+                "- **Status**: pending",
+            ]
+        )
+        body_without_marker = "\n".join(
+            [
+                "# Session 1",
+                "",
+                "## Handoff",
+                "",
+                "- **Status**: pending",
+            ]
+        )
+
+        self.assertTrue(runner.contains_review_session_marker(body_with_marker))
+        self.assertFalse(
+            runner.contains_review_session_marker(body_without_marker)
+        )
+
+    def test_is_generated_review_session_file_reads_marker_from_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            review_path = plan_dir / "session-7.md"
+            other_path = plan_dir / "session-1.md"
+            review_path.write_text(
+                f"# Review\n\n{runner.REVIEW_SESSION_MARKER}\n",
+                encoding="utf-8",
+            )
+            other_path.write_text("# Session 1\n", encoding="utf-8")
+
+            self.assertTrue(
+                runner.is_generated_review_session_file(review_path)
+            )
+            self.assertFalse(
+                runner.is_generated_review_session_file(other_path)
+            )
+            self.assertFalse(
+                runner.is_generated_review_session_file(plan_dir / "missing.md")
+            )
+
+    def test_final_review_output_path_joins_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+
+            self.assertEqual(
+                plan_dir / runner.FINAL_REVIEW_FILENAME,
+                runner.final_review_output_path(plan_dir),
+            )
+
+    def test_next_top_level_session_id_returns_one_for_empty_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            (plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
+            (plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
+
+            self.assertEqual("1", plans.next_top_level_session_id(plan_dir).value)
+
+    def test_next_top_level_session_id_uses_max_top_level_component(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            write_plan_with_ids(
+                plan_dir,
+                (
+                    ("1", "complete"),
+                    ("2.1", "complete"),
+                    ("3", "pending"),
+                ),
+            )
+
+            self.assertEqual("4", plans.next_top_level_session_id(plan_dir).value)
+
+    def test_next_top_level_session_id_ignores_expansion_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            write_plan(plan_dir, ("complete",))
+            (plan_dir / "session-9.expand.md").write_text(
+                "# Expansion\n", encoding="utf-8"
+            )
+
+            self.assertEqual("2", plans.next_top_level_session_id(plan_dir).value)
+
+    def test_build_generated_review_session_body_is_valid_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            session_id = plans.SessionId((7,))
+
+            body = runner.build_generated_review_session_body(
+                session_id,
+                review_harness="claude",
+                plan_dir=plan_dir,
+            )
+
+            self.assertIn(runner.REVIEW_SESSION_MARKER, body)
+            self.assertIn("claude", body)
+            self.assertIn(runner.FINAL_REVIEW_FILENAME, body)
+            self.assertIn("Do not modify", body)
+            self.assertIn("- **Status**: pending", body)
+
+            contract = contracts.parse_completion_contract(body, session_id=session_id)
+            self.assertIsNotNone(contract)
+            self.assertEqual(session_id, contract.session_id)
+            self.assertEqual(1, len(contract.verify.checks))
+            check = contract.verify.checks[0]
+            self.assertIsInstance(check, contracts.CommandCheck)
+            self.assertEqual("python3", check.argv[0])
+            self.assertEqual(
+                str(plans.canonicalize_path(plan_dir)), check.cwd
+            )
+
+    def test_find_pending_generated_review_session_returns_none_when_no_marker(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            write_plan(plan_dir, ("pending", "complete"))
+
+            self.assertIsNone(
+                runner.find_pending_generated_review_session(plan_dir)
+            )
+
+    def test_find_pending_generated_review_session_returns_pending_marked_session(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            write_plan(plan_dir, ("complete", "complete"))
+            review_id = plans.next_top_level_session_id(plan_dir)
+            review_path = plan_dir / review_id.filename
+            review_path.write_text(
+                runner.build_generated_review_session_body(
+                    review_id,
+                    review_harness="claude",
+                    plan_dir=plan_dir,
+                ),
+                encoding="utf-8",
+            )
+
+            found = runner.find_pending_generated_review_session(plan_dir)
+
+            self.assertIsNotNone(found)
+            self.assertEqual(review_id, found.session_id)
+            self.assertEqual(plans.canonicalize_path(review_path), found.path)
+
+    def test_find_pending_generated_review_session_skips_completed_review(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            write_plan(plan_dir, ("complete",))
+            review_id = plans.next_top_level_session_id(plan_dir)
+            review_path = plan_dir / review_id.filename
+            body = runner.build_generated_review_session_body(
+                review_id,
+                review_harness="claude",
+                plan_dir=plan_dir,
+            ).replace("- **Status**: pending", "- **Status**: complete")
+            review_path.write_text(body, encoding="utf-8")
+
+            self.assertIsNone(
+                runner.find_pending_generated_review_session(plan_dir)
+            )
+
+    def test_ensure_generated_review_session_creates_new_when_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            write_plan(plan_dir, ("complete", "pending"))
+
+            session_file, created = runner.ensure_generated_review_session(
+                plan_dir, review_harness="claude"
+            )
+
+            self.assertTrue(created)
+            self.assertEqual("3", session_file.session_id.value)
+            self.assertEqual(
+                plans.canonicalize_path(plan_dir / "session-3.md"),
+                session_file.path,
+            )
+            self.assertTrue(
+                runner.is_generated_review_session_file(session_file.path)
+            )
+            status = plans.read_session_status(session_file)
+            self.assertEqual("pending", status.status)
+
+    def test_ensure_generated_review_session_reuses_pending_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            write_plan(plan_dir, ("complete",))
+
+            first_file, first_created = runner.ensure_generated_review_session(
+                plan_dir, review_harness="claude"
+            )
+            second_file, second_created = runner.ensure_generated_review_session(
+                plan_dir, review_harness="claude"
+            )
+
+            self.assertTrue(first_created)
+            self.assertFalse(second_created)
+            self.assertEqual(first_file.session_id, second_file.session_id)
+            self.assertEqual(first_file.path, second_file.path)
+
+    def test_ensure_generated_review_session_appends_after_completed_review(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            write_plan(plan_dir, ("complete",))
+            first_file, _ = runner.ensure_generated_review_session(
+                plan_dir, review_harness="claude"
+            )
+            completed_body = first_file.path.read_text(encoding="utf-8").replace(
+                "- **Status**: pending", "- **Status**: complete"
+            )
+            first_file.path.write_text(completed_body, encoding="utf-8")
+
+            second_file, created = runner.ensure_generated_review_session(
+                plan_dir, review_harness="claude"
+            )
+
+            self.assertTrue(created)
+            self.assertNotEqual(first_file.session_id, second_file.session_id)
+            self.assertEqual(
+                first_file.session_id.components[0] + 1,
+                second_file.session_id.components[0],
+            )
+
+    def test_ensure_generated_review_session_contract_passes_with_review_text(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            write_plan(plan_dir, ("complete",))
+
+            session_file, _ = runner.ensure_generated_review_session(
+                plan_dir, review_harness="claude"
+            )
+            (plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
+                "Critical review findings.\n", encoding="utf-8"
+            )
+
+            contract = contracts.read_completion_contract(
+                plan_dir, session_file.session_id
+            )
+            self.assertIsNotNone(contract)
+            result = verification.run_verification(contract, repo_root=plan_dir)
+            self.assertTrue(result.passed, result.failures)
+
+    def test_ensure_generated_review_session_contract_fails_without_output(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            write_plan(plan_dir, ("complete",))
+
+            session_file, _ = runner.ensure_generated_review_session(
+                plan_dir, review_harness="claude"
+            )
+            (plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
+                "   \n\n  \t\n", encoding="utf-8"
+            )
+
+            contract = contracts.read_completion_contract(
+                plan_dir, session_file.session_id
+            )
+            self.assertIsNotNone(contract)
+            result = verification.run_verification(contract, repo_root=plan_dir)
+            self.assertFalse(result.passed)
+
 
 class RunControlTests(unittest.TestCase):
     def run_args(self, *, json_output: bool = False, dry_run: bool = False):
@@ -9967,6 +10341,828 @@ class RunVerificationEnforcementTests(unittest.TestCase):
         self.assertIn("verify-failed", events.PAUSE_REASONS)
         self.assertIn("no-contract", events.PAUSE_REASONS)
         self.assertIn("malformed-contract", events.PAUSE_REASONS)
+
+
+class RunReviewHarnessLifecycleTests(unittest.TestCase):
+    """End-to-end coverage for ``--review-harness`` lifecycle integration."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+        self.repo_root = self.tmp_path / "repo"
+        self.config_home = self.tmp_path / "config"
+        init_git_repo(self.repo_root)
+        # Install fake_codex as both `codex` and `claude` so the test can
+        # exercise a distinct --harness / --review-harness pair without
+        # touching the production fixture file.
+        self.fake_codex = install_fake_codex(self.tmp_path)
+        self.fake_claude = install_fake_harness(self.tmp_path, "claude")
+        config_path = (
+            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        )
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps(
+                {
+                    "codex": {"executable": str(self.fake_codex)},
+                    "claude": {"executable": str(self.fake_claude)},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _write_plan(
+        self,
+        statuses: tuple[str, ...] = ("pending",),
+        *,
+        readiness: str | None = "loop-ready",
+        sha_override: str | None = None,
+    ) -> None:
+        contracts_by_id = {
+            str(index): _contract_block(
+                '{"type": "file_exists", "path": "README.md", '
+                f'"name": "readme-{index}"}}',
+                session=str(index),
+            )
+            for index in range(1, len(statuses) + 1)
+        }
+        write_plan(self.plan_dir, statuses, contracts_by_id=contracts_by_id)
+        if readiness is None:
+            return
+        sha = sha_override or plans.stable_readiness_sha256(self.plan_dir)
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state=readiness,
+                readiness_sha256=sha,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+
+    def _precreate_final_review(self) -> Path:
+        """Stamp final-review.md so the generated contract passes for fake harnesses."""
+        path = self.plan_dir / runner.FINAL_REVIEW_FILENAME
+        path.write_text("synthetic final review content\n", encoding="utf-8")
+        return path
+
+    def _write_pending_review_session(self) -> plans.SessionFile:
+        return runner.ensure_generated_review_session(
+            self.plan_dir, review_harness="claude"
+        )[0]
+
+    def _run(
+        self,
+        *,
+        mode: str = "success",
+        harness: str = "codex",
+        review_harness: str | None = None,
+        max_sessions: int | None = None,
+        allow_not_loop_ready: bool = False,
+        timeout: int | None = None,
+        json_mode: bool = True,
+        fake_codex_sleep: str = "5",
+        commit_per_session: bool = False,
+        extra_env: dict[str, str] | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object] | None]:
+        argv = [
+            sys.executable,
+            "-m",
+            "agent_session_loop",
+            "run",
+            str(self.plan_dir),
+            "--cwd",
+            str(self.repo_root),
+            "--harness",
+            harness,
+            "--state-dir",
+            str(self.state_dir),
+        ]
+        if json_mode:
+            argv.append("--json")
+        if review_harness is not None:
+            argv.extend(["--review-harness", review_harness])
+        if allow_not_loop_ready:
+            argv.append("--allow-not-loop-ready")
+        if max_sessions is not None:
+            argv.extend(["--max-sessions", str(max_sessions)])
+        if timeout is not None:
+            argv.extend(["--timeout", str(timeout)])
+        if commit_per_session:
+            argv.append("--commit-per-session")
+        env = os.environ.copy()
+        env.update(
+            {
+                "XDG_CONFIG_HOME": str(self.config_home),
+                "FAKE_CODEX_MODE": mode,
+                "FAKE_CODEX_SLEEP": fake_codex_sleep,
+                "PYTHONPATH": str(REPO_ROOT)
+                + os.pathsep
+                + env.get("PYTHONPATH", ""),
+            }
+        )
+        if extra_env is not None:
+            env.update(extra_env)
+        completed = subprocess.run(
+            argv,
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        payload = json.loads(completed.stdout) if json_mode else None
+        return completed, payload
+
+    def _install_mutating_fake_claude(self) -> Path:
+        """Replace the claude fake harness with one that mutates the cwd repo.
+
+        The replacement marks the first pending session complete, pre-stamps
+        ``final-review.md`` so the generated contract passes, and writes
+        ``mutated by review\\n`` to ``README.md`` in the cwd. The mutation
+        guard should detect the README change and pause the run.
+        """
+        script = self.fake_claude
+        script.write_text(
+            "\n".join(
+                [
+                    "#!/usr/bin/env python3",
+                    "import re",
+                    "import sys",
+                    "from pathlib import Path",
+                    "",
+                    "plan_dir = None",
+                    "last_message = None",
+                    "for index, arg in enumerate(sys.argv):",
+                    "    if arg == '--add-dir' and index + 1 < len(sys.argv):",
+                    "        plan_dir = Path(sys.argv[index + 1])",
+                    "    if arg == '-o' and index + 1 < len(sys.argv):",
+                    "        last_message = Path(sys.argv[index + 1])",
+                    "if plan_dir is None:",
+                    "    print('missing --add-dir', file=sys.stderr)",
+                    "    sys.exit(2)",
+                    "",
+                    "# Mutate a tracked file inside cwd to trigger the guard.",
+                    "(Path.cwd() / 'README.md').write_text(",
+                    "    'mutated by review\\n', encoding='utf-8',",
+                    ")",
+                    "",
+                    "session_re = re.compile(",
+                    "    r'^session-([1-9][0-9]*(?:\\.[1-9][0-9]*)*)\\.md$'",
+                    ")",
+                    "def sort_key(path):",
+                    "    match = session_re.match(path.name)",
+                    "    if match is None:",
+                    "        return ()",
+                    "    return tuple(int(c) for c in match.group(1).split('.'))",
+                    "pending = []",
+                    "for path in sorted(plan_dir.glob('session-*.md'), key=sort_key):",
+                    "    if session_re.match(path.name) is None:",
+                    "        continue",
+                    "    text = path.read_text(encoding='utf-8')",
+                    "    if '- **Status**: pending' in text:",
+                    "        pending.append(path)",
+                    "if pending:",
+                    "    target = pending[0]",
+                    "    text = target.read_text(encoding='utf-8')",
+                    "    text = text.replace(",
+                    "        '- **Status**: pending',",
+                    "        '- **Status**: complete',",
+                    "        1,",
+                    "    )",
+                    "    target.write_text(text, encoding='utf-8')",
+                    "",
+                    "(plan_dir / 'final-review.md').write_text(",
+                    "    'synthetic review\\n', encoding='utf-8',",
+                    ")",
+                    "",
+                    "if last_message is not None:",
+                    "    last_message.parent.mkdir(parents=True, exist_ok=True)",
+                    "    last_message.write_text(",
+                    "        'Runner status: complete\\n', encoding='utf-8',",
+                    "    )",
+                    "",
+                    "sys.exit(0)",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        script.chmod(script.stat().st_mode | stat.S_IXUSR)
+        return script
+
+    def _events_path(self) -> Path:
+        plan_state = self.state_dir / plans.path_sha256(
+            plans.canonicalize_path(self.plan_dir)
+        )
+        return plan_state / events.EVENTS_FILE_NAME
+
+    def _read_events(self) -> list[dict[str, object]]:
+        return read_jsonl(self._events_path())
+
+    def test_fresh_run_appends_and_completes_review_session(self) -> None:
+        self._write_plan(("pending",), readiness="loop-ready")
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        self._precreate_final_review()
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertTrue(payload["review_requested"])
+        self.assertEqual("claude", payload["review_harness"])
+        self.assertTrue(payload["review_completed"])
+        self.assertIsNone(payload.get("review_skipped_reason"))
+        review_session_id = payload["review_session_id"]
+        self.assertIsNotNone(review_session_id)
+        # Review session id must be a fresh top-level id beyond impl sessions.
+        self.assertEqual("2", review_session_id)
+        review_path = self.plan_dir / f"session-{review_session_id}.md"
+        self.assertTrue(review_path.is_file())
+        self.assertTrue(runner.is_generated_review_session_file(review_path))
+        # Both impl and review turns ran with the right kind tag.
+        turns = payload["turns"]
+        self.assertEqual(2, len(turns))
+        self.assertEqual(
+            runner.SESSION_KIND_IMPLEMENTATION, turns[0]["session_kind"]
+        )
+        self.assertEqual("codex", turns[0]["harness"])
+        self.assertEqual(runner.SESSION_KIND_REVIEW, turns[1]["session_kind"])
+        self.assertEqual("claude", turns[1]["harness"])
+        self.assertEqual(1, turns[0]["total_sessions"])
+        self.assertEqual(2, turns[1]["total_sessions"])
+
+    def test_review_runs_when_plan_starts_already_complete(self) -> None:
+        # Author the plan as complete from the start, with readiness=complete
+        # and a matching SHA, so the normal loop-ready gate would refuse it.
+        self._write_plan(("complete",), readiness="complete")
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        self._precreate_final_review()
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertTrue(payload["review_completed"])
+        self.assertEqual("2", payload["review_session_id"])
+        # Only the review turn should have executed.
+        self.assertEqual(1, len(payload["turns"]))
+        self.assertEqual(
+            runner.SESSION_KIND_REVIEW, payload["turns"][0]["session_kind"]
+        )
+        self.assertEqual("claude", payload["turns"][0]["harness"])
+        # Initial readiness was 'complete'; after appending a review session
+        # the readiness was switched to 'running' and then finalized to
+        # 'complete' once all sessions (impl + review) ended complete.
+        self.assertEqual("complete", payload["readiness_state_initial"])
+        self.assertEqual("complete", payload["readiness_state_final"])
+
+    def test_resumes_existing_pending_review_session(self) -> None:
+        # Author the plan as fully complete + readiness=loop-ready first,
+        # then drop in a pre-existing pending review session so we end up
+        # with the impl session complete and the review session pending.
+        self._write_plan(("complete",), readiness=None)
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        review_session = self._write_pending_review_session()
+        # The readiness SHA must reflect the plan including the review session.
+        sha = plans.stable_readiness_sha256(self.plan_dir)
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=sha,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        self._precreate_final_review()
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertTrue(payload["review_completed"])
+        # The pre-existing review session must be reused, not replaced.
+        self.assertEqual(
+            review_session.session_id.value, payload["review_session_id"]
+        )
+        # Only the existing review session needed to run.
+        self.assertEqual(1, len(payload["turns"]))
+        self.assertEqual(
+            runner.SESSION_KIND_REVIEW, payload["turns"][0]["session_kind"]
+        )
+
+    def test_pending_review_session_without_review_harness_pauses(self) -> None:
+        self._write_plan(("complete",), readiness=None)
+        self._write_pending_review_session()
+        sha = plans.stable_readiness_sha256(self.plan_dir)
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=sha,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+
+        completed, payload = self._run()
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("review-harness-required", payload["pause_reason"])
+        # No turns should have run -- the runner refused before launching.
+        self.assertEqual([], payload["turns"])
+
+    def test_max_sessions_skips_review_and_records_skip_reason(self) -> None:
+        self._write_plan(("pending", "pending"), readiness="loop-ready")
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+
+        completed, payload = self._run(
+            review_harness="claude",
+            max_sessions=1,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("max-sessions", payload["reason"])
+        self.assertFalse(payload["review_completed"])
+        self.assertEqual(
+            "max-sessions", payload["review_skipped_reason"]
+        )
+        # Only one implementation turn ran; the loop stopped before any
+        # review session could be appended.
+        self.assertEqual(1, len(payload["turns"]))
+        self.assertEqual(
+            runner.SESSION_KIND_IMPLEMENTATION,
+            payload["turns"][0]["session_kind"],
+        )
+        # No review session file should have been created.
+        review_candidates = [
+            path
+            for path in self.plan_dir.glob("session-*.md")
+            if runner.is_generated_review_session_file(path)
+        ]
+        self.assertEqual([], review_candidates)
+
+    def test_review_session_created_event_is_emitted(self) -> None:
+        self._write_plan(("pending",), readiness="loop-ready")
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        self._precreate_final_review()
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["review_completed"])
+        review_session_id = payload["review_session_id"]
+        events_log = self._read_events()
+        created_events = [
+            entry
+            for entry in events_log
+            if entry.get("name") == events.REVIEW_SESSION_CREATED_EVENT
+        ]
+        self.assertEqual(1, len(created_events))
+        created_payload = created_events[0]["payload"]
+        self.assertEqual(review_session_id, created_payload["session_id"])
+        self.assertEqual("claude", created_payload["review_harness"])
+        canonical_plan_dir = plans.canonicalize_path(self.plan_dir)
+        self.assertEqual(
+            str(canonical_plan_dir / f"session-{review_session_id}.md"),
+            created_payload["review_session_path"],
+        )
+        self.assertEqual(
+            str(runner.final_review_output_path(canonical_plan_dir)),
+            created_payload["review_output_path"],
+        )
+
+    def test_review_session_created_event_not_emitted_when_reused(self) -> None:
+        self._write_plan(("complete",), readiness=None)
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        self._write_pending_review_session()
+        sha = plans.stable_readiness_sha256(self.plan_dir)
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=sha,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        self._precreate_final_review()
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["review_completed"])
+        events_log = self._read_events()
+        created_events = [
+            entry
+            for entry in events_log
+            if entry.get("name") == events.REVIEW_SESSION_CREATED_EVENT
+        ]
+        self.assertEqual([], created_events)
+
+    def test_review_mutated_worktree_pauses_run(self) -> None:
+        self._write_plan(("complete",), readiness=None)
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        review_session = self._write_pending_review_session()
+        sha = plans.stable_readiness_sha256(self.plan_dir)
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=sha,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        self._install_mutating_fake_claude()
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("review-mutated-worktree", payload["pause_reason"])
+        self.assertFalse(payload["review_completed"])
+        # Mutation should be visible on disk after the pause.
+        self.assertEqual(
+            "mutated by review\n",
+            (self.repo_root / "README.md").read_text(encoding="utf-8"),
+        )
+        self.assertEqual(
+            "pending", plans.read_session_status(review_session).status
+        )
+        self.assertEqual(1, payload["final_snapshot"]["counts"]["pending"])
+        guard = payload["turns"][0].get("review_mutation_guard")
+        self.assertIsNotNone(guard)
+        self.assertFalse(guard["passed"])
+        self.assertEqual("review-mutated-worktree", guard["reason"])
+        self.assertTrue(guard["reverted_to_pending"])
+
+    def test_review_nonzero_exit_pauses_run(self) -> None:
+        self._write_plan(("complete",), readiness=None)
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        self._write_pending_review_session()
+        sha = plans.stable_readiness_sha256(self.plan_dir)
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=sha,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+
+        completed, payload = self._run(
+            mode="failure", review_harness="claude"
+        )
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("nonzero-exit", payload["pause_reason"])
+        self.assertFalse(payload["review_completed"])
+        self.assertEqual(1, len(payload["turns"]))
+        self.assertEqual(
+            runner.SESSION_KIND_REVIEW, payload["turns"][0]["session_kind"]
+        )
+
+    def test_review_timeout_pauses_run(self) -> None:
+        self._write_plan(("complete",), readiness=None)
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        self._write_pending_review_session()
+        sha = plans.stable_readiness_sha256(self.plan_dir)
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=sha,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+
+        completed, payload = self._run(
+            mode="timeout",
+            review_harness="claude",
+            timeout=1,
+            fake_codex_sleep="5",
+        )
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("timeout", payload["pause_reason"])
+        self.assertFalse(payload["review_completed"])
+
+    def test_review_missing_final_review_file_pauses_run(self) -> None:
+        self._write_plan(("complete",), readiness=None)
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        self._write_pending_review_session()
+        sha = plans.stable_readiness_sha256(self.plan_dir)
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=sha,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        # Intentionally omit _precreate_final_review() so the contract fails.
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("verify-failed", payload["pause_reason"])
+        self.assertFalse(payload["review_completed"])
+        # The runner should have reverted the review session back to pending.
+        review_path = next(
+            path
+            for path in self.plan_dir.glob("session-*.md")
+            if runner.is_generated_review_session_file(path)
+        )
+        review_text = review_path.read_text(encoding="utf-8")
+        self.assertIn("- **Status**: pending", review_text)
+
+    def test_review_empty_final_review_file_pauses_run(self) -> None:
+        self._write_plan(("complete",), readiness=None)
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        self._write_pending_review_session()
+        sha = plans.stable_readiness_sha256(self.plan_dir)
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=sha,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        # Whitespace-only final-review.md must fail the contract.
+        (self.plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
+            "   \n\t\n", encoding="utf-8"
+        )
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("verify-failed", payload["pause_reason"])
+        self.assertFalse(payload["review_completed"])
+
+    def test_text_output_prints_review_path(self) -> None:
+        self._write_plan(("pending",), readiness="loop-ready")
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        self._precreate_final_review()
+
+        completed, _ = self._run(
+            review_harness="claude", json_mode=False
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        expected_path = runner.final_review_output_path(
+            plans.canonicalize_path(self.plan_dir)
+        )
+        self.assertIn(f"Review: {expected_path}", completed.stdout)
+
+    def _write_dotted_plan(
+        self,
+        statuses: tuple[tuple[str, str], ...],
+        *,
+        readiness: str | None = "loop-ready",
+    ) -> None:
+        contracts_by_id = {
+            session_id: _contract_block(
+                '{"type": "file_exists", "path": "README.md", '
+                f'"name": "readme-{session_id}"}}',
+                session=session_id,
+            )
+            for session_id, _ in statuses
+        }
+        write_plan_with_ids(
+            self.plan_dir, statuses, contracts_by_id=contracts_by_id
+        )
+        if readiness is None:
+            return
+        sha = plans.stable_readiness_sha256(self.plan_dir)
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state=readiness,
+                readiness_sha256=sha,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+
+    def _rewrite_harness_config(self, mapping: dict[str, str]) -> None:
+        """Overwrite the harness config with only the named harnesses."""
+        config_path = (
+            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        )
+        config_path.write_text(
+            json.dumps(
+                {name: {"executable": path} for name, path in mapping.items()}
+            ),
+            encoding="utf-8",
+        )
+
+    def _install_fake_spec_on_path(self) -> tuple[Path, Path, dict[str, str]]:
+        fake_spec = install_fake_spec(self.tmp_path)
+        log_path = self.tmp_path / "fake-spec.jsonl"
+        env = {
+            "PATH": str(self.tmp_path) + os.pathsep + os.environ.get("PATH", ""),
+            "FAKE_SPEC_LOG": str(log_path),
+        }
+        return fake_spec, log_path, env
+
+    def test_fresh_run_review_writes_final_review_via_fake_harness(self) -> None:
+        # Exercise the new fake-harness review mode end-to-end: the implementation
+        # turn just marks its session complete, but the review turn must actually
+        # write `final-review.md` so the generated contract passes. We do not
+        # pre-stamp the file -- the harness fixture has to produce it.
+        self._write_plan(("pending",), readiness="loop-ready")
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+
+        completed, payload = self._run(
+            mode="success-with-review", review_harness="claude"
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertTrue(payload["review_completed"])
+        self.assertEqual("claude", payload["review_harness"])
+        review_path = runner.final_review_output_path(
+            plans.canonicalize_path(self.plan_dir)
+        )
+        self.assertTrue(review_path.is_file())
+        self.assertEqual(
+            "fake review findings\n",
+            review_path.read_text(encoding="utf-8"),
+        )
+
+    def test_review_harness_unavailable_pauses_run(self) -> None:
+        # Configure `claude` with a non-existent path so `shutil.which` returns
+        # None regardless of what the host PATH contains. The runner must
+        # pause with `harness-unavailable` before launching the review turn.
+        self._write_plan(("pending",), readiness="loop-ready")
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        missing_claude = self.tmp_path / "definitely-not-a-real-claude"
+        self._rewrite_harness_config(
+            {
+                "codex": str(self.fake_codex),
+                "claude": str(missing_claude),
+            }
+        )
+
+        completed, payload = self._run(
+            mode="success-with-review", review_harness="claude"
+        )
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("harness-unavailable", payload["pause_reason"])
+        self.assertFalse(payload["review_completed"])
+        # The implementation turn ran with `codex`; the failure must occur
+        # before the review turn starts.
+        self.assertEqual(1, len(payload["turns"]))
+        self.assertEqual(
+            runner.SESSION_KIND_IMPLEMENTATION, payload["turns"][0]["session_kind"]
+        )
+        # A review session was appended (so it's recorded for resume) even
+        # though the review turn could not start.
+        self.assertEqual("2", payload["review_session_id"])
+
+    def test_run_rejects_same_review_harness_via_cli(self) -> None:
+        # The CLI must refuse when --review-harness matches --harness.
+        self._write_plan(("pending",), readiness="loop-ready")
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            harness="codex",
+            review_harness="codex",
+        )
+
+        self.assertEqual(1, completed.returncode)
+        self.assertEqual("input-error", payload["reason"])
+        self.assertIn(
+            "--review-harness must differ from --harness",
+            payload.get("error", ""),
+        )
+        self.assertTrue(payload["review_requested"])
+        self.assertEqual("codex", payload["review_harness"])
+        self.assertIsNone(payload["review_session_id"])
+        self.assertEqual(
+            str(
+                runner.final_review_output_path(
+                    plans.canonicalize_path(self.plan_dir)
+                )
+            ),
+            payload["review_output_path"],
+        )
+        self.assertFalse(payload["review_completed"])
+        self.assertEqual("input-error", payload["review_skipped_reason"])
+
+    def test_review_appends_at_top_level_id_in_dotted_plan(self) -> None:
+        # Dotted-session plans must still get a single top-level review id
+        # one greater than the max top-level component.
+        self._write_dotted_plan(
+            (("1", "pending"), ("1.1", "pending")), readiness="loop-ready"
+        )
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+
+        completed, payload = self._run(
+            mode="success-with-review", review_harness="claude"
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertTrue(payload["review_completed"])
+        # The generated review session must be `session-2.md`, not `1.2`.
+        self.assertEqual("2", payload["review_session_id"])
+        self.assertTrue((self.plan_dir / "session-2.md").is_file())
+        # The two impl sessions ran in dotted order, then the review turn.
+        turns = payload["turns"]
+        self.assertEqual(3, len(turns))
+        self.assertEqual("1", turns[0]["session_id"])
+        self.assertEqual("1.1", turns[1]["session_id"])
+        self.assertEqual("2", turns[2]["session_id"])
+        self.assertEqual(
+            runner.SESSION_KIND_REVIEW, turns[2]["session_kind"]
+        )
+
+    def test_commit_per_session_skips_review_turn(self) -> None:
+        # --commit-per-session must commit after implementation sessions but
+        # never after the generated review session.
+        self._write_plan(("pending",), readiness="loop-ready")
+        _fake_spec, spec_log, spec_env = self._install_fake_spec_on_path()
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            commit_per_session=True,
+            extra_env=spec_env,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertTrue(payload["review_completed"])
+        # Exactly one auto-commit fired: for the implementation session.
+        spec_records = read_jsonl(spec_log)
+        self.assertEqual(1, len(spec_records))
+        self.assertEqual(
+            ["commit", "--yes", "--no-verify"], spec_records[0]["argv"][1:]
+        )
+        self.assertEqual(1, len(payload["commits"]))
+        self.assertEqual("session", payload["commits"][0]["scope"])
+        # The committed scope must reference the implementation session id (1),
+        # not the review session id.
+        self.assertEqual(1, payload["commits"][0]["session"])
+
+    def test_run_without_review_harness_leaves_review_fields_unset(self) -> None:
+        # When --review-harness is absent the run must behave exactly like
+        # the pre-review-harness implementation: no review session file,
+        # no review event, no review-related payload fields populated.
+        self._write_plan(("pending",), readiness="loop-ready")
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+
+        completed, payload = self._run(mode="success")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertFalse(payload["review_requested"])
+        self.assertFalse(payload["review_completed"])
+        self.assertIsNone(payload.get("review_harness"))
+        self.assertIsNone(payload.get("review_session_id"))
+        self.assertIsNone(payload.get("review_skipped_reason"))
+        # All turns are implementation, never review.
+        self.assertTrue(payload["turns"])
+        for turn in payload["turns"]:
+            self.assertEqual(
+                runner.SESSION_KIND_IMPLEMENTATION, turn["session_kind"]
+            )
+        # No generated review session file should exist.
+        review_candidates = [
+            path
+            for path in self.plan_dir.glob("session-*.md")
+            if runner.is_generated_review_session_file(path)
+        ]
+        self.assertEqual([], review_candidates)
+        # No final-review.md should be written either.
+        self.assertFalse(
+            runner.final_review_output_path(self.plan_dir).is_file()
+        )
+        # No review-session-created event should have been emitted.
+        review_events = [
+            entry
+            for entry in self._read_events()
+            if entry.get("name") == events.REVIEW_SESSION_CREATED_EVENT
+        ]
+        self.assertEqual([], review_events)
 
 
 class EndToEndQATests(unittest.TestCase):

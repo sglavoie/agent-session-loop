@@ -22,6 +22,7 @@ ACTION_REQUIRED_EVENT = "action_required"
 COMMIT_STARTED_EVENT = "commit_started"
 COMMIT_FINISHED_EVENT = "commit_finished"
 RUN_CONTROL_EVENT = "run_control"
+REVIEW_SESSION_CREATED_EVENT = "review_session_created"
 STATE_FILE_NAME = "state.json"
 EVENTS_FILE_NAME = "events.jsonl"
 RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED = "stop-after-current-requested"
@@ -61,6 +62,8 @@ PAUSE_REASONS: tuple[str, ...] = (
     "no-contract",
     "malformed-contract",
     "interrupted",
+    "review-harness-required",
+    "review-mutated-worktree",
 )
 _EVENT_WRITE_LOCK = threading.Lock()
 

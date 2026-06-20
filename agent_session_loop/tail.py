@@ -230,6 +230,14 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
         )
     if name == events.RUN_CONTROL_EVENT:
         return _run_control_message(payload)
+    if name == events.REVIEW_SESSION_CREATED_EVENT:
+        session = payload.get("session_id") or payload.get("session", "unknown")
+        harness = payload.get("review_harness", "unknown")
+        review_path = payload.get("review_session_path", "unknown")
+        return (
+            f"review session {session} created "
+            f"(harness {harness}, file {review_path})"
+        )
     if name == events.RUN_PAUSED_EVENT:
         detail = payload.get("message")
         suffix = "" if not detail else f": {detail}"

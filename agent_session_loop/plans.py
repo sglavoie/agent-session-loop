@@ -328,6 +328,16 @@ def discover_session_files(plan_dir: str | Path) -> tuple[SessionFile, ...]:
     return tuple(sorted(sessions, key=lambda session: session.session_id.sort_key))
 
 
+def next_top_level_session_id(plan_dir: str | Path) -> SessionId:
+    """Return a fresh top-level session id one greater than the max in `plan_dir`."""
+    canonical_dir = canonicalize_path(plan_dir)
+    sessions = discover_session_files(canonical_dir)
+    if not sessions:
+        return SessionId((1,))
+    max_top = max(session.session_id.components[0] for session in sessions)
+    return SessionId((max_top + 1,))
+
+
 def noncanonical_session_file_suggestions(
     plan_dir: str | Path,
 ) -> tuple[tuple[str, str], ...]:

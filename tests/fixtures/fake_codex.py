@@ -231,6 +231,36 @@ def main() -> int:
         print("completed one session")
         return 0
 
+    if mode == "success-with-review":
+        selected = _selected_session(plan_dir)
+        if (
+            selected is not None
+            and selected.is_file()
+            and _handoff_status_line(selected) == STATUS_PENDING
+        ):
+            target = selected
+        elif pending:
+            target = pending[0]
+        else:
+            target = None
+        if target is not None:
+            _mark_complete(target)
+            # When the harness is asked to run a generated review session,
+            # the file body carries this marker and the session must produce
+            # ``final-review.md`` inside the plan directory.
+            body = target.read_text(encoding="utf-8")
+            if "<!-- asl:generated-review-session -->" in body:
+                review_body = os.environ.get(
+                    "FAKE_CODEX_REVIEW_BODY",
+                    "fake review findings\n",
+                )
+                (plan_dir / "final-review.md").write_text(
+                    review_body, encoding="utf-8"
+                )
+        _write_last_message("Runner status: complete\nNext command: $session-run plan/\n")
+        print("completed one session (review-aware)")
+        return 0
+
     if mode == "success-future-note":
         selected = _selected_session(plan_dir)
         if (
