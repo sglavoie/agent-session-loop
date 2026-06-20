@@ -8413,6 +8413,37 @@ class PreflightCoreTests(unittest.TestCase):
             self.assertIsNotNone(sentinels[0].line)
             self.assertFalse(report.ok)
 
+    def test_ambiguity_sentinel_ignores_word_fragments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            _write_loop_ready_plan(plan_dir, ("pending",))
+            session_path = plan_dir / "session-1.md"
+            text = session_path.read_text(encoding="utf-8")
+            session_path.write_text(
+                text.replace(
+                    "Instructions.",
+                    "Instructions. AIDEV-TODO AIDEV_TODO prefixTODO TODO-item.",
+                ),
+                encoding="utf-8",
+            )
+            plans.write_readiness_metadata(
+                plan_dir,
+                plans.ReadinessMetadata(
+                    state="loop-ready",
+                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    checked_at="2026-06-19T00:00:00Z",
+                ),
+            )
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            sentinels = [
+                finding
+                for finding in report.findings
+                if finding.category == "ambiguity-sentinel"
+            ]
+            self.assertEqual([], sentinels)
+
     def test_ambiguity_sentinel_ignores_handoff_template_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"

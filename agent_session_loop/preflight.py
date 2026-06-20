@@ -35,6 +35,7 @@ import argparse
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -104,14 +105,25 @@ COMMIT_MODES: tuple[CommitMode, ...] = ("per-session", "end")
 TURN_BUDGET_YELLOW_THRESHOLD = 25
 TURNS_PER_SESSION_ESTIMATE = 3
 
-AMBIGUITY_SENTINELS: tuple[str, ...] = (
+WORD_AMBIGUITY_SENTINELS: tuple[str, ...] = (
     "TBD",
     "TODO",
     "FIXME",
     "XXX",
+)
+LITERAL_AMBIGUITY_SENTINELS: tuple[str, ...] = (
     "<placeholder>",
     "<fill this in>",
     "<fill in>",
+)
+AMBIGUITY_SENTINELS: tuple[str, ...] = (
+    *WORD_AMBIGUITY_SENTINELS,
+    *LITERAL_AMBIGUITY_SENTINELS,
+)
+WORD_AMBIGUITY_SENTINEL_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])("
+    + "|".join(re.escape(sentinel) for sentinel in WORD_AMBIGUITY_SENTINELS)
+    + r")(?![A-Za-z0-9_-])"
 )
 
 
@@ -964,22 +976,33 @@ def _check_ambiguity_sentinels(
         start, end = _instructions_range(lines)
         for line_index in range(start, end):
             line = lines[line_index]
-            for sentinel in AMBIGUITY_SENTINELS:
-                if sentinel in line:
-                    findings.append(
-                        _finding(
-                            "yellow",
-                            "ambiguity-sentinel",
-                            f"session {session.id} contains ambiguity sentinel {sentinel!r}",
-                            session_id=session.id,
-                            path=str(session.path),
-                            line=line_index + 1,
-                            detail=line.strip()[:200],
-                        )
+            sentinel = _matching_ambiguity_sentinel(line)
+            if sentinel is not None:
+                findings.append(
+                    _finding(
+                        "yellow",
+                        "ambiguity-sentinel",
+                        f"session {session.id} contains ambiguity sentinel {sentinel!r}",
+                        session_id=session.id,
+                        path=str(session.path),
+                        line=line_index + 1,
+                        detail=line.strip()[:200],
                     )
-                    break
+                )
 
     return tuple(findings)
+
+
+def _matching_ambiguity_sentinel(line: str) -> str | None:
+    word_match = WORD_AMBIGUITY_SENTINEL_PATTERN.search(line)
+    if word_match is not None:
+        return word_match.group(1)
+
+    for sentinel in LITERAL_AMBIGUITY_SENTINELS:
+        if sentinel in line:
+            return sentinel
+
+    return None
 
 
 def _check_path_references(
