@@ -4202,6 +4202,13 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertEqual(2, raised.exception.code)
         self.assertIn("unrecognized arguments: --interactive", stderr.getvalue())
 
+    def test_preflight_mark_loop_ready_short_flag(self) -> None:
+        parser = cli.build_parser()
+
+        args = parser.parse_args(["preflight", "/tmp/plan", "-m"])
+
+        self.assertTrue(args.mark_loop_ready)
+
     def test_run_parser_review_harness_defaults_to_none(self) -> None:
         parser = cli.build_parser()
 

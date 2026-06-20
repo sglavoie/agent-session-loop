@@ -309,6 +309,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Print machine-readable JSON output",
     )
     preflight_parser.add_argument(
+        "-m",
         "--mark-loop-ready",
         action="store_true",
         help="When checks pass, mark the plan readiness state as loop-ready",
