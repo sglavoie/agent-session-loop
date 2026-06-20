@@ -11,7 +11,7 @@ import threading
 from typing import Any, TextIO
 
 from . import events, plans, state
-from .formatting import format_duration_seconds
+from .formatting import format_duration_seconds, format_turn_started_message
 
 
 DEFAULT_LINES = 40
@@ -189,7 +189,7 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
     if name == "run_started":
         return _run_started_message(payload)
     if name == "turn_started":
-        return f"session {_format_session_label(payload)} started"
+        return format_turn_started_message(payload)
     if name == events.TURN_HEARTBEAT_EVENT:
         stream = payload.get("last_activity_stream") or "none"
         return (

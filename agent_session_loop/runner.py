@@ -39,7 +39,7 @@ from . import (
     tail,
     verification,
 )
-from .formatting import format_duration_seconds
+from .formatting import format_duration_seconds, format_turn_started_message
 
 
 NOT_IMPLEMENTED_EXIT = 2
@@ -1894,7 +1894,7 @@ class _ProgressReporter:
         )
 
     def turn_started(self, active_turn: dict[str, Any]) -> None:
-        self._emit(f"session {_format_session_label(active_turn)} started")
+        self._emit(format_turn_started_message(active_turn))
 
     def heartbeat(self, heartbeat: dict[str, Any]) -> None:
         stream = heartbeat.get("last_activity_stream") or "none"

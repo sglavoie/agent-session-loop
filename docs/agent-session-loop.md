@@ -613,14 +613,15 @@ these as `run control:` lines.
 
 For normal text runs, live progress is printed to stderr with local compact
 timestamps, for example `[2026-06-04 14:32:10] session 2/3 started`, so stdout
-remains the final human summary. The live progress lines cover run start,
-session starts and finishes, periodic 30-second heartbeats, action-required
-signals, commits, run-control help or toggle messages, compact status
-snapshots, pauses, and run finish. Inline-tail output, when `t` is enabled,
-streams only harness/commit log lines and does not duplicate heartbeats or any
-other event/progress lines. Detailed artifact paths remain in the final
-summary, `status`, `state.json`, and `events.jsonl`, and are included in the
-`s` status snapshot on demand.
+remains the final human summary. Generated final-review turns are labeled
+explicitly, for example `[2026-06-04 14:32:10] review session started (7/7)`.
+The live progress lines cover run start, session starts and finishes, periodic
+30-second heartbeats, action-required signals, commits, run-control help or
+toggle messages, compact status snapshots, pauses, and run finish. Inline-tail
+output, when `t` is enabled, streams only harness/commit log lines and does not
+duplicate heartbeats or any other event/progress lines. Detailed artifact paths
+remain in the final summary, `status`, `state.json`, and `events.jsonl`, and
+are included in the `s` status snapshot on demand.
 
 For `run --json`, stdout remains the final JSON payload and stderr stays quiet;
 live monitoring should read `state.json`, `events.jsonl`, or use `tail`.

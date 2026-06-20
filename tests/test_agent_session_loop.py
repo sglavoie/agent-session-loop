@@ -37,7 +37,10 @@ from agent_session_loop import (
     tail,
     verification,
 )
-from agent_session_loop.formatting import format_duration_seconds
+from agent_session_loop.formatting import (
+    format_duration_seconds,
+    format_turn_started_message,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -342,6 +345,47 @@ class ParserAndStateTests(unittest.TestCase):
         for value, expected in cases:
             with self.subTest(value=value):
                 self.assertEqual(expected, format_duration_seconds(value))
+
+    def test_format_turn_started_message_marks_review_sessions(self) -> None:
+        self.assertEqual(
+            "review session started (7/7)",
+            format_turn_started_message(
+                {
+                    "session_id": "7",
+                    "total_sessions": 7,
+                    "session_kind": runner.SESSION_KIND_REVIEW,
+                }
+            ),
+        )
+        self.assertEqual(
+            "session 7/7 started",
+            format_turn_started_message(
+                {
+                    "session_id": "7",
+                    "total_sessions": 7,
+                    "session_kind": runner.SESSION_KIND_IMPLEMENTATION,
+                }
+            ),
+        )
+        self.assertEqual(
+            "session 7/7 started",
+            format_turn_started_message(
+                {"session_id": "7", "total_sessions": 7}
+            ),
+        )
+
+    def test_tail_turn_started_event_marks_review_sessions(self) -> None:
+        self.assertEqual(
+            "review session started (7/7)",
+            tail._event_message(
+                "turn_started",
+                {
+                    "session_id": "7",
+                    "total_sessions": 7,
+                    "session_kind": runner.SESSION_KIND_REVIEW,
+                },
+            ),
+        )
 
     def test_tail_event_messages_format_long_durations(self) -> None:
         heartbeat = tail._event_message(
@@ -14397,6 +14441,9 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             plans.canonicalize_path(self.plan_dir)
         )
         self.assertIn(f"Review: {expected_path}", completed.stdout)
+        self.assertIn("session 1/1 started", completed.stderr)
+        self.assertIn("review session started (2/2)", completed.stderr)
+        self.assertNotIn("session 2/2 started", completed.stderr)
 
     def _write_dotted_plan(
         self,

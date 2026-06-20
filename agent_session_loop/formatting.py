@@ -24,3 +24,13 @@ def format_duration_seconds(value: Any) -> str:
     if hours:
         return f"{hours}h{remaining_minutes:02d}m{remaining_seconds:02d}s"
     return f"{remaining_minutes}m{remaining_seconds:02d}s"
+
+
+def format_turn_started_message(payload: dict[str, Any]) -> str:
+    """Format the human-facing start line for one runner turn."""
+    session = payload.get("session_id") or payload.get("session", "unknown")
+    total = payload.get("total_sessions")
+    label = str(session) if total is None else f"{session}/{total}"
+    if payload.get("session_kind") == "review":
+        return f"review session started ({label})"
+    return f"session {label} started"
