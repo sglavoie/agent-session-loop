@@ -11,7 +11,11 @@ import threading
 from typing import Any, TextIO
 
 from . import events, plans, state
-from .formatting import format_duration_seconds, format_turn_started_message
+from .formatting import (
+    format_duration_seconds,
+    format_turn_finished_message,
+    format_turn_started_message,
+)
 
 
 DEFAULT_LINES = 40
@@ -208,12 +212,7 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
             f"{message}"
         )
     if name == "turn_finished":
-        return (
-            f"session {_format_session_label(payload)} finished "
-            f"(status {payload.get('status_result', 'unknown')}, "
-            f"return code {payload.get('returncode', 'unknown')}, "
-            f"duration {format_duration_seconds(payload.get('duration_seconds'))})"
-        )
+        return format_turn_finished_message(payload)
     if name == events.COMMIT_STARTED_EVENT:
         return (
             f"commit {payload.get('commit_index', 'unknown')} started "

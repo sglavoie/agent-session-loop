@@ -39,6 +39,7 @@ from agent_session_loop import (
 )
 from agent_session_loop.formatting import (
     format_duration_seconds,
+    format_turn_finished_message,
     format_turn_started_message,
 )
 
@@ -374,6 +375,37 @@ class ParserAndStateTests(unittest.TestCase):
             ),
         )
 
+    def test_format_turn_finished_message_includes_running_total_when_available(
+        self,
+    ) -> None:
+        self.assertEqual(
+            "session 2/7 finished "
+            "(status complete, return code 0, duration 6m13s, total 20m15s)",
+            format_turn_finished_message(
+                {
+                    "session_id": "2",
+                    "total_sessions": 7,
+                    "status_result": "complete",
+                    "returncode": 0,
+                    "duration_seconds": 373,
+                    "total_duration_seconds": 1215,
+                }
+            ),
+        )
+        self.assertEqual(
+            "session 2/7 finished "
+            "(status complete, return code 0, duration 6m13s)",
+            format_turn_finished_message(
+                {
+                    "session_id": "2",
+                    "total_sessions": 7,
+                    "status_result": "complete",
+                    "returncode": 0,
+                    "duration_seconds": 373,
+                }
+            ),
+        )
+
     def test_tail_turn_started_event_marks_review_sessions(self) -> None:
         self.assertEqual(
             "review session started (7/7)",
@@ -410,9 +442,11 @@ class ParserAndStateTests(unittest.TestCase):
                 "status_result": "complete",
                 "returncode": 0,
                 "duration_seconds": 90,
+                "total_duration_seconds": 5405,
             },
         )
         self.assertIn("duration 1m30s", finished)
+        self.assertIn("total 1h30m05s", finished)
 
     def test_tail_event_messages_format_run_controls(self) -> None:
         requested = tail._event_message(
@@ -7530,6 +7564,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             "effort": "high",
             "effort_source": config.EFFORT_SOURCE_FLAG,
             "note": "operator reference ABC-123",
+            "run_started_at": "2026-06-11T12:00:00+00:00",
             "active_turn": active_turn,
             "turns": [],
         }
@@ -7544,10 +7579,12 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 payload=payload,
                 control=control,
                 snapshot=plans.inspect_plan(plan_dir),
+                now=runner._parse_datetime("2026-06-11T12:00:20+00:00"),
             )
         )
 
         self.assertIn("status: active session 1/2 turn 1", text)
+        self.assertIn("elapsed 12.3s, idle 2.5s, total 20.0s", text)
         self.assertIn("status note: operator reference ABC-123", text)
         self.assertIn("sessions 0/2 complete, 2 pending", text)
         self.assertIn("harness active codex; future claude", text)
@@ -7566,6 +7603,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             "model_source": config.MODEL_SOURCE_UNRESOLVED,
             "effort": None,
             "effort_source": None,
+            "run_started_at": "2026-06-11T12:00:00+00:00",
             "active_turn": None,
             "turns": [
                 {
@@ -7587,12 +7625,13 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 payload=payload,
                 control=control,
                 snapshot=plans.inspect_plan(plan_dir),
+                now=runner._parse_datetime("2026-06-11T12:01:30+00:00"),
             )
         )
 
         self.assertIn(
             "status: idle; next session 2/2 turn 2; "
-            "sessions 1/2 complete, 1 pending",
+            "sessions 1/2 complete, 1 pending; total 1m30s",
             text,
         )
         self.assertIn("stdout /tmp/run/turn-1/stdout.log", text)
@@ -8018,6 +8057,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             output,
             lambda text: (
                 "status: active session 1/2 turn 1" in text
+                and "total " in text
                 and "status note: operator reference ABC-123" in text
                 and "status: harness active codex; future unchanged" in text
                 and "status: controls stop-after-current off; live tail off" in text
@@ -8793,6 +8833,16 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual(1, turn_finished["payload"]["turn_index"])
         self.assertEqual(1, turn_finished["payload"]["session"])
         self.assertEqual(str(artifact_dir), turn_finished["payload"]["artifact_dir"])
+        self.assertIn("total_duration_seconds", turn)
+        self.assertIn("total_duration_seconds", turn_finished["payload"])
+        self.assertGreaterEqual(
+            turn["total_duration_seconds"],
+            turn["duration_seconds"],
+        )
+        self.assertEqual(
+            turn["total_duration_seconds"],
+            turn_finished["payload"]["total_duration_seconds"],
+        )
         for key in ("stdout_path", "stderr_path", "last_message_path", "result_path"):
             self.assertEqual(turn[key], turn_finished["payload"][key])
             self.assertEqual(artifact_dir, Path(turn_finished["payload"][key]).parent)
@@ -9350,8 +9400,15 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             completed.stderr,
             timestamp + r"session 1/1 started",
         )
+        self.assertRegex(
+            completed.stderr,
+            timestamp
+            + r"session 1/1 finished "
+            + r"\(status complete, return code 0, duration [^,]+, total [^)]+\)",
+        )
         self.assertIn(
-            "session 1/1 finished (status complete, return code 0, duration ",
+            "session 1/1 finished "
+            "(status complete, return code 0, duration ",
             completed.stderr,
         )
         self.assertIn("run finished: run ", completed.stderr)

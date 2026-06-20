@@ -39,7 +39,11 @@ from . import (
     tail,
     verification,
 )
-from .formatting import format_duration_seconds, format_turn_started_message
+from .formatting import (
+    format_duration_seconds,
+    format_turn_finished_message,
+    format_turn_started_message,
+)
 
 
 NOT_IMPLEMENTED_EXIT = 2
@@ -1282,6 +1286,7 @@ def _write_turn_artifacts(
         "started_at": live_turn["started_at"],
         "finished_at": live_turn["finished_at"],
         "duration_seconds": live_turn["duration_seconds"],
+        "total_duration_seconds": live_turn.get("total_duration_seconds"),
         "idle_seconds_since_previous_turn": live_turn[
             "idle_seconds_since_previous_turn"
         ],
@@ -1915,12 +1920,7 @@ class _ProgressReporter:
         )
 
     def turn_finished(self, turn: dict[str, Any]) -> None:
-        self._emit(
-            f"session {_format_session_label(turn)} finished "
-            f"(status {turn['status_result']}, "
-            f"return code {turn['returncode']}, "
-            f"duration {format_duration_seconds(turn['duration_seconds'])})"
-        )
+        self._emit(format_turn_finished_message(turn))
 
     def commit_started(self, commit: dict[str, Any]) -> None:
         self._emit(
@@ -2057,12 +2057,27 @@ def _compact_artifact_source(
     return None
 
 
+def _compact_total_duration_seconds(
+    payload: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> float | None:
+    started_at = _parse_datetime(payload.get("run_started_at"))
+    if started_at is None:
+        return None
+    finished_at = _parse_datetime(payload.get("run_finished_at"))
+    if finished_at is None:
+        finished_at = _utc_now() if now is None else now
+    return _duration_seconds(started_at, finished_at)
+
+
 def _compact_status_lines(
     *,
     payload: dict[str, Any],
     control: dict[str, Any],
     snapshot: plans.PlanSnapshot | None,
     plan_error: str | None = None,
+    now: datetime | None = None,
 ) -> list[str]:
     """Build a short live status snapshot without mutating runner state."""
 
@@ -2081,6 +2096,7 @@ def _compact_status_lines(
     turns = payload.get("turns")
     turn_count = len(turns) if isinstance(turns, list) else 0
     next_turn_index = turn_count + 1
+    total_duration_seconds = _compact_total_duration_seconds(payload, now=now)
 
     if counts is None:
         counts_text = "sessions unavailable"
@@ -2097,11 +2113,20 @@ def _compact_status_lines(
         )
         elapsed = active_turn.get("elapsed_seconds")
         idle = active_turn.get("idle_seconds")
+        timing_parts = []
         if elapsed is not None or idle is not None:
-            current_text += (
-                f"; elapsed {format_duration_seconds(elapsed)}, "
-                f"idle {format_duration_seconds(idle)}"
+            timing_parts.extend(
+                (
+                    f"elapsed {format_duration_seconds(elapsed)}",
+                    f"idle {format_duration_seconds(idle)}",
+                )
             )
+        if total_duration_seconds is not None:
+            timing_parts.append(
+                f"total {format_duration_seconds(total_duration_seconds)}"
+            )
+        if timing_parts:
+            current_text += f"; {', '.join(timing_parts)}"
     elif next_pending_id is not None:
         total_suffix = "" if total_sessions is None else f"/{total_sessions}"
         state_text = "idle" if turn_count else "no active turn"
@@ -2109,8 +2134,16 @@ def _compact_status_lines(
             f"status: {state_text}; next session {next_pending_id}{total_suffix} "
             f"turn {next_turn_index}; {counts_text}"
         )
+        if total_duration_seconds is not None:
+            current_text += (
+                f"; total {format_duration_seconds(total_duration_seconds)}"
+            )
     else:
         current_text = f"status: no active turn; {counts_text}; next session none"
+        if total_duration_seconds is not None:
+            current_text += (
+                f"; total {format_duration_seconds(total_duration_seconds)}"
+            )
 
     active_harness = (
         active_turn.get("harness")
@@ -3840,6 +3873,12 @@ def _run_locked(
         live_turn.stop()
         turn_finished_at = _utc_now()
         live_turn_payload = live_turn.finish(turn_finished_at)
+        run_started_at = _parse_datetime(payload.get("run_started_at"))
+        if run_started_at is not None:
+            live_turn_payload["total_duration_seconds"] = _duration_seconds(
+                run_started_at,
+                turn_finished_at,
+            )
         with run_control_lock:
             run_control_context = None
         previous_turn_finished_at = turn_finished_at
