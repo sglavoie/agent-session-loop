@@ -349,6 +349,43 @@ def _runner_state_payload(state_path: Path) -> dict[str, Any]:
     }
 
 
+def _progress_journal_payload(plan_dir: Path) -> dict[str, Any]:
+    """Summarize the runner-managed `progress.md` journal for `asl status`.
+
+    Shape stays stable across the three states a journal can be in so JSON
+    consumers can branch cleanly: absent (`present=False`), readable
+    (`entry_count`/`last_appended` populated), or present-but-malformed
+    (`error` set, counts None).
+    """
+    journal_path = plans.progress_path(plan_dir)
+    if not journal_path.exists():
+        return {
+            "present": False,
+            "path": str(journal_path),
+            "entry_count": None,
+            "last_appended": None,
+            "error": None,
+        }
+    try:
+        entries = plans.read_progress_entries(plan_dir)
+    except plans.PlanError as error:
+        return {
+            "present": True,
+            "path": str(journal_path),
+            "entry_count": None,
+            "last_appended": None,
+            "error": str(error),
+        }
+    last_appended = entries[-1].completed_at if entries else None
+    return {
+        "present": True,
+        "path": str(journal_path),
+        "entry_count": len(entries),
+        "last_appended": last_appended,
+        "error": None,
+    }
+
+
 def status_payload(
     snapshot: plans.PlanSnapshot,
     state_dir: str | Path | None = None,
@@ -359,6 +396,7 @@ def status_payload(
     lock_info = _read_lock_path(lock_path, snapshot.plan_dir)
     next_pending = snapshot.next_pending
     runner_state = _runner_state_payload(state_path)
+    progress_journal = _progress_journal_payload(snapshot.plan_dir)
     return responses.success_payload(
         "status",
         plan_dir=str(snapshot.plan_dir),
@@ -386,6 +424,7 @@ def status_payload(
         next_pending_id=next_pending.id if next_pending is not None else None,
         sessions=[_session_payload(session) for session in snapshot.sessions],
         lock=_lock_payload(lock_info, lock_path),
+        progress_journal=progress_journal,
     )
 
 
@@ -412,6 +451,24 @@ def _print_text_status(payload: dict[str, Any]) -> None:
         run_id = runner_state.get("run_id") or "unknown"
         run_started_at = runner_state.get("run_started_at") or "unknown"
         print(f"Run state: run {run_id} started {run_started_at}")
+
+    progress_journal = payload.get("progress_journal")
+    if isinstance(progress_journal, dict):
+        if not progress_journal.get("present"):
+            print("Progress journal: not initialized")
+        elif progress_journal.get("error"):
+            print(f"Progress journal: unreadable ({progress_journal['error']})")
+        else:
+            entry_count = progress_journal.get("entry_count") or 0
+            last_appended = progress_journal.get("last_appended")
+            entry_word = "entry" if entry_count == 1 else "entries"
+            if last_appended:
+                print(
+                    f"Progress journal: {entry_count} {entry_word}, "
+                    f"last appended {last_appended}"
+                )
+            else:
+                print(f"Progress journal: {entry_count} {entry_word}")
 
     active_turn = payload.get("active_turn")
     if isinstance(active_turn, dict):

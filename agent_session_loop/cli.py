@@ -7,7 +7,16 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import harnesses, preflight, runner, session_overview, state, tail, verification
+from . import (
+    harnesses,
+    preflight,
+    progress_cli,
+    runner,
+    session_overview,
+    state,
+    tail,
+    verification,
+)
 
 
 def _add_unsafe_bypass_flags(parser: argparse.ArgumentParser) -> None:
@@ -326,6 +335,49 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Print machine-readable JSON output",
     )
     unlock_parser.set_defaults(handler=state.unlock_from_args)
+
+    backfill_parser = subparsers.add_parser(
+        "backfill-progress",
+        help=(
+            "Reconstruct progress.md from completed session handoffs "
+            "(timestamps approximated from session file mtimes)"
+        ),
+    )
+    backfill_parser.add_argument(
+        "plan_dir", help="Split plan directory whose progress journal to rebuild"
+    )
+    backfill_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing progress.md instead of refusing",
+    )
+    backfill_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the would-be journal contents to stdout without writing",
+    )
+    backfill_parser.set_defaults(
+        handler=progress_cli.backfill_progress_from_args
+    )
+
+    progress_parser = subparsers.add_parser(
+        "progress",
+        help="Print, JSON-dump, or follow the runner-managed progress journal.",
+    )
+    progress_parser.add_argument(
+        "plan_dir", help="Split plan directory whose progress journal to inspect"
+    )
+    progress_parser.add_argument(
+        "--tail",
+        action="store_true",
+        help="Follow the journal and print new entries as they appear",
+    )
+    progress_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print parsed entries as machine-readable JSON",
+    )
+    progress_parser.set_defaults(handler=progress_cli.progress_from_args)
 
     return parser
 

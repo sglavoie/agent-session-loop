@@ -352,6 +352,39 @@ Rules:
 - Check `name` is optional. When omitted, the parser assigns `check-<index>` automatically; when supplied, names must be unique within the recipe.
 - Never emit ambiguity sentinels (`TBD`, `TODO`, `FIXME`, `XXX`, `<placeholder>`, `<fill in>`) above the handoff. They would be caught by `asl preflight` as yellow `ambiguity-sentinel` findings.
 
+### Step 9a: Write progress.md Skeleton
+
+After every `session-N.md` has been written, write a skeleton `<output_dir>/progress.md` containing only the `PROGRESS_HEADER` constant (header line + `<!-- agent-session-loop progress-journal v1 -->` schema-version comment + descriptive paragraph). This way fresh plans never trigger the yellow `progress-journal-missing` preflight finding once Session 1 completes, and the runner has a well-formed file to append the first entry to.
+
+Reuse `agent_session_loop.plans.PROGRESS_HEADER` verbatim — do not paraphrase the header or rewrite the schema-version comment by hand. `append_progress_entry` matches the version comment via regex, so any drift in the literal will cause a `PlanError` at the first runner append.
+
+```bash
+PROGRESS_OUTPUT_DIR="$output_dir" python3 - <<'PY'
+import os
+import shutil
+import sys
+from pathlib import Path
+
+asl_path = shutil.which("asl")
+if asl_path is not None:
+    repo_root = Path(asl_path).resolve().parents[3]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+from agent_session_loop.plans import PROGRESS_HEADER, progress_path
+
+plan_dir = Path(os.environ["PROGRESS_OUTPUT_DIR"])
+progress_path(plan_dir).write_text(PROGRESS_HEADER, encoding="utf-8")
+PY
+```
+
+Behavior requirements:
+
+- The skeleton must contain only the header — no `## Session …` entries. The runner appends the first session block when Session 1 completes and verification passes.
+- `progress.md` is **runner-managed** and **excluded** from `plan_content_sha256` / `stable_readiness_sha256`. Do not list it in the manifest's `## Sessions` table; it is derived bookkeeping like `context.md` status, not a unit of work.
+- Authors must never write to `progress.md` from a session; only the runner's `append_progress_entry` mutates it (`session-run` Step 6d documents this for the agent side). If a plan loses or never had a journal, `asl backfill-progress <plan-dir>` reconstructs one from completed handoffs; if a stale or malformed journal already exists, use `asl backfill-progress --force <plan-dir>` so the CLI replaces it atomically.
+- If `agent_session_loop` cannot be imported (running the skill outside this repo without an installed `asl`), fail fast with a clear error pointing to `asl --version`; do not write a placeholder file. A malformed journal would surface as a yellow `progress-journal-missing` finding once Session 1 completes.
+
 ### Step 10: Write manifest.md
 
 Write `<output_dir>/manifest.md`. The three readiness metadata lines are required so that `asl preflight` can parse the manifest immediately; their values are populated in Step 10a below.
@@ -532,7 +565,8 @@ Print a concise summary:
 7. If the Execution Weight table was generated, highlight any "heavy" session and suggest the user consider splitting it further
 8. Mention whether the manifest includes a Parallel Execution section and whether any sessions are `parallel-safe`
 9. State that the plan ships as `**Readiness**: draft` with a stable readiness SHA-256, and that `session-expand` will run final preflight with `--mark-loop-ready` so a clean plan is ready for `session-run`.
-10. Suggest running `<skill-prefix>session-expand <output-directory>` next to validate file paths, signatures, ownership, dependencies, contract entries, assumptions, and final loop-ready preflight against the actual codebase before execution.
+10. Confirm that a skeleton `progress.md` (header only) was written to the output directory. Note that the runner appends one entry per completed session automatically; authors and `session-run` workers never edit the file by hand, and it is excluded from the readiness hash. Mention `asl progress <plan-dir>` (and `--tail`, `--json`) as the inspection surface, `asl backfill-progress <plan-dir>` as the recovery path for plans that lose the journal, and `asl backfill-progress --force <plan-dir>` for stale or malformed existing journals.
+11. Suggest running `<skill-prefix>session-expand <output-directory>` next to validate file paths, signatures, ownership, dependencies, contract entries, assumptions, and final loop-ready preflight against the actual codebase before execution.
 
 ## Important Notes
 
@@ -546,3 +580,4 @@ Print a concise summary:
 - Parallel worker commands must use explicit `--session N`; never recommend concurrent auto-advance invocations.
 - Every emitted `session-N.md` must include a parseable `## Completion Contract` above its `## Handoff`. Plans without contracts will be rejected by `asl preflight` (red `missing-contract` findings) and by `asl run`'s verification gate, which pauses with `reason="no-contract"` unless `--allow-not-loop-ready` is passed.
 - `manifest.md` must carry the three readiness lines (`**Readiness**`, `**Readiness SHA-256**`, `**Readiness checked at**`) with a stable SHA produced by `agent_session_loop.plans.stable_readiness_sha256`. The initial state is always `draft`; directory-mode `session-expand` or manual `asl preflight --mark-loop-ready` may advance it after validation.
+- Every split must emit a skeleton `progress.md` containing only `agent_session_loop.plans.PROGRESS_HEADER`. The journal is runner-managed, excluded from `plan_content_sha256` / `stable_readiness_sha256`, and never appears in the manifest session table. Missing journals trigger a yellow `progress-journal-missing` preflight finding once at least one session is `complete`.

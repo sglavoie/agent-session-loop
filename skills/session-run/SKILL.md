@@ -79,6 +79,17 @@ Read `manifest.md` from the plan directory. If it contains `## Parallel Executio
 
 If `<plan-dir>/parallel-validation.md` exists, read it before selecting or implementing the session. Treat it as authoritative over manifest and session-file parallel metadata for dependency, ownership, and safety claims.
 
+### Step 2.5: Read the Progress Journal
+
+Check for `<plan-dir>/progress.md`. If it exists, read it as the primary cross-session digest: it summarizes what each completed session changed, decided, discovered, and flagged. Use it instead of opening every prior session file.
+
+Treat the journal as best-effort context:
+
+- Format: a `# Progress Journal` header with the `<!-- agent-session-loop progress-journal v1 -->` schema-version comment, followed by one `## Session <id> — <status> (<completed_at>)` block per completed session. Each block carries `- Files touched:`, `- Decisions:`, `- Discovered facts:` (indented bullets or `none`), `- Open questions:` (indented bullets or `none`), and `- Blockers:` lines. The em-dash in headings is `—` (U+2014), not a hyphen.
+- If `progress.md` is absent (older plans, or fresh plans where no session has completed yet), fall back to reading the `## Handoff` block of each completed prior session directly. The journal is always optional context.
+- `progress.md` is **runner-managed** and **excluded** from `plan_content_sha256` / `stable_readiness_sha256`. Reading or skipping it cannot change readiness state, and sessions never write to it (see Step 6d).
+- For deep detail on any one prior session, still consult its `## Handoff` block; the journal is the distilled digest, the handoff is the source of truth.
+
 ### Step 3: Build Session Status Map
 
 Run the status script and use its JSON as the authoritative session list and handoff status map:
@@ -161,13 +172,39 @@ Explicit mode runs exactly the selected session. Do not auto-advance to another 
 
 ### Step 6: Update Handoff
 
-Edit the Handoff section in `session-<ID>.md` with actual results:
+Edit the Handoff section in `session-<ID>.md` with actual results. The expected schema is:
+
+```markdown
+## Handoff
 
 - **Status**: complete
+- **Files modified**: …
+- **Key decisions**: …
+- **Blockers for next session**: …
+- **Notes**: …
+
+### Discovered Facts
+- Lockfile X uses Y format (not Z as the plan assumed).
+- Retry path is at foo/bar.py:142, not foo/baz.py.
+
+### Open Questions
+- Should we cache the parser output? Defer to whoever owns perf.
+```
+
+Required fields (always present, in this order):
+
+- **Status**: `complete` on success
 - **Files modified**: list each file with a brief description of what changed
 - **Key decisions**: any notable choices made during implementation
 - **Blockers for next session**: issues the next session should be aware of
 - **Notes**: anything else relevant
+
+Optional `###` subsections — include each only when there is content to record; omit the heading entirely otherwise:
+
+- **`### Discovered Facts`** — novel findings, surprises, or corrections (file paths, signatures, API quirks, behavior the plan assumed wrong). One terse, top-level `- ` bullet per fact. Indented sub-bullets are silently dropped by the parser, so keep the list flat with no leading whitespace.
+- **`### Open Questions`** — explicit uncertainties handed forward to a later session or to the user. One terse, top-level `- ` bullet per question. Same flat-bullet rule as above.
+
+Heading match is case-sensitive and exact. Use the literal strings `### Discovered Facts` and `### Open Questions`; these mirror the `DISCOVERED_FACTS_HEADING` / `OPEN_QUESTIONS_HEADING` constants exported from `agent_session_loop.plans`, so the parser and skill docs cannot drift. File paths in `Files modified` must not contain literal commas (the runner CSV-parses that field when synthesizing the journal entry).
 
 Use the Edit tool to update the handoff in place — do not rewrite the entire file. The selected session handoff remains the required completion mutation and the source of truth.
 
@@ -239,6 +276,14 @@ For `context.md`, update only clear markdown session-status tables with both a s
 
 If a derived ledger cannot be updated safely, leave it unchanged and mention that in the report. Do not let stale derived tables change the next-session decision.
 
+### Step 6d: Do Not Write the Progress Journal
+
+Never edit `progress.md` from a session. The runner appends an entry automatically after parsing the just-updated handoff (`agent_session_loop.plans.append_progress_entry`) once verification has passed. The append is atomic, version-checked against the `<!-- agent-session-loop progress-journal v1 -->` schema comment, and idempotent against `(session_id, completed_at)`, so retries and runner reruns never double-write.
+
+If you produced facts or questions that future sessions should see, record them in the handoff's `### Discovered Facts` / `### Open Questions` subsections (Step 6); if you have session-specific guidance, inject expansion notes (Step 6b). Do not bypass either of these by writing to `progress.md` directly — the journal is read-only from a session's perspective.
+
+If a plan is missing `progress.md` entirely (older plans authored before the runner shipped journal support), use `asl backfill-progress <plan-dir>` from a separate manual step to reconstruct it from completed handoffs. If the journal exists but is stale or malformed, use `asl backfill-progress --force <plan-dir>` so the CLI replaces it atomically. Never recover it by hand from inside a session.
+
 ### Step 7: Report
 
 Print a brief summary:
@@ -287,5 +332,8 @@ Use the original plan directory argument provided by the user for `<plan-dir>` w
 - The skill has no `--allow-not-loop-ready` equivalent. `reason: no-contract` fails closed; users who must bypass should use `asl run --allow-not-loop-ready` or repair the plan and re-mark it loop-ready.
 - Never modify the original plan file
 - Modify `context.md` only for clear derived session-status table sync described in Step 6c
+- Read `progress.md` in Step 2.5 if it exists — it is the runner-maintained cross-session digest. When absent, fall back to reading prior `## Handoff` blocks directly.
+- Never write to `progress.md`; the runner appends entries after verification (Step 6d). Record forward-looking facts in `### Discovered Facts` and forward-looking uncertainties in `### Open Questions` inside the handoff.
+- `progress.md` is excluded from `plan_content_sha256` / `stable_readiness_sha256`, so reading or skipping it cannot change readiness state.
 - In directory auto-advance mode, if a session's status is already `complete`, skip it and move to the next pending one
 - In explicit mode, never skip to another session; fail closed when the selected session cannot run

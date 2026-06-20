@@ -3,6 +3,15 @@
 The plan files are the durable source of truth. This module will parse
 `manifest.md`, `context.md`, exact `session-<id>.md` files, and handoff
 status lines without trusting generated runner state.
+
+`progress.md` is part of the durable plan-directory surface too: a
+runner-managed, append-only journal of completed sessions seeded by
+`session-split` and appended after each verified-complete session by the
+runner. It is excluded from `plan_content_sha256` and
+`stable_readiness_sha256` so journal writes never invalidate readiness or
+the plan identity. Reads go through `read_progress_entries`; writes go
+through the atomic `append_progress_entry` and `write_progress_journal`
+helpers.
 """
 
 from __future__ import annotations
@@ -25,7 +34,23 @@ READINESS_STATES: tuple[ReadinessState, ...] = (
     "complete",
 )
 STATUS_PREFIX = "- **Status**:"
+HANDOFF_FILES_PREFIX = "- **Files modified**:"
+HANDOFF_DECISIONS_PREFIX = "- **Key decisions**:"
+HANDOFF_BLOCKERS_PREFIX = "- **Blockers for next session**:"
+HANDOFF_NOTES_PREFIX = "- **Notes**:"
 HANDOFF_HEADING = "## Handoff"
+DISCOVERED_FACTS_HEADING = "### Discovered Facts"
+OPEN_QUESTIONS_HEADING = "### Open Questions"
+PROGRESS_FILE_NAME = "progress.md"
+PROGRESS_SCHEMA_VERSION = 1
+PROGRESS_SCHEMA_COMMENT = "<!-- agent-session-loop progress-journal v1 -->"
+PROGRESS_HEADER = (
+    "# Progress Journal\n"
+    f"{PROGRESS_SCHEMA_COMMENT}\n"
+    "\n"
+    "Auto-maintained by agent_session_loop. Append-only. Treat as the running\n"
+    "summary of completed sessions; defer to session files for full detail.\n"
+)
 READINESS_PREFIX = "**Readiness**:"
 READINESS_SHA_PREFIX = "**Readiness SHA-256**:"
 READINESS_CHECKED_PREFIX = "**Readiness checked at**:"
@@ -224,6 +249,56 @@ class SessionStatus:
 
 
 @dataclass(frozen=True)
+class SessionHandoff:
+    """Parsed `## Handoff` block contents for one session file."""
+
+    session: SessionFile
+    status: StatusValue
+    raw_value: str
+    line_number: int | None
+    files_modified: tuple[str, ...] = ()
+    key_decisions: str | None = None
+    blockers: str | None = None
+    notes: str | None = None
+    discovered_facts: tuple[str, ...] = ()
+    open_questions: tuple[str, ...] = ()
+
+    @property
+    def session_id(self) -> SessionId:
+        return self.session.session_id
+
+    @property
+    def id(self) -> str:
+        return self.session.id
+
+    @property
+    def number(self) -> int:
+        return self.session.number
+
+    @property
+    def path(self) -> Path:
+        return self.session.path
+
+    @property
+    def display_label(self) -> str:
+        return self.session.display_label
+
+
+@dataclass(frozen=True)
+class ProgressEntry:
+    """One rendered session row in the runner-managed `progress.md` journal."""
+
+    session_id: SessionId
+    status: StatusValue
+    completed_at: str
+    files_modified: tuple[str, ...] = ()
+    key_decisions: str | None = None
+    discovered_facts: tuple[str, ...] = ()
+    open_questions: tuple[str, ...] = ()
+    blockers: str | None = None
+
+
+@dataclass(frozen=True)
 class PlanSnapshot:
     """Current durable state read from a split session plan directory."""
 
@@ -397,8 +472,22 @@ def _final_handoff_start(lines: list[str]) -> int | None:
     return None
 
 
-def read_session_status(session: SessionFile) -> SessionStatus:
-    """Read the status marker from the final handoff block in a session file."""
+def read_session_handoff(session: SessionFile) -> SessionHandoff:
+    """Read the final `## Handoff` block in a session file as a structured record.
+
+    Body bullets (`- **Status**:`, `- **Files modified**:`, etc.) are captured
+    until the first `### ` or `## ` heading. Recognized subsections
+    (`### Discovered Facts`, `### Open Questions`) then accumulate top-level
+    `- ` bullets — with no leading whitespace, matching the body parser — into
+    their respective tuples. Subsection bullet capture stops at the next
+    `### ` or `## ` heading. Subsections may appear in either order; missing
+    subsections default to empty tuples; unknown `### ` subsections are
+    ignored.
+
+    Missing handoff blocks and blocks without a `- **Status**:` line both
+    yield `status="empty"` and `line_number=None`, matching the prior
+    behavior of `read_session_status`.
+    """
     try:
         lines = session.path.read_text(encoding="utf-8").splitlines()
     except OSError as error:
@@ -406,31 +495,86 @@ def read_session_status(session: SessionFile) -> SessionStatus:
 
     handoff_start = _final_handoff_start(lines)
     if handoff_start is None:
-        return SessionStatus(
+        return SessionHandoff(
             session=session,
             status="empty",
             raw_value="",
             line_number=None,
         )
 
+    status: StatusValue = "empty"
+    raw_value = ""
+    status_line: int | None = None
+    files_modified: tuple[str, ...] = ()
+    key_decisions: str | None = None
+    blockers: str | None = None
+    notes: str | None = None
+    discovered_facts: list[str] = []
+    open_questions: list[str] = []
+    current_subsection: str | None = None
+
     for index in range(handoff_start + 1, len(lines)):
         line = lines[index]
         if line.startswith("## "):
             break
-        if line.startswith(STATUS_PREFIX):
-            raw_value = line[len(STATUS_PREFIX) :].strip()
-            return SessionStatus(
-                session=session,
-                status=parse_status_value(raw_value),
-                raw_value=raw_value,
-                line_number=index + 1,
-            )
+        if line.startswith("### "):
+            heading = line.rstrip()
+            if heading == DISCOVERED_FACTS_HEADING:
+                current_subsection = "facts"
+            elif heading == OPEN_QUESTIONS_HEADING:
+                current_subsection = "questions"
+            else:
+                current_subsection = "other"
+            continue
 
-    return SessionStatus(
+        if current_subsection is None:
+            if line.startswith(STATUS_PREFIX):
+                raw_value = line[len(STATUS_PREFIX) :].strip()
+                status = parse_status_value(raw_value)
+                status_line = index + 1
+            elif line.startswith(HANDOFF_FILES_PREFIX):
+                inline = line[len(HANDOFF_FILES_PREFIX) :].strip()
+                files_modified = (inline,) if inline else ()
+            elif line.startswith(HANDOFF_DECISIONS_PREFIX):
+                inline = line[len(HANDOFF_DECISIONS_PREFIX) :].strip()
+                key_decisions = inline or None
+            elif line.startswith(HANDOFF_BLOCKERS_PREFIX):
+                inline = line[len(HANDOFF_BLOCKERS_PREFIX) :].strip()
+                blockers = inline or None
+            elif line.startswith(HANDOFF_NOTES_PREFIX):
+                inline = line[len(HANDOFF_NOTES_PREFIX) :].strip()
+                notes = inline or None
+        elif current_subsection == "facts" and line.startswith("- "):
+            content = line[2:].strip()
+            if content:
+                discovered_facts.append(content)
+        elif current_subsection == "questions" and line.startswith("- "):
+            content = line[2:].strip()
+            if content:
+                open_questions.append(content)
+
+    return SessionHandoff(
         session=session,
-        status="empty",
-        raw_value="",
-        line_number=None,
+        status=status,
+        raw_value=raw_value,
+        line_number=status_line,
+        files_modified=files_modified,
+        key_decisions=key_decisions,
+        blockers=blockers,
+        notes=notes,
+        discovered_facts=tuple(discovered_facts),
+        open_questions=tuple(open_questions),
+    )
+
+
+def read_session_status(session: SessionFile) -> SessionStatus:
+    """Read the status marker from the final handoff block in a session file."""
+    handoff = read_session_handoff(session)
+    return SessionStatus(
+        session=handoff.session,
+        status=handoff.status,
+        raw_value=handoff.raw_value,
+        line_number=handoff.line_number,
     )
 
 
@@ -1003,3 +1147,236 @@ def inspect_plan(plan_dir: str | Path) -> PlanSnapshot:
         path_hash=path_sha256(canonical_dir),
         fingerprint=plan_fingerprint(canonical_dir, content_hash),
     )
+
+
+_PROGRESS_VERSION_RE = re.compile(
+    r"<!--\s*agent-session-loop progress-journal v(\d+)\s*-->"
+)
+_PROGRESS_HEADING_RE = re.compile(
+    rf"^## Session ({SESSION_ID_PATTERN}) — (\S+) \((\S+)\)\s*$"
+)
+_PROGRESS_FILES_PREFIX = "- Files touched:"
+_PROGRESS_DECISIONS_PREFIX = "- Decisions:"
+_PROGRESS_FACTS_PREFIX = "- Discovered facts:"
+_PROGRESS_QUESTIONS_PREFIX = "- Open questions:"
+_PROGRESS_BLOCKERS_PREFIX = "- Blockers:"
+
+
+def progress_path(plan_dir: str | Path) -> Path:
+    """Return the canonical `progress.md` path for a plan directory."""
+    return canonicalize_path(plan_dir) / PROGRESS_FILE_NAME
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write `text` to `path` via temp-file + `os.replace` so the destination is never half-written."""
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    try:
+        tmp_path.write_text(text, encoding="utf-8")
+    except OSError as error:
+        _raise_read_error(path, error)
+    try:
+        os.replace(tmp_path, path)
+    except OSError as error:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        _raise_read_error(path, error)
+
+
+def _validate_progress_version(path: Path, text: str) -> None:
+    match = _PROGRESS_VERSION_RE.search(text)
+    if match is None:
+        raise PlanError(
+            f"progress journal at {path} is missing schema version comment "
+            f"({PROGRESS_SCHEMA_COMMENT!r})"
+        )
+    version = int(match.group(1))
+    if version != PROGRESS_SCHEMA_VERSION:
+        raise PlanError(
+            f"progress journal at {path} uses schema v{version}; "
+            f"this version of agent-session-loop only understands "
+            f"v{PROGRESS_SCHEMA_VERSION}. Migration required."
+        )
+
+
+def _format_progress_csv(values: tuple[str, ...]) -> str:
+    if not values:
+        return "none"
+    return ", ".join(values)
+
+
+def _parse_progress_csv(value: str) -> tuple[str, ...]:
+    text = value.strip()
+    if not text or text == "none":
+        return ()
+    return tuple(part.strip() for part in text.split(",") if part.strip())
+
+
+def render_progress_entry(entry: ProgressEntry) -> str:
+    """Render a single progress entry block; always ends with a newline."""
+    lines: list[str] = [
+        f"## Session {entry.session_id.value} — {entry.status} ({entry.completed_at})",
+        f"{_PROGRESS_FILES_PREFIX} {_format_progress_csv(entry.files_modified)}",
+        f"{_PROGRESS_DECISIONS_PREFIX} {entry.key_decisions or 'none'}",
+    ]
+    if entry.discovered_facts:
+        lines.append(_PROGRESS_FACTS_PREFIX)
+        for fact in entry.discovered_facts:
+            lines.append(f"  - {fact}")
+    else:
+        lines.append(f"{_PROGRESS_FACTS_PREFIX} none")
+    if entry.open_questions:
+        lines.append(_PROGRESS_QUESTIONS_PREFIX)
+        for question in entry.open_questions:
+            lines.append(f"  - {question}")
+    else:
+        lines.append(f"{_PROGRESS_QUESTIONS_PREFIX} none")
+    lines.append(f"{_PROGRESS_BLOCKERS_PREFIX} {entry.blockers or 'none'}")
+    return "\n".join(lines) + "\n"
+
+
+def render_progress_journal(entries: tuple[ProgressEntry, ...]) -> str:
+    """Render a complete progress journal with header and all entries."""
+    if not entries:
+        return PROGRESS_HEADER
+    text = PROGRESS_HEADER + "\n" + render_progress_entry(entries[0])
+    for entry in entries[1:]:
+        text = text.rstrip("\n") + "\n\n" + render_progress_entry(entry)
+    return text
+
+
+def _consume_indented_bullets(lines: list[str], start: int) -> tuple[list[str], int]:
+    bullets: list[str] = []
+    index = start
+    while index < len(lines) and lines[index].startswith("  - "):
+        bullets.append(lines[index][4:].strip())
+        index += 1
+    return bullets, index
+
+
+def _parse_progress_entries(text: str) -> list[ProgressEntry]:
+    lines = text.splitlines()
+    entries: list[ProgressEntry] = []
+    index = 0
+    while index < len(lines):
+        match = _PROGRESS_HEADING_RE.match(lines[index])
+        if match is None:
+            index += 1
+            continue
+        session_id = parse_session_id(match.group(1))
+        status = parse_status_value(match.group(2))
+        completed_at = match.group(3)
+        index += 1
+
+        files_modified: tuple[str, ...] = ()
+        key_decisions: str | None = None
+        discovered_facts: list[str] = []
+        open_questions: list[str] = []
+        blockers: str | None = None
+
+        while index < len(lines):
+            line = lines[index]
+            if line.startswith("## "):
+                break
+            if line.startswith(_PROGRESS_FILES_PREFIX):
+                value = line[len(_PROGRESS_FILES_PREFIX) :].strip()
+                files_modified = _parse_progress_csv(value)
+                index += 1
+            elif line.startswith(_PROGRESS_DECISIONS_PREFIX):
+                value = line[len(_PROGRESS_DECISIONS_PREFIX) :].strip()
+                key_decisions = None if value in {"", "none"} else value
+                index += 1
+            elif line.startswith(_PROGRESS_FACTS_PREFIX):
+                value = line[len(_PROGRESS_FACTS_PREFIX) :].strip()
+                index += 1
+                if value and value != "none":
+                    discovered_facts.append(value)
+                else:
+                    bullets, index = _consume_indented_bullets(lines, index)
+                    discovered_facts.extend(bullets)
+            elif line.startswith(_PROGRESS_QUESTIONS_PREFIX):
+                value = line[len(_PROGRESS_QUESTIONS_PREFIX) :].strip()
+                index += 1
+                if value and value != "none":
+                    open_questions.append(value)
+                else:
+                    bullets, index = _consume_indented_bullets(lines, index)
+                    open_questions.extend(bullets)
+            elif line.startswith(_PROGRESS_BLOCKERS_PREFIX):
+                value = line[len(_PROGRESS_BLOCKERS_PREFIX) :].strip()
+                blockers = None if value in {"", "none"} else value
+                index += 1
+            else:
+                index += 1
+
+        entries.append(
+            ProgressEntry(
+                session_id=session_id,
+                status=status,
+                completed_at=completed_at,
+                files_modified=files_modified,
+                key_decisions=key_decisions,
+                discovered_facts=tuple(discovered_facts),
+                open_questions=tuple(open_questions),
+                blockers=blockers,
+            )
+        )
+    return entries
+
+
+def read_progress_entries(plan_dir: str | Path) -> tuple[ProgressEntry, ...]:
+    """Read parsed progress entries from `<plan_dir>/progress.md`, or `()` if absent."""
+    path = progress_path(plan_dir)
+    if not _is_file(path):
+        return ()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        _raise_read_error(path, error)
+    _validate_progress_version(path, text)
+    return tuple(_parse_progress_entries(text))
+
+
+def append_progress_entry(plan_dir: str | Path, entry: ProgressEntry) -> Path:
+    """Append `entry` to `<plan_dir>/progress.md`, creating the file with header if absent.
+
+    Idempotent on retries: if the most recent entry already matches
+    `(session_id, completed_at)`, the file is left untouched. Writes go
+    through an atomic temp-file + `os.replace` so a crash mid-append never
+    leaves a half-written file behind.
+    """
+    path = progress_path(plan_dir)
+    rendered_entry = render_progress_entry(entry)
+
+    if path.exists():
+        try:
+            existing = path.read_text(encoding="utf-8")
+        except OSError as error:
+            _raise_read_error(path, error)
+        _validate_progress_version(path, existing)
+        existing_entries = _parse_progress_entries(existing)
+        if existing_entries:
+            last = existing_entries[-1]
+            if (
+                last.session_id == entry.session_id
+                and last.completed_at == entry.completed_at
+            ):
+                return path
+        new_content = existing.rstrip("\n") + "\n\n" + rendered_entry
+    else:
+        new_content = PROGRESS_HEADER + "\n" + rendered_entry
+
+    _atomic_write_text(path, new_content)
+    return path
+
+
+def write_progress_journal(
+    plan_dir: str | Path,
+    entries: tuple[ProgressEntry, ...],
+) -> Path:
+    """Replace `<plan_dir>/progress.md` atomically with a full rendered journal."""
+    path = progress_path(plan_dir)
+    text = render_progress_journal(entries)
+    _atomic_write_text(path, text)
+    return path

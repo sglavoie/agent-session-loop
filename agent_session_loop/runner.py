@@ -1,4 +1,13 @@
-"""Run-loop orchestration boundaries."""
+"""Run-loop orchestration boundaries.
+
+The runner drives one harness turn per pending session. After a turn
+completes, it gates the handoff through `verification`, then — only on a
+verified-complete handoff — appends a row to the plan directory's
+runner-managed `progress.md` journal, and finally syncs the derived
+status ledgers. The verify → progress → ledgers ordering is required so
+that only verified work reaches the journal and the journal write
+happens before the ledger re-inspect.
+"""
 
 from __future__ import annotations
 
@@ -389,6 +398,10 @@ def _utc_run_id() -> str:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _utc_iso_now() -> str:
+    return _utc_now().isoformat()
 
 
 def _isoformat(moment: datetime) -> str:
@@ -2522,6 +2535,53 @@ def _session_path_in_snapshot(
     return None
 
 
+def _append_progress_entry(
+    after: plans.PlanSnapshot,
+    session_id: str,
+    completed_at: str,
+) -> bool:
+    """Append a progress-journal entry for the just-completed session.
+
+    Returns ``True`` when a new entry was written, ``False`` when the call
+    was an idempotent no-op because the most recent journal entry already
+    matches ``(session_id, completed_at)``.
+    """
+    session_status = next(
+        (item for item in after.sessions if item.id == session_id),
+        None,
+    )
+    if session_status is None:
+        raise plans.PlanError(
+            f"session {session_id!r} not found in plan snapshot"
+        )
+    handoff = plans.read_session_handoff(session_status.session)
+    files_modified: tuple[str, ...] = ()
+    if handoff.files_modified:
+        inline = handoff.files_modified[0]
+        files_modified = tuple(
+            part.strip() for part in inline.split(",") if part.strip()
+        )
+    entry = plans.ProgressEntry(
+        session_id=handoff.session_id,
+        status=handoff.status,
+        completed_at=completed_at,
+        files_modified=files_modified,
+        key_decisions=handoff.key_decisions,
+        discovered_facts=handoff.discovered_facts,
+        open_questions=handoff.open_questions,
+        blockers=handoff.blockers,
+    )
+    existing = plans.read_progress_entries(after.plan_dir)
+    if (
+        existing
+        and existing[-1].session_id == entry.session_id
+        and existing[-1].completed_at == entry.completed_at
+    ):
+        return False
+    plans.append_progress_entry(after.plan_dir, entry)
+    return True
+
+
 def _revert_session_status_to_pending(
     snapshot: plans.PlanSnapshot,
     session_id: str,
@@ -3732,6 +3792,32 @@ def _run_locked(
             paths=paths,
         ):
             break
+
+        completed_at = _utc_iso_now()
+        progress_error: str | None = None
+        try:
+            progress_appended = _append_progress_entry(
+                after, session_id, completed_at
+            )
+        except Exception as error:
+            progress_appended = False
+            progress_error = str(error)
+            persistence.append_event(
+                event_path,
+                "progress-journal-append-failed",
+                {
+                    "run_id": payload.get("run_id"),
+                    "session": session_id,
+                    "session_label": session_label,
+                    "completed_at": completed_at,
+                    "error": progress_error,
+                },
+            )
+        with persistence.lock:
+            turn_payload["progress_appended"] = progress_appended
+            if progress_error is not None:
+                turn_payload["progress_error"] = progress_error
+            _write_json_file(paths["result"], turn_payload)
 
         try:
             ledger_updates = plans.sync_derived_status_ledgers(after)

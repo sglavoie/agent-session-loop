@@ -53,12 +53,15 @@ from .plans import (
     HANDOFF_HEADING,
     PlanError,
     PlanSnapshot,
+    ProgressEntry,
     ReadinessMetadata,
     SessionFile,
     canonicalize_path,
     inspect_plan,
     noncanonical_session_file_suggestions,
     parse_readiness_metadata,
+    progress_path,
+    read_progress_entries,
     stable_readiness_sha256,
     write_readiness_metadata,
 )
@@ -73,6 +76,7 @@ PreflightCategory = Literal[
     "malformed-contract",
     "ambiguity-sentinel",
     "path-reference",
+    "progress-journal-missing",
     "env-repo-root",
     "env-git",
     "env-harness",
@@ -90,6 +94,7 @@ PREFLIGHT_CATEGORIES: tuple[PreflightCategory, ...] = (
     "malformed-contract",
     "ambiguity-sentinel",
     "path-reference",
+    "progress-journal-missing",
     "env-repo-root",
     "env-git",
     "env-harness",
@@ -273,6 +278,21 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
             "Rewrite it?"
         ),
         fix_category="plan-edit",
+    ),
+    "progress-journal-missing": RepairHint(
+        category="progress-journal-missing",
+        check_id="progress-journal-missing.backfill",
+        severity_hint="yellow",
+        message=(
+            "Run `asl backfill-progress <plan>` to reconstruct missing "
+            "progress.md, or `asl backfill-progress --force <plan>` when "
+            "the journal already exists but is stale or malformed."
+        ),
+        question_template=(
+            "Progress journal problem: {message}. "
+            "Should I run `asl backfill-progress` to reconstruct it?"
+        ),
+        fix_category="manifest-update",
     ),
     "env-repo-root": RepairHint(
         category="env-repo-root",
@@ -1055,6 +1075,100 @@ def _check_path_references(
     return tuple(findings)
 
 
+def _format_progress_session_ids(session_ids: tuple[str, ...]) -> str:
+    if not session_ids:
+        return "none"
+    return ", ".join(session_ids)
+
+
+def _progress_journal_mismatch_detail(
+    expected_completed_ids: tuple[str, ...],
+    entries: tuple[ProgressEntry, ...],
+) -> str:
+    observed_ids = tuple(entry.session_id.value for entry in entries)
+    details: list[str] = []
+    if observed_ids != expected_completed_ids:
+        details.append(
+            "expected complete sessions: "
+            f"{_format_progress_session_ids(expected_completed_ids)}; "
+            "observed journal entries: "
+            f"{_format_progress_session_ids(observed_ids)}"
+        )
+    non_complete = tuple(
+        f"{entry.session_id.value}={entry.status}"
+        for entry in entries
+        if entry.status != "complete"
+    )
+    if non_complete:
+        details.append(
+            "non-complete journal entry statuses: " + ", ".join(non_complete)
+        )
+    return "; ".join(details)
+
+
+def _check_progress_journal(
+    snapshot: PlanSnapshot,
+) -> tuple[PreflightFinding, ...]:
+    """Check that the runner-managed progress journal is initialized and current.
+
+    Emits a single ``yellow`` finding when at least one session is complete
+    and the journal is missing, or when the journal exists but is
+    unreadable (version mismatch, malformed), stale, duplicated,
+    out-of-order, or missing completed sessions. Plans with no completed
+    sessions and no journal are skipped because the runner will create the
+    journal on the next successful append.
+    """
+    journal_path = progress_path(snapshot.plan_dir)
+    expected_completed_ids = tuple(
+        status.id for status in snapshot.sessions if status.status == "complete"
+    )
+
+    if not journal_path.is_file():
+        if not expected_completed_ids:
+            return ()
+        return (
+            _finding(
+                "yellow",
+                "progress-journal-missing",
+                "progress journal not initialized; run `asl backfill-progress`",
+                path=str(journal_path),
+            ),
+        )
+
+    try:
+        entries = read_progress_entries(snapshot.plan_dir)
+    except PlanError as error:
+        return (
+            _finding(
+                "yellow",
+                "progress-journal-missing",
+                (
+                    "progress journal unreadable; run "
+                    f"`asl backfill-progress --force`: {error}"
+                ),
+                path=str(journal_path),
+            ),
+        )
+    mismatch_detail = _progress_journal_mismatch_detail(
+        expected_completed_ids,
+        entries,
+    )
+    if mismatch_detail:
+        return (
+            _finding(
+                "yellow",
+                "progress-journal-missing",
+                (
+                    "progress journal stale or incomplete; run "
+                    "`asl backfill-progress --force`"
+                ),
+                path=str(journal_path),
+                detail=mismatch_detail,
+            ),
+        )
+    return ()
+
+
 def run_core_preflight(plan_dir: str | Path) -> PreflightReport:
     """Run the core preflight checks against a split plan directory.
 
@@ -1097,6 +1211,7 @@ def run_core_preflight(plan_dir: str | Path) -> PreflightReport:
 
     findings.extend(_check_ambiguity_sentinels(snapshot))
     findings.extend(_check_path_references(contracts_by_session))
+    findings.extend(_check_progress_journal(snapshot))
 
     return PreflightReport(
         plan_dir=canonical_dir,

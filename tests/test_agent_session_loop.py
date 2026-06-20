@@ -28,6 +28,7 @@ from agent_session_loop import (
     harnesses,
     plans,
     preflight,
+    progress_cli,
     run_control,
     runner,
     state,
@@ -566,6 +567,417 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertEqual("complete", snapshot.sessions[0].status)
             self.assertEqual("complete", snapshot.sessions[0].raw_value)
             self.assertEqual(12, snapshot.sessions[0].line_number)
+
+    def _session_file(self, plan_dir: Path, session_id: str = "1") -> plans.SessionFile:
+        return plans.SessionFile(
+            session_id=plans.parse_session_id(session_id),
+            path=plan_dir / f"session-{session_id}.md",
+        )
+
+    def test_read_session_handoff_round_trip_captures_all_bullets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            session_path = plan_dir / "session-1.md"
+            session_path.write_text(
+                "\n".join(
+                    [
+                        "# Session 1",
+                        "",
+                        "Instructions.",
+                        "",
+                        "## Handoff",
+                        "",
+                        "- **Status**: complete",
+                        "- **Files modified**: plans.py, runner.py",
+                        "- **Key decisions**: chose option A over B",
+                        "- **Blockers for next session**: none",
+                        "- **Notes**: verified hash idempotency",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+
+            self.assertEqual("complete", handoff.status)
+            self.assertEqual("complete", handoff.raw_value)
+            self.assertEqual(7, handoff.line_number)
+            self.assertEqual(("plans.py, runner.py",), handoff.files_modified)
+            self.assertEqual("chose option A over B", handoff.key_decisions)
+            self.assertEqual("none", handoff.blockers)
+            self.assertEqual("verified hash idempotency", handoff.notes)
+            self.assertEqual((), handoff.discovered_facts)
+            self.assertEqual((), handoff.open_questions)
+
+    def test_read_session_handoff_returns_empty_for_missing_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            session_path = plan_dir / "session-1.md"
+            session_path.write_text(
+                "# Session 1\n\nNo handoff section here.\n",
+                encoding="utf-8",
+            )
+
+            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+
+            self.assertEqual("empty", handoff.status)
+            self.assertEqual("", handoff.raw_value)
+            self.assertIsNone(handoff.line_number)
+            self.assertEqual((), handoff.files_modified)
+            self.assertIsNone(handoff.key_decisions)
+            self.assertIsNone(handoff.blockers)
+            self.assertIsNone(handoff.notes)
+            self.assertEqual((), handoff.discovered_facts)
+            self.assertEqual((), handoff.open_questions)
+
+    def test_read_session_handoff_block_without_status_line_yields_empty_status(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            session_path = plan_dir / "session-1.md"
+            session_path.write_text(
+                "\n".join(
+                    [
+                        "# Session 1",
+                        "",
+                        "## Handoff",
+                        "",
+                        "- **Files modified**: only files captured",
+                        "- **Notes**: still parses",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+
+            self.assertEqual("empty", handoff.status)
+            self.assertEqual("", handoff.raw_value)
+            self.assertIsNone(handoff.line_number)
+            self.assertEqual(("only files captured",), handoff.files_modified)
+            self.assertEqual("still parses", handoff.notes)
+
+    def test_read_session_handoff_uses_only_final_handoff_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            session_path = plan_dir / "session-1.md"
+            session_path.write_text(
+                "\n".join(
+                    [
+                        "# Session 1",
+                        "",
+                        "## Handoff",
+                        "",
+                        "- **Status**: pending",
+                        "- **Notes**: stale",
+                        "",
+                        "## Handoff",
+                        "",
+                        "- **Status**: complete",
+                        "- **Notes**: real",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+
+            self.assertEqual("complete", handoff.status)
+            self.assertEqual("real", handoff.notes)
+
+    def test_read_session_handoff_body_fields_do_not_leak_across_subsection_heading(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            session_path = plan_dir / "session-1.md"
+            session_path.write_text(
+                "\n".join(
+                    [
+                        "# Session 1",
+                        "",
+                        "## Handoff",
+                        "",
+                        "- **Status**: complete",
+                        "- **Notes**:",
+                        "",
+                        "### Discovered Facts",
+                        "- a captured fact",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+
+            self.assertEqual("complete", handoff.status)
+            self.assertIsNone(handoff.notes)
+            self.assertEqual(("a captured fact",), handoff.discovered_facts)
+            self.assertEqual((), handoff.open_questions)
+
+    def test_read_session_handoff_captures_subsections_in_canonical_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            session_path = plan_dir / "session-1.md"
+            session_path.write_text(
+                "\n".join(
+                    [
+                        "# Session 1",
+                        "",
+                        "## Handoff",
+                        "",
+                        "- **Status**: complete",
+                        "- **Notes**: body notes",
+                        "",
+                        "### Discovered Facts",
+                        "- lockfile uses tar format",
+                        "- retry path is foo/bar.py:142",
+                        "",
+                        "### Open Questions",
+                        "- should we cache parser output?",
+                        "- defer to perf owner",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+
+            self.assertEqual("complete", handoff.status)
+            self.assertEqual("body notes", handoff.notes)
+            self.assertEqual(
+                (
+                    "lockfile uses tar format",
+                    "retry path is foo/bar.py:142",
+                ),
+                handoff.discovered_facts,
+            )
+            self.assertEqual(
+                (
+                    "should we cache parser output?",
+                    "defer to perf owner",
+                ),
+                handoff.open_questions,
+            )
+
+    def test_read_session_handoff_accepts_reversed_subsection_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            session_path = plan_dir / "session-1.md"
+            session_path.write_text(
+                "\n".join(
+                    [
+                        "# Session 1",
+                        "",
+                        "## Handoff",
+                        "",
+                        "- **Status**: complete",
+                        "",
+                        "### Open Questions",
+                        "- question one",
+                        "",
+                        "### Discovered Facts",
+                        "- fact one",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+
+            self.assertEqual(("fact one",), handoff.discovered_facts)
+            self.assertEqual(("question one",), handoff.open_questions)
+
+    def test_read_session_handoff_only_one_subsection_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            session_path = plan_dir / "session-1.md"
+            session_path.write_text(
+                "\n".join(
+                    [
+                        "# Session 1",
+                        "",
+                        "## Handoff",
+                        "",
+                        "- **Status**: complete",
+                        "",
+                        "### Discovered Facts",
+                        "- the only fact",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+
+            self.assertEqual(("the only fact",), handoff.discovered_facts)
+            self.assertEqual((), handoff.open_questions)
+
+    def test_read_session_handoff_subsection_without_bullets_yields_empty_tuple(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            session_path = plan_dir / "session-1.md"
+            session_path.write_text(
+                "\n".join(
+                    [
+                        "# Session 1",
+                        "",
+                        "## Handoff",
+                        "",
+                        "- **Status**: complete",
+                        "",
+                        "### Discovered Facts",
+                        "",
+                        "### Open Questions",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+
+            self.assertEqual((), handoff.discovered_facts)
+            self.assertEqual((), handoff.open_questions)
+
+    def test_read_session_handoff_skips_nested_subsection_bullets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            session_path = plan_dir / "session-1.md"
+            session_path.write_text(
+                "\n".join(
+                    [
+                        "# Session 1",
+                        "",
+                        "## Handoff",
+                        "",
+                        "- **Status**: complete",
+                        "",
+                        "### Discovered Facts",
+                        "- top-level fact",
+                        "  - nested detail ignored",
+                        "    - deeper nesting also ignored",
+                        "- another top-level fact",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+
+            self.assertEqual(
+                ("top-level fact", "another top-level fact"),
+                handoff.discovered_facts,
+            )
+
+    def test_read_session_handoff_ignores_unknown_subsection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            session_path = plan_dir / "session-1.md"
+            session_path.write_text(
+                "\n".join(
+                    [
+                        "# Session 1",
+                        "",
+                        "## Handoff",
+                        "",
+                        "- **Status**: complete",
+                        "",
+                        "### Future Notes",
+                        "- bullet under unknown heading",
+                        "",
+                        "### Discovered Facts",
+                        "- a real fact",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+
+            self.assertEqual("complete", handoff.status)
+            self.assertEqual(("a real fact",), handoff.discovered_facts)
+            self.assertEqual((), handoff.open_questions)
+
+    def test_read_session_handoff_subsections_stop_at_h2_heading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            session_path = plan_dir / "session-1.md"
+            session_path.write_text(
+                "\n".join(
+                    [
+                        "# Session 1",
+                        "",
+                        "## Handoff",
+                        "",
+                        "- **Status**: complete",
+                        "",
+                        "### Discovered Facts",
+                        "- fact inside the block",
+                        "",
+                        "## Trailing Section",
+                        "- bullet after the block",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+
+            self.assertEqual(("fact inside the block",), handoff.discovered_facts)
+
+    def test_read_session_status_delegates_to_read_session_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            session_path = plan_dir / "session-1.md"
+            session_path.write_text(
+                "\n".join(
+                    [
+                        "# Session 1",
+                        "",
+                        "## Handoff",
+                        "",
+                        "- **Status**: pending",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            session_file = self._session_file(plan_dir)
+
+            status = plans.read_session_status(session_file)
+            handoff = plans.read_session_handoff(session_file)
+
+            self.assertEqual(handoff.status, status.status)
+            self.assertEqual(handoff.raw_value, status.raw_value)
+            self.assertEqual(handoff.line_number, status.line_number)
+            self.assertEqual(session_file, status.session)
 
     def test_plan_content_hash_tracks_matching_dotted_expansion_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1805,6 +2217,483 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertTrue(payload["state_path"].endswith("/state.json"))
             self.assertTrue(payload["events_path"].endswith("/events.jsonl"))
             self.assertEqual(1, payload["counts"]["pending"])
+
+    def test_status_payload_progress_journal_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+
+            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+
+            journal = payload["progress_journal"]
+            self.assertFalse(journal["present"])
+            self.assertIsNone(journal["entry_count"])
+            self.assertIsNone(journal["last_appended"])
+            self.assertIsNone(journal["error"])
+            self.assertTrue(journal["path"].endswith("/progress.md"))
+
+    def test_status_payload_progress_journal_with_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("complete", "pending"))
+
+            plans.append_progress_entry(
+                plan_dir,
+                plans.ProgressEntry(
+                    session_id=plans.parse_session_id("1"),
+                    status="complete",
+                    completed_at="2026-06-19T14:22:00Z",
+                    files_modified=("cli.py",),
+                ),
+            )
+
+            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+
+            journal = payload["progress_journal"]
+            self.assertTrue(journal["present"])
+            self.assertEqual(1, journal["entry_count"])
+            self.assertEqual("2026-06-19T14:22:00Z", journal["last_appended"])
+            self.assertIsNone(journal["error"])
+
+    def test_status_payload_progress_journal_malformed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            plans.progress_path(plan_dir).write_text(
+                "# Progress Journal\n\nmissing version comment\n",
+                encoding="utf-8",
+            )
+
+            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+
+            journal = payload["progress_journal"]
+            self.assertTrue(journal["present"])
+            self.assertIsNone(journal["entry_count"])
+            self.assertIsNone(journal["last_appended"])
+            self.assertIsNotNone(journal["error"])
+
+    def test_status_from_args_text_output_renders_journal_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+
+            args = argparse.Namespace(
+                plan_dir=str(plan_dir),
+                state_dir=str(state_dir),
+                json=False,
+            )
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                exit_code = state.status_from_args(args)
+
+            self.assertEqual(0, exit_code)
+            output = buffer.getvalue()
+            self.assertIn("Progress journal: not initialized", output)
+
+            plans.append_progress_entry(
+                plan_dir,
+                plans.ProgressEntry(
+                    session_id=plans.parse_session_id("1"),
+                    status="complete",
+                    completed_at="2026-06-19T14:22:00Z",
+                ),
+            )
+
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                exit_code = state.status_from_args(args)
+
+            self.assertEqual(0, exit_code)
+            output = buffer.getvalue()
+            self.assertIn(
+                "Progress journal: 1 entry, last appended 2026-06-19T14:22:00Z",
+                output,
+            )
+
+
+class ProgressJournalTests(unittest.TestCase):
+    def _entry(
+        self,
+        *,
+        session_id: str = "1",
+        status: str = "complete",
+        completed_at: str = "2026-06-19T14:22:00Z",
+        files_modified: tuple[str, ...] = ("cli.py", "plans.py"),
+        key_decisions: str | None = "chose option A over B (perf)",
+        discovered_facts: tuple[str, ...] = ("Lockfile X uses Y format.",),
+        open_questions: tuple[str, ...] = (),
+        blockers: str | None = None,
+    ) -> plans.ProgressEntry:
+        return plans.ProgressEntry(
+            session_id=plans.parse_session_id(session_id),
+            status=status,  # type: ignore[arg-type]
+            completed_at=completed_at,
+            files_modified=files_modified,
+            key_decisions=key_decisions,
+            discovered_facts=discovered_facts,
+            open_questions=open_questions,
+            blockers=blockers,
+        )
+
+    def test_first_append_creates_file_with_header_and_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+
+            path = plans.append_progress_entry(plan_dir, self._entry())
+
+            self.assertEqual(plans.progress_path(plan_dir), path)
+            text = path.read_text(encoding="utf-8")
+            self.assertTrue(text.startswith(plans.PROGRESS_HEADER))
+            self.assertIn(plans.PROGRESS_SCHEMA_COMMENT, text)
+            self.assertIn(
+                "## Session 1 — complete (2026-06-19T14:22:00Z)", text
+            )
+            self.assertIn("- Files touched: cli.py, plans.py", text)
+            self.assertIn(
+                "- Decisions: chose option A over B (perf)", text
+            )
+            self.assertIn("- Discovered facts:\n  - Lockfile X uses Y format.", text)
+            self.assertIn("- Open questions: none", text)
+            self.assertIn("- Blockers: none", text)
+
+    def test_second_append_preserves_prior_entry_and_appends_new_one_in_order(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+
+            plans.append_progress_entry(plan_dir, self._entry())
+            second = self._entry(
+                session_id="2",
+                completed_at="2026-06-19T15:00:00Z",
+                files_modified=("runner.py",),
+                key_decisions=None,
+                discovered_facts=(),
+                open_questions=("Should we cache?",),
+                blockers="needs review",
+            )
+            plans.append_progress_entry(plan_dir, second)
+
+            text = plans.progress_path(plan_dir).read_text(encoding="utf-8")
+            self.assertLess(
+                text.index("## Session 1 — complete"),
+                text.index("## Session 2 — complete"),
+            )
+            self.assertIn("- Files touched: runner.py", text)
+            self.assertIn("- Decisions: none", text)
+            self.assertIn("- Open questions:\n  - Should we cache?", text)
+            self.assertIn("- Blockers: needs review", text)
+            # Exactly one blank line between the two session headings.
+            session1_index = text.index("## Session 1")
+            session2_index = text.index("## Session 2")
+            between = text[session1_index:session2_index]
+            self.assertTrue(between.endswith("\n\n"))
+            self.assertFalse(between.endswith("\n\n\n"))
+
+    def test_append_is_idempotent_for_duplicate_session_id_and_timestamp(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+
+            plans.append_progress_entry(plan_dir, self._entry())
+            path = plans.progress_path(plan_dir)
+            first_bytes = path.read_bytes()
+
+            # Duplicate by (session_id, completed_at) — even with different fields.
+            duplicate = self._entry(
+                files_modified=("totally", "different"),
+                key_decisions="something else entirely",
+            )
+            plans.append_progress_entry(plan_dir, duplicate)
+
+            self.assertEqual(first_bytes, path.read_bytes())
+
+    def test_append_after_different_timestamp_is_not_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+
+            plans.append_progress_entry(plan_dir, self._entry())
+            plans.append_progress_entry(
+                plan_dir,
+                self._entry(completed_at="2026-06-19T14:23:00Z"),
+            )
+
+            entries = plans.read_progress_entries(plan_dir)
+            self.assertEqual(2, len(entries))
+
+    def test_append_raises_on_version_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            path = plans.progress_path(plan_dir)
+            path.write_text(
+                "# Progress Journal\n"
+                "<!-- agent-session-loop progress-journal v2 -->\n"
+                "\n"
+                "## Session 1 — complete (2026-06-19T14:22:00Z)\n"
+                "- Files touched: none\n"
+                "- Decisions: none\n"
+                "- Discovered facts: none\n"
+                "- Open questions: none\n"
+                "- Blockers: none\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(plans.PlanError) as ctx:
+                plans.append_progress_entry(plan_dir, self._entry())
+            self.assertIn("v2", str(ctx.exception))
+            self.assertIn("v1", str(ctx.exception))
+
+    def test_read_progress_entries_raises_on_missing_version_comment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            path = plans.progress_path(plan_dir)
+            path.write_text(
+                "# Progress Journal\n\n"
+                "## Session 1 — complete (2026-06-19T14:22:00Z)\n"
+                "- Files touched: none\n"
+                "- Decisions: none\n"
+                "- Discovered facts: none\n"
+                "- Open questions: none\n"
+                "- Blockers: none\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(plans.PlanError):
+                plans.read_progress_entries(plan_dir)
+
+    def test_read_progress_entries_returns_empty_when_file_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+
+            self.assertEqual((), plans.read_progress_entries(plan_dir))
+
+    def test_round_trip_render_then_read_recovers_identical_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+
+            entries = (
+                self._entry(),
+                self._entry(
+                    session_id="1.1",
+                    completed_at="2026-06-19T14:30:00Z",
+                    files_modified=(),
+                    key_decisions=None,
+                    discovered_facts=("Fact A.", "Fact B."),
+                    open_questions=("Q1?", "Q2?"),
+                    blockers="db migration pending",
+                ),
+                self._entry(
+                    session_id="3",
+                    completed_at="2026-06-19T15:00:00Z",
+                    files_modified=("runner.py",),
+                    key_decisions="kept inline",
+                    discovered_facts=(),
+                    open_questions=(),
+                    blockers=None,
+                ),
+            )
+            for entry in entries:
+                plans.append_progress_entry(plan_dir, entry)
+
+            recovered = plans.read_progress_entries(plan_dir)
+            self.assertEqual(entries, recovered)
+
+    def test_render_progress_entry_returns_newline_terminated_block(self) -> None:
+        rendered = plans.render_progress_entry(self._entry())
+        self.assertTrue(rendered.endswith("\n"))
+        self.assertTrue(
+            rendered.startswith("## Session 1 — complete (2026-06-19T14:22:00Z)")
+        )
+
+    def test_plan_content_sha256_unchanged_when_progress_mutates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending", "pending"))
+
+            baseline = plans.plan_content_sha256(plan_dir)
+            plans.append_progress_entry(plan_dir, self._entry())
+            self.assertEqual(baseline, plans.plan_content_sha256(plan_dir))
+            plans.append_progress_entry(
+                plan_dir,
+                self._entry(
+                    session_id="2",
+                    completed_at="2026-06-19T15:00:00Z",
+                ),
+            )
+            self.assertEqual(baseline, plans.plan_content_sha256(plan_dir))
+            # Manual mutation (e.g., user edit) of progress.md still ignored.
+            path = plans.progress_path(plan_dir)
+            path.write_text(
+                path.read_text(encoding="utf-8") + "\n<!-- noise -->\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(baseline, plans.plan_content_sha256(plan_dir))
+
+    def test_stable_readiness_sha256_unchanged_when_progress_mutates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending", "pending"))
+
+            baseline = plans.stable_readiness_sha256(plan_dir)
+            plans.append_progress_entry(plan_dir, self._entry())
+            self.assertEqual(baseline, plans.stable_readiness_sha256(plan_dir))
+            plans.append_progress_entry(
+                plan_dir,
+                self._entry(
+                    session_id="2",
+                    completed_at="2026-06-19T15:00:00Z",
+                ),
+            )
+            self.assertEqual(baseline, plans.stable_readiness_sha256(plan_dir))
+            path = plans.progress_path(plan_dir)
+            path.write_text(
+                path.read_text(encoding="utf-8") + "\n<!-- noise -->\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(baseline, plans.stable_readiness_sha256(plan_dir))
+
+    def test_atomic_write_failure_leaves_original_file_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+
+            plans.append_progress_entry(plan_dir, self._entry())
+            path = plans.progress_path(plan_dir)
+            original_bytes = path.read_bytes()
+
+            with mock.patch(
+                "agent_session_loop.plans.os.replace",
+                side_effect=OSError("boom"),
+            ):
+                with self.assertRaises(plans.PlanError):
+                    plans.append_progress_entry(
+                        plan_dir,
+                        self._entry(
+                            session_id="2",
+                            completed_at="2026-06-19T15:00:00Z",
+                        ),
+                    )
+
+            self.assertEqual(original_bytes, path.read_bytes())
+            self.assertFalse(
+                (plan_dir / ".progress.md.tmp").exists(),
+                "atomic-write temp file should be cleaned up on failure",
+            )
+
+
+class RunnerProgressEntryHelperTests(unittest.TestCase):
+    """Unit coverage for ``runner._append_progress_entry``."""
+
+    def _write_complete_plan(self, plan_dir: Path) -> plans.PlanSnapshot:
+        plan_dir.mkdir(parents=True, exist_ok=True)
+        (plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
+        (plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
+        (plan_dir / "session-1.md").write_text(
+            "\n".join(
+                [
+                    "# Session 1: Test",
+                    "",
+                    "Instructions.",
+                    "",
+                    "## Handoff",
+                    "",
+                    "- **Status**: complete",
+                    "- **Files modified**: cli.py, plans.py",
+                    "- **Key decisions**: chose A over B",
+                    "- **Blockers for next session**: (none)",
+                    "- **Notes**: extra notes",
+                    "",
+                    "### Discovered Facts",
+                    "",
+                    "- fact one",
+                    "- fact two",
+                    "",
+                    "### Open Questions",
+                    "",
+                    "- question one",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return plans.inspect_plan(plan_dir)
+
+    def test_append_returns_true_then_false_on_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            snapshot = self._write_complete_plan(plan_dir)
+            completed_at = "2026-06-19T15:00:00Z"
+
+            self.assertTrue(
+                runner._append_progress_entry(snapshot, "1", completed_at)
+            )
+            self.assertFalse(
+                runner._append_progress_entry(snapshot, "1", completed_at)
+            )
+
+            entries = plans.read_progress_entries(plan_dir)
+            self.assertEqual(1, len(entries))
+            entry = entries[0]
+            self.assertEqual("1", entry.session_id.value)
+            self.assertEqual("complete", entry.status)
+            self.assertEqual(("cli.py", "plans.py"), entry.files_modified)
+            self.assertEqual("chose A over B", entry.key_decisions)
+            self.assertEqual(("fact one", "fact two"), entry.discovered_facts)
+            self.assertEqual(("question one",), entry.open_questions)
+            self.assertEqual("(none)", entry.blockers)
+
+    def test_append_with_distinct_timestamp_writes_second_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            snapshot = self._write_complete_plan(plan_dir)
+
+            self.assertTrue(
+                runner._append_progress_entry(
+                    snapshot, "1", "2026-06-19T15:00:00Z"
+                )
+            )
+            self.assertTrue(
+                runner._append_progress_entry(
+                    snapshot, "1", "2026-06-19T16:00:00Z"
+                )
+            )
+
+            entries = plans.read_progress_entries(plan_dir)
+            self.assertEqual(2, len(entries))
+            self.assertEqual(
+                ["2026-06-19T15:00:00Z", "2026-06-19T16:00:00Z"],
+                [entry.completed_at for entry in entries],
+            )
+
+    def test_append_raises_when_session_missing_from_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            snapshot = self._write_complete_plan(plan_dir)
+
+            with self.assertRaises(plans.PlanError):
+                runner._append_progress_entry(
+                    snapshot, "99", "2026-06-19T15:00:00Z"
+                )
+
+    def test_utc_iso_now_returns_iso_string_with_timezone(self) -> None:
+        value = runner._utc_iso_now()
+
+        parsed = runner._parse_datetime(value)
+        self.assertIsNotNone(parsed)
+        self.assertEqual("UTC", parsed.tzname())
 
 
 class VerificationExecutorTests(unittest.TestCase):
@@ -8549,6 +9438,33 @@ def _write_loop_ready_plan(
 
 
 class PreflightCoreTests(unittest.TestCase):
+    def _progress_findings(
+        self,
+        report: preflight.PreflightReport,
+    ) -> list[preflight.PreflightFinding]:
+        return [
+            finding
+            for finding in report.findings
+            if finding.category == "progress-journal-missing"
+        ]
+
+    def _progress_entry(
+        self,
+        session_id: str,
+        *,
+        status: str = "complete",
+    ) -> plans.ProgressEntry:
+        return plans.ProgressEntry(
+            session_id=plans.parse_session_id(session_id),
+            status=status,
+            completed_at="2026-06-19T15:00:00Z",
+            files_modified=(),
+            key_decisions=None,
+            discovered_facts=(),
+            open_questions=(),
+            blockers=None,
+        )
+
     def test_missing_plan_directory_emits_red_plan_structure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "does-not-exist"
@@ -9009,6 +9925,192 @@ class PreflightCoreTests(unittest.TestCase):
             self.assertFalse(yellow_report.ok)
             self.assertEqual((), yellow_report.red_findings)
             self.assertEqual(1, len(yellow_report.yellow_findings))
+
+    def test_progress_journal_missing_yellow_when_complete_session_lacks_file(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            _write_loop_ready_plan(plan_dir, ("complete",))
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            journal_findings = [
+                finding
+                for finding in report.findings
+                if finding.category == "progress-journal-missing"
+            ]
+            self.assertEqual(1, len(journal_findings))
+            finding = journal_findings[0]
+            self.assertEqual("yellow", finding.severity)
+            self.assertIn("backfill-progress", finding.message)
+            self.assertEqual(
+                str(plans.progress_path(plan_dir)), finding.path
+            )
+            self.assertFalse(report.ok)
+
+    def test_progress_journal_missing_yellow_when_header_only_with_completed_sessions(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            _write_loop_ready_plan(plan_dir, ("complete", "complete"))
+            plans.write_progress_journal(plan_dir, ())
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            journal_findings = self._progress_findings(report)
+            self.assertEqual(1, len(journal_findings))
+            finding = journal_findings[0]
+            self.assertEqual("yellow", finding.severity)
+            self.assertIn("--force", finding.message)
+            self.assertIn("expected complete sessions: 1, 2", finding.detail)
+            self.assertIn("observed journal entries: none", finding.detail)
+            self.assertFalse(report.ok)
+
+    def test_progress_journal_missing_silent_when_no_completed_sessions(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            _write_loop_ready_plan(plan_dir, ("pending",))
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            journal_findings = [
+                finding
+                for finding in report.findings
+                if finding.category == "progress-journal-missing"
+            ]
+            self.assertEqual([], journal_findings)
+
+    def test_progress_journal_missing_silent_when_header_only_and_no_completed_sessions(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            _write_loop_ready_plan(plan_dir, ("pending",))
+            plans.write_progress_journal(plan_dir, ())
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            self.assertEqual([], self._progress_findings(report))
+
+    def test_progress_journal_missing_silent_when_journal_present_and_readable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            _write_loop_ready_plan(plan_dir, ("complete",))
+            entry = plans.ProgressEntry(
+                session_id=plans.parse_session_id("1"),
+                status="complete",
+                completed_at="2026-06-19T15:00:00Z",
+                files_modified=(),
+                key_decisions=None,
+                discovered_facts=(),
+                open_questions=(),
+                blockers=None,
+            )
+            plans.append_progress_entry(plan_dir, entry)
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            journal_findings = [
+                finding
+                for finding in report.findings
+                if finding.category == "progress-journal-missing"
+            ]
+            self.assertEqual([], journal_findings)
+
+    def test_progress_journal_missing_yellow_when_latest_completed_session_missing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            _write_loop_ready_plan(plan_dir, ("complete", "complete"))
+            plans.write_progress_journal(plan_dir, (self._progress_entry("1"),))
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            journal_findings = self._progress_findings(report)
+            self.assertEqual(1, len(journal_findings))
+            finding = journal_findings[0]
+            self.assertIn("--force", finding.message)
+            self.assertIn("expected complete sessions: 1, 2", finding.detail)
+            self.assertIn("observed journal entries: 1", finding.detail)
+
+    def test_progress_journal_missing_yellow_when_entries_duplicated_or_out_of_order(
+        self,
+    ) -> None:
+        cases = (
+            ("duplicated", ("1", "1", "2")),
+            ("out-of-order", ("2", "1")),
+        )
+        for name, observed_ids in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                plan_dir = Path(tmp) / "plan"
+                _write_loop_ready_plan(plan_dir, ("complete", "complete"))
+                entries = tuple(
+                    self._progress_entry(session_id)
+                    for session_id in observed_ids
+                )
+                plans.write_progress_journal(plan_dir, entries)
+
+                report = preflight.run_core_preflight(plan_dir)
+
+                journal_findings = self._progress_findings(report)
+                self.assertEqual(1, len(journal_findings))
+                self.assertIn("--force", journal_findings[0].message)
+                self.assertIn(
+                    f"observed journal entries: {', '.join(observed_ids)}",
+                    journal_findings[0].detail,
+                )
+
+    def test_progress_journal_missing_yellow_when_entry_status_is_not_complete(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            _write_loop_ready_plan(plan_dir, ("complete",))
+            plans.write_progress_journal(
+                plan_dir,
+                (self._progress_entry("1", status="pending"),),
+            )
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            journal_findings = self._progress_findings(report)
+            self.assertEqual(1, len(journal_findings))
+            self.assertIn(
+                "non-complete journal entry statuses: 1=pending",
+                journal_findings[0].detail,
+            )
+
+    def test_progress_journal_missing_yellow_when_journal_unreadable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            _write_loop_ready_plan(plan_dir, ("complete",))
+            plans.progress_path(plan_dir).write_text(
+                "# Progress Journal\n"
+                "<!-- agent-session-loop progress-journal v999 -->\n",
+                encoding="utf-8",
+            )
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            journal_findings = [
+                finding
+                for finding in report.findings
+                if finding.category == "progress-journal-missing"
+            ]
+            self.assertEqual(1, len(journal_findings))
+            finding = journal_findings[0]
+            self.assertEqual("yellow", finding.severity)
+            self.assertIn("unreadable", finding.message)
+            self.assertIn("v999", finding.message)
 
 
 _FIX_CATEGORIES = {
@@ -10416,6 +11518,570 @@ class RunVerificationEnforcementTests(unittest.TestCase):
         self.assertIn("malformed-contract", events.PAUSE_REASONS)
 
 
+class RunProgressJournalIntegrationTests(unittest.TestCase):
+    """End-to-end coverage for runner-side ``progress.md`` integration."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+        self.repo_root = self.tmp_path / "repo"
+        self.config_home = self.tmp_path / "config"
+        init_git_repo(self.repo_root)
+        self.fake_codex = install_fake_codex(self.tmp_path)
+        config_path = (
+            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        )
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps({"codex": {"executable": str(self.fake_codex)}}),
+            encoding="utf-8",
+        )
+
+    def _write_plan(
+        self,
+        statuses: tuple[str, ...],
+        *,
+        contracts_by_id: dict[str, str],
+        readiness: str | None = "loop-ready",
+    ) -> None:
+        write_plan(self.plan_dir, statuses, contracts_by_id=contracts_by_id)
+        if readiness is None:
+            return
+        sha = plans.stable_readiness_sha256(self.plan_dir)
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state=readiness,
+                readiness_sha256=sha,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+
+    def _run(self) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+        argv = [
+            sys.executable,
+            "-m",
+            "agent_session_loop",
+            "run",
+            str(self.plan_dir),
+            "--cwd",
+            str(self.repo_root),
+            "--harness",
+            "codex",
+            "--state-dir",
+            str(self.state_dir),
+            "--json",
+            "--allow-not-loop-ready",
+        ]
+        env = os.environ.copy()
+        env.update(
+            {
+                "XDG_CONFIG_HOME": str(self.config_home),
+                "FAKE_CODEX_MODE": "success",
+                "FAKE_CODEX_SLEEP": "5",
+                "PYTHONPATH": str(REPO_ROOT)
+                + os.pathsep
+                + env.get("PYTHONPATH", ""),
+            }
+        )
+        completed = subprocess.run(
+            argv,
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        return completed, json.loads(completed.stdout)
+
+    def _passing_contracts(self, count: int) -> dict[str, str]:
+        return {
+            str(i): _contract_block(
+                '{"type": "file_exists", "path": "README.md", '
+                f'"name": "readme-{i}"}}',
+                session=str(i),
+            )
+            for i in range(1, count + 1)
+        }
+
+    def test_two_session_run_writes_progress_journal_in_order(self) -> None:
+        self._write_plan(
+            ("pending", "pending"),
+            contracts_by_id=self._passing_contracts(2),
+        )
+
+        completed, payload = self._run()
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("all-complete", payload["reason"])
+
+        entries = plans.read_progress_entries(self.plan_dir)
+        self.assertEqual(2, len(entries))
+        self.assertEqual(
+            ["1", "2"], [entry.session_id.value for entry in entries]
+        )
+        self.assertEqual(
+            ["complete", "complete"], [entry.status for entry in entries]
+        )
+
+        self.assertEqual(2, len(payload["turns"]))
+        for turn in payload["turns"]:
+            self.assertTrue(turn["progress_appended"])
+            self.assertNotIn("progress_error", turn)
+
+    def test_verification_failure_short_circuits_progress_append(self) -> None:
+        contracts_by_id = {
+            "1": _contract_block(
+                '{"type": "file_exists", "path": "MISSING.md", '
+                '"name": "missing"}',
+                session="1",
+            )
+        }
+        self._write_plan(("pending",), contracts_by_id=contracts_by_id)
+
+        completed, payload = self._run()
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("verify-failed", payload["pause_reason"])
+
+        self.assertFalse(plans.progress_path(self.plan_dir).exists())
+        self.assertNotIn("progress_appended", payload["turns"][0])
+        failure_events = [
+            record
+            for record in read_jsonl(Path(payload["events_path"]))
+            if record["name"] == "progress-journal-append-failed"
+        ]
+        self.assertEqual([], failure_events)
+
+    def test_append_failure_records_error_and_continues_run(self) -> None:
+        self._write_plan(
+            ("pending",),
+            contracts_by_id=self._passing_contracts(1),
+        )
+        # Pre-write progress.md with a future schema version so the real
+        # append helper raises PlanError without crashing the run.
+        plans.progress_path(self.plan_dir).write_text(
+            "# Progress Journal\n"
+            "<!-- agent-session-loop progress-journal v999 -->\n",
+            encoding="utf-8",
+        )
+
+        completed, payload = self._run()
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("all-complete", payload["reason"])
+
+        turn = payload["turns"][0]
+        self.assertFalse(turn["progress_appended"])
+        self.assertIn("v999", turn["progress_error"])
+
+        failure_events = [
+            record["payload"]
+            for record in read_jsonl(Path(payload["events_path"]))
+            if record["name"] == "progress-journal-append-failed"
+        ]
+        self.assertEqual(1, len(failure_events))
+        self.assertEqual("1", failure_events[0]["session"])
+        self.assertIn("v999", failure_events[0]["error"])
+
+
+class ProgressCliTests(unittest.TestCase):
+    """Coverage for ``asl backfill-progress`` and ``asl progress``."""
+
+    def _write_completed_plan(
+        self,
+        plan_dir: Path,
+        session_ids: tuple[str, ...] = ("1", "2", "3"),
+    ) -> None:
+        plan_dir.mkdir(parents=True, exist_ok=True)
+        (plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
+        (plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
+        for session_id in session_ids:
+            filename = plans.session_id_to_filename(session_id)
+            label = plans.session_id_display_label(session_id)
+            (plan_dir / filename).write_text(
+                "\n".join(
+                    [
+                        f"# {label}: Test",
+                        "",
+                        "Instructions.",
+                        "",
+                        "## Handoff",
+                        "",
+                        "- **Status**: complete",
+                        f"- **Files modified**: file-{session_id}.py",
+                        f"- **Key decisions**: decision for {session_id}",
+                        "- **Blockers for next session**: (none)",
+                        f"- **Notes**: notes for {session_id}",
+                        "",
+                        "### Discovered Facts",
+                        "",
+                        f"- fact about {session_id}",
+                        "",
+                        "### Open Questions",
+                        "",
+                        f"- question about {session_id}",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+    def _run_backfill(
+        self,
+        plan_dir: Path,
+        *,
+        force: bool = False,
+        dry_run: bool = False,
+    ) -> tuple[int, str, str]:
+        args = argparse.Namespace(
+            plan_dir=str(plan_dir),
+            force=force,
+            dry_run=dry_run,
+        )
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = progress_cli.backfill_progress_from_args(args)
+        return code, out.getvalue(), err.getvalue()
+
+    def _run_progress(
+        self,
+        plan_dir: Path,
+        *,
+        tail: bool = False,
+        json_output: bool = False,
+    ) -> tuple[int, str, str]:
+        args = argparse.Namespace(
+            plan_dir=str(plan_dir),
+            tail=tail,
+            json=json_output,
+        )
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = progress_cli.progress_from_args(args)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_backfill_writes_entries_in_dotted_numeric_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            # Intentionally write filenames in non-sorted alphabetical order
+            # to confirm the backfill uses snapshot order (dotted numeric).
+            self._write_completed_plan(plan_dir, ("1", "1.1", "2", "10"))
+
+            code, out, err = self._run_backfill(plan_dir)
+
+            self.assertEqual(0, code, err)
+            self.assertEqual("", err)
+            self.assertIn("wrote 4 entries", out)
+
+            entries = plans.read_progress_entries(plan_dir)
+            self.assertEqual(
+                ["1", "1.1", "2", "10"],
+                [entry.session_id.value for entry in entries],
+            )
+            for entry in entries:
+                self.assertEqual("complete", entry.status)
+                self.assertEqual(
+                    (f"file-{entry.session_id.value}.py",),
+                    entry.files_modified,
+                )
+                self.assertEqual(
+                    f"decision for {entry.session_id.value}",
+                    entry.key_decisions,
+                )
+                self.assertEqual(
+                    (f"fact about {entry.session_id.value}",),
+                    entry.discovered_facts,
+                )
+                self.assertEqual(
+                    (f"question about {entry.session_id.value}",),
+                    entry.open_questions,
+                )
+
+    def test_backfill_refuses_to_overwrite_without_force(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            self._write_completed_plan(plan_dir, ("1",))
+            progress_file = plans.progress_path(plan_dir)
+            progress_file.write_text("preexisting\n", encoding="utf-8")
+
+            code, out, err = self._run_backfill(plan_dir)
+
+            self.assertEqual(1, code)
+            self.assertIn("already exists", err)
+            self.assertIn("--force", err)
+            self.assertEqual(
+                "preexisting\n",
+                progress_file.read_text(encoding="utf-8"),
+            )
+
+    def test_backfill_force_overwrites_existing_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            self._write_completed_plan(plan_dir, ("1", "2"))
+            progress_file = plans.progress_path(plan_dir)
+            progress_file.write_text(
+                "stale and definitely not v1 schema\n", encoding="utf-8"
+            )
+
+            code, out, err = self._run_backfill(plan_dir, force=True)
+
+            self.assertEqual(0, code, err)
+            entries = plans.read_progress_entries(plan_dir)
+            self.assertEqual(2, len(entries))
+
+    def test_backfill_force_preserves_existing_journal_when_replace_fails(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            self._write_completed_plan(plan_dir, ("1", "2"))
+            progress_file = plans.progress_path(plan_dir)
+            progress_file.write_text("old journal contents\n", encoding="utf-8")
+
+            with mock.patch(
+                "agent_session_loop.plans.os.replace",
+                side_effect=OSError("replace failed"),
+            ):
+                code, out, err = self._run_backfill(plan_dir, force=True)
+
+            self.assertEqual(1, code)
+            self.assertEqual("", out)
+            self.assertIn("replace failed", err)
+            self.assertEqual(
+                "old journal contents\n",
+                progress_file.read_text(encoding="utf-8"),
+            )
+            self.assertFalse((plan_dir / ".progress.md.tmp").exists())
+
+    def test_backfill_dry_run_prints_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            self._write_completed_plan(plan_dir, ("1", "2"))
+
+            code, out, err = self._run_backfill(plan_dir, dry_run=True)
+
+            self.assertEqual(0, code, err)
+            self.assertEqual("", err)
+            self.assertIn(plans.PROGRESS_SCHEMA_COMMENT, out)
+            self.assertIn("## Session 1 — complete", out)
+            self.assertIn("## Session 2 — complete", out)
+            self.assertFalse(plans.progress_path(plan_dir).exists())
+
+    def test_backfill_with_no_completed_sessions_writes_header_only(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending", "pending"))
+
+            with mock.patch(
+                "agent_session_loop.plans.os.replace",
+                wraps=os.replace,
+            ) as replace:
+                code, out, err = self._run_backfill(plan_dir)
+
+            self.assertEqual(0, code, err)
+            self.assertEqual(1, replace.call_count)
+            self.assertIn("wrote 0 entries", out)
+            journal = plans.progress_path(plan_dir).read_text(encoding="utf-8")
+            self.assertEqual(plans.PROGRESS_HEADER, journal)
+            self.assertEqual((), plans.read_progress_entries(plan_dir))
+
+    def test_progress_prints_existing_journal_to_stdout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            self._write_completed_plan(plan_dir, ("1",))
+            self._run_backfill(plan_dir)
+
+            code, out, err = self._run_progress(plan_dir)
+
+            self.assertEqual(0, code, err)
+            self.assertEqual("", err)
+            self.assertEqual(
+                plans.progress_path(plan_dir).read_text(encoding="utf-8"),
+                out,
+            )
+
+    def test_progress_errors_when_journal_missing_without_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+
+            code, out, err = self._run_progress(plan_dir)
+
+            self.assertEqual(1, code)
+            self.assertIn("does not exist", err)
+            self.assertIn("asl backfill-progress", err)
+
+    def test_progress_json_returns_entries_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            self._write_completed_plan(plan_dir, ("1", "2"))
+            self._run_backfill(plan_dir)
+
+            code, out, err = self._run_progress(plan_dir, json_output=True)
+
+            self.assertEqual(0, code, err)
+            payload = json.loads(out)
+            self.assertTrue(payload["ok"])
+            self.assertEqual("progress", payload["command"])
+            self.assertEqual(2, payload["entry_count"])
+            self.assertEqual(2, len(payload["entries"]))
+            first = payload["entries"][0]
+            self.assertEqual(
+                {
+                    "session_id",
+                    "status",
+                    "completed_at",
+                    "files_modified",
+                    "key_decisions",
+                    "discovered_facts",
+                    "open_questions",
+                    "blockers",
+                },
+                set(first.keys()),
+            )
+            self.assertEqual("1", first["session_id"])
+            self.assertEqual("complete", first["status"])
+            self.assertEqual(["file-1.py"], first["files_modified"])
+            self.assertEqual("decision for 1", first["key_decisions"])
+            self.assertEqual(["fact about 1"], first["discovered_facts"])
+            self.assertEqual(["question about 1"], first["open_questions"])
+
+    def test_progress_json_empty_entries_when_journal_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+
+            code, out, err = self._run_progress(plan_dir, json_output=True)
+
+            self.assertEqual(0, code, err)
+            payload = json.loads(out)
+            self.assertTrue(payload["ok"])
+            self.assertEqual([], payload["entries"])
+            self.assertEqual(0, payload["entry_count"])
+
+    def test_progress_json_errors_on_malformed_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+            plans.progress_path(plan_dir).write_text(
+                "# Progress Journal\n"
+                "<!-- agent-session-loop progress-journal v999 -->\n",
+                encoding="utf-8",
+            )
+
+            code, out, err = self._run_progress(plan_dir, json_output=True)
+
+            self.assertEqual(1, code)
+            payload = json.loads(out)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("progress", payload["command"])
+            self.assertEqual("malformed-progress-journal", payload["reason"])
+            self.assertIn("v999", payload["error"])
+
+    def test_follow_progress_streams_newly_appended_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            initial_entry = plans.ProgressEntry(
+                session_id=plans.parse_session_id("1"),
+                status="complete",
+                completed_at="2026-06-19T15:00:00Z",
+                files_modified=("first.py",),
+                key_decisions=None,
+                discovered_facts=(),
+                open_questions=(),
+                blockers=None,
+            )
+            plans.append_progress_entry(plan_dir, initial_entry)
+
+            buffer = io.StringIO()
+            stop = threading.Event()
+            seen_new_entry = threading.Event()
+
+            class WaitableStringIO(io.StringIO):
+                def write(self, value: str) -> int:
+                    written = super().write(value)
+                    if "Session 2" in self.getvalue():
+                        seen_new_entry.set()
+                    return written
+
+            buffer = WaitableStringIO()
+            thread = threading.Thread(
+                target=progress_cli.follow_progress,
+                args=(plan_dir,),
+                kwargs={
+                    "out": buffer,
+                    "poll_interval": 0.01,
+                    "stop_event": stop,
+                },
+                daemon=True,
+            )
+            thread.start()
+            try:
+                second_entry = plans.ProgressEntry(
+                    session_id=plans.parse_session_id("2"),
+                    status="complete",
+                    completed_at="2026-06-19T15:30:00Z",
+                    files_modified=("second.py",),
+                    key_decisions="kept inline",
+                    discovered_facts=(),
+                    open_questions=(),
+                    blockers=None,
+                )
+                plans.append_progress_entry(plan_dir, second_entry)
+                self.assertTrue(
+                    seen_new_entry.wait(timeout=2.0),
+                    "follow_progress did not pick up the new entry in time",
+                )
+            finally:
+                stop.set()
+                thread.join(timeout=2.0)
+                self.assertFalse(thread.is_alive())
+
+            output = buffer.getvalue()
+            self.assertIn("## Session 2 — complete", output)
+            self.assertIn("- Files touched: second.py", output)
+            # The pre-existing Session 1 entry was already in the file when
+            # the follower started, so it should not appear in the streamed
+            # output.
+            self.assertNotIn("## Session 1 — complete", output)
+
+    def test_backfill_progress_cli_registered_in_parser(self) -> None:
+        parser = cli.build_parser()
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            self._write_completed_plan(plan_dir, ("1",))
+            args = parser.parse_args(
+                ["backfill-progress", str(plan_dir)]
+            )
+            self.assertEqual(
+                progress_cli.backfill_progress_from_args, args.handler
+            )
+            self.assertEqual(str(plan_dir), args.plan_dir)
+            self.assertFalse(args.force)
+            self.assertFalse(args.dry_run)
+
+    def test_progress_cli_registered_in_parser(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(
+            ["progress", "/tmp/example", "--tail", "--json"]
+        )
+        self.assertEqual(progress_cli.progress_from_args, args.handler)
+        self.assertEqual("/tmp/example", args.plan_dir)
+        self.assertTrue(args.tail)
+        self.assertTrue(args.json)
+
+
 class RunReviewHarnessLifecycleTests(unittest.TestCase):
     """End-to-end coverage for ``--review-harness`` lifecycle integration."""
 
@@ -10463,6 +12129,21 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             for index in range(1, len(statuses) + 1)
         }
         write_plan(self.plan_dir, statuses, contracts_by_id=contracts_by_id)
+        for index, status_value in enumerate(statuses, start=1):
+            if status_value == "complete":
+                plans.append_progress_entry(
+                    self.plan_dir,
+                    plans.ProgressEntry(
+                        session_id=plans.parse_session_id(str(index)),
+                        status="complete",
+                        completed_at=f"2026-06-19T15:00:{index:02d}Z",
+                        files_modified=(),
+                        key_decisions=None,
+                        discovered_facts=(),
+                        open_questions=(),
+                        blockers=None,
+                    ),
+                )
         if readiness is None:
             return
         sha = sha_override or plans.stable_readiness_sha256(self.plan_dir)
