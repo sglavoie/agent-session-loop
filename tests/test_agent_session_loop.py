@@ -3071,6 +3071,79 @@ class CommandAndConfigTests(unittest.TestCase):
             ),
         )
 
+    def test_runner_signals_ignore_stderr_pause_when_final_status_complete(
+        self,
+    ) -> None:
+        result = harnesses.HarnessResult(
+            name="codex",
+            argv=["codex"],
+            returncode=0,
+            stdout="Runner status: complete\n",
+            stderr=(
+                "```text\n"
+                "RUNNER_PAUSE: unsafe - plan is not loop-ready; "
+                "run `asl preflight <plan-dir> --mark-loop-ready` before "
+                "continuing\n"
+                "```\n"
+            ),
+            last_message="Runner status: complete\n",
+        )
+
+        signals = runner._runner_signals(result)
+        self.assertEqual("complete", signals["runner_status"])
+        self.assertEqual("last_message", signals["runner_status_source"])
+        self.assertNotIn("runner_pause", signals)
+        self.assertEqual(
+            "complete",
+            runner._turn_status_result(
+                result=result,
+                status_changes=(
+                    runner._session_status_change_payload(
+                        "9",
+                        before="pending",
+                        after="complete",
+                    ),
+                ),
+                pending_completed=("9",),
+                session_id="9",
+                runner_signals=signals,
+                plan_error=None,
+            ),
+        )
+
+    def test_runner_signals_use_last_signal_within_selected_source(self) -> None:
+        result = harnesses.HarnessResult(
+            name="codex",
+            argv=["codex"],
+            returncode=0,
+            stdout=(
+                "RUNNER_PAUSE: unsafe - quoted skill instructions\n"
+                "Runner status: complete\n"
+            ),
+            stderr="RUNNER_PAUSE: unsafe - stale stderr\n",
+            last_message="",
+        )
+
+        signals = runner._runner_signals(result)
+        self.assertEqual(
+            {"runner_status": "complete", "runner_status_source": "stdout"},
+            signals,
+        )
+
+    def test_live_action_signal_ignores_stderr_runner_pause_text(self) -> None:
+        self.assertIsNone(
+            runner._live_action_signal(
+                "stderr",
+                "RUNNER_PAUSE: unsafe - quoted skill instructions\n",
+            )
+        )
+        self.assertIsNotNone(
+            runner._live_action_signal(
+                "stderr",
+                "approval required before continuing\n",
+            )
+        )
+
     def test_custom_harness_config_accepts_supported_shapes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "harnesses.json"
@@ -11001,6 +11074,39 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             "fake review findings\n",
             review_path.read_text(encoding="utf-8"),
         )
+
+    def test_review_harness_ignores_quoted_runner_pause_in_stderr(self) -> None:
+        self._write_plan(("pending",), readiness="loop-ready")
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            extra_env={
+                "FAKE_CODEX_STDOUT_TEXT": "Runner status: complete\n",
+                "FAKE_CODEX_STDERR_TEXT": (
+                    "```text\n"
+                    "RUNNER_PAUSE: unsafe - plan is not loop-ready; "
+                    "run `asl preflight <plan-dir> --mark-loop-ready` before "
+                    "continuing\n"
+                    "```\n"
+                ),
+            },
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertTrue(payload["review_completed"])
+        self.assertIsNone(payload.get("action_required"))
+        self.assertEqual(
+            [runner.SESSION_KIND_IMPLEMENTATION, runner.SESSION_KIND_REVIEW],
+            [turn["session_kind"] for turn in payload["turns"]],
+        )
+        for turn in payload["turns"]:
+            self.assertEqual("complete", turn["status_result"])
+            self.assertNotIn("runner_pause", turn)
 
     def test_review_harness_unavailable_pauses_run(self) -> None:
         # Configure `claude` with a non-existent path so `shutil.which` returns

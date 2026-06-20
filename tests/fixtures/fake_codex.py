@@ -168,6 +168,12 @@ def main() -> int:
     plan_dir = Path(plan_dir_arg)
 
     _write_last_message(f"fake codex mode: {mode}\n")
+    stdout_text = os.environ.get("FAKE_CODEX_STDOUT_TEXT")
+    if stdout_text is not None:
+        print(stdout_text, end="", flush=True)
+    stderr_text = os.environ.get("FAKE_CODEX_STDERR_TEXT")
+    if stderr_text is not None:
+        print(stderr_text, end="", file=sys.stderr, flush=True)
 
     if mode == "timeout":
         time.sleep(float(os.environ.get("FAKE_CODEX_SLEEP", "5")))

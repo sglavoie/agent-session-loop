@@ -618,44 +618,69 @@ def _pending_completed(
     )
 
 
+def _signal_line_candidates(line: str) -> list[str]:
+    stripped = line.strip()
+    candidates = [stripped]
+    for rendered_prefix in ("claude text: ",):
+        if stripped.startswith(rendered_prefix):
+            candidates.append(stripped[len(rendered_prefix) :].strip())
+    return candidates
+
+
 def _extract_prefixed_line(text: str, prefix: str) -> str | None:
     for line in text.splitlines():
-        stripped = line.strip()
-        candidates = [stripped]
-        for rendered_prefix in ("claude text: ",):
-            if stripped.startswith(rendered_prefix):
-                candidates.append(stripped[len(rendered_prefix) :].strip())
-        for candidate in candidates:
+        for candidate in _signal_line_candidates(line):
             if candidate.startswith(prefix):
                 return candidate[len(prefix) :].strip()
     return None
 
 
+def _runner_signal_lines(text: str) -> list[tuple[str, str]]:
+    signals: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        for candidate in _signal_line_candidates(line):
+            if candidate.startswith(events.RUNNER_STATUS_PREFIX):
+                signals.append(
+                    (
+                        "status",
+                        candidate[len(events.RUNNER_STATUS_PREFIX) :].strip(),
+                    )
+                )
+                break
+            if candidate.startswith(events.RUNNER_PAUSE_PREFIX):
+                signals.append(
+                    (
+                        "pause",
+                        candidate[len(events.RUNNER_PAUSE_PREFIX) :].strip(),
+                    )
+                )
+                break
+    return signals
+
+
 def _runner_signals(result: harnesses.HarnessResult) -> dict[str, Any]:
-    signals: dict[str, Any] = {}
     for source, text in (
         ("last_message", result.last_message),
         ("stdout", result.stdout),
         ("stderr", result.stderr),
     ):
-        if "runner_status" not in signals:
-            status = _extract_prefixed_line(text, events.RUNNER_STATUS_PREFIX)
-            if status is not None:
-                signals["runner_status"] = status
-                signals["runner_status_source"] = source
-
-        if "runner_pause" not in signals:
-            pause = _extract_prefixed_line(text, events.RUNNER_PAUSE_PREFIX)
-            if pause is not None:
-                signals["runner_pause"] = pause
+        source_signals = _runner_signal_lines(text)
+        if not source_signals:
+            continue
+        signal_kind, message = source_signals[-1]
+        signals: dict[str, Any] = {}
+        if signal_kind == "status":
+            signals["runner_status"] = message
+            signals["runner_status_source"] = source
+            if message.strip().lower() in {"pause", "paused"}:
+                signals["runner_pause"] = "Runner status reported paused"
                 signals["runner_pause_source"] = source
+        else:
+            signals["runner_pause"] = message
+            signals["runner_pause_source"] = source
+        return signals
 
-    runner_status = str(signals.get("runner_status", "")).strip().lower()
-    if "runner_pause" not in signals and runner_status in {"pause", "paused"}:
-        signals["runner_pause"] = "Runner status reported paused"
-        signals["runner_pause_source"] = signals.get("runner_status_source")
-
-    return signals
+    return {}
 
 
 def _runner_pause_reason(message: str) -> str:
@@ -679,23 +704,24 @@ def _live_action_signal(
     stream_name: harnesses.StreamName,
     text: str,
 ) -> dict[str, Any] | None:
-    pause = _extract_prefixed_line(text, events.RUNNER_PAUSE_PREFIX)
-    if pause is not None:
-        return {
-            "reason": "runner-pause",
-            "message": pause,
-            "source": stream_name,
-            "matched": events.RUNNER_PAUSE_PREFIX,
-        }
+    if stream_name != "stderr":
+        pause = _extract_prefixed_line(text, events.RUNNER_PAUSE_PREFIX)
+        if pause is not None:
+            return {
+                "reason": "runner-pause",
+                "message": pause,
+                "source": stream_name,
+                "matched": events.RUNNER_PAUSE_PREFIX,
+            }
 
-    status = _extract_prefixed_line(text, events.RUNNER_STATUS_PREFIX)
-    if status is not None and status.strip().lower() in {"pause", "paused"}:
-        return {
-            "reason": "runner-status-paused",
-            "message": status,
-            "source": stream_name,
-            "matched": events.RUNNER_STATUS_PREFIX,
-        }
+        status = _extract_prefixed_line(text, events.RUNNER_STATUS_PREFIX)
+        if status is not None and status.strip().lower() in {"pause", "paused"}:
+            return {
+                "reason": "runner-status-paused",
+                "message": status,
+                "source": stream_name,
+                "matched": events.RUNNER_STATUS_PREFIX,
+            }
 
     lowered = text.lower()
     for pattern in APPROVAL_SIGNAL_PATTERNS:
