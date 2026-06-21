@@ -49,6 +49,7 @@ from .formatting import (
 NOT_IMPLEMENTED_EXIT = 2
 INTERRUPTED_EXIT = 130
 HEARTBEAT_INTERVAL_SECONDS = 30.0
+VERIFICATION_HEARTBEAT_INTERVAL_SECONDS = 30.0
 COMMIT_MODE_PER_SESSION = "per-session"
 COMMIT_MODE_END = "end"
 COMMIT_MODES = (COMMIT_MODE_PER_SESSION, COMMIT_MODE_END)
@@ -1922,6 +1923,47 @@ class _ProgressReporter:
     def turn_finished(self, turn: dict[str, Any]) -> None:
         self._emit(format_turn_finished_message(turn))
 
+    def verification_started(self, payload: dict[str, Any]) -> None:
+        check_count = payload.get("check_count")
+        plural = "" if check_count == 1 else "s"
+        self._emit(
+            f"verification started for session {_format_session_label(payload)} "
+            f"turn {payload.get('turn_index')} ({check_count} check{plural})"
+        )
+
+    def verification_check_started(self, payload: dict[str, Any]) -> None:
+        self._emit(
+            f"verification check {payload['check_index'] + 1}/"
+            f"{payload['check_count']} started: "
+            f"{payload['name']} ({payload['kind']})"
+        )
+
+    def verification_heartbeat(self, payload: dict[str, Any]) -> None:
+        self._emit(
+            f"verification heartbeat for session {_format_session_label(payload)} "
+            f"check {payload['check_index'] + 1}/{payload['check_count']} "
+            f"{payload['name']} "
+            f"(elapsed {format_duration_seconds(payload['elapsed_seconds'])}, "
+            f"check elapsed {format_duration_seconds(payload['check_elapsed_seconds'])})"
+        )
+
+    def verification_check_finished(self, payload: dict[str, Any]) -> None:
+        self._emit(
+            f"verification check {payload['check_index'] + 1}/"
+            f"{payload['check_count']} finished: "
+            f"{payload['name']} ({payload['kind']}) "
+            f"status {payload['status']}, "
+            f"duration {format_duration_seconds(payload['duration_seconds'])}"
+        )
+
+    def verification_finished(self, payload: dict[str, Any]) -> None:
+        outcome = "passed" if payload.get("passed") else "failed"
+        self._emit(
+            f"verification {outcome} for session {_format_session_label(payload)} "
+            f"({payload['passed_count']}/{payload['check_count']} checks passed, "
+            f"duration {format_duration_seconds(payload['duration_seconds'])})"
+        )
+
     def commit_started(self, commit: dict[str, Any]) -> None:
         self._emit(
             f"commit {commit['commit_index']} started "
@@ -2032,8 +2074,9 @@ def _compact_next_pending_id(
     snapshot: plans.PlanSnapshot | None,
     fallback: dict[str, Any] | None,
 ) -> str | None:
-    if snapshot is not None and snapshot.next_pending is not None:
-        return snapshot.next_pending.id
+    if snapshot is not None:
+        next_pending = snapshot.next_pending
+        return next_pending.id if next_pending is not None else None
     if isinstance(fallback, dict):
         value = fallback.get("next_pending_id")
         if value is None:
@@ -2085,6 +2128,10 @@ def _compact_status_lines(
     if not isinstance(active_turn, dict):
         active_turn = None
 
+    active_verification = payload.get("active_verification")
+    if not isinstance(active_verification, dict):
+        active_verification = None
+
     fallback_snapshot = payload.get("final_snapshot") or payload.get(
         "initial_snapshot"
     )
@@ -2106,7 +2153,44 @@ def _compact_status_lines(
             f"{counts['pending']} pending"
         )
 
-    if active_turn is not None:
+    if active_verification is not None:
+        check_index = active_verification.get("current_check_index")
+        check_count_value = active_verification.get("check_count")
+        if check_index is None:
+            check_position = (
+                f"-/{check_count_value}" if check_count_value is not None else "-"
+            )
+        else:
+            check_position = (
+                f"{int(check_index) + 1}/{check_count_value}"
+                if check_count_value is not None
+                else str(int(check_index) + 1)
+            )
+        check_name = active_verification.get("current_check_name") or "pending"
+        current_text = (
+            f"status: verifying session "
+            f"{_format_session_label(active_verification)} "
+            f"turn {active_verification.get('turn_index')} "
+            f"check {check_position} {check_name}; {counts_text}"
+        )
+        elapsed = active_verification.get("elapsed_seconds")
+        check_elapsed = active_verification.get("check_elapsed_seconds")
+        timing_parts = []
+        if elapsed is not None:
+            timing_parts.append(
+                f"elapsed {format_duration_seconds(elapsed)}"
+            )
+        if check_elapsed is not None:
+            timing_parts.append(
+                f"check elapsed {format_duration_seconds(check_elapsed)}"
+            )
+        if total_duration_seconds is not None:
+            timing_parts.append(
+                f"total {format_duration_seconds(total_duration_seconds)}"
+            )
+        if timing_parts:
+            current_text += f"; {', '.join(timing_parts)}"
+    elif active_turn is not None:
         current_text = (
             f"status: active session {_format_session_label(active_turn)} "
             f"turn {active_turn.get('turn_index')}; {counts_text}"
@@ -2372,6 +2456,287 @@ class _LiveTurn:
         )
 
 
+class _LiveVerification:
+    """Thread-safe live state and heartbeat manager for one verification run.
+
+    Mirrors :class:`_LiveTurn` for the post-turn verification phase so the
+    operator surfaces (state, events, progress) can show verification as an
+    active phase with heartbeats instead of leaving the runner appearing idle
+    while a long `Verify` recipe runs.
+    """
+
+    def __init__(
+        self,
+        *,
+        event_path: Path,
+        payload: dict[str, Any],
+        progress: _ProgressReporter,
+        persistence: _RunPersistence,
+        run_id: str | None,
+        turn_index: int,
+        session_id: str,
+        session_label: str,
+        total_sessions: int | None,
+        check_count: int,
+        check_names: tuple[str, ...],
+        check_kinds: tuple[str, ...],
+        heartbeat_interval: float = VERIFICATION_HEARTBEAT_INTERVAL_SECONDS,
+    ) -> None:
+        self._event_path = event_path
+        self._payload = payload
+        self._progress = progress
+        self._persistence = persistence
+        self._run_id = run_id
+        self._turn_index = turn_index
+        self._session_id = session_id
+        self._session_label = session_label
+        self._total_sessions = total_sessions
+        self._check_count = check_count
+        self._check_names = check_names
+        self._check_kinds = check_kinds
+        self._heartbeat_interval = heartbeat_interval
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._started_at: datetime | None = None
+        self._check_started_at: datetime | None = None
+        self._current_check_index: int | None = None
+        self._current_check_name: str | None = None
+        self._current_check_kind: str | None = None
+        self._heartbeat_count = 0
+
+    def _identity_payload(self) -> dict[str, Any]:
+        identity: dict[str, Any] = {
+            "run_id": self._run_id,
+            "turn_index": self._turn_index,
+            "session": _session_compat_value(self._session_id),
+            "session_id": self._session_id,
+            "total_sessions": self._total_sessions,
+        }
+        return identity
+
+    def _state_payload(self, *, now: datetime | None = None) -> dict[str, Any]:
+        moment = _utc_now() if now is None else now
+        elapsed = (
+            _duration_seconds(self._started_at, moment)
+            if self._started_at is not None
+            else 0.0
+        )
+        check_elapsed = (
+            _duration_seconds(self._check_started_at, moment)
+            if self._check_started_at is not None
+            else None
+        )
+        active_state = self._identity_payload()
+        active_state.update(
+            {
+                "check_count": self._check_count,
+                "check_names": list(self._check_names),
+                "check_kinds": list(self._check_kinds),
+                "started_at": (
+                    _isoformat(self._started_at)
+                    if self._started_at is not None
+                    else None
+                ),
+                "current_check_index": self._current_check_index,
+                "current_check_name": self._current_check_name,
+                "current_check_kind": self._current_check_kind,
+                "current_check_started_at": (
+                    _isoformat(self._check_started_at)
+                    if self._check_started_at is not None
+                    else None
+                ),
+                "elapsed_seconds": elapsed,
+                "check_elapsed_seconds": check_elapsed,
+                "heartbeat_count": self._heartbeat_count,
+            }
+        )
+        return active_state
+
+    def start(self) -> None:
+        started_at = _utc_now()
+        with self._lock:
+            self._started_at = started_at
+            state_payload = self._state_payload(now=started_at)
+            event_payload = self._identity_payload() | {
+                "check_count": self._check_count,
+                "check_names": list(self._check_names),
+                "check_kinds": list(self._check_kinds),
+                "started_at": _isoformat(started_at),
+                "session_label": self._session_label,
+            }
+            with self._persistence.lock:
+                self._payload["active_verification"] = state_payload
+                self._persistence.append_event(
+                    self._event_path,
+                    events.VERIFICATION_STARTED_EVENT,
+                    event_payload,
+                )
+                self._persistence.write_state(self._payload)
+        self._progress.verification_started(event_payload)
+        self._thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self._thread.start()
+
+    def check_started(
+        self,
+        *,
+        check_index: int,
+        name: str,
+        kind: str,
+        argv: tuple[str, ...] | None,
+        cwd: str | None,
+    ) -> None:
+        moment = _utc_now()
+        with self._lock:
+            self._check_started_at = moment
+            self._current_check_index = check_index
+            self._current_check_name = name
+            self._current_check_kind = kind
+            state_payload = self._state_payload(now=moment)
+            event_payload = self._identity_payload() | {
+                "check_index": check_index,
+                "check_count": self._check_count,
+                "name": name,
+                "kind": kind,
+                "argv": list(argv) if argv is not None else None,
+                "cwd": cwd,
+                "started_at": _isoformat(moment),
+            }
+            with self._persistence.lock:
+                self._payload["active_verification"] = state_payload
+                self._persistence.append_event(
+                    self._event_path,
+                    events.VERIFICATION_CHECK_STARTED_EVENT,
+                    event_payload,
+                )
+                self._persistence.write_state(self._payload)
+        self._progress.verification_check_started(event_payload)
+
+    def check_finished(
+        self,
+        *,
+        check_index: int,
+        name: str,
+        kind: str,
+        status: str,
+        duration_seconds: float,
+        failure_reason: str | None,
+        returncode: int | None,
+    ) -> None:
+        moment = _utc_now()
+        with self._lock:
+            self._check_started_at = None
+            self._current_check_index = check_index
+            self._current_check_name = name
+            self._current_check_kind = kind
+            state_payload = self._state_payload(now=moment)
+            event_payload = self._identity_payload() | {
+                "check_index": check_index,
+                "check_count": self._check_count,
+                "name": name,
+                "kind": kind,
+                "status": status,
+                "duration_seconds": duration_seconds,
+                "failure_reason": failure_reason,
+                "returncode": returncode,
+                "finished_at": _isoformat(moment),
+            }
+            with self._persistence.lock:
+                self._payload["active_verification"] = state_payload
+                self._persistence.append_event(
+                    self._event_path,
+                    events.VERIFICATION_CHECK_FINISHED_EVENT,
+                    event_payload,
+                )
+                self._persistence.write_state(self._payload)
+        self._progress.verification_check_finished(event_payload)
+
+    def finish(
+        self,
+        *,
+        passed: bool,
+        passed_count: int,
+        reason: str,
+        error: str | None = None,
+    ) -> None:
+        self._stop.set()
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join(timeout=1)
+        moment = _utc_now()
+        with self._lock:
+            duration = (
+                _duration_seconds(self._started_at, moment)
+                if self._started_at is not None
+                else 0.0
+            )
+            event_payload = self._identity_payload() | {
+                "check_count": self._check_count,
+                "passed_count": passed_count,
+                "passed": passed,
+                "reason": reason,
+                "duration_seconds": duration,
+                "finished_at": _isoformat(moment),
+            }
+            if error is not None:
+                event_payload["error"] = error
+            with self._persistence.lock:
+                self._payload["active_verification"] = None
+                self._persistence.append_event(
+                    self._event_path,
+                    events.VERIFICATION_FINISHED_EVENT,
+                    event_payload,
+                )
+                self._persistence.write_state(self._payload)
+        self._progress.verification_finished(event_payload)
+
+    def _heartbeat_loop(self) -> None:
+        while not self._stop.wait(self._heartbeat_interval):
+            heartbeat = self._record_heartbeat()
+            if heartbeat is not None:
+                self._progress.verification_heartbeat(heartbeat)
+
+    def _record_heartbeat(self) -> dict[str, Any] | None:
+        moment = _utc_now()
+        with self._lock:
+            if self._started_at is None:
+                return None
+            self._heartbeat_count += 1
+            state_payload = self._state_payload(now=moment)
+            heartbeat = self._identity_payload() | {
+                "check_index": (
+                    self._current_check_index
+                    if self._current_check_index is not None
+                    else 0
+                ),
+                "check_count": self._check_count,
+                "name": (
+                    self._current_check_name
+                    if self._current_check_name is not None
+                    else ""
+                ),
+                "kind": (
+                    self._current_check_kind
+                    if self._current_check_kind is not None
+                    else ""
+                ),
+                "elapsed_seconds": state_payload["elapsed_seconds"],
+                "check_elapsed_seconds": (
+                    state_payload["check_elapsed_seconds"] or 0.0
+                ),
+                "heartbeat_count": self._heartbeat_count,
+                "created_at": _isoformat(moment),
+            }
+            with self._persistence.lock:
+                self._payload["active_verification"] = state_payload
+                self._persistence.append_event(
+                    self._event_path,
+                    events.VERIFICATION_HEARTBEAT_EVENT,
+                    heartbeat,
+                )
+                self._persistence.write_state(self._payload)
+            return heartbeat
+
+
 def _run_auto_commit(
     *,
     event_path: Path,
@@ -2428,6 +2793,7 @@ def _finish_run(
             _duration_seconds(started_at, finished_at) if started_at is not None else None
         )
         payload["active_turn"] = None
+        payload["active_verification"] = None
         _finalize_readiness_lifecycle(payload)
         persistence.append_event(event_path, "run_finished", payload)
         persistence.write_state(payload)
@@ -2855,6 +3221,7 @@ def _enforce_session_verification(
     event_path: Path,
     payload: dict[str, Any],
     persistence: _RunPersistence,
+    progress: _ProgressReporter,
     before: plans.PlanSnapshot,
     after: plans.PlanSnapshot,
     cwd: Path,
@@ -2864,6 +3231,10 @@ def _enforce_session_verification(
     allow_not_loop_ready: bool,
     turn_payload: dict[str, Any],
     paths: dict[str, Path],
+    run_id: str | None,
+    turn_index: int,
+    total_sessions: int | None,
+    heartbeat_interval: float = VERIFICATION_HEARTBEAT_INTERVAL_SECONDS,
 ) -> bool:
     """Run the session's `Verify` recipe and pause on failure or contract problems.
 
@@ -2937,9 +3308,98 @@ def _enforce_session_verification(
         )
         return True
 
+    # Persist `final_snapshot` to the post-turn inspected snapshot before
+    # verification starts. Completion bookkeeping (progress.md append and
+    # `completed_sessions`) still waits until verification passes, but the
+    # snapshot itself is the post-turn view either way so operator tools see
+    # the in-flight phase as "verifying" rather than "idle".
+    with persistence.lock:
+        payload["final_snapshot"] = _snapshot_payload(after)
+
+    contract_checks = contract.verify.checks
+    check_count = len(contract_checks)
+    live_verification = _LiveVerification(
+        event_path=event_path,
+        payload=payload,
+        progress=progress,
+        persistence=persistence,
+        run_id=run_id,
+        turn_index=turn_index,
+        session_id=session_id,
+        session_label=session_label,
+        total_sessions=total_sessions,
+        check_count=check_count,
+        check_names=tuple(check.name for check in contract_checks),
+        check_kinds=tuple(check.kind for check in contract_checks),
+        heartbeat_interval=heartbeat_interval,
+    )
+
+    def _on_check_started(event: verification.CheckStartedEvent) -> None:
+        live_verification.check_started(
+            check_index=event.check_index,
+            name=event.name,
+            kind=event.kind,
+            argv=event.argv,
+            cwd=event.cwd,
+        )
+
+    def _on_check_finished(event: verification.CheckFinishedEvent) -> None:
+        live_verification.check_finished(
+            check_index=event.check_index,
+            name=event.name,
+            kind=event.kind,
+            status=event.result.status,
+            duration_seconds=event.result.duration_seconds,
+            failure_reason=event.result.failure_reason,
+            returncode=event.result.returncode,
+        )
+
+    observer = verification.VerificationObserver(
+        on_check_started=_on_check_started,
+        on_check_finished=_on_check_finished,
+    )
+
+    live_verification.start()
     try:
-        result = verification.run_verification(contract, repo_root=cwd)
+        result = verification.run_verification(
+            contract, repo_root=cwd, observer=observer
+        )
+    except KeyboardInterrupt:
+        live_verification.finish(
+            passed=False,
+            passed_count=0,
+            reason="interrupted",
+        )
+        failure_note = "verification interrupted by user"
+        reverted = _revert_session_status_to_pending(
+            after, session_id, failure_note=failure_note
+        )
+        snapshot_after = _reinspect_after_revert(before.plan_dir, after, reverted)
+        with persistence.lock:
+            payload["final_snapshot"] = _snapshot_payload(snapshot_after)
+            turn_payload["verification"] = {
+                "session": session_id,
+                "reason": "interrupted",
+            }
+            _write_json_file(paths["result"], turn_payload)
+        _pause_run(
+            event_path,
+            payload,
+            reason="interrupted",
+            message=(
+                f"verification for {session_label} interrupted by user"
+            ),
+            details={**session_details},
+            persistence=persistence,
+        )
+        return True
     except OSError as error:
+        live_verification.finish(
+            passed=False,
+            passed_count=0,
+            reason="verify-failed",
+            error=str(error),
+        )
         failure_note = (
             f"verification failed to execute: {error}"
         )
@@ -2964,6 +3424,19 @@ def _enforce_session_verification(
             persistence=persistence,
         )
         return True
+
+    passed_count = sum(
+        1 for check in result.checks if check.status == "pass"
+    )
+    live_verification.finish(
+        passed=result.passed,
+        passed_count=passed_count,
+        reason=(
+            verification.VERIFY_EXIT_REASON_OK
+            if result.passed
+            else verification.VERIFY_EXIT_REASON_FAILED
+        ),
+    )
 
     details = _verification_failure_details(result, contract)
     with persistence.lock:
@@ -3087,6 +3560,7 @@ def _initial_payload(
         run_finished_at=None,
         duration_seconds=None,
         active_turn=None,
+        active_verification=None,
         action_required=None,
         approval_mode=_approval_mode(args),
         commit_mode=commit_mode,
@@ -3531,646 +4005,635 @@ def _run_locked(
     previous_turn_finished_at: datetime | None = None
     commit_at_end_attempted = False
     review_appended = False
-    while True:
-        pending_session = snapshot.next_pending
+    last_session_details: dict[str, Any] = {}
+    try:
+        while True:
+            pending_session = snapshot.next_pending
 
-        if pending_session is None:
-            if not _all_sessions_complete(snapshot):
-                with persistence.lock:
-                    payload["final_snapshot"] = _snapshot_payload(snapshot)
-                _pause_run(
-                    event_path,
-                    payload,
-                    reason="no-pending-but-incomplete",
-                    message=(
-                        "no pending session was found, but not every "
-                        "session is complete"
-                    ),
-                    details={"snapshot": _snapshot_payload(snapshot)},
-                    persistence=persistence,
-                )
-                break
-
-            if commit_mode == COMMIT_MODE_END and not commit_at_end_attempted:
-                commit_at_end_attempted = True
-                with persistence.lock:
-                    payload["final_snapshot"] = _snapshot_payload(snapshot)
-                commit_payload = _run_auto_commit(
-                    event_path=event_path,
-                    payload=payload,
-                    progress=progress,
-                    cwd=cwd,
-                    run_dir=run_dir,
-                    run_id=run_id,
-                    session_id=None,
-                    persistence=persistence,
-                )
-                if not commit_payload["success"]:
-                    _pause_run(
-                        event_path,
-                        payload,
-                        reason="commit-failed",
-                        message=(
-                            "final auto-commit failed after all sessions "
-                            "completed"
-                        ),
-                        details={"commit": commit_payload},
-                        persistence=persistence,
-                    )
-                    break
-                continue
-
-            if review_requested and not review_appended:
-                try:
-                    review_file, review_created = ensure_generated_review_session(
-                        snapshot.plan_dir,
-                        review_harness=args.review_harness,
-                    )
-                except (plans.PlanError, OSError) as error:
+            if pending_session is None:
+                if not _all_sessions_complete(snapshot):
                     with persistence.lock:
                         payload["final_snapshot"] = _snapshot_payload(snapshot)
                     _pause_run(
                         event_path,
                         payload,
-                        reason="malformed-plan",
+                        reason="no-pending-but-incomplete",
                         message=(
-                            "could not create or reuse a generated review "
-                            f"session: {error}"
+                            "no pending session was found, but not every "
+                            "session is complete"
                         ),
-                        details={"error": str(error)},
+                        details={"snapshot": _snapshot_payload(snapshot)},
                         persistence=persistence,
                     )
                     break
-                review_appended = True
-                with persistence.lock:
-                    payload["review_session_id"] = (
-                        review_file.session_id.value
+
+                if commit_mode == COMMIT_MODE_END and not commit_at_end_attempted:
+                    commit_at_end_attempted = True
+                    with persistence.lock:
+                        payload["final_snapshot"] = _snapshot_payload(snapshot)
+                    commit_payload = _run_auto_commit(
+                        event_path=event_path,
+                        payload=payload,
+                        progress=progress,
+                        cwd=cwd,
+                        run_dir=run_dir,
+                        run_id=run_id,
+                        session_id=None,
+                        persistence=persistence,
                     )
-                if review_created:
-                    persistence.append_event(
-                        event_path,
-                        events.REVIEW_SESSION_CREATED_EVENT,
-                        {
-                            "run_id": run_id,
-                            "session_id": review_file.session_id.value,
-                            "session": review_file.session_id.value,
-                            "review_harness": args.review_harness,
-                            "review_session_path": str(review_file.path),
-                            "review_output_path": (
-                                payload.get("review_output_path")
-                                or str(final_review_output_path(
-                                    snapshot.plan_dir
-                                ))
+                    if not commit_payload["success"]:
+                        _pause_run(
+                            event_path,
+                            payload,
+                            reason="commit-failed",
+                            message=(
+                                "final auto-commit failed after all sessions "
+                                "completed"
                             ),
-                        },
+                            details={"commit": commit_payload},
+                            persistence=persistence,
+                        )
+                        break
+                    continue
+
+                if review_requested and not review_appended:
+                    try:
+                        review_file, review_created = ensure_generated_review_session(
+                            snapshot.plan_dir,
+                            review_harness=args.review_harness,
+                        )
+                    except (plans.PlanError, OSError) as error:
+                        with persistence.lock:
+                            payload["final_snapshot"] = _snapshot_payload(snapshot)
+                        _pause_run(
+                            event_path,
+                            payload,
+                            reason="malformed-plan",
+                            message=(
+                                "could not create or reuse a generated review "
+                                f"session: {error}"
+                            ),
+                            details={"error": str(error)},
+                            persistence=persistence,
+                        )
+                        break
+                    review_appended = True
+                    with persistence.lock:
+                        payload["review_session_id"] = (
+                            review_file.session_id.value
+                        )
+                    if review_created:
+                        persistence.append_event(
+                            event_path,
+                            events.REVIEW_SESSION_CREATED_EVENT,
+                            {
+                                "run_id": run_id,
+                                "session_id": review_file.session_id.value,
+                                "session": review_file.session_id.value,
+                                "review_harness": args.review_harness,
+                                "review_session_path": str(review_file.path),
+                                "review_output_path": (
+                                    payload.get("review_output_path")
+                                    or str(final_review_output_path(
+                                        snapshot.plan_dir
+                                    ))
+                                ),
+                            },
+                        )
+                    try:
+                        snapshot = plans.inspect_plan(snapshot.plan_dir)
+                    except plans.PlanError as error:
+                        _pause_run(
+                            event_path,
+                            payload,
+                            reason="malformed-plan",
+                            message=(
+                                "plan could not be inspected after appending the "
+                                f"review session: {error}"
+                            ),
+                            details={"error": str(error)},
+                            persistence=persistence,
+                        )
+                        break
+                    with persistence.lock:
+                        payload["final_snapshot"] = _snapshot_payload(snapshot)
+                    running_success, running_error = _write_readiness_state(
+                        snapshot.plan_dir, "running"
                     )
-                try:
-                    snapshot = plans.inspect_plan(snapshot.plan_dir)
-                except plans.PlanError as error:
-                    _pause_run(
-                        event_path,
-                        payload,
-                        reason="malformed-plan",
-                        message=(
-                            "plan could not be inspected after appending the "
-                            f"review session: {error}"
-                        ),
-                        details={"error": str(error)},
-                        persistence=persistence,
-                    )
-                    break
+                    with persistence.lock:
+                        if running_success:
+                            payload["readiness_state_active"] = True
+                            payload["readiness_state_current"] = "running"
+                            payload["readiness_state_refreshed_at"] = (
+                                _isoformat(_utc_now())
+                            )
+                            payload["readiness_state_refresh_error"] = None
+                        else:
+                            payload["readiness_state_refresh_error"] = (
+                                running_error
+                            )
+                        persistence.write_state(payload)
+                    continue
+
                 with persistence.lock:
                     payload["final_snapshot"] = _snapshot_payload(snapshot)
-                running_success, running_error = _write_readiness_state(
-                    snapshot.plan_dir, "running"
-                )
+                    payload["reason"] = "all-complete"
+                break
+
+            is_review_session = is_generated_review_session_file(
+                pending_session.path
+            )
+
+            if (
+                not is_review_session
+                and max_sessions is not None
+                and completed_count >= max_sessions
+            ):
                 with persistence.lock:
-                    if running_success:
-                        payload["readiness_state_active"] = True
-                        payload["readiness_state_current"] = "running"
-                        payload["readiness_state_refreshed_at"] = (
-                            _isoformat(_utc_now())
-                        )
-                        payload["readiness_state_refresh_error"] = None
-                    else:
-                        payload["readiness_state_refresh_error"] = (
-                            running_error
-                        )
-                    persistence.write_state(payload)
-                continue
+                    payload["reason"] = "max-sessions"
+                break
 
-            with persistence.lock:
-                payload["final_snapshot"] = _snapshot_payload(snapshot)
-                payload["reason"] = "all-complete"
-            break
+            before = snapshot
+            session_id = pending_session.id
+            session_label = _session_label(session_id)
+            session_identity = _session_identity_payload(session_id)
+            session_details = _session_details_payload(session_id)
+            last_session_details = session_details
 
-        is_review_session = is_generated_review_session_file(
-            pending_session.path
-        )
-
-        if (
-            not is_review_session
-            and max_sessions is not None
-            and completed_count >= max_sessions
-        ):
-            with persistence.lock:
-                payload["reason"] = "max-sessions"
-            break
-
-        before = snapshot
-        session_id = pending_session.id
-        session_label = _session_label(session_id)
-        session_identity = _session_identity_payload(session_id)
-        session_details = _session_details_payload(session_id)
-
-        if is_review_session:
-            with persistence.lock:
-                if payload.get("review_session_id") != session_id:
-                    payload["review_session_id"] = session_id
-
-        with persistence.lock:
-            turn_index = len(payload["turns"]) + 1
-        paths = _turn_paths(
-            run_dir,
-            turn_index=turn_index,
-            session_id=session_id,
-        )
-        if is_review_session:
-            turn_harness = args.review_harness
-        else:
-            with run_control_lock:
-                turn_harness = _selected_future_harness(args, control_payload)
-        turn_model_effort = _selected_model_effort_payload(
-            args,
-            harness=turn_harness,
-        )
-        preflight_failure = _harness_preflight_failure(
-            turn_harness,
-            session_id=session_id,
-        )
-        if preflight_failure is not None:
-            message, details = preflight_failure
-            with persistence.lock:
-                payload["final_snapshot"] = _snapshot_payload(before)
-            _pause_run(
-                event_path,
-                payload,
-                reason="harness-unavailable",
-                message=(
-                    f"harness unavailable before {session_label}: {message}"
-                ),
-                details=details,
-                persistence=persistence,
-            )
-            break
-        use_reply_prompt = (
-            reply_context is not None
-            and reply_text is not None
-            and turn_index == 1
-        )
-        if use_reply_prompt:
-            assert reply_context is not None and reply_text is not None
-            prompt = build_reply_prompt(
-                turn_harness,
-                before.plan_dir,
-                reply=reply_text,
-                context=reply_context,
-            )
-            prompt_kind = "reply"
-            reply_source_meta: dict[str, Any] | None = {
-                "run_id": reply_context.run_id,
-                "session_id": reply_context.session_id,
-                "turn_index": reply_context.turn_index,
-                "last_message_path": str(reply_context.last_message_path),
-                "reply_length": len(reply_text),
-            }
-            persisted_prompt = _reply_argv_placeholder(len(reply_text))
-        else:
-            prompt = build_session_prompt(turn_harness, before.plan_dir)
-            prompt_kind = "session"
-            reply_source_meta = None
-            persisted_prompt = prompt
-        turn_started_at = _utc_now()
-        turn_started_at_text = _isoformat(turn_started_at)
-        idle_seconds_since_previous_turn = (
-            0.0
-            if previous_turn_finished_at is None
-            else _duration_seconds(previous_turn_finished_at, turn_started_at)
-        )
-        session_kind = (
-            SESSION_KIND_REVIEW
-            if is_review_session
-            else SESSION_KIND_IMPLEMENTATION
-        )
-        total_sessions = sum(_status_counts(before).values())
-        active_turn = {
-            "run_id": run_id,
-            "turn_index": turn_index,
-            **session_identity,
-            "session_kind": session_kind,
-            "total_sessions": total_sessions,
-            "artifact_dir": str(paths["artifact_dir"]),
-            "prompt": persisted_prompt,
-            "harness": turn_harness,
-            "model": turn_model_effort["model"],
-            "model_source": turn_model_effort["model_source"],
-            "effort": turn_model_effort["effort"],
-            "effort_source": turn_model_effort["effort_source"],
-            "stdout_path": str(paths["stdout"]),
-            "stderr_path": str(paths["stderr"]),
-            "last_message_path": str(paths["last_message"]),
-            "result_path": str(paths["result"]),
-            "started_at": turn_started_at_text,
-            "finished_at": None,
-            "duration_seconds": None,
-            "idle_seconds_since_previous_turn": idle_seconds_since_previous_turn,
-            "last_activity_at": turn_started_at_text,
-            "last_activity_stream": None,
-            "last_activity_preview": "",
-            "last_heartbeat_at": None,
-            "elapsed_seconds": 0.0,
-            "idle_seconds": 0.0,
-            "heartbeat_count": 0,
-            "stdout_chars": 0,
-            "stderr_chars": 0,
-            "action_required": None,
-            "prompt_kind": prompt_kind,
-            "reply_source": reply_source_meta,
-        }
-        log_stream_callback = _prepare_stream_logs(paths)
-        live_turn = _LiveTurn(
-            payload=payload,
-            event_path=event_path,
-            progress=progress,
-            active_turn=active_turn,
-            persistence=persistence,
-        )
-
-        def stream_callback(stream_name: harnesses.StreamName, text: str) -> None:
-            log_stream_callback(stream_name, text)
-            live_turn.record_activity(stream_name, text)
-
-        with run_control_lock:
-            run_control_context = dict(active_turn)
-        if use_reply_prompt:
-            assert reply_source_meta is not None and reply_text is not None
-            persistence.append_event(
-                event_path,
-                events.REPLY_PROVIDED_EVENT,
-                {
-                    "run_id": run_id,
-                    "turn_index": turn_index,
-                    "session_id": session_id,
-                    "reply_length": len(reply_text),
-                    "source": reply_source_meta,
-                },
-            )
-        persistence.append_event(event_path, "turn_started", active_turn)
-        review_fingerprint_before: dict[str, Any] | None = (
-            _capture_review_repo_fingerprint(cwd, before.plan_dir)
-            if is_review_session
-            else None
-        )
-        live_turn.start()
-        _notify_agent_mux_loop_turn_started(payload, active_turn)
-        try:
-            result = harnesses.run_harness(
-                turn_harness,
-                cwd=cwd,
-                plan_dir=before.plan_dir,
-                prompt=prompt,
-                unsafe_bypass=_unsafe_bypass(args),
-                last_message_path=paths["last_message"],
-                timeout=timeout,
-                stream_callback=stream_callback,
-                model=args.model,
-                effort=args.effort,
-            )
-        except KeyboardInterrupt:
-            invocation = build_harness_invocation(
-                turn_harness,
-                cwd=cwd,
-                plan_dir=before.plan_dir,
-                unsafe_bypass=_unsafe_bypass(args),
-                last_message_path=paths["last_message"],
-                model=args.model,
-                effort=args.effort,
-            )
-            result = harnesses.HarnessResult(
-                name=turn_harness,
-                argv=invocation.argv,
-                returncode=INTERRUPTED_EXIT,
-                stdout="",
-                stderr="",
-                interrupted=True,
-            )
-        except Exception:
-            live_turn.stop()
-            live_turn.finish(_utc_now())
-            run_controls.stop()
-            inline_tail.stop()
-            raise
-        live_turn.stop()
-        turn_finished_at = _utc_now()
-        live_turn_payload = live_turn.finish(turn_finished_at)
-        run_started_at = _parse_datetime(payload.get("run_started_at"))
-        if run_started_at is not None:
-            live_turn_payload["total_duration_seconds"] = _duration_seconds(
-                run_started_at,
-                turn_finished_at,
-            )
-        with run_control_lock:
-            run_control_context = None
-        previous_turn_finished_at = turn_finished_at
-        plan_error = None
-        try:
-            after = plans.inspect_plan(before.plan_dir)
-        except plans.PlanError as error:
-            after = None
-            plan_error = str(error)
-        turn_payload = _write_turn_artifacts(
-            paths=paths,
-            result=result,
-            before=before,
-            after=after,
-            run_id=run_id,
-            turn_index=turn_index,
-            session_id=session_id,
-            live_turn=live_turn_payload,
-            plan_error=plan_error,
-            unredacted_prompt=prompt if use_reply_prompt else None,
-        )
-        with persistence.lock:
-            payload["turns"].append(turn_payload)
-            persistence.append_event(event_path, "turn_finished", turn_payload)
-            persistence.write_state(payload)
-        progress.turn_finished(turn_payload)
-
-        if result.interrupted:
-            with persistence.lock:
-                payload["final_snapshot"] = (
-                    _snapshot_payload(after)
-                    if after is not None
-                    else _snapshot_payload(before)
-                )
-            _pause_run(
-                event_path,
-                payload,
-                reason="interrupted",
-                message="run interrupted by user",
-                details=session_details,
-                persistence=persistence,
-            )
-            break
-
-        if result.timed_out:
-            with persistence.lock:
-                payload["final_snapshot"] = (
-                    _snapshot_payload(after)
-                    if after is not None
-                    else _snapshot_payload(before)
-                )
-            _pause_run(
-                event_path,
-                payload,
-                reason="timeout",
-                message=f"harness turn timed out for {session_label}",
-                details=session_details,
-                persistence=persistence,
-            )
-            break
-        if after is None:
-            with persistence.lock:
-                payload["final_snapshot"] = _snapshot_payload(before)
-            _pause_run(
-                event_path,
-                payload,
-                reason="malformed-plan",
-                message="plan could not be inspected after the harness turn",
-                details={"error": plan_error, **session_details},
-                persistence=persistence,
-            )
-            break
-
-        invalid_pause = _invalid_status_pause(after)
-        if invalid_pause is not None:
-            reason, message, details = invalid_pause
-            with persistence.lock:
-                payload["final_snapshot"] = _snapshot_payload(after)
-            _pause_run(
-                event_path,
-                payload,
-                reason=reason,
-                message=message,
-                details=details | session_details,
-                persistence=persistence,
-            )
-            break
-
-        runner_pause = turn_payload.get("runner_pause")
-        if runner_pause is not None:
-            pause_reason = _runner_pause_reason(str(runner_pause))
-            with persistence.lock:
-                payload["final_snapshot"] = _snapshot_payload(after)
-            _pause_run(
-                event_path,
-                payload,
-                reason=pause_reason,
-                message=str(runner_pause),
-                details={
-                    **session_details,
-                    "source": turn_payload.get("runner_pause_source"),
-                },
-                persistence=persistence,
-            )
-            break
-        if result.returncode != 0:
-            with persistence.lock:
-                payload["final_snapshot"] = _snapshot_payload(after)
-            _pause_run(
-                event_path,
-                payload,
-                reason="nonzero-exit",
-                message=(
-                    f"harness exited with status {result.returncode} "
-                    f"for {session_label}"
-                ),
-                details={
-                    **session_details,
-                    "returncode": result.returncode,
-                },
-                persistence=persistence,
-            )
-            break
-
-        if is_review_session and review_fingerprint_before is not None:
-            review_fingerprint_after = _capture_review_repo_fingerprint(
-                cwd, before.plan_dir
-            )
-            if review_fingerprint_after != review_fingerprint_before:
-                failure_note = (
-                    "review mutation guard failed: repository content changed "
-                    "outside the plan directory"
-                )
-                reverted = _revert_session_status_to_pending(
-                    after, session_id, failure_note=failure_note
-                )
-                snapshot_after = _reinspect_after_revert(
-                    before.plan_dir, after, reverted
-                )
-                details = {
-                    **session_details,
-                    "fingerprint_before": review_fingerprint_before,
-                    "fingerprint_after": review_fingerprint_after,
-                }
+            if is_review_session:
                 with persistence.lock:
-                    payload["final_snapshot"] = _snapshot_payload(snapshot_after)
-                    turn_payload["review_mutation_guard"] = {
-                        "passed": False,
-                        "reason": "review-mutated-worktree",
-                        "reverted_to_pending": reverted is not None,
-                        "fingerprint_before": review_fingerprint_before,
-                        "fingerprint_after": review_fingerprint_after,
-                    }
-                    _write_json_file(paths["result"], turn_payload)
+                    if payload.get("review_session_id") != session_id:
+                        payload["review_session_id"] = session_id
+
+            with persistence.lock:
+                turn_index = len(payload["turns"]) + 1
+            paths = _turn_paths(
+                run_dir,
+                turn_index=turn_index,
+                session_id=session_id,
+            )
+            if is_review_session:
+                turn_harness = args.review_harness
+            else:
+                with run_control_lock:
+                    turn_harness = _selected_future_harness(args, control_payload)
+            turn_model_effort = _selected_model_effort_payload(
+                args,
+                harness=turn_harness,
+            )
+            preflight_failure = _harness_preflight_failure(
+                turn_harness,
+                session_id=session_id,
+            )
+            if preflight_failure is not None:
+                message, details = preflight_failure
+                with persistence.lock:
+                    payload["final_snapshot"] = _snapshot_payload(before)
                 _pause_run(
                     event_path,
                     payload,
-                    reason="review-mutated-worktree",
+                    reason="harness-unavailable",
                     message=(
-                        f"review session {session_label} mutated repository "
-                        "content outside the plan directory"
+                        f"harness unavailable before {session_label}: {message}"
                     ),
                     details=details,
                     persistence=persistence,
                 )
                 break
-
-        expected_change = (
-            _session_status_change_payload(
-                session_id,
-                before="pending",
-                after="complete",
-            ),
-        )
-        status_changes = _status_changes(before, after)
-        if not status_changes:
-            with persistence.lock:
-                payload["expected_status_changes"] = list(expected_change)
-                payload["observed_status_changes"] = []
-                payload["final_snapshot"] = _snapshot_payload(after)
-            _pause_run(
-                event_path,
-                payload,
-                reason="no-status-change",
-                message=f"{session_label} did not change status",
-                details={
-                    **session_details,
-                    "expected_status_changes": list(expected_change),
-                    "observed_status_changes": [],
-                },
+            use_reply_prompt = (
+                reply_context is not None
+                and reply_text is not None
+                and turn_index == 1
+            )
+            if use_reply_prompt:
+                assert reply_context is not None and reply_text is not None
+                prompt = build_reply_prompt(
+                    turn_harness,
+                    before.plan_dir,
+                    reply=reply_text,
+                    context=reply_context,
+                )
+                prompt_kind = "reply"
+                reply_source_meta: dict[str, Any] | None = {
+                    "run_id": reply_context.run_id,
+                    "session_id": reply_context.session_id,
+                    "turn_index": reply_context.turn_index,
+                    "last_message_path": str(reply_context.last_message_path),
+                    "reply_length": len(reply_text),
+                }
+                persisted_prompt = _reply_argv_placeholder(len(reply_text))
+            else:
+                prompt = build_session_prompt(turn_harness, before.plan_dir)
+                prompt_kind = "session"
+                reply_source_meta = None
+                persisted_prompt = prompt
+            turn_started_at = _utc_now()
+            turn_started_at_text = _isoformat(turn_started_at)
+            idle_seconds_since_previous_turn = (
+                0.0
+                if previous_turn_finished_at is None
+                else _duration_seconds(previous_turn_finished_at, turn_started_at)
+            )
+            session_kind = (
+                SESSION_KIND_REVIEW
+                if is_review_session
+                else SESSION_KIND_IMPLEMENTATION
+            )
+            total_sessions = sum(_status_counts(before).values())
+            active_turn = {
+                "run_id": run_id,
+                "turn_index": turn_index,
+                **session_identity,
+                "session_kind": session_kind,
+                "total_sessions": total_sessions,
+                "artifact_dir": str(paths["artifact_dir"]),
+                "prompt": persisted_prompt,
+                "harness": turn_harness,
+                "model": turn_model_effort["model"],
+                "model_source": turn_model_effort["model_source"],
+                "effort": turn_model_effort["effort"],
+                "effort_source": turn_model_effort["effort_source"],
+                "stdout_path": str(paths["stdout"]),
+                "stderr_path": str(paths["stderr"]),
+                "last_message_path": str(paths["last_message"]),
+                "result_path": str(paths["result"]),
+                "started_at": turn_started_at_text,
+                "finished_at": None,
+                "duration_seconds": None,
+                "idle_seconds_since_previous_turn": idle_seconds_since_previous_turn,
+                "last_activity_at": turn_started_at_text,
+                "last_activity_stream": None,
+                "last_activity_preview": "",
+                "last_heartbeat_at": None,
+                "elapsed_seconds": 0.0,
+                "idle_seconds": 0.0,
+                "heartbeat_count": 0,
+                "stdout_chars": 0,
+                "stderr_chars": 0,
+                "action_required": None,
+                "prompt_kind": prompt_kind,
+                "reply_source": reply_source_meta,
+            }
+            log_stream_callback = _prepare_stream_logs(paths)
+            live_turn = _LiveTurn(
+                payload=payload,
+                event_path=event_path,
+                progress=progress,
+                active_turn=active_turn,
                 persistence=persistence,
             )
-            break
-        if len(status_changes) > 1:
-            with persistence.lock:
-                payload["expected_status_changes"] = list(expected_change)
-                payload["observed_status_changes"] = list(status_changes)
-                payload["final_snapshot"] = _snapshot_payload(after)
-            _pause_run(
-                event_path,
-                payload,
-                reason="multiple-status-changes",
-                message="more than one session status changed during one harness turn",
-                details={
-                    **session_details,
-                    "expected_status_changes": list(expected_change),
-                    "observed_status_changes": list(status_changes),
-                },
-                persistence=persistence,
-            )
-            break
-        if status_changes != expected_change:
-            with persistence.lock:
-                payload["expected_status_changes"] = list(expected_change)
-                payload["observed_status_changes"] = list(status_changes)
-                payload["final_snapshot"] = _snapshot_payload(after)
-            _pause_run(
-                event_path,
-                payload,
-                reason="unexpected-status-change",
-                message="the changed session status did not match the expected pending completion",
-                details={
-                    **session_details,
-                    "expected_status_changes": list(expected_change),
-                    "observed_status_changes": list(status_changes),
-                },
-                persistence=persistence,
-            )
-            break
 
-        if _enforce_session_verification(
-            event_path=event_path,
-            payload=payload,
-            persistence=persistence,
-            before=before,
-            after=after,
-            cwd=cwd,
-            session_id=session_id,
-            session_label=session_label,
-            session_details=session_details,
-            allow_not_loop_ready=allow_not_loop_ready,
-            turn_payload=turn_payload,
-            paths=paths,
-        ):
-            break
+            def stream_callback(stream_name: harnesses.StreamName, text: str) -> None:
+                log_stream_callback(stream_name, text)
+                live_turn.record_activity(stream_name, text)
 
-        completed_at = _utc_iso_now()
-        progress_error: str | None = None
-        try:
-            progress_appended = _append_progress_entry(
-                after, session_id, completed_at
+            with run_control_lock:
+                run_control_context = dict(active_turn)
+            if use_reply_prompt:
+                assert reply_source_meta is not None and reply_text is not None
+                persistence.append_event(
+                    event_path,
+                    events.REPLY_PROVIDED_EVENT,
+                    {
+                        "run_id": run_id,
+                        "turn_index": turn_index,
+                        "session_id": session_id,
+                        "reply_length": len(reply_text),
+                        "source": reply_source_meta,
+                    },
+                )
+            persistence.append_event(event_path, "turn_started", active_turn)
+            review_fingerprint_before: dict[str, Any] | None = (
+                _capture_review_repo_fingerprint(cwd, before.plan_dir)
+                if is_review_session
+                else None
             )
-        except Exception as error:
-            progress_appended = False
-            progress_error = str(error)
-            persistence.append_event(
-                event_path,
-                "progress-journal-append-failed",
-                {
-                    "run_id": payload.get("run_id"),
-                    "session": session_id,
-                    "session_label": session_label,
-                    "completed_at": completed_at,
-                    "error": progress_error,
-                },
-            )
-        with persistence.lock:
-            turn_payload["progress_appended"] = progress_appended
-            if progress_error is not None:
-                turn_payload["progress_error"] = progress_error
-            _write_json_file(paths["result"], turn_payload)
-
-        try:
-            ledger_updates = plans.sync_derived_status_ledgers(after)
-        except plans.PlanError as error:
-            with persistence.lock:
-                payload["final_snapshot"] = _snapshot_payload(after)
-            _pause_run(
-                event_path,
-                payload,
-                reason="malformed-plan",
-                message="derived status ledgers could not be synced",
-                details={
-                    **session_details,
-                    "error": str(error),
-                },
-                persistence=persistence,
-            )
-            break
-        if ledger_updates:
+            live_turn.start()
+            _notify_agent_mux_loop_turn_started(payload, active_turn)
+            try:
+                result = harnesses.run_harness(
+                    turn_harness,
+                    cwd=cwd,
+                    plan_dir=before.plan_dir,
+                    prompt=prompt,
+                    unsafe_bypass=_unsafe_bypass(args),
+                    last_message_path=paths["last_message"],
+                    timeout=timeout,
+                    stream_callback=stream_callback,
+                    model=args.model,
+                    effort=args.effort,
+                )
+            except KeyboardInterrupt:
+                invocation = build_harness_invocation(
+                    turn_harness,
+                    cwd=cwd,
+                    plan_dir=before.plan_dir,
+                    unsafe_bypass=_unsafe_bypass(args),
+                    last_message_path=paths["last_message"],
+                    model=args.model,
+                    effort=args.effort,
+                )
+                result = harnesses.HarnessResult(
+                    name=turn_harness,
+                    argv=invocation.argv,
+                    returncode=INTERRUPTED_EXIT,
+                    stdout="",
+                    stderr="",
+                    interrupted=True,
+                )
+            except Exception:
+                live_turn.stop()
+                live_turn.finish(_utc_now())
+                run_controls.stop()
+                inline_tail.stop()
+                raise
+            live_turn.stop()
+            turn_finished_at = _utc_now()
+            live_turn_payload = live_turn.finish(turn_finished_at)
+            run_started_at = _parse_datetime(payload.get("run_started_at"))
+            if run_started_at is not None:
+                live_turn_payload["total_duration_seconds"] = _duration_seconds(
+                    run_started_at,
+                    turn_finished_at,
+                )
+            with run_control_lock:
+                run_control_context = None
+            previous_turn_finished_at = turn_finished_at
+            plan_error = None
             try:
                 after = plans.inspect_plan(before.plan_dir)
+            except plans.PlanError as error:
+                after = None
+                plan_error = str(error)
+            turn_payload = _write_turn_artifacts(
+                paths=paths,
+                result=result,
+                before=before,
+                after=after,
+                run_id=run_id,
+                turn_index=turn_index,
+                session_id=session_id,
+                live_turn=live_turn_payload,
+                plan_error=plan_error,
+                unredacted_prompt=prompt if use_reply_prompt else None,
+            )
+            with persistence.lock:
+                payload["turns"].append(turn_payload)
+                persistence.append_event(event_path, "turn_finished", turn_payload)
+                persistence.write_state(payload)
+            progress.turn_finished(turn_payload)
+
+            if result.interrupted:
+                with persistence.lock:
+                    payload["final_snapshot"] = (
+                        _snapshot_payload(after)
+                        if after is not None
+                        else _snapshot_payload(before)
+                    )
+                _pause_run(
+                    event_path,
+                    payload,
+                    reason="interrupted",
+                    message="run interrupted by user",
+                    details=session_details,
+                    persistence=persistence,
+                )
+                break
+
+            if result.timed_out:
+                with persistence.lock:
+                    payload["final_snapshot"] = (
+                        _snapshot_payload(after)
+                        if after is not None
+                        else _snapshot_payload(before)
+                    )
+                _pause_run(
+                    event_path,
+                    payload,
+                    reason="timeout",
+                    message=f"harness turn timed out for {session_label}",
+                    details=session_details,
+                    persistence=persistence,
+                )
+                break
+            if after is None:
+                with persistence.lock:
+                    payload["final_snapshot"] = _snapshot_payload(before)
+                _pause_run(
+                    event_path,
+                    payload,
+                    reason="malformed-plan",
+                    message="plan could not be inspected after the harness turn",
+                    details={"error": plan_error, **session_details},
+                    persistence=persistence,
+                )
+                break
+
+            invalid_pause = _invalid_status_pause(after)
+            if invalid_pause is not None:
+                reason, message, details = invalid_pause
+                with persistence.lock:
+                    payload["final_snapshot"] = _snapshot_payload(after)
+                _pause_run(
+                    event_path,
+                    payload,
+                    reason=reason,
+                    message=message,
+                    details=details | session_details,
+                    persistence=persistence,
+                )
+                break
+
+            runner_pause = turn_payload.get("runner_pause")
+            if runner_pause is not None:
+                pause_reason = _runner_pause_reason(str(runner_pause))
+                with persistence.lock:
+                    payload["final_snapshot"] = _snapshot_payload(after)
+                _pause_run(
+                    event_path,
+                    payload,
+                    reason=pause_reason,
+                    message=str(runner_pause),
+                    details={
+                        **session_details,
+                        "source": turn_payload.get("runner_pause_source"),
+                    },
+                    persistence=persistence,
+                )
+                break
+            if result.returncode != 0:
+                with persistence.lock:
+                    payload["final_snapshot"] = _snapshot_payload(after)
+                _pause_run(
+                    event_path,
+                    payload,
+                    reason="nonzero-exit",
+                    message=(
+                        f"harness exited with status {result.returncode} "
+                        f"for {session_label}"
+                    ),
+                    details={
+                        **session_details,
+                        "returncode": result.returncode,
+                    },
+                    persistence=persistence,
+                )
+                break
+
+            if is_review_session and review_fingerprint_before is not None:
+                review_fingerprint_after = _capture_review_repo_fingerprint(
+                    cwd, before.plan_dir
+                )
+                if review_fingerprint_after != review_fingerprint_before:
+                    failure_note = (
+                        "review mutation guard failed: repository content changed "
+                        "outside the plan directory"
+                    )
+                    reverted = _revert_session_status_to_pending(
+                        after, session_id, failure_note=failure_note
+                    )
+                    snapshot_after = _reinspect_after_revert(
+                        before.plan_dir, after, reverted
+                    )
+                    details = {
+                        **session_details,
+                        "fingerprint_before": review_fingerprint_before,
+                        "fingerprint_after": review_fingerprint_after,
+                    }
+                    with persistence.lock:
+                        payload["final_snapshot"] = _snapshot_payload(snapshot_after)
+                        turn_payload["review_mutation_guard"] = {
+                            "passed": False,
+                            "reason": "review-mutated-worktree",
+                            "reverted_to_pending": reverted is not None,
+                            "fingerprint_before": review_fingerprint_before,
+                            "fingerprint_after": review_fingerprint_after,
+                        }
+                        _write_json_file(paths["result"], turn_payload)
+                    _pause_run(
+                        event_path,
+                        payload,
+                        reason="review-mutated-worktree",
+                        message=(
+                            f"review session {session_label} mutated repository "
+                            "content outside the plan directory"
+                        ),
+                        details=details,
+                        persistence=persistence,
+                    )
+                    break
+
+            expected_change = (
+                _session_status_change_payload(
+                    session_id,
+                    before="pending",
+                    after="complete",
+                ),
+            )
+            status_changes = _status_changes(before, after)
+            if not status_changes:
+                with persistence.lock:
+                    payload["expected_status_changes"] = list(expected_change)
+                    payload["observed_status_changes"] = []
+                    payload["final_snapshot"] = _snapshot_payload(after)
+                _pause_run(
+                    event_path,
+                    payload,
+                    reason="no-status-change",
+                    message=f"{session_label} did not change status",
+                    details={
+                        **session_details,
+                        "expected_status_changes": list(expected_change),
+                        "observed_status_changes": [],
+                    },
+                    persistence=persistence,
+                )
+                break
+            if len(status_changes) > 1:
+                with persistence.lock:
+                    payload["expected_status_changes"] = list(expected_change)
+                    payload["observed_status_changes"] = list(status_changes)
+                    payload["final_snapshot"] = _snapshot_payload(after)
+                _pause_run(
+                    event_path,
+                    payload,
+                    reason="multiple-status-changes",
+                    message="more than one session status changed during one harness turn",
+                    details={
+                        **session_details,
+                        "expected_status_changes": list(expected_change),
+                        "observed_status_changes": list(status_changes),
+                    },
+                    persistence=persistence,
+                )
+                break
+            if status_changes != expected_change:
+                with persistence.lock:
+                    payload["expected_status_changes"] = list(expected_change)
+                    payload["observed_status_changes"] = list(status_changes)
+                    payload["final_snapshot"] = _snapshot_payload(after)
+                _pause_run(
+                    event_path,
+                    payload,
+                    reason="unexpected-status-change",
+                    message="the changed session status did not match the expected pending completion",
+                    details={
+                        **session_details,
+                        "expected_status_changes": list(expected_change),
+                        "observed_status_changes": list(status_changes),
+                    },
+                    persistence=persistence,
+                )
+                break
+
+            if _enforce_session_verification(
+                event_path=event_path,
+                payload=payload,
+                persistence=persistence,
+                progress=progress,
+                before=before,
+                after=after,
+                cwd=cwd,
+                session_id=session_id,
+                session_label=session_label,
+                session_details=session_details,
+                allow_not_loop_ready=allow_not_loop_ready,
+                turn_payload=turn_payload,
+                paths=paths,
+                run_id=run_id,
+                turn_index=turn_index,
+                total_sessions=total_sessions,
+            ):
+                break
+
+            completed_at = _utc_iso_now()
+            progress_error: str | None = None
+            try:
+                progress_appended = _append_progress_entry(
+                    after, session_id, completed_at
+                )
+            except Exception as error:
+                progress_appended = False
+                progress_error = str(error)
+                persistence.append_event(
+                    event_path,
+                    "progress-journal-append-failed",
+                    {
+                        "run_id": payload.get("run_id"),
+                        "session": session_id,
+                        "session_label": session_label,
+                        "completed_at": completed_at,
+                        "error": progress_error,
+                    },
+                )
+            with persistence.lock:
+                turn_payload["progress_appended"] = progress_appended
+                if progress_error is not None:
+                    turn_payload["progress_error"] = progress_error
+                _write_json_file(paths["result"], turn_payload)
+
+            try:
+                ledger_updates = plans.sync_derived_status_ledgers(after)
             except plans.PlanError as error:
                 with persistence.lock:
                     payload["final_snapshot"] = _snapshot_payload(after)
@@ -4178,7 +4641,7 @@ def _run_locked(
                     event_path,
                     payload,
                     reason="malformed-plan",
-                    message="plan could not be inspected after syncing ledgers",
+                    message="derived status ledgers could not be synced",
                     details={
                         **session_details,
                         "error": str(error),
@@ -4186,71 +4649,100 @@ def _run_locked(
                     persistence=persistence,
                 )
                 break
-            with persistence.lock:
-                turn_payload["ledger_updates"] = [str(path) for path in ledger_updates]
-                turn_payload["after"] = _snapshot_payload(after)
-                _write_json_file(paths["result"], turn_payload)
-
-        _refresh_active_readiness_state(payload, after.plan_dir, persistence)
-
-        if not is_review_session and commit_mode == COMMIT_MODE_PER_SESSION:
-            commit_payload = _run_auto_commit(
-                event_path=event_path,
-                payload=payload,
-                progress=progress,
-                cwd=cwd,
-                run_dir=run_dir,
-                run_id=run_id,
-                session_id=session_id,
-                persistence=persistence,
-            )
-            if not commit_payload["success"]:
+            if ledger_updates:
+                try:
+                    after = plans.inspect_plan(before.plan_dir)
+                except plans.PlanError as error:
+                    with persistence.lock:
+                        payload["final_snapshot"] = _snapshot_payload(after)
+                    _pause_run(
+                        event_path,
+                        payload,
+                        reason="malformed-plan",
+                        message="plan could not be inspected after syncing ledgers",
+                        details={
+                            **session_details,
+                            "error": str(error),
+                        },
+                        persistence=persistence,
+                    )
+                    break
                 with persistence.lock:
-                    payload["final_snapshot"] = _snapshot_payload(after)
-                _pause_run(
-                    event_path,
-                    payload,
-                    reason="commit-failed",
-                    message=(
-                        "auto-commit failed after session "
-                        f"{session_id} completed"
-                    ),
-                    details={
-                        **session_details,
-                        "commit": commit_payload,
-                    },
+                    turn_payload["ledger_updates"] = [str(path) for path in ledger_updates]
+                    turn_payload["after"] = _snapshot_payload(after)
+                    _write_json_file(paths["result"], turn_payload)
+
+            _refresh_active_readiness_state(payload, after.plan_dir, persistence)
+
+            if not is_review_session and commit_mode == COMMIT_MODE_PER_SESSION:
+                commit_payload = _run_auto_commit(
+                    event_path=event_path,
+                    payload=payload,
+                    progress=progress,
+                    cwd=cwd,
+                    run_dir=run_dir,
+                    run_id=run_id,
+                    session_id=session_id,
                     persistence=persistence,
                 )
+                if not commit_payload["success"]:
+                    with persistence.lock:
+                        payload["final_snapshot"] = _snapshot_payload(after)
+                    _pause_run(
+                        event_path,
+                        payload,
+                        reason="commit-failed",
+                        message=(
+                            "auto-commit failed after session "
+                            f"{session_id} completed"
+                        ),
+                        details={
+                            **session_details,
+                            "commit": commit_payload,
+                        },
+                        persistence=persistence,
+                    )
+                    break
+
+            with persistence.lock:
+                payload["completed_sessions"].append(_session_compat_value(session_id))
+                payload.setdefault("completed_session_ids", []).append(session_id)
+                if is_review_session:
+                    payload["review_completed"] = True
+            if not is_review_session:
+                completed_count += 1
+            snapshot = after
+            with persistence.lock:
+                payload["final_snapshot"] = _snapshot_payload(snapshot)
+
+            if is_review_session:
+                with persistence.lock:
+                    payload["reason"] = "all-complete"
                 break
 
-        with persistence.lock:
-            payload["completed_sessions"].append(_session_compat_value(session_id))
-            payload.setdefault("completed_session_ids", []).append(session_id)
-            if is_review_session:
-                payload["review_completed"] = True
-        if not is_review_session:
-            completed_count += 1
-        snapshot = after
-        with persistence.lock:
-            payload["final_snapshot"] = _snapshot_payload(snapshot)
+            with run_control_lock:
+                should_stop_after_current = _consume_run_control_stop(
+                    run_controls,
+                    snapshot=snapshot,
+                    payload=payload,
+                    event_path=event_path,
+                    control_payload=control_payload,
+                    context=turn_payload,
+                    persistence=persistence,
+                )
+            if should_stop_after_current:
+                break
 
-        if is_review_session:
-            with persistence.lock:
-                payload["reason"] = "all-complete"
-            break
-
-        with run_control_lock:
-            should_stop_after_current = _consume_run_control_stop(
-                run_controls,
-                snapshot=snapshot,
-                payload=payload,
-                event_path=event_path,
-                control_payload=control_payload,
-                context=turn_payload,
+    except KeyboardInterrupt:
+        if not payload.get("paused"):
+            _pause_run(
+                event_path,
+                payload,
+                reason="interrupted",
+                message="run interrupted by user",
+                details=dict(last_session_details),
                 persistence=persistence,
             )
-        if should_stop_after_current:
-            break
 
     with persistence.lock:
         if payload["ok"] and payload["reason"] == "":

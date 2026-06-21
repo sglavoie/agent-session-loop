@@ -89,6 +89,38 @@ def _active_turn_payload(
     }
 
 
+def _active_verification_payload(
+    *,
+    run_id: str = "20260619T000000Z-1",
+    turn_index: int = 1,
+    session_id: str = "1",
+    started_at: str = "2026-06-19T00:00:00+00:00",
+    check_index: int | None = 0,
+    check_count: int = 2,
+    check_name: str = "operator-surface-tests",
+    check_kind: str = "command",
+    check_started_at: str | None = "2026-06-19T00:00:01+00:00",
+) -> dict[str, object]:
+    return {
+        "run_id": run_id,
+        "turn_index": turn_index,
+        "session_id": session_id,
+        "session": int(session_id) if session_id.isdigit() else session_id,
+        "total_sessions": 5,
+        "started_at": started_at,
+        "elapsed_seconds": 5.5,
+        "check_count": check_count,
+        "check_names": [check_name, "operator-surface-compile"],
+        "check_kinds": [check_kind, "command"],
+        "current_check_index": check_index,
+        "current_check_name": check_name,
+        "current_check_kind": check_kind,
+        "current_check_started_at": check_started_at,
+        "check_elapsed_seconds": 1.5,
+        "heartbeat_count": 0,
+    }
+
+
 def _turn_result_payload(
     *,
     plan_dir: Path,
@@ -209,6 +241,73 @@ class ScanRunningRowsTests(unittest.TestCase):
             self.assertEqual("claude", row.harness)
             self.assertTrue(row.lock_active)
             self.assertFalse(row.lock_stale)
+
+    def test_active_verification_emits_verification_running_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "state"
+            plan_dir = Path(tmp) / "plans" / "alpha-verify"
+            plan_dir.mkdir(parents=True)
+            active_verification = _active_verification_payload(
+                run_id="20260619T000000Z-2",
+                turn_index=3,
+                session_id="2",
+                check_index=1,
+                check_count=2,
+                check_name="operator-surface-compile",
+            )
+            _make_plan_state_dir(
+                state_root,
+                plan_dir,
+                lock={"pid": os.getpid()},
+                state_payload={
+                    "run_id": "20260619T000000Z-2",
+                    "harness": "claude",
+                    "active_turn": None,
+                    "active_verification": active_verification,
+                },
+            )
+
+            rows, stale_locks, skipped = session_overview.scan_running_rows(
+                state_root
+            )
+
+            self.assertEqual((), stale_locks)
+            self.assertEqual((), skipped)
+            self.assertEqual(1, len(rows))
+            row = rows[0]
+            self.assertEqual("verification", row.kind)
+            self.assertEqual("2", row.session_id)
+            self.assertEqual(3, row.turn_index)
+            self.assertEqual(1, row.check_index)
+            self.assertEqual(2, row.check_count)
+            self.assertEqual("operator-surface-compile", row.check_name)
+            self.assertEqual("command", row.check_kind)
+            self.assertIsNone(row.idle_seconds)
+            self.assertEqual(5.5, row.elapsed_seconds)
+
+    def test_active_verification_takes_priority_over_active_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "state"
+            plan_dir = Path(tmp) / "plans" / "alpha-priority"
+            plan_dir.mkdir(parents=True)
+            active_turn = _active_turn_payload(session_id="2", turn_index=3)
+            active_verification = _active_verification_payload(
+                session_id="2", turn_index=3
+            )
+            _make_plan_state_dir(
+                state_root,
+                plan_dir,
+                lock={"pid": os.getpid()},
+                state_payload={
+                    "active_turn": active_turn,
+                    "active_verification": active_verification,
+                },
+            )
+
+            rows, _, _ = session_overview.scan_running_rows(state_root)
+
+            self.assertEqual(1, len(rows))
+            self.assertEqual("verification", rows[0].kind)
 
     def test_stale_lock_excluded_from_running_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -635,6 +734,10 @@ class BuildSessionsPayloadTests(unittest.TestCase):
                     "last_activity_at",
                     "lock_active",
                     "lock_stale",
+                    "check_index",
+                    "check_count",
+                    "check_name",
+                    "check_kind",
                 },
                 set(payload["running"][0].keys()),
             )
@@ -662,6 +765,60 @@ class BuildSessionsPayloadTests(unittest.TestCase):
                 {"path", "reason"},
                 set(payload["skipped"][0].keys()),
             )
+
+
+    def test_verification_running_row_payload_includes_check_context(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "state"
+            state_root.mkdir()
+            running_row = session_overview.RunningRow(
+                kind="verification",
+                plan_dir=Path("/plans/alpha"),
+                state_dir=Path("/state/alpha"),
+                run_id="run-1",
+                harness="claude",
+                session_id="2",
+                turn_index=3,
+                pid=os.getpid(),
+                started_at="2026-06-19T00:00:00+00:00",
+                elapsed_seconds=5.0,
+                idle_seconds=None,
+                last_activity_at="2026-06-19T00:00:01+00:00",
+                lock_active=True,
+                lock_stale=False,
+                check_index=0,
+                check_count=2,
+                check_name="operator-surface-tests",
+                check_kind="command",
+            )
+
+            payload = session_overview.build_sessions_payload(
+                state_root_path=state_root,
+                show_running=True,
+                show_recent=False,
+                limit=20,
+                running_rows=(running_row,),
+                recent_rows=(),
+                stale_locks=(),
+                skipped=(),
+            )
+
+            self.assertEqual(1, len(payload["running"]))
+            row = payload["running"][0]
+            self.assertEqual("verification", row["kind"])
+            self.assertEqual(0, row["check_index"])
+            self.assertEqual(2, row["check_count"])
+            self.assertEqual("operator-surface-tests", row["check_name"])
+            self.assertEqual("command", row["check_kind"])
+
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                session_overview._print_text_sessions(payload, verbose=False)
+            text = buffer.getvalue()
+            self.assertIn("verification", text)
+            self.assertIn("check 1/2 operator-surface-tests", text)
 
 
 class SessionsFromArgsTests(unittest.TestCase):

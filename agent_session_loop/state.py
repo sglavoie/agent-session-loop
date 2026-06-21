@@ -309,6 +309,7 @@ def _runner_state_payload(state_path: Path) -> dict[str, Any]:
             "path": str(state_path),
             "error": None,
             "active_turn": None,
+            "active_verification": None,
         }
 
     try:
@@ -319,6 +320,7 @@ def _runner_state_payload(state_path: Path) -> dict[str, Any]:
             "path": str(state_path),
             "error": str(error),
             "active_turn": None,
+            "active_verification": None,
         }
 
     if not isinstance(raw, dict):
@@ -327,11 +329,16 @@ def _runner_state_payload(state_path: Path) -> dict[str, Any]:
             "path": str(state_path),
             "error": "state file did not contain a JSON object",
             "active_turn": None,
+            "active_verification": None,
         }
 
     active_turn = raw.get("active_turn")
     if not isinstance(active_turn, dict):
         active_turn = None
+
+    active_verification = raw.get("active_verification")
+    if not isinstance(active_verification, dict):
+        active_verification = None
 
     return {
         "present": True,
@@ -346,6 +353,7 @@ def _runner_state_payload(state_path: Path) -> dict[str, Any]:
         "run_finished_at": raw.get("run_finished_at"),
         "duration_seconds": raw.get("duration_seconds"),
         "active_turn": active_turn,
+        "active_verification": active_verification,
     }
 
 
@@ -386,6 +394,34 @@ def _progress_journal_payload(plan_dir: Path) -> dict[str, Any]:
     }
 
 
+def _stale_runner_state(
+    runner_state: dict[str, Any],
+    lock_info: LockInfo | None,
+) -> tuple[bool, str | None]:
+    """Detect unfinished `state.json` that no active lock is guarding.
+
+    Returns ``(stale_unfinished, stale_reason)``. The pair is ``(False, None)``
+    when the runner state is absent, unreadable, already finished, or still
+    held by an active lock. When an active lock is missing but the persisted
+    state never set ``run_finished_at``, surface a short, human-readable
+    reason so the operator can see the orphan in both JSON and text output.
+    """
+    if not runner_state.get("present"):
+        return False, None
+    if runner_state.get("error"):
+        return False, None
+    if runner_state.get("run_finished_at"):
+        return False, None
+    if lock_info is not None and lock_info.active:
+        return False, None
+    if lock_info is None:
+        return True, "runner state has not finished but no lock file is present"
+    return (
+        True,
+        f"runner state has not finished but lock is stale: {lock_info.reason}",
+    )
+
+
 def status_payload(
     snapshot: plans.PlanSnapshot,
     state_dir: str | Path | None = None,
@@ -396,6 +432,9 @@ def status_payload(
     lock_info = _read_lock_path(lock_path, snapshot.plan_dir)
     next_pending = snapshot.next_pending
     runner_state = _runner_state_payload(state_path)
+    stale_unfinished, stale_reason = _stale_runner_state(runner_state, lock_info)
+    runner_state["stale_unfinished"] = stale_unfinished
+    runner_state["stale_reason"] = stale_reason
     progress_journal = _progress_journal_payload(snapshot.plan_dir)
     return responses.success_payload(
         "status",
@@ -415,6 +454,7 @@ def status_payload(
         events_path=str(plan_state / events.EVENTS_FILE_NAME),
         runner_state=runner_state,
         active_turn=runner_state.get("active_turn"),
+        active_verification=runner_state.get("active_verification"),
         counts=_status_counts(snapshot),
         next_pending=(
             _session_compat_value(next_pending.id)
@@ -451,6 +491,9 @@ def _print_text_status(payload: dict[str, Any]) -> None:
         run_id = runner_state.get("run_id") or "unknown"
         run_started_at = runner_state.get("run_started_at") or "unknown"
         print(f"Run state: run {run_id} started {run_started_at}")
+        if runner_state.get("stale_unfinished"):
+            stale_reason = runner_state.get("stale_reason") or "stale unfinished"
+            print(f"Run state: stale/orphaned ({stale_reason})")
 
     progress_journal = payload.get("progress_journal")
     if isinstance(progress_journal, dict):
@@ -491,6 +534,36 @@ def _print_text_status(payload: dict[str, Any]) -> None:
         print(f"  Stderr: {active_turn.get('stderr_path')}")
         print(f"  Last message: {active_turn.get('last_message_path')}")
         print(f"  Result: {active_turn.get('result_path')}")
+
+    active_verification = payload.get("active_verification")
+    if isinstance(active_verification, dict):
+        check_count = active_verification.get("check_count")
+        check_index = active_verification.get("current_check_index")
+        if check_index is None:
+            check_position = (
+                f"-/{check_count}" if check_count is not None else "-"
+            )
+        else:
+            check_position = (
+                f"{int(check_index) + 1}/{check_count}"
+                if check_count is not None
+                else str(int(check_index) + 1)
+            )
+        check_name = active_verification.get("current_check_name") or "pending"
+        print(
+            "Active verification: "
+            f"session {_session_label_from_payload(active_verification)} "
+            f"turn {active_verification.get('turn_index')} "
+            f"check {check_position} {check_name} "
+            f"elapsed {format_duration_seconds(active_verification.get('elapsed_seconds'))} "
+            f"check elapsed {format_duration_seconds(active_verification.get('check_elapsed_seconds'))}"
+        )
+        check_kind = active_verification.get("current_check_kind")
+        if check_kind:
+            print(f"  Check kind: {check_kind}")
+        heartbeat_count = active_verification.get("heartbeat_count")
+        if heartbeat_count is not None:
+            print(f"  Heartbeats: {heartbeat_count}")
 
     print("Sessions:")
     for session in payload["sessions"]:

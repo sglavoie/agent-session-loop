@@ -593,10 +593,26 @@ one of `stop-after-current-requested`, `stop-after-current-canceled`,
 While a harness turn is active, `state.json` also includes `active_turn` with
 the run id, turn index, session ID, harness, prompt, model and effort metadata,
 artifact paths, elapsed and idle seconds, last activity metadata, heartbeat
-count, and any best-effort action-required signal. `events.jsonl` records
+count, and any best-effort action-required signal. While the runner is
+executing a post-turn `## Completion Contract` `### Verify` recipe, `state.json`
+also includes `active_verification` with the run id, turn index, session ID,
+total `check_count`, the declared `check_names` and `check_kinds`,
+`current_check_index`, `current_check_name`, `current_check_kind`,
+`started_at`, `current_check_started_at`, `elapsed_seconds`,
+`check_elapsed_seconds`, and `heartbeat_count`. `active_turn` is cleared before
+`active_verification` is populated, so the two phases are mutually exclusive;
+both are `null` between turns and after `run_finished`. `events.jsonl` records
 `turn_started`, `turn_heartbeat`, `action_required`, `turn_finished`,
-`commit_started`, `commit_finished`, `run_control`, `review_session_created`,
-`run_paused`, and `run_finished` events as they happen. `review_session_created`
+`verification_started`, `verification_check_started`, `verification_heartbeat`,
+`verification_check_finished`, `verification_finished`, `commit_started`,
+`commit_finished`, `run_control`, `review_session_created`, `run_paused`, and
+`run_finished` events as they happen. Verification heartbeats fire every 30
+seconds while a single check is in flight, so long-running checks remain
+observable in `tail` and the live status snapshot. Verification check argv is
+captured in the `verification_check_started` payload and not streamed to a
+log file; command stdout and stderr remain captured in the underlying
+`asl verify` invocation and in the turn `result.json` under the `verification`
+key. `review_session_created`
 fires once per run, when the runner appends a fresh generated review session;
 resuming an existing pending review session does not re-emit it. Its payload
 carries `run_id`, the review `session_id`, `review_harness`,
@@ -712,7 +728,15 @@ authoritative for runtime-selected per-turn harnesses after `1`, `2`, or `3`.
 state. Each parsed session includes canonical string `id`; integer-only
 sessions also include numeric `number` for compatibility. The top-level
 `next_pending_id` is the canonical string ID, while `next_pending` remains a
-numeric value for integer-only plans and a string for dotted plans. `doctor
+numeric value for integer-only plans and a string for dotted plans. The
+top-level payload also surfaces `active_turn` and `active_verification` (each
+`null` when the corresponding phase is not in flight) and a `runner_state`
+block with `stale_unfinished` (boolean) and `stale_reason` (string or `null`).
+`stale_unfinished` is `true` whenever `state.json` is present without a
+`run_finished_at` and no active lock guards it (no lock file, or a stale lock);
+`stale_reason` carries a short human-readable explanation. Text output prints
+`Run state: stale/orphaned (<reason>)` immediately under the regular
+`Run state:` line whenever the runner state is orphaned. `doctor
 --json` reports the resolved harness executable, generated prompt, argv, and
 model/effort metadata without invoking the harness. Text `run` and `doctor`
 output print the selected model after `Harness:` and print effort only when an
@@ -725,10 +749,15 @@ and `recent`), `limit` (a non-negative integer), `running` (array of running
 rows), `recent` (array of recent rows, truncated to `limit`), `stale_locks`,
 `skipped`, and `counts`. `counts` mirrors the row arrays with integer
 `running`, `recent`, `stale_locks`, and `skipped` fields. Running rows include
-`kind` (`"turn"` for an active turn, `"loop"` when the lock is alive but no
-`active_turn` exists), `plan_dir`, `state_dir`, `run_id`, `harness`,
-`session_id`, `turn_index`, `pid`, `started_at`, `elapsed_seconds`,
-`idle_seconds`, `last_activity_at`, `lock_active`, and `lock_stale`. Recent
+`kind` (`"turn"` for an active turn, `"verification"` while the runner is
+executing a post-turn `### Verify` recipe, `"loop"` when the lock is alive but
+no `active_turn` or `active_verification` exists), `plan_dir`, `state_dir`,
+`run_id`, `harness`, `session_id`, `turn_index`, `pid`, `started_at`,
+`elapsed_seconds`, `idle_seconds`, `last_activity_at`, `lock_active`, and
+`lock_stale`. Verification rows also include `check_index`, `check_count`,
+`check_name`, and `check_kind`; the text renderer appends a
+`check k/n NAME` suffix and uses `null` for `idle_seconds` because verification
+has no idle concept. Plain turn rows leave the verification fields `null`. Recent
 rows include `plan_dir`, `state_dir`, `run_id`, `harness`, `session_id`,
 `turn_index`, `status`, `finished_at`, `duration_seconds`, and
 `artifact_dir`. Plan paths in JSON are always full canonical paths; the
@@ -866,6 +895,67 @@ asl unlock ~/.local/share/agent-plans/example-plan/ --force --json
 If a plan has no pending sessions but is not complete, inspect every final
 `session-<id>.md` handoff and normalize statuses to exactly `pending` or
 `complete`. Ignore older status templates preserved above the final handoff.
+
+### Long verification after `session N/N finished`
+
+The runner emits `session N/N finished` as soon as a harness turn writes a
+`- **Status**: complete` handoff and the per-turn turn artifacts are flushed.
+The independent post-turn verification gate then runs the session's
+`## Completion Contract` `### Verify` recipe, which can take longer than the
+harness turn itself (full unit suites, integration commands, large
+`regex_in_file` scans, etc.). During that window the runner is **not** idle:
+`state.json.active_verification` is populated with the in-flight check, and
+`events.jsonl` carries `verification_started`, `verification_check_started`,
+`verification_heartbeat` (every 30 seconds), `verification_check_finished`, and
+finally `verification_finished` records. `asl status`, `asl tail`, and
+`asl sessions --running` all surface this phase — `asl sessions --running` reports
+the row with `kind="verification"` and a `check k/n NAME` suffix, and `asl tail`
+prints the same heartbeats inline. Independent verification remains mandatory:
+the harness handoff is only the implementation claim, the verify recipe is the
+durable gate. Per-check stdout, stderr, and `failure_reason` enums remain
+captured in the turn `result.json` under the `verification` key and in any
+`asl verify --json` invocation.
+
+### Stale unfinished `state.json` with no lock
+
+When a runner process is killed (SIGKILL, host reboot, container OOM) without
+running its cleanup path, `state.json` can be left without
+`run_finished_at` while no `lock.json` is held. `asl status` flags this in two
+places:
+
+```bash
+asl status ~/.local/share/agent-plans/example-plan/ --json \
+  | jq '.runner_state | {stale_unfinished, stale_reason, run_id, run_started_at}'
+```
+
+Text output prints a second `Run state: stale/orphaned (<reason>)` line under
+the regular `Run state:` line. The orphan is informational: durable session
+completion still lives in the `## Handoff` blocks, and the next `asl run` will
+acquire a fresh lock, recompute readiness, and resume normally. If the orphan
+appears alongside a `Lock: stale (...)` entry, clear the lock with
+`asl unlock ... --force --json` only after confirming no other runner is
+genuinely active.
+
+### Missing progress journal entry for the final session after a killed runner
+
+The runner appends to `progress.md` (the runner-managed cross-session digest)
+**after** the post-turn verification gate succeeds. If a runner is killed
+between writing the `- **Status**: complete` handoff and finishing
+verification, the session's handoff is durable but the journal entry will be
+missing. The fix is to rerun the loop — verification reruns, and the
+post-verification append is idempotent against `(session_id, completed_at)`.
+If the operator already finished the run by hand and only wants to backfill
+the journal, regenerate it from the handoffs:
+
+```bash
+asl backfill-progress ~/.local/share/agent-plans/example-plan/
+asl backfill-progress --force ~/.local/share/agent-plans/example-plan/
+```
+
+`backfill-progress` reconstructs the journal from completed handoffs; `--force`
+replaces an existing journal atomically. Never edit `progress.md` by hand from
+a session — the schema-versioned `<!-- agent-session-loop progress-journal v1 -->`
+header is what the runner uses to refuse stale or malformed journals.
 
 ### Interactive Q&A resume
 

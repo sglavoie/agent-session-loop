@@ -21,7 +21,7 @@ import re
 import subprocess
 import sys
 import time
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from . import plans, responses
 from .contracts import (
@@ -76,6 +76,78 @@ class VerificationResult:
     @property
     def failures(self) -> tuple[CheckResult, ...]:
         return tuple(check for check in self.checks if check.status != "pass")
+
+
+@dataclass(frozen=True)
+class CheckStartedEvent:
+    """Observer payload emitted before a single check executes."""
+
+    session_id: SessionId
+    check_index: int
+    check_count: int
+    name: str
+    kind: str
+    argv: tuple[str, ...] | None = None
+    cwd: str | None = None
+
+
+@dataclass(frozen=True)
+class CheckFinishedEvent:
+    """Observer payload emitted after a single check finishes."""
+
+    session_id: SessionId
+    check_index: int
+    check_count: int
+    name: str
+    kind: str
+    result: CheckResult
+
+
+CheckStartedCallback = Callable[[CheckStartedEvent], None]
+CheckFinishedCallback = Callable[[CheckFinishedEvent], None]
+
+
+@dataclass(frozen=True)
+class VerificationObserver:
+    """Optional callbacks invoked around each check in :func:`run_verification`.
+
+    Each callback is fired synchronously, in declared check order, on the same
+    thread that runs the check. ``on_check_started`` is invoked before the
+    check executes; ``on_check_finished`` is invoked after the check completes
+    (including failures). Either field may be ``None`` to skip that event.
+    Exceptions raised by a callback propagate to the caller.
+    """
+
+    on_check_started: CheckStartedCallback | None = None
+    on_check_finished: CheckFinishedCallback | None = None
+
+
+def _make_check_started_event(
+    session_id: SessionId,
+    check: VerificationCheck,
+    *,
+    index: int,
+    count: int,
+    repo_root: Path,
+) -> CheckStartedEvent:
+    argv: tuple[str, ...] | None = None
+    cwd: str | None = None
+    if isinstance(check, CommandCheck):
+        argv = tuple(check.argv)
+        resolved = (
+            repo_root if check.cwd is None
+            else _resolve_under_root(repo_root, check.cwd)
+        )
+        cwd = str(resolved)
+    return CheckStartedEvent(
+        session_id=session_id,
+        check_index=index,
+        check_count=count,
+        name=check.name,
+        kind=check.kind,
+        argv=argv,
+        cwd=cwd,
+    )
 
 
 def _resolve_under_root(repo_root: Path, relative: str) -> Path:
@@ -254,13 +326,48 @@ def run_check(check: VerificationCheck, *, repo_root: str | Path) -> CheckResult
 
 
 def run_verification(
-    contract: CompletionContract, *, repo_root: str | Path
+    contract: CompletionContract,
+    *,
+    repo_root: str | Path,
+    observer: VerificationObserver | None = None,
 ) -> VerificationResult:
-    """Execute every check in ``contract.verify`` against ``repo_root``."""
+    """Execute every check in ``contract.verify`` against ``repo_root``.
+
+    When ``observer`` is provided, its ``on_check_started`` and
+    ``on_check_finished`` callbacks are invoked synchronously around each
+    check in declared order. The CLI behavior and JSON payload of
+    :func:`verify_from_args` are unchanged when no observer is passed.
+    """
     canonical_root = canonicalize_path(repo_root)
+    on_started = observer.on_check_started if observer is not None else None
+    on_finished = observer.on_check_finished if observer is not None else None
+    checks = contract.verify.checks
+    check_count = len(checks)
     results: list[CheckResult] = []
-    for check in contract.verify.checks:
-        results.append(run_check(check, repo_root=canonical_root))
+    for index, check in enumerate(checks):
+        if on_started is not None:
+            on_started(
+                _make_check_started_event(
+                    contract.session_id,
+                    check,
+                    index=index,
+                    count=check_count,
+                    repo_root=canonical_root,
+                )
+            )
+        check_result = run_check(check, repo_root=canonical_root)
+        results.append(check_result)
+        if on_finished is not None:
+            on_finished(
+                CheckFinishedEvent(
+                    session_id=contract.session_id,
+                    check_index=index,
+                    check_count=check_count,
+                    name=check.name,
+                    kind=check.kind,
+                    result=check_result,
+                )
+            )
     return VerificationResult(
         session_id=contract.session_id,
         checks=tuple(results),

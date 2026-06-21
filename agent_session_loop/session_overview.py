@@ -80,6 +80,10 @@ class RunningRow:
     last_activity_at: str | None
     lock_active: bool
     lock_stale: bool
+    check_index: int | None = None
+    check_count: int | None = None
+    check_name: str | None = None
+    check_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -485,8 +489,42 @@ def _build_running_row(
     plan_dir: Path,
     state_payload: dict[str, Any],
 ) -> RunningRow:
+    active_verification = state_payload.get("active_verification")
     active_turn = state_payload.get("active_turn")
-    if isinstance(active_turn, dict):
+    check_index: int | None = None
+    check_count: int | None = None
+    check_name: str | None = None
+    check_kind: str | None = None
+    if isinstance(active_verification, dict):
+        kind = "verification"
+        run_id = (
+            _coerce_nonempty_str(active_verification.get("run_id"))
+            or _coerce_nonempty_str(state_payload.get("run_id"))
+            or ""
+        )
+        harness = _coerce_nonempty_str(state_payload.get("harness")) or ""
+        session_id = _resolve_session_id(active_verification)
+        turn_index = _coerce_int(active_verification.get("turn_index"))
+        started_at = (
+            _coerce_nonempty_str(active_verification.get("started_at"))
+            or lock_info.created_at
+        )
+        elapsed_seconds = _coerce_float(
+            active_verification.get("elapsed_seconds")
+        )
+        idle_seconds = None
+        last_activity_at = _coerce_nonempty_str(
+            active_verification.get("current_check_started_at")
+        ) or _coerce_nonempty_str(active_verification.get("started_at"))
+        check_index = _coerce_int(active_verification.get("current_check_index"))
+        check_count = _coerce_int(active_verification.get("check_count"))
+        check_name = _coerce_nonempty_str(
+            active_verification.get("current_check_name")
+        )
+        check_kind = _coerce_nonempty_str(
+            active_verification.get("current_check_kind")
+        )
+    elif isinstance(active_turn, dict):
         kind = "turn"
         run_id = (
             _coerce_nonempty_str(active_turn.get("run_id"))
@@ -534,6 +572,10 @@ def _build_running_row(
         last_activity_at=last_activity_at,
         lock_active=True,
         lock_stale=False,
+        check_index=check_index,
+        check_count=check_count,
+        check_name=check_name,
+        check_kind=check_kind,
     )
 
 
@@ -673,6 +715,10 @@ def _running_row_payload(row: RunningRow) -> dict[str, Any]:
         "last_activity_at": row.last_activity_at,
         "lock_active": row.lock_active,
         "lock_stale": row.lock_stale,
+        "check_index": row.check_index,
+        "check_count": row.check_count,
+        "check_name": row.check_name,
+        "check_kind": row.check_kind,
     }
 
 
@@ -760,14 +806,31 @@ def _print_running_section(
         turn_index = _format_int(row["turn_index"])
         harness = row["harness"] or "unknown"
         pid = _format_int(row["pid"])
+        check_suffix = ""
+        if row.get("kind") == "verification":
+            check_index = row.get("check_index")
+            check_count = row.get("check_count")
+            if check_index is None:
+                position = (
+                    f"-/{check_count}" if check_count is not None else "-"
+                )
+            else:
+                position = (
+                    f"{int(check_index) + 1}/{check_count}"
+                    if check_count is not None
+                    else str(int(check_index) + 1)
+                )
+            check_name = row.get("check_name") or "pending"
+            check_suffix = f"  check {position} {check_name}"
         print(
-            f"  {row['kind']:<6}"
+            f"  {row['kind']:<12}"
             f"  started {format_local_time(row['started_at'])}"
             f"  elapsed {format_duration_seconds(row['elapsed_seconds'])}"
             f"  idle {format_duration_seconds(row['idle_seconds'])}"
             f"  pid {pid}"
             f"  harness {harness}"
             f"  session {session_id} turn {turn_index}"
+            f"{check_suffix}"
             f"  plan {plan}"
         )
 

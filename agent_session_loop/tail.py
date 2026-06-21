@@ -237,6 +237,71 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
             f"review session {session} created "
             f"(harness {harness}, file {review_path})"
         )
+    if name == events.VERIFICATION_STARTED_EVENT:
+        check_count = payload.get("check_count")
+        plural = "" if check_count == 1 else "s"
+        return (
+            f"verification started for session {_format_session_label(payload)} "
+            f"turn {payload.get('turn_index')} ({check_count} check{plural})"
+        )
+    if name == events.VERIFICATION_CHECK_STARTED_EVENT:
+        check_index = payload.get("check_index")
+        check_count = payload.get("check_count")
+        position = (
+            f"{int(check_index) + 1}/{check_count}"
+            if check_index is not None and check_count is not None
+            else "?/?"
+        )
+        return (
+            f"verification check {position} started: "
+            f"{payload.get('name', 'unknown')} "
+            f"({payload.get('kind', 'unknown')}) "
+            f"session {_format_session_label(payload)} "
+            f"turn {payload.get('turn_index')}"
+        )
+    if name == events.VERIFICATION_HEARTBEAT_EVENT:
+        check_index = payload.get("check_index")
+        check_count = payload.get("check_count")
+        position = (
+            f"{int(check_index) + 1}/{check_count}"
+            if check_index is not None and check_count is not None
+            else "?/?"
+        )
+        return (
+            f"verification heartbeat for session {_format_session_label(payload)} "
+            f"check {position} {payload.get('name', 'unknown')} "
+            f"(elapsed {format_duration_seconds(payload.get('elapsed_seconds'))}, "
+            f"check elapsed {format_duration_seconds(payload.get('check_elapsed_seconds'))})"
+        )
+    if name == events.VERIFICATION_CHECK_FINISHED_EVENT:
+        check_index = payload.get("check_index")
+        check_count = payload.get("check_count")
+        position = (
+            f"{int(check_index) + 1}/{check_count}"
+            if check_index is not None and check_count is not None
+            else "?/?"
+        )
+        failure_reason = payload.get("failure_reason")
+        suffix = f", failure {failure_reason}" if failure_reason else ""
+        return (
+            f"verification check {position} finished: "
+            f"{payload.get('name', 'unknown')} "
+            f"({payload.get('kind', 'unknown')}) "
+            f"status {payload.get('status', 'unknown')}, "
+            f"duration {format_duration_seconds(payload.get('duration_seconds'))}"
+            f"{suffix}"
+        )
+    if name == events.VERIFICATION_FINISHED_EVENT:
+        outcome = "passed" if payload.get("passed") else "failed"
+        passed_count = payload.get("passed_count", "?")
+        check_count = payload.get("check_count", "?")
+        reason = payload.get("reason") or "unknown"
+        return (
+            f"verification {outcome} for session {_format_session_label(payload)} "
+            f"({passed_count}/{check_count} checks passed, "
+            f"reason {reason}, "
+            f"duration {format_duration_seconds(payload.get('duration_seconds'))})"
+        )
     if name == events.RUN_PAUSED_EVENT:
         detail = payload.get("message")
         suffix = "" if not detail else f": {detail}"

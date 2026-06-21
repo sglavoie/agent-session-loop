@@ -448,6 +448,163 @@ class ParserAndStateTests(unittest.TestCase):
         self.assertIn("duration 1m30s", finished)
         self.assertIn("total 1h30m05s", finished)
 
+    def test_tail_event_messages_format_verification_started(self) -> None:
+        message = tail._event_message(
+            events.VERIFICATION_STARTED_EVENT,
+            {
+                "session": 2,
+                "session_id": "2",
+                "total_sessions": 5,
+                "turn_index": 3,
+                "check_count": 2,
+            },
+        )
+        self.assertEqual(
+            "verification started for session 2/5 turn 3 (2 checks)",
+            message,
+        )
+
+    def test_tail_event_messages_format_verification_check_started(self) -> None:
+        message = tail._event_message(
+            events.VERIFICATION_CHECK_STARTED_EVENT,
+            {
+                "session": 2,
+                "session_id": "2",
+                "total_sessions": 5,
+                "turn_index": 3,
+                "check_index": 0,
+                "check_count": 2,
+                "name": "operator-surface-tests",
+                "kind": "command",
+            },
+        )
+        self.assertIn("verification check 1/2 started", message)
+        self.assertIn("operator-surface-tests", message)
+        self.assertIn("(command)", message)
+        self.assertIn("session 2/5", message)
+        self.assertIn("turn 3", message)
+
+    def test_tail_event_messages_format_verification_heartbeat(self) -> None:
+        message = tail._event_message(
+            events.VERIFICATION_HEARTBEAT_EVENT,
+            {
+                "session": 2,
+                "session_id": "2",
+                "total_sessions": 5,
+                "turn_index": 3,
+                "check_index": 1,
+                "check_count": 2,
+                "name": "operator-surface-compile",
+                "elapsed_seconds": 65,
+                "check_elapsed_seconds": 5.0,
+                "heartbeat_count": 2,
+            },
+        )
+        self.assertIn("verification heartbeat for session 2/5", message)
+        self.assertIn("check 2/2 operator-surface-compile", message)
+        self.assertIn("elapsed 1m05s", message)
+        self.assertIn("check elapsed 5", message)
+
+    def test_tail_event_messages_format_verification_check_finished(self) -> None:
+        passed = tail._event_message(
+            events.VERIFICATION_CHECK_FINISHED_EVENT,
+            {
+                "session": 2,
+                "session_id": "2",
+                "total_sessions": 5,
+                "turn_index": 3,
+                "check_index": 0,
+                "check_count": 2,
+                "name": "operator-surface-tests",
+                "kind": "command",
+                "status": "pass",
+                "duration_seconds": 1.5,
+                "failure_reason": None,
+                "returncode": 0,
+            },
+        )
+        self.assertIn("verification check 1/2 finished", passed)
+        self.assertIn("status pass", passed)
+        self.assertNotIn("failure", passed)
+
+        failed = tail._event_message(
+            events.VERIFICATION_CHECK_FINISHED_EVENT,
+            {
+                "session": 2,
+                "session_id": "2",
+                "total_sessions": 5,
+                "turn_index": 3,
+                "check_index": 1,
+                "check_count": 2,
+                "name": "operator-surface-compile",
+                "kind": "command",
+                "status": "fail",
+                "duration_seconds": 0.5,
+                "failure_reason": "command-failed",
+                "returncode": 1,
+            },
+        )
+        self.assertIn("status fail", failed)
+        self.assertIn("failure command-failed", failed)
+
+    def test_tail_event_messages_format_verification_finished(self) -> None:
+        passed = tail._event_message(
+            events.VERIFICATION_FINISHED_EVENT,
+            {
+                "session": 2,
+                "session_id": "2",
+                "total_sessions": 5,
+                "turn_index": 3,
+                "check_count": 2,
+                "passed_count": 2,
+                "passed": True,
+                "reason": "ok",
+                "duration_seconds": 7.5,
+            },
+        )
+        self.assertIn("verification passed for session 2/5", passed)
+        self.assertIn("2/2 checks passed", passed)
+        self.assertIn("reason ok", passed)
+
+        failed = tail._event_message(
+            events.VERIFICATION_FINISHED_EVENT,
+            {
+                "session": 2,
+                "session_id": "2",
+                "total_sessions": 5,
+                "turn_index": 3,
+                "check_count": 2,
+                "passed_count": 1,
+                "passed": False,
+                "reason": "verify-failed",
+                "duration_seconds": 4.0,
+            },
+        )
+        self.assertIn("verification failed for session 2/5", failed)
+        self.assertIn("1/2 checks passed", failed)
+        self.assertIn("reason verify-failed", failed)
+
+    def test_tail_does_not_add_log_targets_for_verification_events(
+        self,
+    ) -> None:
+        record = {
+            "name": events.VERIFICATION_CHECK_STARTED_EVENT,
+            "payload": {
+                "run_id": "run-1",
+                "session": 2,
+                "session_id": "2",
+                "turn_index": 3,
+                "check_index": 0,
+                "check_count": 1,
+                "name": "operator-surface-tests",
+                "kind": "command",
+                "argv": ["python3", "-m", "pytest", "-q"],
+                "cwd": "/tmp/repo",
+            },
+        }
+        targets = tail._discover_targets([record], None)
+        self.assertEqual({}, targets)
+
     def test_tail_event_messages_format_run_controls(self) -> None:
         requested = tail._event_message(
             events.RUN_CONTROL_EVENT,
@@ -2394,6 +2551,320 @@ class ParserAndStateTests(unittest.TestCase):
                 output,
             )
 
+    def test_status_payload_flags_stale_unfinished_runner_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(
+                plan_dir,
+                ("complete", "complete", "complete", "complete", "complete"),
+            )
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            plan_state.mkdir(parents=True)
+            state_path = plan_state / events.STATE_FILE_NAME
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "paused": False,
+                        "run_id": "20260619T120000Z-1",
+                        "harness": "claude",
+                        "reason": "",
+                        "run_started_at": "2026-06-19T12:00:00+00:00",
+                        "run_finished_at": None,
+                        "duration_seconds": None,
+                        "active_turn": None,
+                        "final_snapshot": {
+                            "counts": {
+                                "pending": 0,
+                                "complete": 5,
+                                "empty": 0,
+                                "unknown": 0,
+                            },
+                            "next_pending_id": "5",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+
+            self.assertIsNone(payload["next_pending"])
+            self.assertIsNone(payload["next_pending_id"])
+            self.assertEqual(0, payload["counts"]["pending"])
+            self.assertEqual(5, payload["counts"]["complete"])
+
+            runner_state = payload["runner_state"]
+            self.assertTrue(runner_state["present"])
+            self.assertTrue(runner_state["stale_unfinished"])
+            self.assertIsNotNone(runner_state["stale_reason"])
+            self.assertIn("no lock file is present", runner_state["stale_reason"])
+
+    def test_status_payload_does_not_flag_stale_when_finished(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("complete", "complete"))
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            plan_state.mkdir(parents=True)
+            state_path = plan_state / events.STATE_FILE_NAME
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "paused": False,
+                        "run_id": "20260619T120000Z-2",
+                        "harness": "claude",
+                        "reason": "",
+                        "run_started_at": "2026-06-19T12:00:00+00:00",
+                        "run_finished_at": "2026-06-19T12:30:00+00:00",
+                        "duration_seconds": 1800.0,
+                        "active_turn": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+
+            runner_state = payload["runner_state"]
+            self.assertTrue(runner_state["present"])
+            self.assertFalse(runner_state["stale_unfinished"])
+            self.assertIsNone(runner_state["stale_reason"])
+
+    def test_status_payload_does_not_flag_stale_when_active_lock_held(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending", "pending"))
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            plan_state.mkdir(parents=True)
+            state_path = plan_state / events.STATE_FILE_NAME
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "paused": False,
+                        "run_id": "20260619T120000Z-3",
+                        "harness": "claude",
+                        "reason": "",
+                        "run_started_at": "2026-06-19T12:00:00+00:00",
+                        "run_finished_at": None,
+                        "duration_seconds": None,
+                        "active_turn": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            lock_info = state.acquire_lock(plan_dir, state_dir)
+            try:
+                payload = state.status_payload(
+                    plans.inspect_plan(plan_dir), state_dir
+                )
+            finally:
+                state.release_lock(plan_dir, state_dir)
+
+            self.assertTrue(payload["lock"]["active"])
+            self.assertEqual(lock_info.pid, payload["lock"]["pid"])
+            runner_state = payload["runner_state"]
+            self.assertTrue(runner_state["present"])
+            self.assertFalse(runner_state["stale_unfinished"])
+            self.assertIsNone(runner_state["stale_reason"])
+
+    def test_status_payload_exposes_active_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            plan_state.mkdir(parents=True)
+            state_path = plan_state / events.STATE_FILE_NAME
+            active_verification = {
+                "run_id": "20260620T100000Z-1",
+                "turn_index": 1,
+                "session": 1,
+                "session_id": "1",
+                "total_sessions": 1,
+                "check_count": 2,
+                "check_names": ["operator-surface-tests", "operator-surface-compile"],
+                "check_kinds": ["command", "command"],
+                "started_at": "2026-06-20T10:00:00+00:00",
+                "current_check_index": 0,
+                "current_check_name": "operator-surface-tests",
+                "current_check_kind": "command",
+                "current_check_started_at": "2026-06-20T10:00:01+00:00",
+                "elapsed_seconds": 2.0,
+                "check_elapsed_seconds": 1.0,
+                "heartbeat_count": 0,
+            }
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "paused": False,
+                        "run_id": "20260620T100000Z-1",
+                        "harness": "claude",
+                        "reason": "",
+                        "run_started_at": "2026-06-20T10:00:00+00:00",
+                        "run_finished_at": None,
+                        "duration_seconds": None,
+                        "active_turn": None,
+                        "active_verification": active_verification,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+
+            self.assertEqual(active_verification, payload["active_verification"])
+            self.assertEqual(
+                active_verification,
+                payload["runner_state"]["active_verification"],
+            )
+
+    def test_status_payload_active_verification_null_when_idle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            plan_state.mkdir(parents=True)
+            state_path = plan_state / events.STATE_FILE_NAME
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "paused": False,
+                        "run_id": "20260620T100000Z-2",
+                        "harness": "claude",
+                        "reason": "",
+                        "run_started_at": "2026-06-20T10:00:00+00:00",
+                        "run_finished_at": None,
+                        "duration_seconds": None,
+                        "active_turn": None,
+                        "active_verification": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+
+            self.assertIsNone(payload["active_verification"])
+            self.assertIsNone(payload["runner_state"]["active_verification"])
+
+    def test_status_from_args_text_output_renders_active_verification(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            plan_state.mkdir(parents=True)
+            state_path = plan_state / events.STATE_FILE_NAME
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "paused": False,
+                        "run_id": "20260620T100000Z-3",
+                        "harness": "claude",
+                        "reason": "",
+                        "run_started_at": "2026-06-20T10:00:00+00:00",
+                        "run_finished_at": None,
+                        "duration_seconds": None,
+                        "active_turn": None,
+                        "active_verification": {
+                            "run_id": "20260620T100000Z-3",
+                            "turn_index": 1,
+                            "session": 1,
+                            "session_id": "1",
+                            "total_sessions": 1,
+                            "check_count": 2,
+                            "check_names": [
+                                "operator-surface-tests",
+                                "operator-surface-compile",
+                            ],
+                            "check_kinds": ["command", "command"],
+                            "started_at": "2026-06-20T10:00:00+00:00",
+                            "current_check_index": 0,
+                            "current_check_name": "operator-surface-tests",
+                            "current_check_kind": "command",
+                            "current_check_started_at": (
+                                "2026-06-20T10:00:01+00:00"
+                            ),
+                            "elapsed_seconds": 2.0,
+                            "check_elapsed_seconds": 1.0,
+                            "heartbeat_count": 0,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            args = argparse.Namespace(
+                plan_dir=str(plan_dir),
+                state_dir=str(state_dir),
+                json=False,
+            )
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                exit_code = state.status_from_args(args)
+
+            self.assertEqual(0, exit_code)
+            output = buffer.getvalue()
+            self.assertIn(
+                "Active verification: session 1 turn 1 check 1/2 "
+                "operator-surface-tests",
+                output,
+            )
+            self.assertIn("Check kind: command", output)
+
+    def test_status_from_args_text_output_flags_stale_unfinished(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(
+                plan_dir,
+                ("complete", "complete", "complete", "complete", "complete"),
+            )
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            plan_state.mkdir(parents=True)
+            state_path = plan_state / events.STATE_FILE_NAME
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "paused": False,
+                        "run_id": "20260619T120000Z-4",
+                        "harness": "claude",
+                        "reason": "",
+                        "run_started_at": "2026-06-19T12:00:00+00:00",
+                        "run_finished_at": None,
+                        "duration_seconds": None,
+                        "active_turn": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            args = argparse.Namespace(
+                plan_dir=str(plan_dir),
+                state_dir=str(state_dir),
+                json=False,
+            )
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                exit_code = state.status_from_args(args)
+
+            self.assertEqual(0, exit_code)
+            output = buffer.getvalue()
+            self.assertIn("Run state: stale/orphaned", output)
+            self.assertIn("Next pending: none", output)
+
 
 class ProgressJournalTests(unittest.TestCase):
     def _entry(
@@ -2984,6 +3455,289 @@ class VerificationExecutorTests(unittest.TestCase):
 
             self.assertTrue(result.passed)
             self.assertEqual((), result.failures)
+
+    def _record_observer(
+        self,
+    ) -> tuple[verification.VerificationObserver, list[tuple[str, object]]]:
+        events: list[tuple[str, object]] = []
+        observer = verification.VerificationObserver(
+            on_check_started=lambda event: events.append(("started", event)),
+            on_check_finished=lambda event: events.append(("finished", event)),
+        )
+        return observer, events
+
+    def test_run_verification_emits_observer_events_for_passing_command(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            check = contracts.CommandCheck(
+                name="ok",
+                argv=("python3", "-c", "import sys; sys.exit(0)"),
+                timeout_seconds=10.0,
+            )
+            contract = self._contract(checks=(check,))
+            observer, events = self._record_observer()
+
+            result = verification.run_verification(
+                contract, repo_root=repo_root, observer=observer
+            )
+
+            self.assertTrue(result.passed)
+            self.assertEqual(["started", "finished"], [tag for tag, _ in events])
+            started = events[0][1]
+            finished = events[1][1]
+            self.assertIsInstance(started, verification.CheckStartedEvent)
+            self.assertIsInstance(finished, verification.CheckFinishedEvent)
+            self.assertEqual(0, started.check_index)
+            self.assertEqual(1, started.check_count)
+            self.assertEqual("ok", started.name)
+            self.assertEqual("command", started.kind)
+            self.assertEqual(check.argv, started.argv)
+            self.assertEqual(
+                str(plans.canonicalize_path(repo_root)), started.cwd
+            )
+            self.assertEqual(started.session_id, contract.session_id)
+            self.assertEqual(0, finished.check_index)
+            self.assertEqual(1, finished.check_count)
+            self.assertEqual("pass", finished.result.status)
+            self.assertEqual("command", finished.result.kind)
+            self.assertEqual(0, finished.result.returncode)
+
+    def test_run_verification_emits_observer_events_for_failing_command(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            check = contracts.CommandCheck(
+                name="boom",
+                argv=("python3", "-c", "import sys; sys.exit(3)"),
+                timeout_seconds=10.0,
+            )
+            contract = self._contract(checks=(check,))
+            observer, events = self._record_observer()
+
+            result = verification.run_verification(
+                contract, repo_root=repo_root, observer=observer
+            )
+
+            self.assertFalse(result.passed)
+            self.assertEqual(["started", "finished"], [tag for tag, _ in events])
+            finished = events[1][1]
+            self.assertEqual("fail", finished.result.status)
+            self.assertEqual("command-failed", finished.result.failure_reason)
+            self.assertEqual(3, finished.result.returncode)
+
+    def test_run_verification_emits_observer_events_for_command_timeout(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            check = contracts.CommandCheck(
+                name="sleeper",
+                argv=("python3", "-c", "import time; time.sleep(5)"),
+                timeout_seconds=0.1,
+            )
+            contract = self._contract(checks=(check,))
+            observer, events = self._record_observer()
+
+            result = verification.run_verification(
+                contract, repo_root=repo_root, observer=observer
+            )
+
+            self.assertFalse(result.passed)
+            self.assertEqual(["started", "finished"], [tag for tag, _ in events])
+            finished = events[1][1]
+            self.assertEqual("fail", finished.result.status)
+            self.assertEqual("command-timeout", finished.result.failure_reason)
+
+    def test_run_verification_emits_observer_events_for_file_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "present.txt").write_text("hi\n", encoding="utf-8")
+            check = contracts.FileExistsCheck(name="present", path="present.txt")
+            contract = self._contract(checks=(check,))
+            observer, events = self._record_observer()
+
+            result = verification.run_verification(
+                contract, repo_root=repo_root, observer=observer
+            )
+
+            self.assertTrue(result.passed)
+            self.assertEqual(["started", "finished"], [tag for tag, _ in events])
+            started = events[0][1]
+            self.assertEqual("file_exists", started.kind)
+            self.assertIsNone(started.argv)
+            self.assertIsNone(started.cwd)
+            finished = events[1][1]
+            self.assertEqual("pass", finished.result.status)
+            self.assertEqual("file_exists", finished.kind)
+
+    def test_run_verification_emits_observer_events_for_regex_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "module.py").write_text(
+                "def parse_completion_contract():\n    pass\n",
+                encoding="utf-8",
+            )
+            check = contracts.RegexInFileCheck(
+                name="symbol",
+                path="module.py",
+                pattern=r"^def parse_completion_contract",
+            )
+            contract = self._contract(checks=(check,))
+            observer, events = self._record_observer()
+
+            result = verification.run_verification(
+                contract, repo_root=repo_root, observer=observer
+            )
+
+            self.assertTrue(result.passed)
+            self.assertEqual(["started", "finished"], [tag for tag, _ in events])
+            started = events[0][1]
+            self.assertEqual("regex_in_file", started.kind)
+            self.assertIsNone(started.argv)
+            self.assertIsNone(started.cwd)
+            finished = events[1][1]
+            self.assertEqual("pass", finished.result.status)
+            self.assertEqual("regex_in_file", finished.kind)
+
+    def test_run_verification_emits_events_in_declared_check_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "present.txt").write_text("hi\n", encoding="utf-8")
+            contract = self._contract(
+                checks=(
+                    contracts.FileExistsCheck(
+                        name="present", path="present.txt"
+                    ),
+                    contracts.CommandCheck(
+                        name="middle",
+                        argv=("python3", "-c", "import sys; sys.exit(0)"),
+                        timeout_seconds=10.0,
+                    ),
+                    contracts.FileExistsCheck(
+                        name="absent", path="nope.txt"
+                    ),
+                )
+            )
+            observer, events = self._record_observer()
+
+            result = verification.run_verification(
+                contract, repo_root=repo_root, observer=observer
+            )
+
+            self.assertFalse(result.passed)
+            self.assertEqual(
+                [
+                    ("started", 0, "present"),
+                    ("finished", 0, "present"),
+                    ("started", 1, "middle"),
+                    ("finished", 1, "middle"),
+                    ("started", 2, "absent"),
+                    ("finished", 2, "absent"),
+                ],
+                [
+                    (tag, event.check_index, event.name)
+                    for tag, event in events
+                ],
+            )
+            for tag, event in events:
+                self.assertEqual(3, event.check_count)
+                if tag == "finished":
+                    expected_status = "pass" if event.name != "absent" else "fail"
+                    self.assertEqual(expected_status, event.result.status)
+
+    def test_run_verification_resolves_observer_cwd_for_command_subdir(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "nested").mkdir()
+            check = contracts.CommandCheck(
+                name="pwd",
+                argv=("python3", "-c", "import sys; sys.exit(0)"),
+                timeout_seconds=10.0,
+                cwd="nested",
+            )
+            contract = self._contract(checks=(check,))
+            observer, events = self._record_observer()
+
+            verification.run_verification(
+                contract, repo_root=repo_root, observer=observer
+            )
+
+            started = events[0][1]
+            self.assertEqual(
+                str(plans.canonicalize_path(repo_root / "nested")),
+                started.cwd,
+            )
+
+    def test_run_verification_with_partial_observer_only_fires_set_callback(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "present.txt").write_text("hi\n", encoding="utf-8")
+            contract = self._contract(
+                checks=(
+                    contracts.FileExistsCheck(name="present", path="present.txt"),
+                )
+            )
+            finished_events: list[verification.CheckFinishedEvent] = []
+            observer = verification.VerificationObserver(
+                on_check_started=None,
+                on_check_finished=finished_events.append,
+            )
+
+            verification.run_verification(
+                contract, repo_root=repo_root, observer=observer
+            )
+
+            self.assertEqual(1, len(finished_events))
+            self.assertEqual("present", finished_events[0].name)
+
+    def test_run_verification_without_observer_matches_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "present.txt").write_text("hi\n", encoding="utf-8")
+            contract = self._contract(
+                checks=(
+                    contracts.FileExistsCheck(name="present", path="present.txt"),
+                )
+            )
+
+            result = verification.run_verification(contract, repo_root=repo_root)
+
+            self.assertTrue(result.passed)
+            self.assertEqual(1, len(result.checks))
+
+    def test_run_verification_propagates_observer_callback_exceptions(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "present.txt").write_text("hi\n", encoding="utf-8")
+            contract = self._contract(
+                checks=(
+                    contracts.FileExistsCheck(name="present", path="present.txt"),
+                )
+            )
+
+            class _Boom(RuntimeError):
+                pass
+
+            def _explode(_event: verification.CheckStartedEvent) -> None:
+                raise _Boom("observer error")
+
+            observer = verification.VerificationObserver(
+                on_check_started=_explode
+            )
+
+            with self.assertRaises(_Boom):
+                verification.run_verification(
+                    contract, repo_root=repo_root, observer=observer
+                )
 
 
 class QnAContextLoaderTests(unittest.TestCase):
@@ -7708,6 +8462,167 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertIn("status: plan inspection error: missing context.md", text)
         self.assertIn("sessions 0/1 complete, 1 pending", text)
 
+    def test_compact_status_live_all_complete_overrides_stale_next_pending(
+        self,
+    ) -> None:
+        plan_dir, _state_dir, _config_home, _fake_codex = self.setup_loop(
+            statuses=("complete", "complete", "complete", "complete", "complete")
+        )
+        payload = {
+            "harness": "codex",
+            "model": config.NATIVE_MODEL_DEFAULT,
+            "model_source": config.MODEL_SOURCE_UNRESOLVED,
+            "effort": None,
+            "effort_source": None,
+            "active_turn": None,
+            "turns": [],
+            "final_snapshot": {
+                "counts": {
+                    "pending": 0,
+                    "complete": 5,
+                    "empty": 0,
+                    "unknown": 0,
+                },
+                "next_pending_id": "5",
+            },
+        }
+        control = {
+            "stop_after_current": False,
+            "tail_enabled": False,
+            "next_harness": None,
+        }
+
+        text = "\n".join(
+            runner._compact_status_lines(
+                payload=payload,
+                control=control,
+                snapshot=plans.inspect_plan(plan_dir),
+            )
+        )
+
+        self.assertIn("sessions 5/5 complete, 0 pending", text)
+        self.assertIn("next session none", text)
+        self.assertNotIn("next session 5", text)
+
+    def test_compact_status_snapshot_reports_active_verification(self) -> None:
+        plan_dir, _state_dir, _config_home, _fake_codex = self.setup_loop(
+            statuses=("pending", "pending")
+        )
+        active_verification = {
+            "run_id": "run-1",
+            "turn_index": 1,
+            "session": 1,
+            "session_id": "1",
+            "total_sessions": 2,
+            "check_count": 2,
+            "check_names": ["pytest", "compile"],
+            "check_kinds": ["command", "command"],
+            "started_at": "2026-06-11T12:00:00+00:00",
+            "current_check_index": 1,
+            "current_check_name": "compile",
+            "current_check_kind": "command",
+            "current_check_started_at": "2026-06-11T12:00:10+00:00",
+            "elapsed_seconds": 15.0,
+            "check_elapsed_seconds": 5.0,
+            "heartbeat_count": 1,
+        }
+        payload = {
+            "harness": "codex",
+            "model": "gpt-5",
+            "model_source": config.MODEL_SOURCE_FLAG,
+            "effort": "high",
+            "effort_source": config.EFFORT_SOURCE_FLAG,
+            "run_started_at": "2026-06-11T12:00:00+00:00",
+            "active_turn": None,
+            "active_verification": active_verification,
+            "turns": [
+                {
+                    "stdout_path": "/tmp/run/turn-1/stdout.log",
+                    "stderr_path": "/tmp/run/turn-1/stderr.log",
+                    "last_message_path": "/tmp/run/turn-1/last-message.txt",
+                    "result_path": "/tmp/run/turn-1/result.json",
+                }
+            ],
+        }
+        control = {
+            "stop_after_current": False,
+            "tail_enabled": False,
+            "next_harness": None,
+        }
+
+        text = "\n".join(
+            runner._compact_status_lines(
+                payload=payload,
+                control=control,
+                snapshot=plans.inspect_plan(plan_dir),
+                now=runner._parse_datetime("2026-06-11T12:00:20+00:00"),
+            )
+        )
+
+        self.assertIn(
+            "status: verifying session 1/2 turn 1 check 2/2 compile", text
+        )
+        self.assertIn("elapsed 15.0s, check elapsed 5.0s, total 20.0s", text)
+        self.assertIn("sessions 0/2 complete, 2 pending", text)
+        self.assertNotIn("status: active session", text)
+        self.assertNotIn("status: idle", text)
+
+    def test_compact_status_snapshot_reports_verification_before_first_check(
+        self,
+    ) -> None:
+        plan_dir, _state_dir, _config_home, _fake_codex = self.setup_loop(
+            statuses=("pending",)
+        )
+        active_verification = {
+            "run_id": "run-1",
+            "turn_index": 1,
+            "session": 1,
+            "session_id": "1",
+            "total_sessions": 1,
+            "check_count": 3,
+            "check_names": ["a", "b", "c"],
+            "check_kinds": ["command", "file_exists", "regex_in_file"],
+            "started_at": "2026-06-11T12:00:00+00:00",
+            "current_check_index": None,
+            "current_check_name": None,
+            "current_check_kind": None,
+            "current_check_started_at": None,
+            "elapsed_seconds": 0.5,
+            "check_elapsed_seconds": None,
+            "heartbeat_count": 0,
+        }
+        payload = {
+            "harness": "codex",
+            "model": "gpt-5",
+            "model_source": config.MODEL_SOURCE_FLAG,
+            "effort": "high",
+            "effort_source": config.EFFORT_SOURCE_FLAG,
+            "run_started_at": "2026-06-11T12:00:00+00:00",
+            "active_turn": None,
+            "active_verification": active_verification,
+            "turns": [],
+        }
+        control = {
+            "stop_after_current": False,
+            "tail_enabled": False,
+            "next_harness": None,
+        }
+
+        text = "\n".join(
+            runner._compact_status_lines(
+                payload=payload,
+                control=control,
+                snapshot=plans.inspect_plan(plan_dir),
+                now=runner._parse_datetime("2026-06-11T12:00:01+00:00"),
+            )
+        )
+
+        self.assertIn(
+            "status: verifying session 1/1 turn 1 check -/3 pending", text
+        )
+        self.assertNotIn("check elapsed", text)
+        self.assertIn("elapsed 0.5s", text)
+
     def test_successful_turn_syncs_derived_status_ledgers(self) -> None:
         plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
             statuses=("pending", "pending")
@@ -9723,6 +10638,344 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 stderr_text,
                 timestamp + r"session 1/3 heartbeat \(elapsed",
             )
+
+    def test_initial_and_live_turn_state_include_active_verification_key(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("pending",))
+            snapshot = plans.inspect_plan(plan_dir)
+            plan_state_dir = state.plan_state_dir(plan_dir, state_dir)
+            run_id = "run-1"
+            run_dir = plan_state_dir / "runs" / run_id
+            event_path = plan_state_dir / events.EVENTS_FILE_NAME
+            state_path = plan_state_dir / events.STATE_FILE_NAME
+            lock_info = state.LockInfo(
+                path=plan_state_dir / state.LOCK_FILE_NAME,
+                pid=123,
+                plan_dir=str(plans.canonicalize_path(plan_dir)),
+                created_at="2026-06-20T10:00:00+00:00",
+                stale=False,
+                reason="active",
+                raw={},
+            )
+            args = argparse.Namespace(
+                dry_run=False,
+                review_harness=None,
+                harness="codex",
+                model=None,
+                effort=None,
+                unsafe_bypass=True,
+                note=None,
+                allow_not_loop_ready=False,
+            )
+            payload = runner._initial_payload(
+                args=args,
+                snapshot=snapshot,
+                state_dir=plan_state_dir,
+                run_dir=run_dir,
+                event_path=event_path,
+                state_path=state_path,
+                lock_info=lock_info,
+                cwd=tmp_dir,
+                run_id=run_id,
+                commit_mode=None,
+            )
+            persistence = runner._RunPersistence()
+
+            persistence.write_state(payload)
+            initial_state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertIn("active_verification", initial_state)
+            self.assertIsNone(initial_state["active_verification"])
+
+            active_turn = {
+                "run_id": run_id,
+                "turn_index": 1,
+                "session": 1,
+                "session_id": "1",
+                "total_sessions": 1,
+                "harness": "codex",
+                "artifact_dir": str(run_dir / "turn-0001-session-1"),
+                "stdout_path": str(run_dir / "turn-0001-session-1" / "stdout.log"),
+                "stderr_path": str(run_dir / "turn-0001-session-1" / "stderr.log"),
+                "last_message_path": str(
+                    run_dir / "turn-0001-session-1" / "last-message.txt"
+                ),
+                "result_path": str(run_dir / "turn-0001-session-1" / "result.json"),
+                "started_at": runner._isoformat(runner._utc_now()),
+                "finished_at": None,
+                "duration_seconds": None,
+                "idle_seconds_since_previous_turn": 0.0,
+                "last_activity_at": None,
+                "last_activity_stream": None,
+                "last_activity_preview": "",
+                "last_heartbeat_at": None,
+                "elapsed_seconds": 0.0,
+                "idle_seconds": 0.0,
+                "heartbeat_count": 0,
+                "stdout_chars": 0,
+                "stderr_chars": 0,
+                "action_required": None,
+            }
+            live_turn = runner._LiveTurn(
+                payload=payload,
+                event_path=event_path,
+                progress=runner._ProgressReporter(enabled=False),
+                active_turn=active_turn,
+                persistence=persistence,
+                heartbeat_interval=60,
+            )
+            try:
+                live_turn.start()
+                active_state = json.loads(state_path.read_text(encoding="utf-8"))
+                self.assertIsInstance(active_state["active_turn"], dict)
+                self.assertIn("active_verification", active_state)
+                self.assertIsNone(active_state["active_verification"])
+            finally:
+                live_turn.stop()
+                live_turn.finish(runner._utc_now())
+
+    def test_live_verification_heartbeat_updates_state_events_and_progress(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            event_path = tmp_dir / events.EVENTS_FILE_NAME
+            state_path = tmp_dir / events.STATE_FILE_NAME
+            payload = {
+                "state_path": str(state_path),
+                "active_turn": None,
+                "active_verification": None,
+            }
+            persistence = runner._RunPersistence()
+            progress = runner._ProgressReporter(enabled=True)
+            stderr = io.StringIO()
+
+            live_verification = runner._LiveVerification(
+                event_path=event_path,
+                payload=payload,
+                progress=progress,
+                persistence=persistence,
+                run_id="run-1",
+                turn_index=1,
+                session_id="1",
+                session_label="1/2",
+                total_sessions=2,
+                check_count=1,
+                check_names=("pytest",),
+                check_kinds=("command",),
+                heartbeat_interval=0.01,
+            )
+
+            with redirect_stderr(stderr):
+                live_verification.start()
+                live_verification.check_started(
+                    check_index=0,
+                    name="pytest",
+                    kind="command",
+                    argv=("pytest", "-q"),
+                    cwd="/tmp/repo",
+                )
+                wait_until(
+                    lambda: (
+                        event_path.exists()
+                        and events.VERIFICATION_HEARTBEAT_EVENT
+                        in event_path.read_text(encoding="utf-8")
+                    )
+                )
+                live_verification.check_finished(
+                    check_index=0,
+                    name="pytest",
+                    kind="command",
+                    status="pass",
+                    duration_seconds=1.25,
+                    failure_reason=None,
+                    returncode=0,
+                )
+                live_verification.finish(
+                    passed=True, passed_count=1, reason="ok"
+                )
+
+            state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertIsNone(state_payload["active_verification"])
+
+            event_records = read_jsonl(event_path)
+            event_names = [record["name"] for record in event_records]
+            self.assertIn(events.VERIFICATION_STARTED_EVENT, event_names)
+            self.assertIn(events.VERIFICATION_CHECK_STARTED_EVENT, event_names)
+            self.assertIn(events.VERIFICATION_HEARTBEAT_EVENT, event_names)
+            self.assertIn(events.VERIFICATION_CHECK_FINISHED_EVENT, event_names)
+            self.assertIn(events.VERIFICATION_FINISHED_EVENT, event_names)
+
+            started_payload = next(
+                record["payload"]
+                for record in event_records
+                if record["name"] == events.VERIFICATION_STARTED_EVENT
+            )
+            self.assertEqual(1, started_payload["check_count"])
+            self.assertEqual(["pytest"], started_payload["check_names"])
+            self.assertEqual("1/2", started_payload["session_label"])
+
+            check_started_payload = next(
+                record["payload"]
+                for record in event_records
+                if record["name"] == events.VERIFICATION_CHECK_STARTED_EVENT
+            )
+            self.assertEqual(0, check_started_payload["check_index"])
+            self.assertEqual("pytest", check_started_payload["name"])
+            self.assertEqual(["pytest", "-q"], check_started_payload["argv"])
+            self.assertEqual("/tmp/repo", check_started_payload["cwd"])
+
+            check_finished_payload = next(
+                record["payload"]
+                for record in event_records
+                if record["name"] == events.VERIFICATION_CHECK_FINISHED_EVENT
+            )
+            self.assertEqual("pass", check_finished_payload["status"])
+            self.assertEqual(1.25, check_finished_payload["duration_seconds"])
+            self.assertEqual(0, check_finished_payload["returncode"])
+            self.assertIsNone(check_finished_payload["failure_reason"])
+
+            finished_payload = next(
+                record["payload"]
+                for record in event_records
+                if record["name"] == events.VERIFICATION_FINISHED_EVENT
+            )
+            self.assertTrue(finished_payload["passed"])
+            self.assertEqual("ok", finished_payload["reason"])
+            self.assertEqual(1, finished_payload["passed_count"])
+
+            stderr_text = stderr.getvalue()
+            timestamp = r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] "
+            self.assertRegex(
+                stderr_text,
+                timestamp + r"verification started for session 1/2 turn 1 \(1 check\)",
+            )
+            self.assertRegex(
+                stderr_text,
+                timestamp + r"verification check 1/1 started: pytest \(command\)",
+            )
+            self.assertRegex(
+                stderr_text,
+                timestamp
+                + r"verification heartbeat for session 1/2 check 1/1 pytest \(elapsed",
+            )
+            self.assertRegex(
+                stderr_text,
+                timestamp
+                + r"verification check 1/1 finished: pytest \(command\) status pass",
+            )
+            self.assertRegex(
+                stderr_text,
+                timestamp
+                + r"verification passed for session 1/2 \(1/1 checks passed",
+            )
+
+    def test_live_verification_check_started_finished_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            event_path = tmp_dir / events.EVENTS_FILE_NAME
+            state_path = tmp_dir / events.STATE_FILE_NAME
+            payload = {
+                "state_path": str(state_path),
+                "active_turn": None,
+                "active_verification": None,
+            }
+            persistence = runner._RunPersistence()
+            live_verification = runner._LiveVerification(
+                event_path=event_path,
+                payload=payload,
+                progress=runner._ProgressReporter(enabled=False),
+                persistence=persistence,
+                run_id="run-2",
+                turn_index=3,
+                session_id="2.1",
+                session_label="2.1/4",
+                total_sessions=4,
+                check_count=2,
+                check_names=("readme", "regex"),
+                check_kinds=("file_exists", "regex_in_file"),
+                heartbeat_interval=60,
+            )
+
+            live_verification.start()
+            after_start_state = json.loads(
+                state_path.read_text(encoding="utf-8")
+            )["active_verification"]
+            self.assertEqual(2, after_start_state["check_count"])
+            self.assertEqual(
+                ["file_exists", "regex_in_file"], after_start_state["check_kinds"]
+            )
+            self.assertIsNone(after_start_state["current_check_index"])
+
+            live_verification.check_started(
+                check_index=0,
+                name="readme",
+                kind="file_exists",
+                argv=None,
+                cwd=None,
+            )
+            mid_state = json.loads(
+                state_path.read_text(encoding="utf-8")
+            )["active_verification"]
+            self.assertEqual(0, mid_state["current_check_index"])
+            self.assertEqual("readme", mid_state["current_check_name"])
+            self.assertEqual("file_exists", mid_state["current_check_kind"])
+            self.assertIsNotNone(mid_state["current_check_started_at"])
+
+            live_verification.check_finished(
+                check_index=0,
+                name="readme",
+                kind="file_exists",
+                status="fail",
+                duration_seconds=0.0,
+                failure_reason="file-missing",
+                returncode=None,
+            )
+            after_check_state = json.loads(
+                state_path.read_text(encoding="utf-8")
+            )["active_verification"]
+            self.assertIsNone(after_check_state["current_check_started_at"])
+            self.assertEqual(0, after_check_state["current_check_index"])
+
+            live_verification.finish(
+                passed=False,
+                passed_count=0,
+                reason="verify-failed",
+                error="check failed",
+            )
+            final_state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertIsNone(final_state["active_verification"])
+
+            event_records = read_jsonl(event_path)
+            failed_check = next(
+                record["payload"]
+                for record in event_records
+                if record["name"] == events.VERIFICATION_CHECK_FINISHED_EVENT
+            )
+            self.assertEqual("fail", failed_check["status"])
+            self.assertEqual("file-missing", failed_check["failure_reason"])
+            self.assertIsNone(failed_check["returncode"])
+            self.assertNotIn("argv", failed_check)
+
+            finished = next(
+                record["payload"]
+                for record in event_records
+                if record["name"] == events.VERIFICATION_FINISHED_EVENT
+            )
+            self.assertFalse(finished["passed"])
+            self.assertEqual("verify-failed", finished["reason"])
+            self.assertEqual("check failed", finished["error"])
+            check_started = next(
+                record["payload"]
+                for record in event_records
+                if record["name"] == events.VERIFICATION_CHECK_STARTED_EVENT
+            )
+            self.assertIsNone(check_started["argv"])
+            self.assertIsNone(check_started["cwd"])
 
     def test_live_turn_action_required_payload_includes_harness(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -13239,6 +14492,73 @@ class RunVerificationEnforcementTests(unittest.TestCase):
         self.assertEqual("ok", verify_payload["reason"])
         self.assertTrue(verify_payload["passed"])
 
+    def test_verify_passing_contract_emits_verification_phase_events(
+        self,
+    ) -> None:
+        contracts_by_id = {
+            "1": _contract_block(
+                '{"type": "file_exists", "path": "README.md", '
+                '"name": "readme"}',
+                session="1",
+            )
+        }
+        self._write_plan(("pending",), contracts_by_id=contracts_by_id)
+
+        completed, payload = self._run()
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        final_snapshot = payload["final_snapshot"]
+        self.assertEqual(1, final_snapshot["counts"]["complete"])
+        self.assertEqual(0, final_snapshot["counts"]["pending"])
+        event_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir)
+            / events.EVENTS_FILE_NAME
+        )
+        event_records = read_jsonl(event_path)
+        phase_events = [
+            record["name"]
+            for record in event_records
+            if record["name"]
+            in {
+                events.VERIFICATION_STARTED_EVENT,
+                events.VERIFICATION_CHECK_STARTED_EVENT,
+                events.VERIFICATION_CHECK_FINISHED_EVENT,
+                events.VERIFICATION_FINISHED_EVENT,
+            }
+        ]
+        self.assertEqual(
+            [
+                events.VERIFICATION_STARTED_EVENT,
+                events.VERIFICATION_CHECK_STARTED_EVENT,
+                events.VERIFICATION_CHECK_FINISHED_EVENT,
+                events.VERIFICATION_FINISHED_EVENT,
+            ],
+            phase_events,
+        )
+        started = next(
+            record["payload"]
+            for record in event_records
+            if record["name"] == events.VERIFICATION_STARTED_EVENT
+        )
+        self.assertEqual(1, started["check_count"])
+        self.assertEqual(["readme"], started["check_names"])
+        check_started = next(
+            record["payload"]
+            for record in event_records
+            if record["name"] == events.VERIFICATION_CHECK_STARTED_EVENT
+        )
+        self.assertEqual("readme", check_started["name"])
+        self.assertEqual("file_exists", check_started["kind"])
+        finished = next(
+            record["payload"]
+            for record in event_records
+            if record["name"] == events.VERIFICATION_FINISHED_EVENT
+        )
+        self.assertTrue(finished["passed"])
+        self.assertEqual(1, finished["passed_count"])
+        self.assertEqual("ok", finished["reason"])
+
     def test_verify_failing_contract_pauses_and_reverts_status(self) -> None:
         contracts_by_id = {
             "1": _contract_block(
@@ -13272,6 +14592,28 @@ class RunVerificationEnforcementTests(unittest.TestCase):
         final_snapshot = payload["final_snapshot"]
         self.assertEqual(1, final_snapshot["counts"]["pending"])
         self.assertEqual(0, final_snapshot["counts"]["complete"])
+
+    def test_verify_failing_contract_clears_active_phases_and_finishes_run(
+        self,
+    ) -> None:
+        contracts_by_id = {
+            "1": _contract_block(
+                '{"type": "file_exists", "path": "MISSING.md", '
+                '"name": "missing"}',
+                session="1",
+            )
+        }
+        self._write_plan(("pending",), contracts_by_id=contracts_by_id)
+
+        completed, payload = self._run()
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("verify-failed", payload["pause_reason"])
+        self.assertIsNone(payload["active_turn"])
+        self.assertIsNone(payload["active_verification"])
+        self.assertIsInstance(payload["run_finished_at"], str)
+        self.assertNotEqual("", payload["run_finished_at"])
 
     def test_verify_missing_contract_pauses_when_gate_enforced(self) -> None:
         self._write_plan(("pending",), contracts_by_id=None)
@@ -13335,6 +14677,444 @@ class RunVerificationEnforcementTests(unittest.TestCase):
         self.assertIn("verify-failed", events.PAUSE_REASONS)
         self.assertIn("no-contract", events.PAUSE_REASONS)
         self.assertIn("malformed-contract", events.PAUSE_REASONS)
+
+
+class RunVerificationInterruptTests(unittest.TestCase):
+    """Direct ``_run_locked`` invocation tests covering KeyboardInterrupt
+    handling for the post-turn verification phase and the outer session loop.
+
+    These exercise the cleanup contract: any KeyboardInterrupt raised after a
+    harness turn finishes must leave a coherent state payload with
+    ``pause_reason='interrupted'``, ``run_finished_at`` populated, and no
+    dangling ``active_turn`` / ``active_verification`` entries.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+        self.repo_root = self.tmp_path / "repo"
+        self.config_home = self.tmp_path / "config"
+        init_git_repo(self.repo_root)
+        self.fake_codex = install_fake_codex(self.tmp_path)
+        config_path = (
+            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        )
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps({"codex": {"executable": str(self.fake_codex)}}),
+            encoding="utf-8",
+        )
+
+    def _make_args(self) -> argparse.Namespace:
+        return argparse.Namespace(
+            plan_dir=str(self.plan_dir),
+            cwd=str(self.repo_root),
+            harness="codex",
+            state_dir=str(self.state_dir),
+            json=False,
+            dry_run=False,
+            unsafe_bypass=True,
+            timeout=None,
+            max_sessions=None,
+            commit_mode=None,
+            model=None,
+            effort=None,
+            note=None,
+            allow_not_loop_ready=True,
+        )
+
+    def _invoke_run_locked(
+        self,
+    ) -> tuple[int, dict[str, object]]:
+        env_updates = {
+            "XDG_CONFIG_HOME": str(self.config_home),
+            "FAKE_CODEX_MODE": "success",
+            "FAKE_CODEX_SLEEP": "5",
+            "PYTHONPATH": str(REPO_ROOT)
+            + os.pathsep
+            + os.environ.get("PYTHONPATH", ""),
+        }
+        args = self._make_args()
+        with patched_env(**env_updates):
+            lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+            try:
+                exit_code, payload = runner._run_locked(
+                    args=args,
+                    cwd=self.repo_root,
+                    timeout=None,
+                    max_sessions=None,
+                    commit_mode=None,
+                    lock_info=lock_info,
+                    run_id="test-run",
+                )
+            finally:
+                state.release_lock(self.plan_dir, self.state_dir)
+        return exit_code, payload
+
+    def test_keyboard_interrupt_during_verification_pauses_cleanly(
+        self,
+    ) -> None:
+        contract = _contract_block(
+            '{"type": "file_exists", "path": "README.md", "name": "readme"}',
+            session="1",
+        )
+        write_plan(self.plan_dir, ("pending",), contracts_by_id={"1": contract})
+
+        def raise_keyboard_interrupt(*_args: object, **_kwargs: object) -> None:
+            raise KeyboardInterrupt
+
+        with mock.patch.object(
+            runner.verification,
+            "run_verification",
+            side_effect=raise_keyboard_interrupt,
+        ):
+            exit_code, payload = self._invoke_run_locked()
+
+        self.assertEqual(runner.INTERRUPTED_EXIT, exit_code)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("interrupted", payload["pause_reason"])
+        self.assertIn("verification", payload["pause_message"])
+        self.assertIn("interrupted by user", payload["pause_message"])
+        self.assertIsNone(payload["active_turn"])
+        self.assertIsNone(payload["active_verification"])
+        self.assertIsInstance(payload["run_finished_at"], str)
+        self.assertNotEqual("", payload["run_finished_at"])
+        # The session was reverted to pending.
+        session_text = (
+            self.plan_dir / "session-1.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("- **Status**: pending", session_text)
+        self.assertNotIn("- **Status**: complete", session_text)
+        self.assertIn("verification interrupted by user", session_text)
+        # Lock was released.
+        self.assertFalse(
+            state.lock_path_for_plan(self.plan_dir, self.state_dir).exists()
+        )
+        # The verification phase emitted a `finished` event with the
+        # interrupted reason, keeping the observer contract symmetric.
+        event_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir)
+            / events.EVENTS_FILE_NAME
+        )
+        event_records = read_jsonl(event_path)
+        finished_records = [
+            record
+            for record in event_records
+            if record["name"] == events.VERIFICATION_FINISHED_EVENT
+        ]
+        self.assertEqual(1, len(finished_records))
+        self.assertEqual(
+            "interrupted", finished_records[0]["payload"]["reason"]
+        )
+        self.assertFalse(finished_records[0]["payload"]["passed"])
+        # `run_finished` was still emitted as the final lifecycle event.
+        run_finished_records = [
+            record
+            for record in event_records
+            if record["name"] == "run_finished"
+        ]
+        self.assertEqual(1, len(run_finished_records))
+
+    def test_keyboard_interrupt_after_turn_finished_pauses_cleanly(
+        self,
+    ) -> None:
+        """Cover the outer ``_run_locked`` KeyboardInterrupt wrapper.
+
+        When a KeyboardInterrupt escapes the post-turn bookkeeping helpers
+        (here, ``_append_progress_entry``), the outer ``try/except`` must call
+        ``_pause_run('interrupted', ...)`` once, then ``_finish_run`` must
+        clear both active phases and stamp ``run_finished_at``.
+        """
+
+        # No completion contract: verification is skipped, so the next thing
+        # called after `turn_finished` is `_append_progress_entry`, which we
+        # mock to raise KeyboardInterrupt.
+        write_plan(self.plan_dir, ("pending",))
+
+        def raise_keyboard_interrupt(*_args: object, **_kwargs: object) -> bool:
+            raise KeyboardInterrupt
+
+        with mock.patch.object(
+            runner,
+            "_append_progress_entry",
+            side_effect=raise_keyboard_interrupt,
+        ):
+            exit_code, payload = self._invoke_run_locked()
+
+        self.assertEqual(runner.INTERRUPTED_EXIT, exit_code)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("interrupted", payload["pause_reason"])
+        self.assertEqual("run interrupted by user", payload["pause_message"])
+        # Pause details should carry the in-flight session identity.
+        pause_details = payload["pause_details"]
+        self.assertEqual(1, pause_details["session"])
+        self.assertIsNone(payload["active_turn"])
+        self.assertIsNone(payload["active_verification"])
+        self.assertIsInstance(payload["run_finished_at"], str)
+        self.assertNotEqual("", payload["run_finished_at"])
+        # The lock is released even when the outer wrapper catches the KI.
+        self.assertFalse(
+            state.lock_path_for_plan(self.plan_dir, self.state_dir).exists()
+        )
+        # Exactly one `run_paused` event was recorded (no duplicate from a
+        # cascading handler).
+        event_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir)
+            / events.EVENTS_FILE_NAME
+        )
+        event_records = read_jsonl(event_path)
+        pause_records = [
+            record
+            for record in event_records
+            if record["name"] == events.RUN_PAUSED_EVENT
+        ]
+        self.assertEqual(1, len(pause_records))
+        self.assertEqual(
+            "interrupted", pause_records[0]["payload"]["reason"]
+        )
+
+
+class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
+    """End-to-end coverage for the full post-turn verification lifecycle.
+
+    Drives ``_run_locked`` directly with a synthetic long-running verification
+    command and a shortened heartbeat interval so at least one
+    ``verification_heartbeat`` event fires inside the check window. Also locks
+    in the documented post-turn event ordering: ``turn_finished`` precedes the
+    four verification phase events, the progress journal entry is appended
+    after verification passes, and ``run_finished`` is the final lifecycle
+    event.
+
+    Also covers the historical ``state.json`` shape (no ``active_verification``
+    key) as a fixture-style regression: ``status_payload`` and
+    ``_print_text_status`` must remain consumable by pre-feature state
+    snapshots without raising or inventing detail.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+        self.repo_root = self.tmp_path / "repo"
+        self.config_home = self.tmp_path / "config"
+        init_git_repo(self.repo_root)
+        self.fake_codex = install_fake_codex(self.tmp_path)
+        config_path = (
+            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        )
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps({"codex": {"executable": str(self.fake_codex)}}),
+            encoding="utf-8",
+        )
+
+    def _make_args(self) -> argparse.Namespace:
+        return argparse.Namespace(
+            plan_dir=str(self.plan_dir),
+            cwd=str(self.repo_root),
+            harness="codex",
+            state_dir=str(self.state_dir),
+            json=False,
+            dry_run=False,
+            unsafe_bypass=True,
+            timeout=None,
+            max_sessions=None,
+            commit_mode=None,
+            model=None,
+            effort=None,
+            note=None,
+            allow_not_loop_ready=True,
+        )
+
+    def _invoke_run_locked(self) -> tuple[int, dict[str, object]]:
+        env_updates = {
+            "XDG_CONFIG_HOME": str(self.config_home),
+            "FAKE_CODEX_MODE": "success",
+            "PYTHONPATH": str(REPO_ROOT)
+            + os.pathsep
+            + os.environ.get("PYTHONPATH", ""),
+        }
+        args = self._make_args()
+        with patched_env(**env_updates):
+            lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+            try:
+                exit_code, payload = runner._run_locked(
+                    args=args,
+                    cwd=self.repo_root,
+                    timeout=None,
+                    max_sessions=None,
+                    commit_mode=None,
+                    lock_info=lock_info,
+                    run_id="test-run-heartbeat",
+                )
+            finally:
+                state.release_lock(self.plan_dir, self.state_dir)
+        return exit_code, payload
+
+    def test_long_verification_command_emits_heartbeats_and_orders_post_turn_events(
+        self,
+    ) -> None:
+        sleep_argv = [
+            sys.executable,
+            "-c",
+            "import time; time.sleep(0.3)",
+        ]
+        check_payload = (
+            '{"type": "command", "name": "long-sleep", '
+            f'"argv": {json.dumps(sleep_argv)}, "timeout_seconds": 30}}'
+        )
+        contract = _contract_block(check_payload, session="1")
+        write_plan(
+            self.plan_dir, ("pending",), contracts_by_id={"1": contract}
+        )
+
+        real_enforce = runner._enforce_session_verification
+
+        def short_heartbeat_enforce(**kwargs: object) -> bool:
+            kwargs["heartbeat_interval"] = 0.05
+            return real_enforce(**kwargs)
+
+        with mock.patch.object(
+            runner,
+            "_enforce_session_verification",
+            new=short_heartbeat_enforce,
+        ):
+            exit_code, payload = self._invoke_run_locked()
+
+        self.assertEqual(0, exit_code)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual("all-complete", payload["reason"])
+        # Both active phases cleared cleanly at run finish.
+        self.assertIsNone(payload["active_turn"])
+        self.assertIsNone(payload["active_verification"])
+        # Final snapshot reflects the post-verify all-complete plan state.
+        self.assertEqual(1, payload["final_snapshot"]["counts"]["complete"])
+        self.assertIsNone(payload["final_snapshot"]["next_pending"])
+
+        event_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir)
+            / events.EVENTS_FILE_NAME
+        )
+        event_records = read_jsonl(event_path)
+        event_names = [record["name"] for record in event_records]
+
+        # At least one verification_heartbeat fired during the synthetic long
+        # verify. With a 0.3s sleep and a 0.05s interval, we expect several
+        # heartbeats; the assertion uses >=1 to avoid scheduler flakiness.
+        heartbeat_count = event_names.count(events.VERIFICATION_HEARTBEAT_EVENT)
+        self.assertGreaterEqual(
+            heartbeat_count,
+            1,
+            f"expected verification_heartbeat events; got: {event_names}",
+        )
+
+        # Heartbeats happened strictly between check_started and
+        # check_finished for the same check.
+        check_started_index = event_names.index(
+            events.VERIFICATION_CHECK_STARTED_EVENT
+        )
+        check_finished_index = event_names.index(
+            events.VERIFICATION_CHECK_FINISHED_EVENT
+        )
+        heartbeat_indexes = [
+            i
+            for i, name in enumerate(event_names)
+            if name == events.VERIFICATION_HEARTBEAT_EVENT
+        ]
+        for hb_index in heartbeat_indexes:
+            self.assertGreater(hb_index, check_started_index)
+            self.assertLess(hb_index, check_finished_index)
+
+        # Documented post-turn event ordering: turn_finished precedes the
+        # four verification phase events, which precede run_finished.
+        turn_finished_index = event_names.index("turn_finished")
+        verification_started_index = event_names.index(
+            events.VERIFICATION_STARTED_EVENT
+        )
+        verification_finished_index = event_names.index(
+            events.VERIFICATION_FINISHED_EVENT
+        )
+        run_finished_index = event_names.index("run_finished")
+        self.assertLess(turn_finished_index, verification_started_index)
+        self.assertLess(verification_started_index, check_started_index)
+        self.assertLess(check_started_index, check_finished_index)
+        self.assertLess(check_finished_index, verification_finished_index)
+        self.assertLess(verification_finished_index, run_finished_index)
+
+        # Progress journal append happened after verification passed and
+        # before run_finished. The append itself is silent on success, so the
+        # durable evidence is the journal entry that exists by the time the
+        # run reports completion.
+        entries = plans.read_progress_entries(self.plan_dir)
+        self.assertEqual(1, len(entries))
+        self.assertEqual("1", entries[0].session_id.value)
+        self.assertEqual("complete", entries[0].status)
+        self.assertTrue(payload["turns"][0]["progress_appended"])
+
+    def test_historical_state_without_active_verification_renders_cleanly(
+        self,
+    ) -> None:
+        write_plan(self.plan_dir, ("complete",))
+        plan_state = state.plan_state_dir(self.plan_dir, self.state_dir)
+        plan_state.mkdir(parents=True, exist_ok=True)
+        state_path = plan_state / events.STATE_FILE_NAME
+        # Synthetic snapshot of a pre-feature `state.json`: no
+        # `active_verification` key, no stale-orphan tracking, no
+        # newer turn-level fields. The new code paths must default the
+        # missing fields without raising or inventing detail.
+        historical_payload = {
+            "ok": True,
+            "paused": False,
+            "reason": "all-complete",
+            "harness": "codex",
+            "run_id": "historical-run-1",
+            "run_started_at": "2025-01-01T00:00:00+00:00",
+            "run_finished_at": "2025-01-01T00:05:00+00:00",
+            "duration_seconds": 300.0,
+            "active_turn": None,
+        }
+        state_path.write_text(
+            json.dumps(historical_payload, sort_keys=True),
+            encoding="utf-8",
+        )
+
+        snapshot = plans.inspect_plan(self.plan_dir)
+        payload = state.status_payload(snapshot, self.state_dir)
+
+        # Top-level shape mirrors `runner_state` and defaults missing keys.
+        self.assertIsNone(payload["active_turn"])
+        self.assertIsNone(payload["active_verification"])
+        runner_state = payload["runner_state"]
+        self.assertIsNone(runner_state["active_turn"])
+        self.assertIsNone(runner_state["active_verification"])
+        # A historical run that recorded `run_finished_at` is not stale, even
+        # without a live lock — the stale-orphan check only fires when state
+        # never finished.
+        self.assertFalse(runner_state["stale_unfinished"])
+        self.assertIsNone(runner_state["stale_reason"])
+
+        # The text renderer must not raise when fed a historical payload and
+        # must not invent `Active verification:` or `stale/orphaned` lines
+        # that weren't present in the snapshot.
+        buffer = io.StringIO()
+        args = argparse.Namespace(
+            plan_dir=str(self.plan_dir),
+            state_dir=str(self.state_dir),
+            json=False,
+        )
+        with redirect_stdout(buffer):
+            exit_code = state.status_from_args(args)
+        self.assertEqual(0, exit_code)
+        rendered = buffer.getvalue()
+        self.assertNotIn("Active verification:", rendered)
+        self.assertNotIn("stale/orphaned", rendered)
+        self.assertIn("Run state: run historical-run-1", rendered)
 
 
 class RunProgressJournalIntegrationTests(unittest.TestCase):
