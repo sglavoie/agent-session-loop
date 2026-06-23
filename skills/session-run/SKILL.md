@@ -231,7 +231,7 @@ On any non-zero exit, fail closed without advancing:
 
 `reason: cwd-error` and `reason: invalid-session` indicate the skill itself called `asl verify` incorrectly (bad `--cwd` or bad `--session`); revert the handoff and pause exactly the same way, but the corrective action is for the skill caller to fix the invocation, not the plan.
 
-If verification passes (`ok: true`, exit `0`), continue to Step 6b. Do not write a parallel verification artifact — the `## Handoff` mutations plus any `RUNNER_PAUSE:` line are the complete record. The runner writes a per-turn `result.json` under a `verification` key; the skill does not need to duplicate that.
+If verification passes (`ok: true`, exit `0`), continue to Step 6b. Do not write a parallel verification artifact — the `## Handoff` mutations plus any real pause line are the complete record. The runner writes a per-turn `result.json` under a `verification` key; the skill does not need to duplicate that.
 
 If text output is captured instead of JSON (e.g., legacy invocation without `--json`), `asl verify` writes the pass/fail summary on **stderr** when verification fails and on **stdout** when it passes. Always capture both streams.
 
@@ -286,7 +286,7 @@ For runner-friendly output, you may print one or more machine-readable lines imm
 - `Runner status: paused` when stopping without completing the selected session because user input, validation, plan repair, or another recoverable intervention is required.
 - `RUNNER_PAUSE: <reason> - <short detail>` to describe a pause in a stable, grep-friendly form. Prefer existing fail-closed vocabulary such as `malformed-plan`, `unknown-status`, `lock-contention`, `blocked`, `unsafe`, `verify-failed`, `no-contract`, or `malformed-contract` when it applies. Do not invent new reason strings; reuse the runner-side vocabulary so manual and loop output grep together.
 
-These runner-readable lines are optional for manual use and must not replace the final `Next command:` line when that line is part of the report.
+These runner-readable lines are optional for manual use and must not replace the final `Next command:` line when that line is part of the report. Never print a `RUNNER_PAUSE:` line after a successful session, and never print placeholder lines such as `RUNNER_PAUSE: none`; the Python runner treats any `RUNNER_PAUSE:` line as a real pause.
 
 In `runner_managed=true` mode, print `Runner status: complete` only after the selected handoff has been changed to `complete`. If you stop before making that handoff change, print `Runner status: paused` and a `RUNNER_PAUSE: <reason> - <detail>` line so the Python runner records a structured pause instead of `no-status-change`.
 
