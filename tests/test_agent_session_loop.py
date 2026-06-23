@@ -17253,6 +17253,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         reply: str | None = None,
         dry_run: bool = False,
         json_output: bool = True,
+        allow_not_loop_ready: bool = True,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
         argv = [
             sys.executable,
@@ -17266,8 +17267,9 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
             "codex",
             "--state-dir",
             str(self.state_dir),
-            "--allow-not-loop-ready",
         ]
+        if allow_not_loop_ready:
+            argv.append("--allow-not-loop-ready")
         if json_output:
             argv.append("--json")
         if dry_run:
@@ -17466,6 +17468,46 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
             paused_events,
             events_path.read_text(encoding="utf-8"),
         )
+        context = qna.load_qna_context(self.plan_dir, state_dir=self.state_dir)
+        self.assertEqual("1", context.session_id)
+
+        resume_completed, resume_payload = self._run_run(
+            mode="reply-aware",
+            reply=self.REPLY_TEXT,
+        )
+
+        self.assertEqual(
+            0, resume_completed.returncode, resume_completed.stderr
+        )
+        self.assertTrue(resume_payload["ok"])
+        self.assertFalse(resume_payload["paused"])
+        self.assertEqual("all-complete", resume_payload["reason"])
+
+    def test_failed_reply_readiness_gate_preserves_paused_context_for_retry(
+        self,
+    ) -> None:
+        self._write_plan()
+        first_completed, first_payload = self._run_run(mode="reply-aware")
+        self.assertEqual(1, first_completed.returncode, first_completed.stderr)
+        self.assertTrue(first_payload["paused"])
+        plan_state = state.plan_state_dir(self.plan_dir, self.state_dir)
+        state_path = plan_state / events.STATE_FILE_NAME
+        events_path = plan_state / events.EVENTS_FILE_NAME
+        paused_state = state_path.read_bytes()
+        paused_events = events_path.read_bytes()
+
+        failed_completed, failed_payload = self._run_run(
+            mode="reply-aware",
+            reply=self.REPLY_TEXT,
+            allow_not_loop_ready=False,
+        )
+
+        self.assertEqual(1, failed_completed.returncode, failed_completed.stderr)
+        self.assertFalse(failed_payload["ok"])
+        self.assertTrue(failed_payload["paused"])
+        self.assertEqual("not-loop-ready", failed_payload["pause_reason"])
+        self.assertEqual(paused_state, state_path.read_bytes())
+        self.assertEqual(paused_events, events_path.read_bytes())
         context = qna.load_qna_context(self.plan_dir, state_dir=self.state_dir)
         self.assertEqual("1", context.session_id)
 

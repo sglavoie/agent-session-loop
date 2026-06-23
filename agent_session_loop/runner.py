@@ -1326,6 +1326,32 @@ def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
     os.replace(temporary_path, path)
 
 
+def _write_bytes_file(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    temporary_path.write_bytes(payload)
+    os.replace(temporary_path, path)
+
+
+def _read_optional_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _restore_optional_bytes(path: Path, payload: bytes | None) -> None:
+    if payload is None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    _write_bytes_file(path, payload)
+
+
 def _commit_status_result(
     *,
     returncode: int,
@@ -1636,6 +1662,33 @@ class _RunPersistence:
             return
         with self.lock:
             _write_state_payload(payload)
+
+
+class _ReplyStatePreserver:
+    """Restore paused Q&A state when a reply attempt fails before consumption."""
+
+    def __init__(
+        self,
+        *,
+        state_path: Path,
+        event_path: Path,
+        enabled: bool,
+    ) -> None:
+        self._enabled = enabled
+        self._consumed = False
+        self._state_path = state_path
+        self._event_path = event_path
+        self._state_bytes = _read_optional_bytes(state_path) if enabled else None
+        self._event_bytes = _read_optional_bytes(event_path) if enabled else None
+
+    def mark_consumed(self) -> None:
+        self._consumed = True
+
+    def restore_if_unconsumed(self) -> None:
+        if not self._enabled or self._consumed:
+            return
+        _restore_optional_bytes(self._state_path, self._state_bytes)
+        _restore_optional_bytes(self._event_path, self._event_bytes)
 
 
 def _run_persistence(
@@ -3728,6 +3781,19 @@ def _run_locked(
         run_id=run_id,
         commit_mode=commit_mode,
     )
+    reply_state_preserver = _ReplyStatePreserver(
+        state_path=state_path,
+        event_path=event_path,
+        enabled=reply_text is not None and not args.dry_run,
+    )
+
+    def finish_run_locked(
+        exit_code: int,
+        result_payload: dict[str, Any],
+    ) -> tuple[int, dict[str, Any]]:
+        reply_state_preserver.restore_if_unconsumed()
+        return exit_code, result_payload
+
     persist_run_state = not (args.dry_run and reply_text is not None)
     persistence = _RunPersistence(
         write_state=persist_run_state,
@@ -3780,7 +3846,7 @@ def _run_locked(
             persistence=persistence,
         )
         _finish_run(event_path, payload, progress, persistence=persistence)
-        return 1, payload
+        return finish_run_locked(1, payload)
 
     review_requested = getattr(args, "review_harness", None) is not None
 
@@ -3795,12 +3861,12 @@ def _run_locked(
                 persistence=persistence,
             )
             _finish_run(event_path, payload, progress, persistence=persistence)
-            return 1, payload
+            return finish_run_locked(1, payload)
         if not review_requested:
             with persistence.lock:
                 payload["reason"] = "all-complete"
             _finish_run(event_path, payload, progress, persistence=persistence)
-            return 0, payload
+            return finish_run_locked(0, payload)
 
     if not review_requested:
         pending_review = find_pending_generated_review_session(snapshot.plan_dir)
@@ -3822,7 +3888,7 @@ def _run_locked(
                 persistence=persistence,
             )
             _finish_run(event_path, payload, progress, persistence=persistence)
-            return 1, payload
+            return finish_run_locked(1, payload)
 
     if args.dry_run:
         with persistence.lock:
@@ -3836,7 +3902,7 @@ def _run_locked(
                 reply_context=reply_context,
             )
         _finish_run(event_path, payload, progress, persistence=persistence)
-        return 0, payload
+        return finish_run_locked(0, payload)
 
     allow_not_loop_ready = _allow_not_loop_ready(args)
     preflight_report = preflight.run_preflight(
@@ -3878,7 +3944,7 @@ def _run_locked(
             persistence=persistence,
         )
         _finish_run(event_path, payload, progress, persistence=persistence)
-        return 1, payload
+        return finish_run_locked(1, payload)
 
     try:
         if commit_mode == COMMIT_MODE_END:
@@ -3906,7 +3972,7 @@ def _run_locked(
             persistence=persistence,
         )
         _finish_run(event_path, payload, progress, persistence=persistence)
-        return 1, payload
+        return finish_run_locked(1, payload)
 
     should_transition = gate_passed or (
         allow_not_loop_ready and preflight_report.readiness is not None
@@ -4291,6 +4357,7 @@ def _run_locked(
                 run_control_context = dict(active_turn)
             if use_reply_prompt:
                 assert reply_source_meta is not None and reply_text is not None
+                reply_state_preserver.mark_consumed()
                 persistence.append_event(
                     event_path,
                     events.REPLY_PROVIDED_EVENT,
@@ -4768,7 +4835,7 @@ def _run_locked(
         exit_code = 0 if payload["ok"] else 1
         if payload.get("pause_reason") == "interrupted":
             exit_code = INTERRUPTED_EXIT
-    return exit_code, payload
+    return finish_run_locked(exit_code, payload)
 
 
 def _state_error_reason(error: state.StateError) -> tuple[str, bool]:

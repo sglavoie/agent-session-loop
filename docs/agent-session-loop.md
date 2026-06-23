@@ -458,6 +458,9 @@ plus a `reply_source` summary; the literal reply text is never stored in
 `state.json`, `events.jsonl`, `argv`, or turn artifacts (the persisted argv
 substitutes a placeholder like `<asl reply prompt redacted: N chars>` for the
 full in-harness reply prompt).
+The reply is consumed only after the resumed harness turn starts; pre-harness
+failures such as `not-loop-ready` preserve the previous paused `state.json` and
+`events.jsonl` so the same reply can be retried after repair.
 Subsequent turns in the same run drop back to the plain session prompt. The
 flag is allowed only when the most recent turn paused with a non-empty
 `last-message.txt`; otherwise `run --reply` exits non-zero with `reason:
