@@ -1,6 +1,6 @@
 ---
 name: session-split
-description: Split a multi-session plan into per-session files with conservative parallel-safety metadata and scheduling guidance. Accepts a plan file path or captured inline plan text. Also proposes session boundaries if the plan lacks session structure.
+description: Split a multi-session plan into per-session files for serial execution by `session-run`. Accepts a plan file path or captured inline plan text. Also proposes session boundaries if the plan lacks session structure.
 allowed-tools: Bash, Read, Write
 ---
 
@@ -8,7 +8,7 @@ allowed-tools: Bash, Read, Write
 
 ## Purpose
 
-Parse a multi-session plan and split it into a collision-safe persistent directory of smaller, self-contained files: shared context, individual session files with handoff templates and parallel-safety metadata, and a manifest with ready-to-paste serial and parallel-aware execution commands.
+Parse a multi-session plan and split it into a collision-safe persistent directory of smaller, self-contained files: shared context, individual session files with handoff templates, and a manifest with a ready-to-paste serial execution command. The generated plan is serial-only by design — `session-run` auto-advances through sessions in dotted numeric order.
 
 ## Input
 
@@ -158,52 +158,7 @@ Record a tuple for each: `(path, lines | NEW, session_number)` — where `sessio
 
 **Explicit boundary**: Do NOT verify signatures, function names, or code patterns — that is `session-expand`'s job. This step only measures size and spread.
 
-### Step 5: Parallel Safety Analysis
-
-Build conservative parallel metadata after the surface scan and before any generated files are written. Parallelism is optional guidance; architectural correctness and collision avoidance always win.
-
-**Inputs to consider:**
-
-- Parsed session order, titles, and content
-- Surface scan path references when available
-- Explicit dependency language such as "depends on", "requires", "after", "before", "blocks", "unblocks", "handoff from", or "must run after"
-- Shared context contracts and global invariants
-- Write-path ownership claims in the plan, especially words such as "edit", "update", "modify", "create", "delete", "own", "owns", "scope", or "files modified"
-
-**Build dependency edges:**
-
-- Add an edge from session A to session B when B explicitly depends on A or must run after A.
-- Add an edge when B consumes generated output, APIs, schemas, contracts, or helper code produced by A.
-- Add an edge for overlapping write ownership, including exact path overlap and parent/child path overlap.
-- Add an edge for shared risky files unless the plan clearly assigns one session exclusive ownership.
-- Do not treat numeric session order alone as a dependency; use the plan text and shared context.
-
-**Classify each session:**
-
-- `parallel-safe`: concrete owned write paths, no broad or risky shared writes, and no dependency edge against any other session in the same wave.
-- `parallel-candidate`: likely separable, but ownership, generated output, or dependency evidence is incomplete and should be validated by `session-expand` before concurrent execution.
-- `serial-required`: has an unresolved dependency, overlapping ownership, broad directory ownership, shared risky files, or global side effects that make concurrent execution unsafe.
-
-Treat these as not parallel-safe by default: unknown ownership, broad directory edits, shared configs, schemas, migrations, lockfiles, generated files, package-manager metadata, build-system files, parent/child path overlap, repo-wide rewrites, and instructions that ask workers to clean up or refactor outside their owned paths.
-
-**Build dependency waves:**
-
-- Topologically group sessions into waves using dependency edges.
-- Sessions inside the same wave may be listed as safe to run together only when every session is `parallel-safe`, all owned write paths are disjoint, and no risky shared path appears in more than one session.
-- Keep `parallel-candidate` sessions out of safe concurrent sets; list them separately as candidates that need manual confirmation or `session-expand` validation.
-- Put any session with `serial-required` in its own wave unless a later validation step proves a narrower boundary.
-
-Record for each session:
-
-- Safety classification
-- Required prior sessions
-- Allowed concurrent sessions
-- Owned write paths
-- Forbidden/shared paths
-- Serial blockers or uncertainty reasons
-- Optional intra-session tracks, but only when the session itself contains disjoint sub-work with clear ownership
-
-### Step 6: Handle Edge Cases
+### Step 5: Handle Edge Cases
 
 **No session markers found**: Propose session boundaries using concrete data:
 
@@ -213,13 +168,13 @@ Record for each session:
 4. Present the proposed session structure with per-session summaries: `<Title> -- <N> files, ~<L> existing lines, <subsystem(s)>`
 5. If surface scan was skipped (< 5 file references), fall back to heading/affinity grouping
 6. Ask the user for approval before proceeding
-7. Once approved, restructure the plan content accordingly and continue to Step 7
+7. Once approved, restructure the plan content accordingly and continue to Step 6
 
 **Single session found**: Tell the user: "Only 1 session found — splitting is not needed." Stop.
 
-**Two or more sessions found**: Continue to Step 7.
+**Two or more sessions found**: Continue to Step 6.
 
-### Step 7: Resolve Output Directory
+### Step 6: Resolve Output Directory
 
 Run the resolver and use its JSON output as the source of truth for all generated file paths:
 
@@ -254,7 +209,7 @@ PY
 
 Use `output_dir` for every generated file path. Use `source_path` as the canonical original plan path in generated content. Do not derive an alternate directory from the plan filename.
 
-### Step 8: Write context.md
+### Step 7: Write context.md
 
 Write the context lines to `<output_dir>/context.md`.
 
@@ -268,7 +223,7 @@ _No shared context section found in the original plan._
 **Original plan**: `<source_path>`
 ```
 
-### Step 9: Write session-N.md Files
+### Step 8: Write session-N.md Files
 
 For each session, write `<output_dir>/session-N.md` where N is the canonical session number from the heading. Normalize numeric IDs by parsing each dotted component as an integer before naming files: `Session 01` writes `session-1.md`, `Session 02.03` writes `session-2.3.md`, and leading zeroes must never appear in filenames, expansion references, manifest tables, or execution commands.
 
@@ -279,16 +234,6 @@ For each session, write `<output_dir>/session-N.md` where N is the canonical ses
 
 > **Before starting**: Read `context.md` in this directory for shared project context.
 > **Previous session**: Read the **Handoff** section at the bottom of `session-<N-1>.md`.
-
-## Parallel Metadata
-
-- **Safety classification**: `<parallel-safe | parallel-candidate | serial-required>`
-- **Required prior sessions**: `<none | session numbers and reasons>`
-- **Allowed concurrent sessions**: `<none | session numbers>`
-- **Owned write paths**: `<paths this session may edit>`
-- **Forbidden/shared paths**: `<paths that must not be edited, or require coordinator ownership>`
-- **Serial blockers**: `<none | dependency or ownership reasons>`
-- **Optional internal tracks**: `<none | disjoint track names and owned paths>`
 
 ---
 
@@ -334,11 +279,9 @@ Rules:
 
 - For Session 1, omit the "Previous session" line
 - Preserve all original content exactly — do not summarize, rewrite, or reformat
-- Insert the Parallel Metadata block above the preserved original session content
+- Do not emit a `## Parallel Metadata` block, internal-track prompts, or any other parallel-scheduling scaffolding. The generated plan is serial-only and `session-run` ignores legacy parallel sections even if they appear on disk.
 - **Heading normalization**: if the original session heading was `###` level, promote all headings within the session by one level so the file reads naturally as a standalone document (session title becomes `#`, its `####` sub-sections become `##`, etc.)
 - Preserve fenced code blocks verbatim
-- If `Optional internal tracks` is not `none`, add an `### Internal Track Worker Prompts` subsection directly below the metadata with one prompt per track.
-- Emit intra-session worker prompts only when optional internal tracks have disjoint ownership. Track workers must not edit `manifest.md`, `context.md`, session handoffs, or files outside their ownership; the coordinator integrates results, updates the session handoff, and lets `session-run` sync derived status tables.
 
 **Completion contract emission rules** (the contract is consumed by `agent_session_loop.contracts.parse_completion_contract` and by `asl verify` / `asl run` verification enforcement, so the shape must be exact):
 
@@ -352,7 +295,7 @@ Rules:
 - Check `name` is optional. When omitted, the parser assigns `check-<index>` automatically; when supplied, names must be unique within the recipe.
 - Never emit ambiguity sentinels (`TBD`, `TODO`, `FIXME`, `XXX`, `<placeholder>`, `<fill in>`) above the handoff. They would be caught by `asl preflight` as yellow `ambiguity-sentinel` findings.
 
-### Step 9a: Write progress.md Skeleton
+### Step 8a: Write progress.md Skeleton
 
 After every `session-N.md` has been written, write a skeleton `<output_dir>/progress.md` containing only the `PROGRESS_HEADER` constant (header line + `<!-- agent-session-loop progress-journal v1 -->` schema-version comment + descriptive paragraph). This way fresh plans never trigger the yellow `progress-journal-missing` preflight finding once Session 1 completes, and the runner has a well-formed file to append the first entry to.
 
@@ -385,9 +328,9 @@ Behavior requirements:
 - Authors must never write to `progress.md` from a session; only the runner's `append_progress_entry` mutates it (`session-run` Step 6d documents this for the agent side). If a plan loses or never had a journal, `asl backfill-progress <plan-dir>` reconstructs one from completed handoffs; if a stale or malformed journal already exists, use `asl backfill-progress --force <plan-dir>` so the CLI replaces it atomically.
 - If `agent_session_loop` cannot be imported (running the skill outside this repo without an installed `asl`), fail fast with a clear error pointing to `asl --version`; do not write a placeholder file. A malformed journal would surface as a yellow `progress-journal-missing` finding once Session 1 completes.
 
-### Step 10: Write manifest.md
+### Step 9: Write manifest.md
 
-Write `<output_dir>/manifest.md`. The three readiness metadata lines are required so that `asl preflight` can parse the manifest immediately; their values are populated in Step 10a below.
+Write `<output_dir>/manifest.md`. The three readiness metadata lines are required so that `asl preflight` can parse the manifest immediately; their values are populated in Step 9a below.
 
 ````markdown
 # <Plan Title>
@@ -420,65 +363,9 @@ Run `<skill-prefix>session-run` once per session, preferably in a fresh harness 
 
 Example rendered command: `<skill-prefix>session-run ~/.local/share/agent-plans/<slug>-<hash>/`
 
-`<skill-prefix>session-run` auto-advances — it finds the next pending session from final session handoff statuses, implements it, updates the handoff, and syncs recognized derived status tables in `manifest.md` and `context.md`. No session number needed. Repeat in new conversations until all sessions are complete.
+`<skill-prefix>session-run` auto-advances — it finds the next pending session from final session handoff statuses, implements it, updates the handoff, and syncs the recognized derived status table in `manifest.md`. No session number is needed and no explicit session selector is accepted; the plan is serial-only by design. Repeat in new conversations until all sessions are complete.
 
 Session handoff statuses are the source of truth. The `manifest.md` status table is derived bookkeeping for humans and automation.
-
-## Parallel Execution
-
-Parallel execution is optional. Use it only when the safety analysis marks sessions as `parallel-safe`; otherwise use the serial command above.
-
-Do not run concurrent auto-advance commands:
-
-```text
-<skill-prefix>session-run <output_dir>/
-```
-
-Concurrent auto-picking can race on the same pending session. Explicit session execution is required for parallel workers and depends on `<skill-prefix>session-run <output_dir>/ --session N` support.
-
-### Dependency Waves
-
-| Wave | Sessions | Safe concurrent set | Notes |
-| ---- | -------- | ------------------- | ----- |
-| 1    | <sessions> | <session numbers or none> | <dependency and ownership summary> |
-
-### Session Ownership
-
-| Session | Classification | Owned write paths | Required prior sessions | Allowed concurrent sessions | Serial blockers |
-| ------- | -------------- | ----------------- | ----------------------- | --------------------------- | --------------- |
-| 1       | <classification> | <paths> | <none/session numbers> | <none/session numbers> | <none/reasons> |
-
-### Parallel Worker Commands
-
-Emit one command block per session listed in a safe concurrent set. Use these only for sessions listed in a safe concurrent set:
-
-```text
-<skill-prefix>session-run <output_dir>/ --session <N>
-```
-
-Example:
-
-```text
-<skill-prefix>session-run <output_dir>/ --session 2
-```
-
-### Worker Prompts
-
-Emit one ready-to-use prompt per parallel-safe worker with all placeholders replaced:
-
-```text
-You are implementing Session <N> from <output_dir>/session-<N>.md.
-Read context.md, session-<N>.md, and session-<N>.expand.md if present.
-You own only these write paths: <owned paths>.
-Do not edit these shared or forbidden paths: <forbidden/shared paths>.
-You are not alone in the codebase; do not revert or overwrite changes outside your ownership.
-Run the session verification that applies to your scope.
-Update the Handoff section of session-<N>.md when complete. In explicit parallel runs, leave shared manifest/context status tables for the final bookkeeping sync unless this is the last pending session.
-```
-
-### Serial Blockers
-
-- <session>: <reason, or "none">
 
 ## Token Budget
 
@@ -502,9 +389,11 @@ Weight classification:
 
 Replace all `<placeholders>` with actual computed values.
 
+Do not emit a `## Parallel Execution` section, `### Dependency Waves`, `### Session Ownership`, `### Parallel Worker Commands`, `### Worker Prompts`, or `### Serial Blockers`. The generated manifest is serial-only and `session-run` rejects explicit `--session` selectors.
+
 **Note**: Omit the Execution Weight section entirely if the surface scan was skipped (< 5 file references).
 
-### Step 10a: Populate Readiness Metadata
+### Step 9a: Populate Readiness Metadata
 
 After every `session-N.md`, `context.md`, and `manifest.md` file has been written, compute the stable readiness SHA-256 for the just-written directory and overwrite the two placeholder fields (`<readiness_sha256>` and `<readiness_checked_at>`) in `manifest.md`. The readiness state stays at `draft`; only `asl preflight --mark-loop-ready` (after the user repairs all yellow/red findings) may advance the state to `loop-ready`.
 
@@ -547,12 +436,13 @@ PY
 
 Behavior requirements:
 
-- Compute the SHA after every other generated file is finalized; the hash depends on the contents of the session, context, manifest, expansion (if any), and `parallel-validation.md` (if any) files. Recomputing earlier produces a hash that the next `asl preflight` will treat as a red `manifest-readiness` finding.
+- Compute the SHA after every other generated file is finalized; the hash depends on the contents of the session, context, manifest, and expansion (if any) files. `parallel-validation.md` is no longer hashed even if a legacy copy is present on disk. Recomputing earlier produces a hash that the next `asl preflight` will treat as a red `manifest-readiness` finding.
+- Do not write a `parallel-validation.md` file. It is not generated by this skill and `agent_session_loop.plans.stable_readiness_sha256` ignores it.
 - Always emit `**Readiness**: draft`. Do not advance the state in `session-split`; directory-mode `session-expand` runs final `asl preflight --mark-loop-ready` after validation, and manual preflight may do the same after repair.
 - The timestamp must be a UTC ISO-8601 string. The parser only checks non-emptiness, but consumers (preflight repair hints, guided skill) display the value verbatim.
 - If `agent_session_loop` cannot be imported (for example when running the skill outside this repo), fail fast with a clear error pointing to `asl --version`; do not write a placeholder SHA. A placeholder would cause `asl preflight` to emit a red `manifest-readiness` finding and block `--mark-loop-ready` until the user repairs the manifest by hand.
 
-### Step 11: Report Results
+### Step 10: Report Results
 
 Print a concise summary:
 
@@ -560,13 +450,12 @@ Print a concise summary:
 2. Source plan path, especially when inline content was captured
 3. Output directory path
 4. File listing with approximate sizes
-5. The ready-to-paste execution command (the "Execute All Sessions" block from manifest.md)
+5. The ready-to-paste serial execution command (the `## Execution` block from manifest.md)
 6. Estimated token savings percentage
 7. If the Execution Weight table was generated, highlight any "heavy" session and suggest the user consider splitting it further
-8. Mention whether the manifest includes a Parallel Execution section and whether any sessions are `parallel-safe`
-9. State that the plan ships as `**Readiness**: draft` with a stable readiness SHA-256, and that `session-expand` will run final preflight with `--mark-loop-ready` so a clean plan is ready for `session-run`.
-10. Confirm that a skeleton `progress.md` (header only) was written to the output directory. Note that the runner appends one entry per completed session automatically; authors and `session-run` workers never edit the file by hand, and it is excluded from the readiness hash. Mention `asl progress <plan-dir>` (and `--tail`, `--json`) as the inspection surface, `asl backfill-progress <plan-dir>` as the recovery path for plans that lose the journal, and `asl backfill-progress --force <plan-dir>` for stale or malformed existing journals.
-11. Suggest running `<skill-prefix>session-expand <output-directory>` next to validate file paths, signatures, ownership, dependencies, contract entries, assumptions, and final loop-ready preflight against the actual codebase before execution.
+8. State that the plan ships as `**Readiness**: draft` with a stable readiness SHA-256, and that `session-expand` will run final preflight with `--mark-loop-ready` so a clean plan is ready for `session-run`.
+9. Confirm that a skeleton `progress.md` (header only) was written to the output directory. Note that the runner appends one entry per completed session automatically; authors and `session-run` workers never edit the file by hand, and it is excluded from the readiness hash. Mention `asl progress <plan-dir>` (and `--tail`, `--json`) as the inspection surface, `asl backfill-progress <plan-dir>` as the recovery path for plans that lose the journal, and `asl backfill-progress --force <plan-dir>` for stale or malformed existing journals.
+10. Suggest running `<skill-prefix>session-expand <output-directory>` next to validate file paths, signatures, contract entries, assumptions, and final loop-ready preflight against the actual codebase before execution.
 
 ## Important Notes
 
@@ -576,8 +465,8 @@ Print a concise summary:
 - If a session contains "Exit criteria" or "Verification" sub-sections, they belong to that session (not to context)
 - Content between `---` horizontal rules that appears between context and the first session should go at the end of context.md
 - Always use `<skill-prefix>session-run` in generated execution instructions — it auto-advances through sessions and runs within the active harness conversation.
-- Never promote parallel execution above correctness; uncertain ownership or dependencies must become `parallel-candidate` or `serial-required`.
-- Parallel worker commands must use explicit `--session N`; never recommend concurrent auto-advance invocations.
+- The generated plan is serial-only by design. Do not emit `## Parallel Metadata` blocks, dependency waves, worker prompts, or any explicit `--session N` execution commands. `session-run` only accepts directory auto-advance and rejects explicit session selectors.
+- Do not generate a `parallel-validation.md` file. The readiness hash ignores it even when a legacy copy lingers on disk.
 - Every emitted `session-N.md` must include a parseable `## Completion Contract` above its `## Handoff`. Plans without contracts will be rejected by `asl preflight` (red `missing-contract` findings) and by `asl run`'s verification gate, which pauses with `reason="no-contract"` unless `--allow-not-loop-ready` is passed.
 - `manifest.md` must carry the three readiness lines (`**Readiness**`, `**Readiness SHA-256**`, `**Readiness checked at**`) with a stable SHA produced by `agent_session_loop.plans.stable_readiness_sha256`. The initial state is always `draft`; directory-mode `session-expand` or manual `asl preflight --mark-loop-ready` may advance it after validation.
 - Every split must emit a skeleton `progress.md` containing only `agent_session_loop.plans.PROGRESS_HEADER`. The journal is runner-managed, excluded from `plan_content_sha256` / `stable_readiness_sha256`, and never appears in the manifest session table. Missing journals trigger a yellow `progress-journal-missing` preflight finding once at least one session is `complete`.

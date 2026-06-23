@@ -1,6 +1,6 @@
 ---
 name: session-resplit
-description: Split one pending session in an existing split plan into nested child sessions while preserving plan metadata, locks, archives, and rerun guidance.
+description: Split one pending session in an existing split plan into nested serial child sessions while preserving plan metadata, locks, archives, and rerun guidance.
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 ---
 
@@ -10,12 +10,16 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 
 Replace one pending session in an existing split plan with nested child sessions such as `session-8.1.md`, `session-8.2.md`, and `session-8.3.md`. Use this when one pending session is too large or needs clearer boundaries, but the rest of the plan should remain intact.
 
+Sequential by design: generated children are serial work units with parseable completion contracts. This skill does not read or emit parallel scheduling metadata. Legacy `parallel-validation.md` files and any `## Parallel Metadata` blocks left on disk from older plans are ignored as plan maintenance and execution inputs.
+
 This skill is a companion to `session-split`, `session-expand`, and `session-run`:
 
 - `session-split` creates the original plan directory.
 - `session-expand` verifies plan facts and writes `session-<ID>.expand.md` files.
-- `session-run` executes one pending `session-<ID>.md` file at a time.
+- `session-run` executes one pending `session-<ID>.md` file at a time, serially.
 - `session-resplit` rewrites one pending parent session into nested pending children, then instructs the user to rerun `session-expand`.
+
+Targeted parent selection (`--session <ID>`, direct `session-<ID>.md` paths) is intentionally preserved here because this skill is plan maintenance, not session execution. The `session-run` skill is serial-only and accepts only `<plan-dir>/`; the targeting flags on this skill let an operator pick which pending parent to rewrite without changing the serial execution contract.
 
 ## Input
 
@@ -107,7 +111,7 @@ If no helper exists, perform the contract manually. Keep edits scoped to the sel
 
 Verify the resolved plan directory exists and contains `context.md` and `manifest.md`.
 
-Read `context.md` and `manifest.md`. If `parallel-validation.md` exists, read it too; it will become stale after a successful resplit and must be archived.
+Read `context.md` and `manifest.md`. Do not read `parallel-validation.md` even if it exists; that file is a legacy artifact from older plan splits and is intentionally ignored by both this skill and `session-run`. Ignore any `## Parallel Metadata` blocks, dependency-wave tables, or ownership tables left in `manifest.md` or in session files — they are not maintained and do not gate resplit decisions.
 
 Build the exact session file list from the plan directory:
 
@@ -136,10 +140,9 @@ Fail closed without modifying files when:
 - Any file already exists for a child ID that would be generated, such as `session-8.1.md` when splitting `session-8.md`.
 - Any descendant session already exists under the selected parent prefix, such as `session-8.1.md` or `session-8.1.1.md` when splitting `session-8.md`.
 - A matching child expansion file already exists, such as `session-8.1.expand.md`.
-- `parallel-validation.md` marks the selected parent as `blocked`, `unsafe to run now`, or `ownership-conflicted`.
 - The plan directory has an active `agent-session-loop` lock.
 
-`parallel-validation.md` language saying the selected session is `dependent on unresolved work` is not by itself a resplit blocker. Resplitting is plan maintenance, not session execution. Preserve the dependency by making the generated children serial-required and by carrying required prior sessions into the first child.
+Resplitting is plan maintenance, not session execution. A pending parent that depends on earlier incomplete sessions can still be resplit — preserve the dependency by generating serial children that link in the same `> **Previous session**` chain.
 
 ### Step 4: Acquire the Plan Lock
 
@@ -169,8 +172,9 @@ Read the selected parent session content above its final `## Handoff` block. Pre
 - `> **Before starting**` context requirement
 - Expansion-note reference, if present
 - Previous-session reference, if present
-- `## Parallel Metadata`, if present
 - All implementation instructions above the final handoff
+
+Strip any `## Parallel Metadata` block from the parent body before partitioning the instructions; do not copy it into generated child files.
 
 Create child sessions that are useful execution units, not arbitrary slices. Prefer boundaries based on files, subsystems, phases, tests, or explicit deliverables. When a compact parent paragraph lists deliverables after a colon or in bullets, split on those deliverables before falling back to generic phases.
 
@@ -178,13 +182,8 @@ Default child metadata:
 
 - Child IDs are `<PARENT_ID>.1`, `<PARENT_ID>.2`, ..., `<PARENT_ID>.<N>`.
 - Child files are `session-<CHILD_ID>.md`.
-- The first child inherits the parent's required prior sessions and previous-session reference.
-- Each later child requires the immediately preceding child.
-- Safety classification defaults to `serial-required`.
-- Allowed concurrent sessions defaults to `none`.
-- Owned write paths default to a narrowed subset of the parent's owned paths when clear; otherwise preserve the parent owned paths and mark the child serial-required.
-- Forbidden/shared paths should preserve the parent's caution text when present.
-- Serial blockers should explain that the child sequence was generated from a resplit parent and should run serially until `session-expand` validates it.
+- The first child inherits the parent's previous-session reference. If the parent did not have one, fall back to the session that immediately precedes the parent in dotted numeric order.
+- Each later child's previous-session reference points to the prior child file.
 
 Each child session must include:
 
@@ -200,16 +199,7 @@ Each child session must include:
 - **Parent title**: <parent title>
 - **Child session**: <CHILD_ID>
 - **Parent archive**: `<archive-path>`
-
-## Parallel Metadata
-
-- **Safety classification**: `serial-required`
-- **Required prior sessions**: <prior IDs or none>
-- **Allowed concurrent sessions**: none
-- **Owned write paths**: <paths or unknown - inherited from parent>
-- **Forbidden/shared paths**: <paths or parent text>
-- **Serial blockers**: Generated child of `session-<PARENT_ID>.md`; run serially until expansion validates narrower ownership.
-- **Optional internal tracks**: none
+- **Archived parent expansion**: historical context only; rerun `<skill-prefix>session-expand` for current facts. <!-- include only when the parent had an expansion file -->
 
 ---
 
@@ -217,11 +207,36 @@ Each child session must include:
 
 - Full parent instructions are archived at `<archive-path>/session-<PARENT_ID>.md`.
 - Preserve the archived parent implementation intent while completing only this child scope.
-- Archived parent expansion notes, if present, are historical context only; rerun `session-expand` for current facts.
+- Archived parent expansion notes are at `<archive-path>/session-<PARENT_ID>.expand.md`; use them as historical context until `<skill-prefix>session-expand` regenerates current notes. <!-- include only when the parent had an expansion file -->
 
 ## Child Scope
 
 <child-specific instructions>
+
+---
+
+## Completion Contract
+
+### Done when
+
+- <child title> is implemented as described in the child scope above.
+
+### Verify
+
+```json
+{
+  "session": "<CHILD_ID>",
+  "checks": [
+    {
+      "type": "command",
+      "argv": ["python3", "-m", "unittest", "-q"],
+      "timeout_seconds": 60
+    }
+  ]
+}
+```
+
+---
 
 ## Handoff
 
@@ -234,11 +249,11 @@ Each child session must include:
 - **Notes**:
 ```
 
-For the first child, the previous-session reference should point to the session that immediately precedes the parent in dotted numeric order when one exists. For later children, it should point to the prior child file.
+The `## Completion Contract` block is required so `asl verify` and `asl run` enforce the same gate on generated children that the rest of the plan uses. The default `Verify` recipe runs `python3 -m unittest -q` as a placeholder; rerun `session-expand` afterwards to refine the recipe against the actual codebase.
 
 If the parent had expansion notes, do not copy stale line numbers into child instructions as authoritative facts. Instead, place a short lineage note saying the archived parent expansion may contain historical context and that `session-expand` must be rerun.
 
-### Step 6: Archive the Parent and Stale Artifacts
+### Step 6: Archive the Parent
 
 Create an archive directory inside the plan directory:
 
@@ -252,11 +267,10 @@ Archive these files when present:
 
 - The parent `session-<PARENT_ID>.md`
 - The parent `session-<PARENT_ID>.expand.md`
-- `parallel-validation.md`
 
 The parent session file must no longer exist at the plan root after a successful resplit. Leaving it in place would cause `session-run` to execute the unsplit parent before the new children.
 
-Do not silently delete stale validation artifacts. Move them into the archive directory and mention the archive in the report.
+Do not touch `parallel-validation.md` if it exists. It is a legacy artifact from older plans and is intentionally left on disk so that hand-edited historical context is not lost. Neither this skill nor `session-run` reads it.
 
 ### Step 7: Write Children and Update Ledgers
 
@@ -267,8 +281,9 @@ Update `manifest.md` as derived bookkeeping:
 - Update the top-level `**Sessions**:` count when present.
 - In the primary `## Sessions` table, replace the parent row with child rows in child-ID order.
 - Keep non-status cells intact where practical, but set each child status to `pending` and file to `session-<CHILD_ID>.md`.
-- In dependency-wave and ownership tables, replace the parent row with serial child rows when the table shape is clear.
-- If a table cannot be updated safely, leave it unchanged and append a `## Resplit Notes` section explaining which parent was split, which child files were created, and which tables may need manual cleanup.
+- Append a `## Resplit Notes` section to `manifest.md` describing which parent was split, which child files were created, and the archive directory used.
+
+Do not edit legacy dependency-wave or ownership tables left in `manifest.md`. Those tables are not maintained by the serial workflow; leave their rows untouched even when they reference the resplit parent.
 
 Update `context.md` only when it contains a clear markdown session-status table with both a session ID column and a `Status` column. Do not rewrite prose, checklists, ambiguous tables, or unrelated uses of `pending`.
 
@@ -276,7 +291,7 @@ If the selected parent was the first pending session, the first generated child 
 
 ### Step 8: Regenerate Expansion Guidance
 
-After a successful resplit, `parallel-validation.md` and any parent expansion file are stale by definition. The report must instruct the user to rerun `session-expand` against the plan directory before continuing execution.
+After a successful resplit, any parent expansion file is stale by definition and the generated child contracts use placeholder verify recipes. The report must instruct the user to rerun `session-expand` against the plan directory before continuing execution so child expansion notes are written and the verify recipes can be refined.
 
 Ready-to-paste command:
 
@@ -295,7 +310,7 @@ Print a concise summary:
 1. Parent session that was resplit
 2. Child sessions created
 3. Archive directory used
-4. Stale validation artifacts archived
+4. Files archived (parent session and parent expansion when present)
 5. Derived ledgers updated or intentionally left unchanged
 6. Any manual cleanup required
 7. Next commands
@@ -313,9 +328,9 @@ RESPLIT_STATUS: paused
 RESPLIT_PAUSE: <reason> - <short detail>
 ```
 
-Prefer stable reasons such as `malformed-plan`, `unknown-status`, `lock-contention`, `blocked`, `unsafe`, `collision`, `cannot-split`, or `ambiguous-input`.
+Prefer stable reasons such as `malformed-plan`, `unknown-status`, `lock-contention`, `blocked`, `collision`, `cannot-split`, or `ambiguous-input`.
 
-End every successful report with exactly one `Next command:` line. Because resplitting invalidates expansion and parallel-validation artifacts, the next command should normally be:
+End every successful report with exactly one `Next command:` line. Because resplitting invalidates the parent expansion file and leaves generated children with placeholder verify recipes, the next command should normally be:
 
 ```
 Next command: $session-expand <plan-dir>/
@@ -339,6 +354,7 @@ Use a trailing slash for displayed plan directories.
 - Never modify the original source plan file referenced by `manifest.md`.
 - Treat final handoff status lines as authoritative over derived manifest tables.
 - Preserve dotted session IDs everywhere: filenames, headings, dependencies, lineage, examples, and reports.
-- Default generated children to serial-required dependencies until `session-expand` proves narrower ownership.
-- Archive `parallel-validation.md` after any successful resplit because its cross-session conclusions were computed against the old session graph.
-- After resplitting, rerun `session-expand` before `session-run` so child annotations and validation are regenerated with dotted IDs.
+- Do not emit `## Parallel Metadata` blocks in generated children. Generated children are serial work units; each must include a parseable `## Completion Contract` block instead.
+- Do not read or rewrite `parallel-validation.md`. It is a legacy artifact that both this skill and `session-run` ignore.
+- Do not touch legacy dependency-wave or ownership tables in `manifest.md`. Leave their rows intact even when they reference the resplit parent.
+- After resplitting, rerun `session-expand` before `session-run` so child expansion notes are written and child verify recipes can be refined past the default placeholder.

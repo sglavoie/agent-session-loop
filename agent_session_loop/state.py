@@ -441,11 +441,6 @@ def status_payload(
         plan_dir=str(snapshot.plan_dir),
         context_path=str(snapshot.context_path),
         manifest_path=str(snapshot.manifest_path),
-        parallel_validation_path=(
-            str(snapshot.parallel_validation_path)
-            if snapshot.parallel_validation_path is not None
-            else None
-        ),
         content_sha256=snapshot.content_sha256,
         path_hash=snapshot.path_hash,
         plan_hash=snapshot.plan_hash,

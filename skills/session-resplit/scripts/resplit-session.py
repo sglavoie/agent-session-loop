@@ -6,6 +6,12 @@ plan inspection, target validation, lock acquisition, archival, child file
 creation, and derived ledger updates. The skill may provide child specs for
 better semantic boundaries; otherwise the helper falls back to deterministic
 phase-based child instructions.
+
+Sequential by design: this script does not read `parallel-validation.md`, does
+not emit `## Parallel Metadata` blocks for generated children, and leaves
+legacy parallel manifest tables (waves, ownership) untouched. Generated
+children include a parseable `## Completion Contract` so `asl verify` /
+`asl run` enforce the same gate used elsewhere.
 """
 
 from __future__ import annotations
@@ -49,9 +55,7 @@ class ChildSpec:
     session_id: plans.SessionId
     title: str
     instructions: str
-    required_prior_sessions: str
     previous_session_file: str | None
-    owned_write_paths: str
 
     @property
     def filename(self) -> str:
@@ -64,7 +68,6 @@ class ParentDetails:
 
     title: str
     body: str
-    metadata: dict[str, str]
     had_expansion: bool
     prior_session_file: str | None
 
@@ -132,7 +135,6 @@ def _validate_snapshot(
     snapshot: plans.PlanSnapshot,
     parent_id: plans.SessionId,
     parts: int,
-    parallel_validation_text: str | None,
 ) -> plans.SessionStatus:
     for session in snapshot.sessions:
         if session.status == "unknown":
@@ -178,58 +180,7 @@ def _validate_snapshot(
                 f"child expansion file already exists: {child.expansion_filename}",
             )
 
-    if parallel_validation_text is not None:
-        _validate_parallel_status(parent_id, parallel_validation_text)
-
     return parent_status
-
-
-def _validate_parallel_status(parent_id: plans.SessionId, text: str) -> None:
-    section = _parallel_validation_section(parent_id, text)
-    if section is None:
-        return
-
-    marker_labels = {
-        "validated classification",
-        "run condition",
-        "session-run markers",
-    }
-    for line in section.splitlines():
-        match = re.match(r"^-\s+\*\*(.+?)\*\*:\s*(.*?)\s*$", line)
-        if match is None:
-            continue
-        label = match.group(1).strip().lower()
-        if label not in marker_labels:
-            continue
-        value = match.group(2).strip().lower()
-        blockers = (
-            "unsafe to run now",
-            "ownership-conflicted",
-            "ownership conflicted",
-        )
-        blocker = next((item for item in blockers if item in value), None)
-        if blocker is None and re.search(r"(?<!not\s)\bblocked\b", value):
-            blocker = "blocked"
-        if blocker is not None:
-            raise ResplitError(
-                "blocked",
-                f"parallel-validation.md marks session {parent_id.value} as {blocker}",
-            )
-
-
-def _parallel_validation_section(parent_id: plans.SessionId, text: str) -> str | None:
-    pattern = re.compile(
-        rf"^###\s+Session\s+{re.escape(parent_id.value)}(?::|\b).*$",
-        re.MULTILINE,
-    )
-    match = pattern.search(text)
-    if match is None:
-        return None
-
-    next_match = re.search(r"^###\s+Session\s+\S+.*$", text[match.end() :], re.MULTILINE)
-    if next_match is None:
-        return text[match.start() :]
-    return text[match.start() : match.end() + next_match.start()]
 
 
 def _split_before_final_handoff(text: str, filename: str) -> str:
@@ -250,28 +201,6 @@ def _extract_parent_title(parent_id: plans.SessionId, before_handoff: str) -> st
             title = match.group(1)
             return re.sub(rf"^Session\s+{re.escape(parent_id.value)}\s*:?\s*", "", title)
     return f"Session {parent_id.value}"
-
-
-def _extract_metadata(before_handoff: str) -> dict[str, str]:
-    lines = before_handoff.splitlines()
-    metadata: dict[str, str] = {}
-    in_metadata = False
-
-    for line in lines:
-        if line.strip() == "## Parallel Metadata":
-            in_metadata = True
-            continue
-        if not in_metadata:
-            continue
-        if line.strip() == "---":
-            break
-        if line.startswith("## "):
-            break
-        match = re.match(r"^-\s+\*\*(.+?)\*\*:\s*(.*)\s*$", line)
-        if match:
-            metadata[match.group(1).strip().lower()] = match.group(2).strip()
-
-    return metadata
 
 
 def _extract_previous_session_file(before_handoff: str) -> str | None:
@@ -337,7 +266,6 @@ def _parse_parent_details(
     return ParentDetails(
         title=_extract_parent_title(parent_status.session_id, before_handoff),
         body=body,
-        metadata=_extract_metadata(before_handoff),
         had_expansion=parent_expansion_path.exists(),
         prior_session_file=_extract_previous_session_file(before_handoff),
     )
@@ -541,13 +469,7 @@ def _load_child_specs(path: Path | None) -> list[dict[str, str]] | None:
                 "ambiguous-input",
                 f"child spec {index} requires nonempty title and instructions",
             )
-        specs.append(
-            {
-                "title": title,
-                "instructions": instructions,
-                "owned_write_paths": str(item.get("owned_write_paths", "")).strip(),
-            }
-        )
+        specs.append({"title": title, "instructions": instructions})
     _validate_parts(len(specs))
     return specs
 
@@ -559,11 +481,6 @@ def _build_child_specs(
     explicit_specs: list[dict[str, str]] | None,
     first_previous_session_file: str | None,
 ) -> list[ChildSpec]:
-    parent_required = parent_details.metadata.get("required prior sessions", "none")
-    parent_owned = parent_details.metadata.get(
-        "owned write paths", "unknown - inherited from parent"
-    )
-
     if explicit_specs is None:
         semantic_units = _semantic_units(parent_details.body)
         if len(semantic_units) >= parts:
@@ -587,7 +504,6 @@ def _build_child_specs(
                     parent_details.title, index, instruction_groups[index - 1]
                 ),
                 "instructions": instruction_groups[index - 1],
-                "owned_write_paths": parent_owned,
             }
             for index in range(1, parts + 1)
         ]
@@ -602,19 +518,12 @@ def _build_child_specs(
             if index == 1
             else _child_id(parent_id, index - 1).filename
         )
-        required = (
-            parent_required
-            if index == 1
-            else f"{_child_id(parent_id, index - 1).value} (generated child sequence)"
-        )
         children.append(
             ChildSpec(
                 session_id=child_session_id,
                 title=raw["title"],
                 instructions=raw["instructions"],
-                required_prior_sessions=required or "none",
                 previous_session_file=previous_file,
-                owned_write_paths=raw.get("owned_write_paths") or parent_owned,
             )
         )
     return children
@@ -648,6 +557,33 @@ def _instruction_summary(instructions: str) -> str | None:
     return None
 
 
+def _render_completion_contract(child: ChildSpec) -> list[str]:
+    verify_payload = {
+        "session": child.session_id.value,
+        "checks": [
+            {
+                "type": "command",
+                "argv": ["python3", "-m", "unittest", "-q"],
+                "timeout_seconds": 60,
+            }
+        ],
+    }
+    verify_json = json.dumps(verify_payload, indent=2)
+    return [
+        "## Completion Contract",
+        "",
+        "### Done when",
+        "",
+        f"- {child.title} is implemented as described in the child scope above.",
+        "",
+        "### Verify",
+        "",
+        "```json",
+        *verify_json.splitlines(),
+        "```",
+    ]
+
+
 def _render_child_session(
     parent_id: plans.SessionId,
     child: ChildSpec,
@@ -655,13 +591,6 @@ def _render_child_session(
     parent_details: ParentDetails,
     skill_prefix: str,
 ) -> str:
-    forbidden = parent_details.metadata.get(
-        "forbidden/shared paths", "Inherited from parent session; coordinator ownership required"
-    )
-    serial_blocker = (
-        f"Generated child of `session-{parent_id.value}.md`; run serially until "
-        "expansion validates narrower ownership."
-    )
     lines = [
         f"# Session {child.session_id.value}: {child.title}",
         "",
@@ -693,16 +622,6 @@ def _render_child_session(
     lines.extend(
         [
             "",
-            "## Parallel Metadata",
-            "",
-            "- **Safety classification**: `serial-required`",
-            f"- **Required prior sessions**: {child.required_prior_sessions}",
-            "- **Allowed concurrent sessions**: none",
-            f"- **Owned write paths**: {child.owned_write_paths}",
-            f"- **Forbidden/shared paths**: {forbidden}",
-            f"- **Serial blockers**: {serial_blocker}",
-            "- **Optional internal tracks**: none",
-            "",
             "---",
             "",
             "## Parent Scope",
@@ -727,6 +646,16 @@ def _render_child_session(
             "## Child Scope",
             "",
             child.instructions.strip(),
+            "",
+            "---",
+            "",
+        ]
+    )
+    lines.extend(_render_completion_contract(child))
+    lines.extend(
+        [
+            "",
+            "---",
             "",
             "## Handoff",
             "",
@@ -787,33 +716,6 @@ def _replace_previous_session_reference(
     return updated, updated != text
 
 
-def _replace_required_prior_metadata(
-    text: str,
-    parent_id: plans.SessionId,
-    replacement_id: plans.SessionId,
-) -> tuple[str, bool]:
-    lines = text.splitlines()
-    changed = False
-
-    for index, line in enumerate(lines):
-        match = re.match(r"^(-\s+\*\*Required prior sessions\*\*:\s*)(.*)$", line)
-        if match is None:
-            continue
-        required, required_changed = _replace_session_id_mentions(
-            match.group(2),
-            parent_id,
-            replacement_id,
-        )
-        if required_changed:
-            lines[index] = f"{match.group(1)}{required.strip()}"
-            changed = True
-
-    if not changed:
-        return text, False
-    suffix = "\n" if text.endswith("\n") else ""
-    return "\n".join(lines) + suffix, True
-
-
 def _repair_next_session_references(
     snapshot: plans.PlanSnapshot,
     parent_id: plans.SessionId,
@@ -830,12 +732,7 @@ def _repair_next_session_references(
         parent_id,
         replacement_id,
     )
-    updated, required_changed = _replace_required_prior_metadata(
-        updated,
-        parent_id,
-        replacement_id,
-    )
-    if not previous_changed and not required_changed:
+    if not previous_changed:
         return []
 
     _write_text(next_session.path, updated)
@@ -906,24 +803,6 @@ def _session_id_from_cell(value: str) -> plans.SessionId | None:
     return plans.parse_session_id(match.group(1))
 
 
-def _cell_mentions_session(value: str, session_id: plans.SessionId) -> bool:
-    ids = re.findall(rf"(?<![\d.])({plans.SESSION_ID_PATTERN})(?![\d.])", value)
-    return session_id.value in ids
-
-
-def _replace_session_id_mentions(
-    value: str,
-    parent_id: plans.SessionId,
-    replacement_id: plans.SessionId,
-) -> tuple[str, bool]:
-    pattern = re.compile(
-        rf"(?<![\d.])(?:session[\s-]*|s)?{re.escape(parent_id.value)}(?![\d.])",
-        re.IGNORECASE,
-    )
-    updated = pattern.sub(replacement_id.value, value)
-    return updated, updated != value
-
-
 def _find_header(headers: list[str], names: set[str]) -> int | None:
     for index, header in enumerate(headers):
         if header in names:
@@ -931,18 +810,11 @@ def _find_header(headers: list[str], names: set[str]) -> int | None:
     return None
 
 
-def _table_block_type(headers: list[str]) -> str | None:
+def _is_status_table(headers: list[str]) -> bool:
     session_headers = {"#", "session", "session #", "session number", "session id", "id"}
-    if _find_header(headers, session_headers) is not None:
-        if _find_header(headers, {"status"}) is not None:
-            return "status"
-        if _find_header(headers, {"classification"}) is not None:
-            return "ownership"
-    has_wave = _find_header(headers, {"wave"}) is not None
-    has_sessions = _find_header(headers, {"sessions"}) is not None
-    if has_wave and has_sessions:
-        return "wave"
-    return None
+    if _find_header(headers, session_headers) is None:
+        return False
+    return _find_header(headers, {"status"}) is not None
 
 
 def _replace_status_table_parent(
@@ -999,158 +871,10 @@ def _replace_status_table_parent(
     return updated, changed
 
 
-def _replace_wave_table_parent(
-    block: list[str],
-    parent_id: plans.SessionId,
-    children: list[ChildSpec],
-) -> tuple[list[str], bool]:
-    parsed_header = _split_table_row(block[0])
-    assert parsed_header is not None
-    headers = [_normalize_header(cell) for cell in parsed_header[1]]
-    wave_index = _find_header(headers, {"wave"})
-    sessions_index = _find_header(headers, {"sessions"})
-    safe_index = _find_header(headers, {"safe concurrent set"})
-    notes_index = _find_header(headers, {"notes"})
-    if wave_index is None or sessions_index is None:
-        return block, False
-
-    changed = False
-    updated = block[:2]
-    for row in block[2:]:
-        parsed = _split_table_row(row)
-        if parsed is None:
-            updated.append(row)
-            continue
-        leading, cells = parsed
-        if max(wave_index, sessions_index) >= len(cells):
-            updated.append(row)
-            continue
-        if not _cell_mentions_session(cells[sessions_index], parent_id):
-            updated.append(row)
-            continue
-
-        for child in children:
-            child_cells = list(cells)
-            child_cells[wave_index] = _replace_cell_content(
-                child_cells[wave_index], child.session_id.value
-            )
-            child_cells[sessions_index] = _replace_cell_content(
-                child_cells[sessions_index], child.session_id.value
-            )
-            if safe_index is not None and safe_index < len(child_cells):
-                child_cells[safe_index] = _replace_cell_content(
-                    child_cells[safe_index], "none"
-                )
-            if notes_index is not None and notes_index < len(child_cells):
-                note = (
-                    f"Generated child of session {parent_id.value}; "
-                    "serial-required until expanded and validated"
-                )
-                child_cells[notes_index] = _replace_cell_content(
-                    child_cells[notes_index],
-                    note,
-                )
-            updated.append(_join_table_row(leading, child_cells))
-        changed = True
-    return updated, changed
-
-
-def _replace_ownership_table_parent(
-    block: list[str],
-    parent_id: plans.SessionId,
-    children: list[ChildSpec],
-) -> tuple[list[str], bool]:
-    parsed_header = _split_table_row(block[0])
-    assert parsed_header is not None
-    headers = [_normalize_header(cell) for cell in parsed_header[1]]
-    session_index = _find_header(
-        headers, {"session", "session #", "session number", "session id", "id"}
-    )
-    classification_index = _find_header(headers, {"classification"})
-    owned_index = _find_header(headers, {"owned write paths"})
-    required_index = _find_header(headers, {"required prior sessions"})
-    allowed_index = _find_header(headers, {"allowed concurrent sessions"})
-    blockers_index = _find_header(headers, {"serial blockers"})
-    if session_index is None or classification_index is None:
-        return block, False
-
-    changed = False
-    updated = block[:2]
-    for row in block[2:]:
-        parsed = _split_table_row(row)
-        if parsed is None:
-            updated.append(row)
-            continue
-        leading, cells = parsed
-        if max(session_index, classification_index) >= len(cells):
-            updated.append(row)
-            continue
-        row_session_id = _session_id_from_cell(cells[session_index])
-        if row_session_id != parent_id:
-            if (
-                row_session_id is not None
-                and row_session_id.sort_key > parent_id.sort_key
-                and required_index is not None
-                and required_index < len(cells)
-            ):
-                replacement = children[-1].session_id
-                required, required_changed = _replace_session_id_mentions(
-                    cells[required_index],
-                    parent_id,
-                    replacement,
-                )
-                if required_changed:
-                    updated_cells = list(cells)
-                    updated_cells[required_index] = _replace_cell_content(
-                        updated_cells[required_index],
-                        required.strip(),
-                    )
-                    updated.append(_join_table_row(leading, updated_cells))
-                    changed = True
-                    continue
-            updated.append(row)
-            continue
-
-        for child in children:
-            child_cells = list(cells)
-            child_cells[session_index] = _replace_cell_content(
-                child_cells[session_index], child.session_id.value
-            )
-            child_cells[classification_index] = _replace_cell_content(
-                child_cells[classification_index], "serial-required"
-            )
-            if owned_index is not None and owned_index < len(child_cells):
-                child_cells[owned_index] = _replace_cell_content(
-                    child_cells[owned_index], child.owned_write_paths
-                )
-            if required_index is not None and required_index < len(child_cells):
-                child_cells[required_index] = _replace_cell_content(
-                    child_cells[required_index], child.required_prior_sessions
-                )
-            if allowed_index is not None and allowed_index < len(child_cells):
-                child_cells[allowed_index] = _replace_cell_content(
-                    child_cells[allowed_index], "none"
-                )
-            if blockers_index is not None and blockers_index < len(child_cells):
-                blocker = (
-                    f"Generated child of session {parent_id.value}; run serially "
-                    "until expanded and validated"
-                )
-                child_cells[blockers_index] = _replace_cell_content(
-                    child_cells[blockers_index],
-                    blocker,
-                )
-            updated.append(_join_table_row(leading, child_cells))
-        changed = True
-    return updated, changed
-
-
 def _update_table_blocks(
     text: str,
     parent_id: plans.SessionId,
     children: list[ChildSpec],
-    *,
-    manifest: bool,
 ) -> tuple[str, bool]:
     lines = text.splitlines()
     updated: list[str] = []
@@ -1178,17 +902,8 @@ def _update_table_blocks(
             continue
 
         headers = [_normalize_header(cell) for cell in parsed_header[1]]
-        block_type = _table_block_type(headers)
-        if block_type == "status":
+        if _is_status_table(headers):
             new_block, block_changed = _replace_status_table_parent(
-                block, parent_id, children
-            )
-        elif manifest and block_type == "wave":
-            new_block, block_changed = _replace_wave_table_parent(
-                block, parent_id, children
-            )
-        elif manifest and block_type == "ownership":
-            new_block, block_changed = _replace_ownership_table_parent(
                 block, parent_id, children
             )
         else:
@@ -1214,10 +929,9 @@ def _append_resplit_notes(
             "## Resplit Notes",
             "",
             f"- `session-{parent_id.value}.md` was split into {child_files}.",
-            "- Parent and stale validation artifacts were archived under "
-            f"`{archive_relative_path}`.",
+            f"- Parent files were archived under `{archive_relative_path}`.",
             "- Rerun `session-expand` before continuing execution so expansion "
-            "notes and parallel validation match the nested sessions.",
+            "notes match the nested sessions.",
             "",
         ]
     )
@@ -1237,9 +951,7 @@ def _update_manifest(
         rf"\g<1>{total_sessions}",
         text,
     )
-    updated, tables_changed = _update_table_blocks(
-        updated, parent_id, children, manifest=True
-    )
+    updated, tables_changed = _update_table_blocks(updated, parent_id, children)
     updated = _append_resplit_notes(updated, parent_id, children, archive_relative_path)
     changed = updated != text or tables_changed
     if changed:
@@ -1253,7 +965,7 @@ def _update_context(
     children: list[ChildSpec],
 ) -> bool:
     text = _read_text(context_path)
-    updated, changed = _update_table_blocks(text, parent_id, children, manifest=False)
+    updated, changed = _update_table_blocks(text, parent_id, children)
     if changed:
         _write_text(context_path, updated)
     return changed
@@ -1287,12 +999,7 @@ def resplit_session(
         parts = _infer_parts(parent_details.body)
     parts = _validate_parts(parts)
 
-    parallel_validation_text = (
-        _read_text(snapshot.parallel_validation_path)
-        if snapshot.parallel_validation_path is not None
-        else None
-    )
-    _validate_snapshot(snapshot, parent_id, parts, parallel_validation_text)
+    _validate_snapshot(snapshot, parent_id, parts)
 
     lock_acquired = False
     try:
@@ -1303,17 +1010,7 @@ def resplit_session(
 
     try:
         locked_snapshot = plans.inspect_plan(snapshot.plan_dir)
-        locked_parallel_validation_text = (
-            _read_text(locked_snapshot.parallel_validation_path)
-            if locked_snapshot.parallel_validation_path is not None
-            else None
-        )
-        locked_parent_status = _validate_snapshot(
-            locked_snapshot,
-            parent_id,
-            parts,
-            locked_parallel_validation_text,
-        )
+        locked_parent_status = _validate_snapshot(locked_snapshot, parent_id, parts)
         parent_details = _parse_parent_details(
             locked_parent_status, locked_snapshot.plan_dir / parent_id.expansion_filename
         )
@@ -1337,10 +1034,7 @@ def resplit_session(
         for path in (
             locked_parent_status.path,
             locked_snapshot.plan_dir / parent_id.expansion_filename,
-            locked_snapshot.parallel_validation_path,
         ):
-            if path is None:
-                continue
             archived = _archive_file(path, archive_dir)
             if archived is not None:
                 archived_files.append(archived)
@@ -1383,7 +1077,6 @@ def resplit_session(
             "archived_files": archived_files,
             "ledger_updates": ledger_updates,
             "reference_updates": reference_updates,
-            "stale_validation_archived": "parallel-validation.md" in archived_files,
             "next_command": f"{skill_prefix}session-expand {locked_snapshot.plan_dir}/",
         }
     finally:

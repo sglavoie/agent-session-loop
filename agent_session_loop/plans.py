@@ -305,7 +305,6 @@ class PlanSnapshot:
     plan_dir: Path
     context_path: Path
     manifest_path: Path
-    parallel_validation_path: Path | None
     sessions: tuple[SessionStatus, ...]
     content_sha256: str
     path_hash: str
@@ -769,16 +768,19 @@ def plan_content_sha256(
     plan_dir: str | Path,
     sessions: tuple[SessionFile, ...] | None = None,
 ) -> str:
-    """Hash the current plan files in deterministic relative-path order."""
+    """Hash the current plan files in deterministic relative-path order.
+
+    Legacy `parallel-validation.md` is excluded entirely. Legacy
+    `## Parallel Execution` (in `manifest.md`) and `## Parallel Metadata`
+    (in `session-<id>.md`) sections are stripped before hashing so leftover
+    parallel scheduling text cannot move the content hash.
+    """
     canonical_dir = canonicalize_path(plan_dir)
     selected_sessions = discover_session_files(canonical_dir) if sessions is None else sessions
     selected_sessions = tuple(
         sorted(selected_sessions, key=lambda session: session.session_id.sort_key)
     )
     relative_names = ["context.md", "manifest.md"]
-
-    if _is_file(canonical_dir / "parallel-validation.md"):
-        relative_names.append("parallel-validation.md")
 
     for session in selected_sessions:
         relative_names.append(session.filename)
@@ -789,9 +791,14 @@ def plan_content_sha256(
     digest = hashlib.sha256()
     for relative_name in relative_names:
         file_path = canonical_dir / relative_name
+        try:
+            text = file_path.read_text(encoding="utf-8")
+        except OSError as error:
+            _raise_read_error(file_path, error)
+        normalized = _normalize_for_content_hash(relative_name, text)
         digest.update(relative_name.encode("utf-8"))
         digest.update(b"\0")
-        _update_digest_from_file(digest, file_path)
+        digest.update(normalized.encode("utf-8"))
         digest.update(b"\0")
     return digest.hexdigest()
 
@@ -1020,12 +1027,8 @@ def _clear_status_cells_in_text(text: str) -> str:
     return "\n".join(out) + suffix
 
 
-VOLATILE_PARALLEL_VALIDATION_SECTIONS = frozenset(
-    {
-        "Plan Readiness",
-        "Preflight Snapshot",
-    }
-)
+LEGACY_PARALLEL_MANIFEST_SECTIONS = frozenset({"Parallel Execution"})
+LEGACY_PARALLEL_SESSION_SECTIONS = frozenset({"Parallel Metadata"})
 
 
 def _strip_markdown_sections(text: str, headings: frozenset[str]) -> str:
@@ -1055,15 +1058,27 @@ def _strip_markdown_sections(text: str, headings: frozenset[str]) -> str:
     return "\n".join(out) + suffix
 
 
+def _normalize_for_content_hash(filename: str, text: str) -> str:
+    if SESSION_FILE_RE.fullmatch(filename):
+        return _strip_markdown_sections(text, LEGACY_PARALLEL_SESSION_SECTIONS)
+    if filename == "manifest.md":
+        return _strip_markdown_sections(text, LEGACY_PARALLEL_MANIFEST_SECTIONS)
+    return text
+
+
 def _normalize_for_readiness(filename: str, text: str) -> str:
     if SESSION_FILE_RE.fullmatch(filename):
-        return _strip_final_handoff_block(text)
+        return _strip_markdown_sections(
+            _strip_final_handoff_block(text),
+            LEGACY_PARALLEL_SESSION_SECTIONS,
+        )
     if filename == "manifest.md":
-        return _clear_status_cells_in_text(_strip_readiness_lines(text))
+        return _strip_markdown_sections(
+            _clear_status_cells_in_text(_strip_readiness_lines(text)),
+            LEGACY_PARALLEL_MANIFEST_SECTIONS,
+        )
     if filename == "context.md":
         return _clear_status_cells_in_text(text)
-    if filename == "parallel-validation.md":
-        return _strip_markdown_sections(text, VOLATILE_PARALLEL_VALIDATION_SECTIONS)
     return text
 
 
@@ -1071,7 +1086,11 @@ def stable_readiness_sha256(
     plan_dir: str | Path,
     sessions: tuple[SessionFile, ...] | None = None,
 ) -> str:
-    """Hash structural plan content, ignoring final handoffs and status bookkeeping."""
+    """Hash structural plan content, ignoring final handoffs and status bookkeeping.
+
+    Legacy `parallel-validation.md` is excluded; legacy `## Parallel Execution`
+    and `## Parallel Metadata` sections are stripped via `_normalize_for_readiness`.
+    """
     canonical_dir = canonicalize_path(plan_dir)
     selected_sessions = (
         discover_session_files(canonical_dir) if sessions is None else sessions
@@ -1080,9 +1099,6 @@ def stable_readiness_sha256(
         sorted(selected_sessions, key=lambda session: session.session_id.sort_key)
     )
     relative_names = ["context.md", "manifest.md"]
-
-    if _is_file(canonical_dir / "parallel-validation.md"):
-        relative_names.append("parallel-validation.md")
 
     for session in selected_sessions:
         relative_names.append(session.filename)
@@ -1134,14 +1150,10 @@ def inspect_plan(plan_dir: str | Path) -> PlanSnapshot:
     statuses = tuple(read_session_status(session) for session in sessions)
     content_hash = plan_content_sha256(canonical_dir, sessions)
 
-    parallel_validation_path = canonical_dir / "parallel-validation.md"
     return PlanSnapshot(
         plan_dir=canonical_dir,
         context_path=context_path,
         manifest_path=manifest_path,
-        parallel_validation_path=(
-            parallel_validation_path if _is_file(parallel_validation_path) else None
-        ),
         sessions=statuses,
         content_sha256=content_hash,
         path_hash=path_sha256(canonical_dir),

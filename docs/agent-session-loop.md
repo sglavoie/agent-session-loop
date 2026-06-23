@@ -90,11 +90,11 @@ each session is gated on its `## Completion Contract` `### Verify` recipe.
    placeholder `Done when` bullet); replace the placeholder with a real
    criterion and refine the check command per session.
 
-2. Run `session-expand` on the plan directory so expansion notes,
-   `parallel-validation.md`, and per-session `## Contract Issues` sections are
-   available. Expansion validates each session contract against the actual
-   codebase, runs final `asl preflight --mark-loop-ready`, and prints
-   `session-run` only when the plan is loop-ready.
+2. Run `session-expand` on the plan directory so expansion notes and
+   per-session `## Contract Issues` sections are available. Expansion validates
+   each session contract against the actual codebase, runs final
+   `asl preflight --mark-loop-ready`, and prints `session-run` only when the
+   plan is loop-ready.
 
 3. If a pending session is still too large, resplit that session and regenerate
    expansion guidance before running the loop:
@@ -156,11 +156,16 @@ the per-session verification gate's `no-contract` pause, but it does not
 suppress failures from contracts that are present — a malformed or failing
 contract still pauses the run.
 
-`parallel-validation.md` is authoritative for dependency and ownership safety
-claims. Its `## Plan Readiness` and `## Preflight Snapshot` sections are
-informational snapshots from expansion time; the stable readiness hash ignores
-those sections, and `session-run` validates the current manifest readiness
-state/SHA before implementation.
+ASL is sequential by design. `session-run` always selects the next pending
+session from the manifest and runs one session per harness turn; there is no
+explicit `--session` selector and no parallel scheduling. `session-run`
+validates the current manifest readiness state and SHA before implementation.
+
+Older split plans may still have a `parallel-validation.md` file, a
+`## Parallel Execution` block in `manifest.md`, or `## Parallel Metadata`
+blocks in each `session-<id>.md`. These legacy artifacts are ignored: the
+runner does not read them, the readiness hash excludes them, and new plans
+emitted by `session-split` and `session-resplit` do not contain them.
 
 ## Completion Contracts
 
@@ -248,10 +253,9 @@ To migrate an existing plan in place:
    - Add a `## Completion Contract` block (above the final `## Handoff`) to
      every `session-<id>.md`, with at least one `### Done when` bullet and a
      `### Verify` JSON block holding a non-empty `checks` array.
-3. Run `session-expand` to refresh per-session expansion notes,
-   `parallel-validation.md`, and final preflight readiness against the new
-   contract shape. When final preflight succeeds, the plan is marked
-   `loop-ready`.
+3. Run `session-expand` to refresh per-session expansion notes and final
+   preflight readiness against the new contract shape. When final preflight
+   succeeds, the plan is marked `loop-ready`.
 4. Resume the loop with `asl run`.
 
 For one-off emergency execution of an unmigrated plan, pass
@@ -261,10 +265,12 @@ carry a contract are still gated by it.
 
 `session-resplit` is plan maintenance, not a runner subcommand. It archives one
 pending parent `session-<id>.md`, writes nested pending children such as
-`session-2.1.md` and `session-2.2.md`, archives stale expansion and
-`parallel-validation.md` artifacts, and tells you to rerun `session-expand`.
-After expansion is regenerated, `asl status` and `asl run --dry-run` should show
-the first child as the next pending session.
+`session-2.1.md` and `session-2.2.md`, archives stale expansion artifacts, and
+tells you to rerun `session-expand`. A legacy `parallel-validation.md` is left
+on disk untouched. `session-resplit` keeps the explicit `--session <ID>`
+selector because it is plan maintenance; `session-run` does not. After
+expansion is regenerated, `asl status` and `asl run --dry-run` should show the
+first child as the next pending session.
 
 Optional auto-commit modes require the resolved working directory to be a clean
 git worktree before the first harness turn starts, and require `spec` on
@@ -341,9 +347,9 @@ flag is supplied. JSON output carries a stable shape with `findings`,
 findings are manifest-readiness findings. It refuses when any non-readiness red
 or yellow finding remains.
 
-The readiness hash includes session files, expansion notes, and substantive
-parallel-validation safety content, but excludes derived readiness/preflight
-snapshot sections inside `parallel-validation.md`.
+The readiness hash includes session files and expansion notes. Legacy
+`parallel-validation.md`, `## Parallel Execution` manifest blocks, and
+`## Parallel Metadata` session blocks are excluded entirely.
 
 `verify` reads a session's `## Completion Contract` and executes its `### Verify`
 recipe against `--cwd` (defaults to the current directory). Exit code is the
@@ -994,6 +1000,9 @@ python3 /Users/dev/.codex/skills/.system/skill-creator/scripts/quick_validate.py
 just sync-skills
 python3 -m unittest discover -s tests
 python3 -m py_compile agent_session_loop/*.py bin/.local/bin/agent-session-loop bin/.local/bin/asl
+just build-ccl
+just all
+just verify-asl-install
 ```
 
 Use a synthetic plan directory for manual smoke tests so generated state, locks,

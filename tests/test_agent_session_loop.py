@@ -27,6 +27,7 @@ from agent_session_loop import (
     contracts,
     events,
     harnesses,
+    install_verify,
     plans,
     preflight,
     progress_cli,
@@ -1463,7 +1464,6 @@ class ParserAndStateTests(unittest.TestCase):
         cases = (
             "context.md",
             "manifest.md",
-            "parallel-validation.md",
             "session-1.expand.md",
         )
 
@@ -1790,9 +1790,7 @@ class ParserAndStateTests(unittest.TestCase):
 
             self.assertNotEqual(baseline, plans.stable_readiness_sha256(plan_dir))
 
-    def test_stable_readiness_sha256_tracks_expansion_and_validation_files(
-        self,
-    ) -> None:
+    def test_stable_readiness_sha256_tracks_expansion_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             write_plan(plan_dir, ("pending",))
@@ -1804,104 +1802,148 @@ class ParserAndStateTests(unittest.TestCase):
             with_expansion = plans.stable_readiness_sha256(plan_dir)
             self.assertNotEqual(baseline, with_expansion)
 
+            expansion.write_text("notes changed\n", encoding="utf-8")
+            self.assertNotEqual(with_expansion, plans.stable_readiness_sha256(plan_dir))
+
+    def test_stable_readiness_sha256_ignores_parallel_validation_file(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+
+            baseline = plans.stable_readiness_sha256(plan_dir)
+
             validation = plan_dir / "parallel-validation.md"
             validation.write_text(
-                "\n".join(
-                    [
-                        "# Parallel Validation",
-                        "",
-                        "## Summary",
-                        "",
-                        "- **Safe concurrent sessions**: none",
-                        "",
-                        "## Plan Readiness",
-                        "",
-                        "- **Recorded state**: draft",
-                        "- **Recorded SHA-256**: old",
-                        "- **Recomputed SHA-256**: new",
-                        "- **Divergence**: recorded SHA differs from recomputed SHA",
-                        "",
-                        "## Preflight Snapshot",
-                        "",
-                        "- **Findings**: 1R / 1Y / 0G",
-                        "- **Reason**: preflight-red",
-                        "",
-                        "## Session-Run Precedence",
-                        "",
-                        "Dependency and ownership claims remain authoritative.",
-                        "",
-                    ]
-                ),
+                "# Parallel Validation\n\nany content at all\n",
                 encoding="utf-8",
             )
-            with_validation = plans.stable_readiness_sha256(plan_dir)
-            self.assertNotEqual(with_expansion, with_validation)
+            self.assertEqual(baseline, plans.stable_readiness_sha256(plan_dir))
 
             validation.write_text(
-                "\n".join(
-                    [
-                        "# Parallel Validation",
-                        "",
-                        "## Summary",
-                        "",
-                        "- **Safe concurrent sessions**: none",
-                        "",
-                        "## Plan Readiness",
-                        "",
-                        "- **Recorded state**: loop-ready",
-                        "- **Recorded SHA-256**: current",
-                        "- **Recomputed SHA-256**: current",
-                        "- **Divergence**: none",
-                        "",
-                        "## Preflight Snapshot",
-                        "",
-                        "- **Findings**: 0R / 0Y / 2G",
-                        "- **Reason**: loop-ready-marked",
-                        "",
-                        "## Session-Run Precedence",
-                        "",
-                        "Dependency and ownership claims remain authoritative.",
-                        "",
-                    ]
-                ),
+                "# Parallel Validation\n\nentirely different content\n",
                 encoding="utf-8",
             )
-            self.assertEqual(
-                with_validation, plans.stable_readiness_sha256(plan_dir)
-            )
+            self.assertEqual(baseline, plans.stable_readiness_sha256(plan_dir))
 
-            validation.write_text(
-                "\n".join(
-                    [
-                        "# Parallel Validation",
-                        "",
-                        "## Summary",
-                        "",
-                        "- **Safe concurrent sessions**: 1, 2",
-                        "",
-                        "## Plan Readiness",
-                        "",
-                        "- **Recorded state**: loop-ready",
-                        "- **Recorded SHA-256**: current",
-                        "- **Recomputed SHA-256**: current",
-                        "- **Divergence**: none",
-                        "",
-                        "## Preflight Snapshot",
-                        "",
-                        "- **Findings**: 0R / 0Y / 2G",
-                        "- **Reason**: loop-ready-marked",
-                        "",
-                        "## Session-Run Precedence",
-                        "",
-                        "Dependency and ownership claims remain authoritative.",
-                        "",
-                    ]
-                ),
+    def test_stable_readiness_sha256_ignores_legacy_parallel_sections(
+        self,
+    ) -> None:
+        baseline_session = "\n".join(
+            [
+                "# Session 1: Test",
+                "",
+                "## Instructions",
+                "",
+                "Do the thing.",
+                "",
+                "## Handoff",
+                "",
+                "- **Status**: pending",
+                "",
+            ]
+        )
+        with_parallel_session = "\n".join(
+            [
+                "# Session 1: Test",
+                "",
+                "## Parallel Metadata",
+                "",
+                "- **Safety classification**: serial-required",
+                "",
+                "## Instructions",
+                "",
+                "Do the thing.",
+                "",
+                "## Handoff",
+                "",
+                "- **Status**: pending",
+                "",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+            session_path = plan_dir / "session-1.md"
+            session_path.write_text(baseline_session, encoding="utf-8")
+            baseline = plans.stable_readiness_sha256(plan_dir)
+
+            manifest_path = plan_dir / "manifest.md"
+            manifest_path.write_text(
+                manifest_path.read_text(encoding="utf-8")
+                + "\n## Parallel Execution\n\nLegacy scheduling text.\n",
                 encoding="utf-8",
             )
-            self.assertNotEqual(
-                with_validation, plans.stable_readiness_sha256(plan_dir)
+            self.assertEqual(baseline, plans.stable_readiness_sha256(plan_dir))
+
+            session_path.write_text(with_parallel_session, encoding="utf-8")
+            self.assertEqual(baseline, plans.stable_readiness_sha256(plan_dir))
+
+    def test_plan_content_sha256_ignores_parallel_validation_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+
+            baseline = plans.plan_content_sha256(plan_dir)
+
+            validation = plan_dir / "parallel-validation.md"
+            validation.write_text("anything\n", encoding="utf-8")
+            self.assertEqual(baseline, plans.plan_content_sha256(plan_dir))
+
+            validation.write_text("anything else\n", encoding="utf-8")
+            self.assertEqual(baseline, plans.plan_content_sha256(plan_dir))
+
+    def test_plan_content_sha256_ignores_legacy_parallel_sections(self) -> None:
+        baseline_session = "\n".join(
+            [
+                "# Session 1: Test",
+                "",
+                "## Instructions",
+                "",
+                "Do the thing.",
+                "",
+                "## Handoff",
+                "",
+                "- **Status**: pending",
+                "",
+            ]
+        )
+        with_parallel_session = "\n".join(
+            [
+                "# Session 1: Test",
+                "",
+                "## Parallel Metadata",
+                "",
+                "- **Safety classification**: serial-required",
+                "",
+                "## Instructions",
+                "",
+                "Do the thing.",
+                "",
+                "## Handoff",
+                "",
+                "- **Status**: pending",
+                "",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+            session_path = plan_dir / "session-1.md"
+            session_path.write_text(baseline_session, encoding="utf-8")
+            baseline = plans.plan_content_sha256(plan_dir)
+
+            manifest_path = plan_dir / "manifest.md"
+            manifest_path.write_text(
+                manifest_path.read_text(encoding="utf-8")
+                + "\n## Parallel Execution\n\nLegacy scheduling text.\n",
+                encoding="utf-8",
             )
+            self.assertEqual(baseline, plans.plan_content_sha256(plan_dir))
+
+            session_path.write_text(with_parallel_session, encoding="utf-8")
+            self.assertEqual(baseline, plans.plan_content_sha256(plan_dir))
 
     def test_parse_completion_contract_returns_none_when_section_absent(self) -> None:
         text = "\n".join(
@@ -6505,6 +6547,14 @@ class CommandAndConfigTests(unittest.TestCase):
             )
         )
 
+    def test_build_session_prompt_omits_explicit_session_selector(self) -> None:
+        for harness in ("codex", "claude", "copilot"):
+            with self.subTest(harness=harness):
+                prompt = runner.build_session_prompt(harness, "/tmp/plan")
+                self.assertNotIn("--session", prompt)
+                self.assertNotIn("session-1.md", prompt)
+                self.assertNotIn("session-2.md", prompt)
+
     def test_commit_flags_are_mutually_exclusive(self) -> None:
         parser = cli.build_parser()
         stderr = io.StringIO()
@@ -9068,12 +9118,28 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             statuses=("pending", "pending")
         )
         state_path = state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
+        gate_dir = state_dir / "stream-gates"
+
+        def ready_path(session_id: str) -> Path:
+            return gate_dir / f"session-{session_id}.ready"
+
+        def continue_path(session_id: str) -> Path:
+            return gate_dir / f"session-{session_id}.continue"
+
+        def release_session(session_id: str) -> None:
+            gate_dir.mkdir(parents=True, exist_ok=True)
+            continue_path(session_id).write_text("continue\n", encoding="utf-8")
+
         process, master_fd = self.start_run_pty(
             plan_dir=plan_dir,
             state_dir=state_dir,
             config_home=config_home,
             mode="streaming-success",
-            fake_step_sleep="1.5",
+            fake_step_sleep="0",
+            extra_env={
+                "FAKE_CODEX_STREAM_GATE_DIR": str(gate_dir),
+                "FAKE_CODEX_STREAM_GATE_TIMEOUT": "20",
+            },
         )
 
         output = self.read_run_pty_until(
@@ -9084,11 +9150,17 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         )
 
         def first_turn_logs_ready():
+            if not ready_path("1").exists():
+                return None
             if not state_path.exists():
                 return None
             payload = json.loads(state_path.read_text(encoding="utf-8"))
             active_turn = payload.get("active_turn")
             if not isinstance(active_turn, dict):
+                return None
+            if active_turn.get("stdout_chars", 0) <= 0:
+                return None
+            if active_turn.get("stderr_chars", 0) <= 0:
                 return None
             stdout_path = Path(active_turn["stdout_path"])
             stderr_path = Path(active_turn["stderr_path"])
@@ -9103,7 +9175,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 return active_turn
             return None
 
-        wait_until(first_turn_logs_ready, timeout=3)
+        wait_until(first_turn_logs_ready, timeout=10)
         os.write(master_fd, b"t")
         output = self.read_run_pty_until(
             master_fd,
@@ -9129,6 +9201,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             process=process,
             timeout=5,
         )
+        release_session("1")
         output = self.read_run_pty_until(
             master_fd,
             output,
@@ -9155,6 +9228,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             lambda text: "control: live tail disabled" in text,
             process=process,
         )
+        release_session("2")
         output = self.finish_run_pty(
             process=process,
             master_fd=master_fd,
@@ -9820,52 +9894,64 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         ]
         self.assertEqual(["2.1", "2.2", "3"], started_ids)
 
-    def test_fake_codex_explicit_dotted_session_prompt_marks_selected_session(
+    def test_fake_codex_ignores_explicit_session_token_and_advances_first_pending(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_dir = Path(tmp)
-            plan_dir = tmp_dir / "plan"
-            write_plan_with_ids(
-                plan_dir,
-                (("2", "pending"), ("2.1", "pending"), ("3", "pending")),
-            )
-            fake_codex = install_fake_codex(tmp_dir)
-            last_message = tmp_dir / "last-message.txt"
+        prompts = (
+            f"$session-run <plan-dir>/ --session 2.1 --runner-managed",
+            f"$session-run <plan-dir>/session-2.1.md --runner-managed",
+            f"$session-run <plan-dir>/session-3.md --runner-managed",
+        )
+        for prompt_template in prompts:
+            with self.subTest(prompt=prompt_template):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_dir = Path(tmp)
+                    plan_dir = tmp_dir / "plan"
+                    write_plan_with_ids(
+                        plan_dir,
+                        (
+                            ("2", "pending"),
+                            ("2.1", "pending"),
+                            ("3", "pending"),
+                        ),
+                    )
+                    fake_codex = install_fake_codex(tmp_dir)
+                    last_message = tmp_dir / "last-message.txt"
+                    prompt = prompt_template.replace("<plan-dir>", str(plan_dir))
 
-            completed = subprocess.run(
-                [
-                    str(fake_codex),
-                    "exec",
-                    "--add-dir",
-                    str(plan_dir),
-                    "-o",
-                    str(last_message),
-                    f"$session-run {plan_dir}/ --session 2.1",
-                ],
-                cwd=REPO_ROOT,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
+                    completed = subprocess.run(
+                        [
+                            str(fake_codex),
+                            "exec",
+                            "--add-dir",
+                            str(plan_dir),
+                            "-o",
+                            str(last_message),
+                            prompt,
+                        ],
+                        cwd=REPO_ROOT,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
 
-            self.assertEqual(0, completed.returncode, completed.stderr)
-            self.assertIn(
-                "- **Status**: pending",
-                (plan_dir / "session-2.md").read_text(encoding="utf-8"),
-            )
-            self.assertIn(
-                "- **Status**: complete",
-                (plan_dir / "session-2.1.md").read_text(encoding="utf-8"),
-            )
-            self.assertIn(
-                "- **Status**: pending",
-                (plan_dir / "session-3.md").read_text(encoding="utf-8"),
-            )
-            self.assertIn(
-                "Runner status: complete",
-                last_message.read_text(encoding="utf-8"),
-            )
+                    self.assertEqual(0, completed.returncode, completed.stderr)
+                    self.assertIn(
+                        "- **Status**: complete",
+                        (plan_dir / "session-2.md").read_text(encoding="utf-8"),
+                    )
+                    self.assertIn(
+                        "- **Status**: pending",
+                        (plan_dir / "session-2.1.md").read_text(encoding="utf-8"),
+                    )
+                    self.assertIn(
+                        "- **Status**: pending",
+                        (plan_dir / "session-3.md").read_text(encoding="utf-8"),
+                    )
+                    self.assertIn(
+                        "Runner status: complete",
+                        last_message.read_text(encoding="utf-8"),
+                    )
 
     def test_unexpected_dotted_progress_reports_expected_and_observed_ids(
         self,
@@ -13962,6 +14048,100 @@ class SkillInstructionTests(unittest.TestCase):
 
         self.assertIn("missing-contract", text)
         self.assertNotIn("session-contract", text)
+
+
+class InstallVerificationTests(unittest.TestCase):
+    def _install_fake_home_links(self, home: Path) -> Path:
+        fake_bin = home / ".local/bin"
+        fake_bin.mkdir(parents=True)
+        (fake_bin / "asl").symlink_to(REPO_ROOT / "bin/.local/bin/asl")
+
+        skill_dirs = [
+            path
+            for path in (REPO_ROOT / "skills").iterdir()
+            if path.is_dir() and (path / "SKILL.md").exists()
+        ]
+        for install_dir in install_verify.SKILL_INSTALL_DIRS:
+            install_root = home / install_dir
+            install_root.mkdir(parents=True)
+            for skill_dir in skill_dirs:
+                (install_root / skill_dir.name).symlink_to(
+                    skill_dir,
+                    target_is_directory=True,
+                )
+        return fake_bin
+
+    def test_verify_install_accepts_links_to_this_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            fake_bin = self._install_fake_home_links(home)
+
+            payload = install_verify.verify_install(
+                repo_root=REPO_ROOT,
+                home=home,
+                path_env=str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+            )
+
+            self.assertTrue(payload["ok"], payload["failures"])
+            checks = payload["checks"]
+            self.assertIn("asl-path", {check["name"] for check in checks})
+            self.assertIn("status-smoke", {check["name"] for check in checks})
+            status_smoke = next(
+                check for check in checks if check["name"] == "status-smoke"
+            )
+            self.assertIn("omitted parallel_validation_path", status_smoke["detail"])
+
+    def test_verify_install_accepts_stow_folded_skill_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            fake_bin = self._install_fake_home_links(home)
+            folded = home / ".claude/skills/gitsummary"
+            folded.unlink()
+            folded.mkdir()
+            (folded / "SKILL.md").symlink_to(
+                REPO_ROOT / "skills/gitsummary/SKILL.md"
+            )
+
+            payload = install_verify.verify_install(
+                repo_root=REPO_ROOT,
+                home=home,
+                path_env=str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+            )
+
+            self.assertTrue(payload["ok"], payload["failures"])
+
+    def test_verify_install_rejects_stale_session_run_skill_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            fake_bin = self._install_fake_home_links(home)
+            stale_skill = home / ".codex/skills/session-run"
+            stale_skill.unlink()
+            stale_skill.mkdir()
+            (stale_skill / "SKILL.md").write_text(
+                "\n".join(
+                    [
+                        "# stale session-run",
+                        "",
+                        "**Explicit flag**: `<plan-dir>/ --session <ID>` runs exactly",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            payload = install_verify.verify_install(
+                repo_root=REPO_ROOT,
+                home=home,
+                path_env=str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+            )
+
+            self.assertFalse(payload["ok"])
+            self.assertTrue(
+                any(
+                    failure["name"] == "session-run-content"
+                    for failure in payload["failures"]
+                )
+            )
 
 
 class SessionRunSkillReplyCompatibilityTests(unittest.TestCase):

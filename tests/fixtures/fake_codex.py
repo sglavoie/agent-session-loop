@@ -6,7 +6,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
-import shlex
 import sys
 import time
 
@@ -56,42 +55,11 @@ def _pending_sessions(plan_dir: Path) -> list[Path]:
     ]
 
 
-def _prompt_tokens() -> list[str]:
-    for value in reversed(sys.argv[1:]):
-        if "session-run" not in value:
-            continue
-        try:
-            return shlex.split(value)
-        except ValueError:
-            return value.split()
-    return []
-
-
 def _prompt_contains_reply_context() -> bool:
     for value in sys.argv[1:]:
         if "## ASL reply context" in value:
             return True
     return False
-
-
-def _selected_session(plan_dir: Path) -> Path | None:
-    tokens = _prompt_tokens()
-    for index, token in enumerate(tokens):
-        if token != "--session":
-            continue
-        if index + 1 >= len(tokens):
-            return None
-        session_id = tokens[index + 1]
-        if SESSION_FILE_RE.fullmatch(f"session-{session_id}.md") is None:
-            return None
-        return plan_dir / f"session-{session_id}.md"
-
-    for token in tokens:
-        path = Path(token)
-        if _session_id(path) is None:
-            continue
-        return path if path.is_absolute() else plan_dir / path.name
-    return None
 
 
 def _session_label(path: Path) -> str:
@@ -184,6 +152,44 @@ def _step_sleep() -> None:
     time.sleep(float(os.environ.get("FAKE_CODEX_STEP_SLEEP", "0.1")))
 
 
+def _stream_gate_dir() -> Path | None:
+    value = os.environ.get("FAKE_CODEX_STREAM_GATE_DIR")
+    if not value:
+        return None
+    return Path(value)
+
+
+def _signal_stream_ready(session_label: str) -> None:
+    gate_dir = _stream_gate_dir()
+    if gate_dir is None:
+        return
+    gate_dir.mkdir(parents=True, exist_ok=True)
+    (gate_dir / f"session-{session_label}.ready").write_text(
+        "ready\n",
+        encoding="utf-8",
+    )
+
+
+def _wait_for_stream_continue(session_label: str) -> bool:
+    gate_dir = _stream_gate_dir()
+    if gate_dir is None:
+        return True
+
+    continue_path = gate_dir / f"session-{session_label}.continue"
+    timeout = float(os.environ.get("FAKE_CODEX_STREAM_GATE_TIMEOUT", "30"))
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if continue_path.exists():
+            return True
+        time.sleep(0.02)
+    print(
+        f"timed out waiting for stream gate: {continue_path}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return False
+
+
 def main() -> int:
     plan_dir_arg = _arg_value("--add-dir")
     if plan_dir_arg is None:
@@ -250,14 +256,7 @@ def main() -> int:
 
     if mode == "reply-aware":
         if _prompt_contains_reply_context():
-            selected = _selected_session(plan_dir)
-            if (
-                selected is not None
-                and selected.is_file()
-                and _handoff_status_line(selected) == STATUS_PENDING
-            ):
-                _mark_complete(selected)
-            elif pending:
+            if pending:
                 _mark_complete(pending[0])
             _write_last_message(
                 "Runner status: complete\nNext command: $session-run plan/\n"
@@ -275,31 +274,14 @@ def main() -> int:
         return 0
 
     if mode == "success":
-        selected = _selected_session(plan_dir)
-        if (
-            selected is not None
-            and selected.is_file()
-            and _handoff_status_line(selected) == STATUS_PENDING
-        ):
-            _mark_complete(selected)
-        elif pending:
+        if pending:
             _mark_complete(pending[0])
         _write_last_message("Runner status: complete\nNext command: $session-run plan/\n")
         print("completed one session")
         return 0
 
     if mode == "success-with-review":
-        selected = _selected_session(plan_dir)
-        if (
-            selected is not None
-            and selected.is_file()
-            and _handoff_status_line(selected) == STATUS_PENDING
-        ):
-            target = selected
-        elif pending:
-            target = pending[0]
-        else:
-            target = None
+        target = pending[0] if pending else None
         if target is not None:
             _mark_complete(target)
             # When the harness is asked to run a generated review session,
@@ -319,17 +301,7 @@ def main() -> int:
         return 0
 
     if mode == "success-future-note":
-        selected = _selected_session(plan_dir)
-        if (
-            selected is not None
-            and selected.is_file()
-            and _handoff_status_line(selected) == STATUS_PENDING
-        ):
-            target = selected
-        elif pending:
-            target = pending[0]
-        else:
-            target = None
+        target = pending[0] if pending else None
         if target is not None:
             source_session_id = _session_label(target)
             _mark_complete(target)
@@ -360,6 +332,10 @@ def main() -> int:
             file=sys.stderr,
             flush=True,
         )
+        _signal_stream_ready(session_label)
+        if not _wait_for_stream_continue(session_label):
+            _write_last_message("fake codex stream gate timeout\n")
+            return 3
         _step_sleep()
         _mark_complete(pending[0])
         _write_last_message("Runner status: complete\nNext command: $session-run plan/\n")

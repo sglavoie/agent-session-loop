@@ -1,6 +1,6 @@
 ---
 name: session-run
-description: Execute the next pending or explicitly selected session from a split plan directory. Supports parallel-safe explicit session scheduling with dependency validation while preserving serial auto-advance. Delegates authoritative status, readiness, and verification checks to `asl` scripts; `asl run` invokes this skill with `--runner-managed` so Python owns postflight enforcement. Companion to session-split and session-expand.
+description: Execute the next pending session from a split plan directory. Sequential by design — accepts only `<plan-dir>/` plus internal `--runner-managed`; explicit session targeting and parallel worker mode are not supported. Delegates authoritative status, readiness, and verification checks to `asl` scripts; `asl run` invokes this skill with `--runner-managed` so Python owns postflight enforcement. Companion to session-split and session-expand.
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 ---
 
@@ -8,15 +8,15 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 
 ## Purpose
 
-Execute one session from a split plan directory. Directory-only input preserves the serial auto-advance behavior by picking the first session with status `pending`. Explicit input runs exactly the selected session after dependency and validation checks, which lets a coordinator assign parallel-safe workers without racing on auto-pick. One session per invocation — the user controls pacing by invoking this skill once per conversation.
+Execute one session from a split plan directory. The skill is sequential by design: it always picks the first session with status `pending` from `asl status`. There is no explicit-session mode, no direct-session-file mode, and no parallel worker mode. One session per invocation — the user controls pacing by invoking this skill once per conversation.
 
 ## Input
 
-The user provides a plan directory path, a plan directory plus an explicit session selector, or a direct session file path as the host agent command or skill invocation argument.
+The user provides a plan directory path as the host agent command or skill invocation argument.
 
 `asl run` appends `--runner-managed` to the skill invocation it sends to the harness. Treat that flag as an internal execution-mode marker, not as user-facing syntax: in runner-managed mode the Python runner already holds the plan lock, has run the authoritative readiness gate, and will run verification, handoff revert, derived ledger sync, and readiness refresh after this skill returns.
 
-Runner-managed prompts may carry extra context beyond the first invocation line. When `asl run --reply TEXT` resumes a paused session, the runner prepends the `<skill-prefix>session-run <plan-dir>/ --runner-managed` invocation on line 1 and appends an `## ASL reply context` block containing the operator reply, the previous pause metadata, the paused turn's last message, and resume instructions. The first line is the only CLI invocation — everything below the `## ASL reply context` heading is prompt context for this skill, not additional CLI syntax. Do not try to parse the reply block as flags or session selectors; parse only the first line for paths and `--session`/`--runner-managed` tokens.
+Runner-managed prompts may carry extra context beyond the first invocation line. When `asl run --reply TEXT` resumes a paused session, the runner prepends the `<skill-prefix>session-run <plan-dir>/ --runner-managed` invocation on line 1 and appends an `## ASL reply context` block containing the operator reply, the previous pause metadata, the paused turn's last message, and resume instructions. The first line is the only CLI invocation — everything below the `## ASL reply context` heading is prompt context for this skill, not additional CLI syntax. Do not try to parse the reply block as flags or other tokens; parse only the first line for the plan directory and the optional `--runner-managed` marker.
 
 Determine `<skill-prefix>` once for the active harness and use it for every user-facing skill invocation you print:
 
@@ -32,25 +32,15 @@ Examples:
 
 ```
 $session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/
-$session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --session 2
-$session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --session 2.1
-$session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/session-2.md
-$session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/session-2.1.md
 /session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/
-/session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --session 2
-/session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --session 2.1
-/session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/session-2.md
-/session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/session-2.1.md
 ```
 
 Accepted input forms:
 
-- **Directory auto-advance**: `<plan-dir>/` keeps the serial workflow and selects the first pending session.
-- **Explicit flag**: `<plan-dir>/ --session <ID>` runs exactly `session-<ID>.md`, where `<ID>` is a session ID such as `2` or `2.1`.
-- **Direct session file**: `<plan-dir>/session-<ID>.md` runs exactly that session.
-- **Runner-managed suffix**: any accepted form may end with `--runner-managed` when invoked by `asl run`; remove this marker before resolving paths and session IDs, but keep the execution mode.
+- **Directory auto-advance**: `<plan-dir>/` selects the first session with status `pending` in dotted numeric order. This is the only supported invocation form.
+- **Runner-managed suffix**: the input may end with `--runner-managed` when invoked by `asl run`; remove this marker before resolving the plan directory path, but keep the execution mode.
 
-Concurrent auto-advance invocations are unsafe because multiple workers can select the same pending session. Parallel workers must use an explicit session target assigned by a coordinator.
+Explicit session selectors (`--session <ID>`) and direct session file paths (`<plan-dir>/session-<ID>.md`) are not accepted by this skill. Reject them in Step 1. Plan-maintenance operations against a specific session belong to `session-resplit`, not `session-run`.
 
 ## Instructions
 
@@ -58,20 +48,19 @@ Concurrent auto-advance invocations are unsafe because multiple workers can sele
 
 Trim trailing whitespace from the invocation argument and determine the execution mode:
 
-- **Directory auto-advance mode**: the input is a directory path with no extra selector.
-- **Explicit flag mode**: the input is a directory path followed by exactly `--session <ID>`, where `<ID>` matches `[1-9][0-9]*(\.[1-9][0-9]*)*`.
-- **Direct file mode**: the input is a path ending in `session-<ID>.md`; derive the plan directory from the file's parent directory and the selected session ID from the filename.
-- **Runner-managed mode**: if the final token is exactly `--runner-managed`, remove it before the mode checks above and set `runner_managed=true`.
+- **Runner-managed marker**: if the final token is exactly `--runner-managed`, remove it and set `runner_managed=true` before resolving the plan directory.
+- **Directory auto-advance mode**: the remaining input must be a single plan directory path with no other tokens.
 
 Reject malformed inputs and stop without making changes:
 
-- Unknown flags or extra positional arguments
-- `--session` without a valid session ID
+- Any `--session` flag or session ID positional argument (no longer supported by this skill)
+- A path ending in `session-<ID>.md` (no longer supported by this skill)
+- Any other unknown flags or extra positional arguments
 - `--runner-managed` anywhere except the final token
-- A direct file path whose basename is not exactly `session-<ID>.md` with a valid session ID
-- A selected session file that does not exist
 
 Verify the resolved plan directory exists and contains `manifest.md` and `context.md`.
+
+When `runner_managed=true` and the input is rejected, emit `Runner status: paused` followed by `RUNNER_PAUSE: malformed-plan - unsupported session-run input; expected <plan-dir>/ [--runner-managed]` so the Python runner records a structured pause instead of `no-status-change`.
 
 ### Step 1a: Honor Runner-Managed Reply Context
 
@@ -104,9 +93,9 @@ Behavior:
 
 Read `context.md` from the plan directory. Hold this as shared context for the session implementation.
 
-Read `manifest.md` from the plan directory. If it contains `## Parallel Execution`, `### Dependency Waves`, `### Session Ownership`, or parallel worker commands, hold that metadata as scheduling guidance. The manifest is guidance, not the completion source of truth; handoff statuses in the session files remain authoritative for completion.
+Read `manifest.md` from the plan directory. Treat the manifest's session-status table as derived bookkeeping; final handoff statuses in the session files remain authoritative for completion. Older plans may still contain a `## Parallel Execution` block (with `### Dependency Waves`, `### Session Ownership`, or worker-command subsections) — ignore those sections. This skill no longer schedules parallel work.
 
-If `<plan-dir>/parallel-validation.md` exists, read it before selecting or implementing the session. Treat it as authoritative over manifest and session-file parallel metadata for dependency, ownership, and safety claims.
+Do not read `parallel-validation.md` even if it exists on disk. This skill no longer consults that file.
 
 ### Step 2.5: Read the Progress Journal
 
@@ -129,18 +118,7 @@ asl status <plan-dir> --json
 
 If `asl status` exits non-zero or the JSON has `ok: false`, stop without making changes. Use the JSON `reason`/`error` fields in the report and emit a `RUNNER_PAUSE: malformed-plan - <summary>` line when `runner_managed=true`.
 
-In **directory auto-advance mode**, find the first session with status `pending` in dotted numeric order.
-
-- Prefer `next_pending_id` from the `asl status --json` payload; it is already resolved by the same parser used by `asl run`.
-
-- If **no sessions are pending** (all are `complete`): print `Next command: All sessions implemented - nothing left to run.` and stop.
-
-In **explicit mode**, select only the requested session ID:
-
-- If the selected session is missing from the `sessions` array, print an error and stop.
-- If the selected session is already `complete`, print an error and stop.
-- If the selected session status is anything other than `pending`, print an error and stop.
-- Never fall back to another pending session.
+Select the next session using `next_pending_id` from the JSON payload; it is already resolved by the same parser used by `asl run`. If no session has status `pending`, every session in `sessions` is `complete`: print `Next command: All sessions implemented - nothing left to run.` and stop.
 
 ### Step 4: Load Session
 
@@ -148,32 +126,20 @@ Read `session-<ID>.md` for the selected session.
 
 Also check for `session-<ID>.expand.md`. If it exists, read it — this contains verified file paths, corrected signatures, and codebase patterns discovered by `session-expand`. Treat expansion notes as authoritative corrections to the session plan.
 
-Read the selected session's `## Parallel Metadata` block if present. In explicit mode, use it together with `manifest.md` and optional `parallel-validation.md` to validate that this exact session may run now.
+If the selected session is not the first session in the sorted status map, also read the **Handoff** section from the immediately preceding session file for context. Do not derive the previous session with integer arithmetic; use the sorted session ID list from `asl status`.
 
-Explicit-session validation fails closed. Stop without implementing or updating any handoff if:
+Older split plans may still contain a `## Parallel Metadata` block at the top of each session file. Ignore it. This skill does not validate parallel safety, ownership, or required-prior-session metadata from session files — `asl status` resolves the next pending session, and `asl preflight` enforces plan-level readiness.
 
-- `parallel-validation.md` marks the selected session as blocked, unsafe to run now, ownership-conflicted, or dependent on unresolved work.
-- `parallel-validation.md` adds required prior session IDs that are not complete.
-- The session's `Required prior sessions` metadata lists prior session IDs whose handoff status is not `complete`.
-- The selected session has a prerequisite implied by concrete implementation instructions and that prerequisite is not complete.
+### Step 4a: Pre-Implementation Readiness Checks
 
-Manifest/session safety classifications guide parallel scheduling but do not by themselves forbid serial explicit execution after all required prior sessions are complete. For example, `serial-required` means "do not run concurrently"; it does not mean "never run explicitly." Validation notes can still block execution when they identify unresolved dependencies or ownership conflicts.
-
-In directory auto-advance mode, if the selected session is not the first session in the sorted status map, also read the **Handoff** section from the immediately preceding session file for context. Do not derive the previous session with integer arithmetic; use the sorted session ID list.
-
-In explicit mode, read the **Handoff** section for every required prior session ID. Also read the immediately preceding session file in dotted numeric order if it is complete or if metadata/validation/instructions list it as required. A pending previous session is not automatically a blocker unless required by metadata, validation notes, or concrete implementation dependencies.
-
-### Step 4a: Pre-Implementation Contract and Readiness Checks
-
-Before executing any implementation work, delegate plan-wide safety checks to the Python scripts. Each pause here happens **before** the handoff is touched, so no revert is needed — emit the pause line, do not run Step 5, do not modify the handoff, and let Step 7 print the report with the `Next command:` line pointing back at the same selected session.
+Before executing any implementation work, delegate plan-wide safety checks to the Python scripts. Each pause here happens **before** the handoff is touched, so no revert is needed — emit the pause line, do not run Step 5, do not modify the handoff, and let Step 7 print the report with the `Next command:` line pointing back at the same plan directory.
 
 When `runner_managed=true`:
 
 - Do not run `asl preflight`.
 - Do not recompute readiness SHA values in the skill.
-- Do not parse `parallel-validation.md` readiness snapshots as gates.
 - Trust the active `asl run` process to own the lock, readiness lifecycle, verification gate, handoff revert, derived ledger sync, and readiness refresh.
-- You may still surface non-blocking context from expansion or validation files in the final report.
+- You may still surface non-blocking context from expansion files in the final report.
 
 When `runner_managed=false`, run:
 
@@ -189,15 +155,11 @@ RUNNER_PAUSE: unsafe - plan is not loop-ready; run `asl preflight <plan-dir> --m
 
 Do not repair readiness from the skill except by telling the user the exact `asl preflight --mark-loop-ready` command. If `preflight` reports contract findings, surface its `repair_hints` rather than interpreting `session-<ID>.expand.md` contract prose as authoritative.
 
-Always treat any `## Plan Readiness` or `## Preflight Snapshot` section in `parallel-validation.md` as informational snapshot text. The live `asl` command output is canonical.
-
 ### Step 5: Implement
 
-Execute the session's instructions — everything above the `## Handoff` section in the session file. Use the context from `context.md`, manifest scheduling guidance, validation notes (if any), expansion notes (if any), and required prior handoffs (if any) to inform the implementation.
+Execute the session's instructions — everything above the `## Handoff` section in the session file. Use the context from `context.md`, expansion notes (if any), and the immediately preceding handoff (if any) to inform the implementation.
 
 Follow all instructions in the session file faithfully. Make real code changes, run tests if specified, and handle edge cases described in the session.
-
-Explicit mode runs exactly the selected session. Do not auto-advance to another session within the same invocation, even if the selected session finishes quickly.
 
 ### Step 6: Update Handoff
 
@@ -251,7 +213,7 @@ Invocation:
 asl verify <plan-dir> --session <ID> --cwd <repo-root> --json
 ```
 
-- `--session <ID>` is required and must be the exact selected session id (e.g., `2`, `2.1`).
+- `--session <ID>` is required and must be the exact selected session id (e.g., `2`, `2.1`). It is an internal argument to `asl verify`, not a user-facing `session-run` mode.
 - `--cwd <repo-root>` should point at the repository root where the implementation work happened. When the skill is invoked from inside that repository, pass the current working directory; otherwise omit `--cwd` and let `asl verify` use its own cwd.
 - `--json` is mandatory because the skill needs the stable `reason` field for branching.
 - Exit code is the gate decision: `0` means every check passed; any non-zero exit is a hard pause. The skill can rely on exit code alone for the gate decision.
@@ -263,7 +225,7 @@ On any non-zero exit, fail closed without advancing:
 1. Use the Edit tool to revert the handoff `- **Status**: complete` line back to `- **Status**: pending` in `session-<ID>.md`. Do not rewrite the entire handoff — flip just the status line.
 2. Append a short bullet under `- **Notes**:` summarizing the failure. Prefer the JSON `error` string and a short per-check summary when available, e.g., `- verification failed: <reason> - <error>` or `- verification failed: 1/3 checks failed (first failure: <name> - <failure_reason>)`.
 3. Emit `RUNNER_PAUSE: <reason> - <short summary>` using the JSON `reason` field verbatim so it greps cleanly alongside `asl run` loop output.
-4. Skip Step 6b and Step 6c. Proceed to Step 7 and print the report, but **do not** advance the `Next command:` to another session — Step 7 will naturally point back at the same selected session because the handoff was reverted to `pending`.
+4. Skip Step 6b and Step 6c. Proceed to Step 7 and print the report, but **do not** advance the `Next command:` to another session — Step 7 will naturally point back at the same plan directory because the handoff was reverted to `pending` and `asl status` will resolve `next_pending_id` to the same session.
 
 `reason: no-contract` handling: the runner skips verification entirely when the operator passed `--allow-not-loop-ready` and the session lacks a `## Completion Contract` section. The skill has no equivalent flag and therefore must fail closed by default with the same revert + pause sequence above. Users who need to bypass the contract requirement should switch to `asl run --allow-not-loop-ready`, or repair the plan first by adding a completion contract and re-marking the plan loop-ready via `session-split` Step 10a / `asl preflight --mark-loop-ready`.
 
@@ -292,12 +254,7 @@ After the selected handoff is updated and any future-session notes are injected,
 
 When `runner_managed=true`, skip this step. `asl run` rebuilds the status map from final handoff blocks and syncs recognized derived status tables after verification succeeds. Skipping here avoids racing the runner and keeps postflight behavior centralized.
 
-When `runner_managed=false`, rebuild the status map from final handoff blocks and sync derived status tables where it is safe:
-
-- In directory auto-advance mode, sync recognized status tables after every completed session.
-- In explicit mode, if any session remains `pending`, skip shared `manifest.md`/`context.md` status-table sync to avoid concurrent workers racing on shared files.
-- In explicit mode, if no sessions remain `pending`, sync recognized status tables as final bookkeeping.
-- Always treat session handoffs as authoritative. `manifest.md` and `context.md` are derived bookkeeping only.
+When `runner_managed=false`, rebuild the status map from final handoff blocks and sync recognized derived status tables. `session-run` is always directory auto-advance, so it is safe to sync `manifest.md` and `context.md` after every completed session. Always treat session handoffs as authoritative; `manifest.md` and `context.md` are derived bookkeeping only.
 
 For `manifest.md`, update markdown tables that have a session ID column (`#`, `Session`, `Session #`, `Session number`, `Session ID`, or `ID`) and a `Status` column. Keep row order and non-status cells intact.
 
@@ -326,8 +283,8 @@ Print a brief summary:
 For runner-friendly output, you may print one or more machine-readable lines immediately before the final `Next command:` line:
 
 - `Runner status: complete` after a successful session handoff update.
-- `Runner status: paused` when stopping without completing the selected session because user input, validation, plan repair, dependency resolution, or another recoverable intervention is required.
-- `RUNNER_PAUSE: <reason> - <short detail>` to describe a pause in a stable, grep-friendly form. Prefer existing fail-closed vocabulary such as `malformed-plan`, `unknown-status`, `lock-contention`, `blocked`, `unsafe`, `dependent`, `unresolved-prerequisite`, `verify-failed`, `no-contract`, or `malformed-contract` when it applies. Do not invent new reason strings; reuse the runner-side vocabulary so manual and loop output grep together.
+- `Runner status: paused` when stopping without completing the selected session because user input, validation, plan repair, or another recoverable intervention is required.
+- `RUNNER_PAUSE: <reason> - <short detail>` to describe a pause in a stable, grep-friendly form. Prefer existing fail-closed vocabulary such as `malformed-plan`, `unknown-status`, `lock-contention`, `blocked`, `unsafe`, `verify-failed`, `no-contract`, or `malformed-contract` when it applies. Do not invent new reason strings; reuse the runner-side vocabulary so manual and loop output grep together.
 
 These runner-readable lines are optional for manual use and must not replace the final `Next command:` line when that line is part of the report.
 
@@ -335,29 +292,27 @@ In `runner_managed=true` mode, print `Runner status: complete` only after the se
 
 End every successful report with exactly one `Next command:` line:
 
-- In directory auto-advance mode, if another pending session remains, print `Next command: <skill-prefix>session-run <plan-dir>/`
-- In explicit mode, if another pending session remains and the coordinator/manifest/validation clearly identifies the next assigned explicit target, print `Next command: <skill-prefix>session-run <plan-dir>/ --session <ID>`
-- In explicit mode, if another pending session remains but there is no clear next explicit target, print `Next command: <skill-prefix>session-run <plan-dir>/` and state above it that this is the serial fallback after active parallel workers have finished
+- If any session still has status `pending` after the current handoff update, print `Next command: <skill-prefix>session-run <plan-dir>/`
 - If no pending sessions remain, print `Next command: All sessions implemented - nothing left to run.`
 
 Before printing this line, re-check the session statuses after the current handoff update so the next action reflects the actual updated plan directory state.
 
-Use the original plan directory argument provided by the user for `<plan-dir>` when the input was a directory. Use the resolved parent directory when the input was a direct session file. Always display `<plan-dir>` with a trailing slash for directory readability.
+Use the original plan directory argument provided by the user for `<plan-dir>`. Always display `<plan-dir>` with a trailing slash for directory readability.
 
 ## Important Notes
 
 - One session per invocation — never implement more than one session
-- Honor `--runner-managed` as an internal mode from `asl run`: implement the selected session and update its handoff, but leave readiness, verification, handoff revert, and derived ledger sync to the Python runner.
+- Honor `--runner-managed` as an internal mode from `asl run`: implement the next pending session and update its handoff, but leave readiness, verification, handoff revert, and derived ledger sync to the Python runner.
 - When the prompt carries an `## ASL reply context` block (only on the first turn after `asl run --reply TEXT`), use the `### Operator reply` text as the answers to the paused question and resume the session without re-asking the operator. If the reply is genuinely incomplete, emit `Runner status: paused` and `RUNNER_PAUSE: blocked - interactive decision gates require user answers` before mutating the handoff.
 - Use `asl status <plan-dir> --json` as the authoritative parser for session lists, final handoff statuses, and `next_pending_id`; do not reimplement that parser in prose when the script can answer it.
-- In manual mode, use `asl preflight <plan-dir> --json` before implementation and `asl verify <plan-dir> --session <ID> --json` after marking the handoff complete.
+- In manual mode, use `asl preflight <plan-dir> --json` before implementation and `asl verify <plan-dir> --session <ID> --json` after marking the handoff complete. `--session <ID>` here is an internal `asl verify` argument; it is never a `session-run` invocation form.
 - Always read `context.md` before starting implementation
-- Always read `manifest.md`; use its parallel metadata as guidance, not as the completion source of truth
-- If `parallel-validation.md` exists, read it and treat it as authoritative over manifest/session parallel metadata
+- Always read `manifest.md`; treat its session-status table as derived bookkeeping, not the completion source of truth. Ignore any legacy `## Parallel Execution` section.
+- Do not read `parallel-validation.md` even if it exists on disk. The skill no longer consults that file.
+- Ignore any legacy `## Parallel Metadata` block at the top of a session file. The skill no longer validates parallel safety, ownership, or required-prior-session metadata from session files.
 - Expansion notes (`session-<ID>.expand.md`) take precedence over the session file for factual claims (file paths, line numbers, function signatures)
 - The session file is the source of truth for what to implement; expansion notes only correct factual details
 - Treat expansion-file `## Contract Issues` as context only; canonical contract findings come from `asl preflight` before manual implementation and from runner/`asl verify` after completion.
-- `## Plan Readiness` and `## Preflight Snapshot` in `parallel-validation.md` are informational; do not gate on them when a live `asl` command is available.
 - In manual mode, always run `asl verify <plan-dir> --session <ID> --json` (with `--cwd <repo-root>` when the repo root is known) after writing the `complete` handoff. Non-zero exit reverts the handoff to `pending`, appends a failure note, and emits `RUNNER_PAUSE: <reason> - <summary>` using the stable JSON `reason` field.
 - The skill has no `--allow-not-loop-ready` equivalent. `reason: no-contract` fails closed; users who must bypass should use `asl run --allow-not-loop-ready` or repair the plan and re-mark it loop-ready.
 - Never modify the original plan file
@@ -365,5 +320,4 @@ Use the original plan directory argument provided by the user for `<plan-dir>` w
 - Read `progress.md` in Step 2.5 if it exists — it is the runner-maintained cross-session digest. When absent, fall back to reading prior `## Handoff` blocks directly.
 - Never write to `progress.md`; the runner appends entries after verification (Step 6d). Record forward-looking facts in `### Discovered Facts` and forward-looking uncertainties in `### Open Questions` inside the handoff.
 - `progress.md` is excluded from `plan_content_sha256` / `stable_readiness_sha256`, so reading or skipping it cannot change readiness state.
-- In directory auto-advance mode, if a session's status is already `complete`, skip it and move to the next pending one
-- In explicit mode, never skip to another session; fail closed when the selected session cannot run
+- If a session's status is already `complete`, skip it and continue to the next pending one. There is no way to re-run a completed session through this skill.

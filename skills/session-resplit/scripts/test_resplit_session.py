@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import importlib.util
+import json
 import os
 from pathlib import Path
 import sys
@@ -19,7 +20,7 @@ sys.modules[SPEC.name] = resplit
 assert SPEC.loader is not None
 SPEC.loader.exec_module(resplit)
 
-from agent_session_loop import plans, state  # noqa: E402
+from agent_session_loop import contracts, plans, state  # noqa: E402
 
 
 def write_session(
@@ -141,37 +142,12 @@ def write_resplit_plan(plan_dir: Path, *, parent_status: str = "pending") -> Non
                 "> **Previous session**: Read the **Handoff** section at the "
                 "bottom of `session-2.md`.",
                 "",
-                "## Parallel Metadata",
-                "",
-                "- **Safety classification**: `serial-required`",
-                "- **Required prior sessions**: 2 (serial work-session sequence)",
-                "- **Allowed concurrent sessions**: none",
-                "- **Owned write paths**: wrap.py",
-                "- **Forbidden/shared paths**: shared files require coordinator ownership",
-                "- **Serial blockers**: run serially",
-                "- **Optional internal tracks**: none",
-                "",
-                "---",
-                "",
                 "Use parent output.",
             ]
         ),
     )
     (plan_dir / "session-2.expand.md").write_text(
         "historical facts\n", encoding="utf-8"
-    )
-    (plan_dir / "parallel-validation.md").write_text(
-        "\n".join(
-            [
-                "# Parallel Validation",
-                "",
-                "### Session 2: Parent Work",
-                "",
-                "- **Run condition**: dependent on unresolved work",
-                "",
-            ]
-        ),
-        encoding="utf-8",
     )
 
 
@@ -204,15 +180,17 @@ class ResplitSessionTest(unittest.TestCase):
             )
             self.assertEqual(["manifest.md", "context.md"], result["ledger_updates"])
             self.assertEqual(["session-3.md"], result["reference_updates"])
-            self.assertTrue(result["stale_validation_archived"])
+            self.assertNotIn("stale_validation_archived", result)
+            self.assertEqual(
+                ["session-2.md", "session-2.expand.md"],
+                result["archived_files"],
+            )
 
             archive_dir = plan_dir / result["archive_dir"]
             self.assertTrue((archive_dir / "session-2.md").is_file())
             self.assertTrue((archive_dir / "session-2.expand.md").is_file())
-            self.assertTrue((archive_dir / "parallel-validation.md").is_file())
             self.assertFalse((plan_dir / "session-2.md").exists())
             self.assertFalse((plan_dir / "session-2.expand.md").exists())
-            self.assertFalse((plan_dir / "parallel-validation.md").exists())
 
             child_one = (plan_dir / "session-2.1.md").read_text(encoding="utf-8")
             child_two = (plan_dir / "session-2.2.md").read_text(encoding="utf-8")
@@ -233,19 +211,23 @@ class ResplitSessionTest(unittest.TestCase):
                 child_one,
             )
             self.assertIn("Focus deliverable: schema setup.", child_one)
-            self.assertIn(
-                "- **Required prior sessions**: 2.1 (generated child sequence)",
-                child_two,
-            )
+            self.assertNotIn("## Parallel Metadata", child_one)
+            self.assertNotIn("## Parallel Metadata", child_two)
+            self.assertIn("## Completion Contract", child_one)
+            self.assertIn("### Done when", child_one)
+            self.assertIn("### Verify", child_one)
             self.assertIn(
                 "> **Previous session**: Read the **Handoff** section at the bottom "
                 "of `session-2.3.md`.",
                 next_session,
             )
-            self.assertIn(
-                "- **Required prior sessions**: 2.3 (serial work-session sequence)",
-                next_session,
+
+            child_one_contract = contracts.parse_completion_contract(
+                child_one, session_id="2.1"
             )
+            self.assertIsNotNone(child_one_contract)
+            self.assertEqual((2, 1), child_one_contract.session_id.components)
+            self.assertEqual(1, len(child_one_contract.verify.checks))
 
             manifest = (plan_dir / "manifest.md").read_text(encoding="utf-8")
             context = (plan_dir / "context.md").read_text(encoding="utf-8")
@@ -262,46 +244,30 @@ class ResplitSessionTest(unittest.TestCase):
                 "| 2.3 | Parent Work: Docs update | pending | session-2.3.md |",
                 manifest,
             )
+            # Legacy parallel ownership table must be left untouched.
             self.assertIn(
-                "| 3 | serial-required | wrap.py | 2.3 (serial work-session sequence) | none | serial |",
+                "| 3 | serial-required | wrap.py | 2 (serial work-session sequence) | none | serial |",
                 manifest,
             )
+            # Legacy wave table row for the parent must be left untouched.
+            self.assertIn("| 2 | 2 | none | parent |", manifest)
             self.assertIn("| 2.1 | Parent Work: Schema setup | pending |", context)
 
-    def test_resplit_rejects_complete_parent_without_mutating_plan(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            plan_dir = Path(tmp) / "plan"
-            write_resplit_plan(plan_dir, parent_status="complete")
-
-            with self.assertRaises(resplit.ResplitError) as raised:
-                resplit.resplit_session(plan_dir, session_id="2", parts=2)
-
-            self.assertEqual("blocked", raised.exception.reason)
-            self.assertTrue((plan_dir / "session-2.md").is_file())
-            self.assertFalse((plan_dir / "session-2.1.md").exists())
-            self.assertFalse((plan_dir / "resplit-archive").exists())
-
-    def test_resplit_ignores_non_marker_blocked_text_in_parallel_findings(self) -> None:
+    def test_resplit_leaves_existing_parallel_validation_file_on_disk(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             state_dir = Path(tmp) / "state"
             write_resplit_plan(plan_dir)
-            (plan_dir / "parallel-validation.md").write_text(
+            legacy_validation = plan_dir / "parallel-validation.md"
+            legacy_validation.write_text(
                 "\n".join(
                     [
                         "# Parallel Validation",
                         "",
-                        "## Summary",
-                        "",
-                        "- **Blocked sessions**: none",
-                        "",
-                        "## Session Results",
-                        "",
                         "### Session 2: Parent Work",
                         "",
-                        "- **Validated classification**: serial-required",
-                        "- **Run condition**: dependent on unresolved work",
-                        "- **Findings**: session is not blocked for resplitting",
+                        "- **Validated classification**: blocked",
+                        "- **Run condition**: blocked",
                         "",
                     ]
                 ),
@@ -317,28 +283,13 @@ class ResplitSessionTest(unittest.TestCase):
             )
 
             self.assertTrue(result["ok"])
-            self.assertEqual(["2.1", "2.2"], result["children"])
+            self.assertNotIn("parallel-validation.md", result["archived_files"])
+            self.assertTrue(legacy_validation.is_file())
 
-    def test_resplit_rejects_blocked_parallel_validation_marker(self) -> None:
+    def test_resplit_rejects_complete_parent_without_mutating_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
-            write_resplit_plan(plan_dir)
-            (plan_dir / "parallel-validation.md").write_text(
-                "\n".join(
-                    [
-                        "# Parallel Validation",
-                        "",
-                        "## Session Results",
-                        "",
-                        "### Session 2: Parent Work",
-                        "",
-                        "- **Validated classification**: blocked",
-                        "- **Run condition**: blocked",
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
+            write_resplit_plan(plan_dir, parent_status="complete")
 
             with self.assertRaises(resplit.ResplitError) as raised:
                 resplit.resplit_session(plan_dir, session_id="2", parts=2)
@@ -346,6 +297,55 @@ class ResplitSessionTest(unittest.TestCase):
             self.assertEqual("blocked", raised.exception.reason)
             self.assertTrue((plan_dir / "session-2.md").is_file())
             self.assertFalse((plan_dir / "session-2.1.md").exists())
+            self.assertFalse((plan_dir / "resplit-archive").exists())
+
+    def test_resplit_rejects_existing_descendant_session_as_collision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_resplit_plan(plan_dir)
+            write_session(plan_dir, "2.1", "pending", title="Leftover child")
+            descendant_path = plan_dir / "session-2.1.md"
+            original_descendant = descendant_path.read_text(encoding="utf-8")
+
+            with self.assertRaises(resplit.ResplitError) as raised:
+                resplit.resplit_session(
+                    plan_dir,
+                    session_id="2",
+                    parts=3,
+                    state_dir=state_dir,
+                )
+
+            self.assertEqual("collision", raised.exception.reason)
+            self.assertIn("session-2.1.md", raised.exception.detail)
+            self.assertTrue((plan_dir / "session-2.md").is_file())
+            self.assertEqual(
+                original_descendant, descendant_path.read_text(encoding="utf-8")
+            )
+            self.assertFalse((plan_dir / "session-2.2.md").exists())
+            self.assertFalse((plan_dir / "resplit-archive").exists())
+
+    def test_resplit_rejects_existing_child_expansion_as_collision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_resplit_plan(plan_dir)
+            (plan_dir / "session-2.2.expand.md").write_text(
+                "stale expansion\n", encoding="utf-8"
+            )
+
+            with self.assertRaises(resplit.ResplitError) as raised:
+                resplit.resplit_session(
+                    plan_dir,
+                    session_id="2",
+                    parts=3,
+                    state_dir=state_dir,
+                )
+
+            self.assertEqual("collision", raised.exception.reason)
+            self.assertIn("session-2.2.expand.md", raised.exception.detail)
+            self.assertFalse((plan_dir / "session-2.1.md").exists())
+            self.assertFalse((plan_dir / "resplit-archive").exists())
 
     def test_resplit_rejects_active_lock_without_mutating_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -368,6 +368,41 @@ class ResplitSessionTest(unittest.TestCase):
             self.assertTrue((plan_dir / "session-2.md").is_file())
             self.assertFalse((plan_dir / "session-2.1.md").exists())
             self.assertFalse((plan_dir / "resplit-archive").exists())
+
+    def test_generated_child_contract_parses_cleanly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_resplit_plan(plan_dir)
+
+            result = resplit.resplit_session(
+                plan_dir,
+                session_id="2",
+                parts=2,
+                state_dir=state_dir,
+                now=datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc),
+            )
+            self.assertTrue(result["ok"])
+
+            for child_id in result["children"]:
+                child_path = plan_dir / plans.session_id_to_filename(child_id)
+                child_text = child_path.read_text(encoding="utf-8")
+                contract = contracts.parse_completion_contract(
+                    child_text, session_id=child_id
+                )
+                self.assertIsNotNone(contract)
+                self.assertEqual(
+                    tuple(int(p) for p in child_id.split(".")),
+                    contract.session_id.components,
+                )
+                self.assertEqual(1, len(contract.verify.checks))
+                self.assertGreaterEqual(len(contract.done_when), 1)
+                # Round-trip JSON to confirm the fenced block is well-formed.
+                fence_start = child_text.find("```json")
+                fence_end = child_text.find("```", fence_start + 7)
+                self.assertGreater(fence_end, fence_start)
+                payload = json.loads(child_text[fence_start + 7 : fence_end].strip())
+                self.assertEqual(child_id, payload["session"])
 
     def test_cli_target_parsing_accepts_dotted_explicit_and_direct_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
