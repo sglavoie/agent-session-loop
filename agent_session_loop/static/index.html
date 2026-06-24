@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ASL Workbench</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="wb-header">
+      <div class="wb-header__title">
+        <span class="wb-header__brand">ASL</span>
+        <span class="wb-header__subtitle">Workbench</span>
+      </div>
+      <div class="wb-header__meta">
+        <span class="wb-refresh" id="wb-refresh-status">idle</span>
+        <button
+          class="wb-button wb-button--ghost"
+          id="wb-refresh-now"
+          type="button"
+          title="Fetch now"
+        >
+          refresh
+        </button>
+      </div>
+    </header>
+
+    <nav class="wb-filters" id="wb-filters" aria-label="Plan filters">
+      <button
+        class="wb-chip"
+        type="button"
+        data-filter="all"
+        aria-pressed="true"
+      >
+        all <span class="wb-chip__count" data-count="all">0</span>
+      </button>
+      <button class="wb-chip" type="button" data-filter="running" aria-pressed="false">
+        running <span class="wb-chip__count" data-count="running">0</span>
+      </button>
+      <button class="wb-chip" type="button" data-filter="paused" aria-pressed="false">
+        paused <span class="wb-chip__count" data-count="paused">0</span>
+      </button>
+      <button class="wb-chip" type="button" data-filter="failed" aria-pressed="false">
+        failed <span class="wb-chip__count" data-count="failed">0</span>
+      </button>
+      <button class="wb-chip" type="button" data-filter="stale" aria-pressed="false">
+        stale <span class="wb-chip__count" data-count="stale">0</span>
+      </button>
+      <button class="wb-chip" type="button" data-filter="ready" aria-pressed="false">
+        ready <span class="wb-chip__count" data-count="ready">0</span>
+      </button>
+      <button class="wb-chip" type="button" data-filter="complete" aria-pressed="false">
+        complete <span class="wb-chip__count" data-count="complete">0</span>
+      </button>
+      <button class="wb-chip" type="button" data-filter="recent" aria-pressed="false">
+        recent <span class="wb-chip__count" data-count="recent">0</span>
+      </button>
+    </nav>
+
+    <section
+      id="wb-warnings"
+      class="wb-warnings"
+      aria-live="polite"
+      hidden
+    ></section>
+
+    <section
+      id="wb-queue-meta"
+      class="wb-queue-meta"
+      aria-live="polite"
+      hidden
+    ></section>
+
+    <main class="wb-queue" id="wb-queue">
+      <p class="wb-empty" id="wb-empty">loading queue…</p>
+    </main>
+
+    <main class="wb-detail" id="wb-detail" hidden>
+      <div class="wb-detail__head">
+        <button
+          class="wb-button wb-button--ghost"
+          id="wb-detail-back"
+          type="button"
+        >
+          &larr; queue
+        </button>
+        <div class="wb-detail__head-text">
+          <h1 class="wb-detail__label" id="wb-detail-label">(loading)</h1>
+          <p class="wb-detail__path" id="wb-detail-path"></p>
+          <p class="wb-detail__meta">
+            <span class="wb-badge" id="wb-detail-state" data-state="unknown">
+              unknown
+            </span>
+            <span id="wb-detail-action-hint" class="wb-detail__action-hint"></span>
+          </p>
+          <p class="wb-detail__hint" id="wb-detail-hint"></p>
+        </div>
+      </div>
+
+      <section class="wb-panel">
+        <h2 class="wb-panel__title">Controls</h2>
+        <div id="wb-controls-feedback" class="wb-controls__feedback" hidden></div>
+        <div class="wb-controls" id="wb-controls">
+          <button
+            class="wb-button wb-button--primary"
+            id="wb-control-launch"
+            type="button"
+            data-action="launch"
+          >
+            launch
+          </button>
+          <button
+            class="wb-button"
+            id="wb-control-stop"
+            type="button"
+            data-action="stop"
+          >
+            stop after current
+          </button>
+          <label class="wb-control__harness">
+            future harness
+            <select id="wb-control-harness" data-action="harness-select">
+              <option value="">(no change)</option>
+              <option value="codex">codex</option>
+              <option value="claude">claude</option>
+              <option value="copilot">copilot</option>
+            </select>
+            <button
+              class="wb-button"
+              id="wb-control-harness-apply"
+              type="button"
+              data-action="harness-apply"
+            >
+              apply
+            </button>
+          </label>
+          <button
+            class="wb-button"
+            id="wb-control-pin"
+            type="button"
+            data-action="pin"
+          >
+            pin
+          </button>
+          <button
+            class="wb-button wb-button--danger"
+            id="wb-control-unlock"
+            type="button"
+            data-action="unlock"
+            title="Removes the operational lock. Confirms first."
+          >
+            unlock stale
+          </button>
+        </div>
+      </section>
+
+      <section class="wb-panel">
+        <h2 class="wb-panel__title">Launch profile</h2>
+        <form
+          id="wb-profile-form"
+          class="wb-profile-form"
+          novalidate
+          autocomplete="off"
+        >
+          <div class="wb-profile-form__row">
+            <label>
+              <span>label</span>
+              <input type="text" name="label" id="wb-profile-label" />
+            </label>
+            <label>
+              <span>cwd <abbr title="required">*</abbr></span>
+              <input
+                type="text"
+                name="cwd"
+                id="wb-profile-cwd"
+                required
+                aria-required="true"
+              />
+            </label>
+            <label>
+              <span>harness <abbr title="required">*</abbr></span>
+              <select
+                name="harness"
+                id="wb-profile-harness"
+                required
+                aria-required="true"
+              >
+                <option value="">(choose)</option>
+                <option value="codex">codex</option>
+                <option value="claude">claude</option>
+                <option value="copilot">copilot</option>
+              </select>
+            </label>
+            <label>
+              <span>model</span>
+              <input type="text" name="model" id="wb-profile-model" />
+            </label>
+            <label>
+              <span>effort</span>
+              <input type="text" name="effort" id="wb-profile-effort" />
+            </label>
+            <label>
+              <span>timeout (s)</span>
+              <input type="number" name="timeout" id="wb-profile-timeout" min="1" />
+            </label>
+            <label>
+              <span>commit mode</span>
+              <select name="commit_mode" id="wb-profile-commit-mode">
+                <option value="">(default)</option>
+                <option value="per-session">per-session</option>
+                <option value="end">end</option>
+              </select>
+            </label>
+            <label>
+              <span>review harness</span>
+              <select name="review_harness" id="wb-profile-review-harness">
+                <option value="">(none)</option>
+                <option value="codex">codex</option>
+                <option value="claude">claude</option>
+                <option value="copilot">copilot</option>
+              </select>
+            </label>
+            <label>
+              <span>unsafe bypass</span>
+              <select
+                name="unsafe_bypass"
+                id="wb-profile-unsafe-bypass"
+                data-tri-state="true"
+              >
+                <option value="">(default)</option>
+                <option value="true">enabled</option>
+                <option value="false">disabled</option>
+              </select>
+            </label>
+            <label>
+              <span>allow not loop-ready</span>
+              <select
+                name="allow_not_loop_ready"
+                id="wb-profile-allow-not-loop-ready"
+                data-tri-state="true"
+              >
+                <option value="">(default)</option>
+                <option value="true">enabled</option>
+                <option value="false">disabled</option>
+              </select>
+            </label>
+            <label class="wb-profile-form__textarea">
+              <span>note</span>
+              <textarea name="note" id="wb-profile-note" rows="2"></textarea>
+            </label>
+          </div>
+          <p
+            id="wb-profile-form-errors"
+            class="wb-form__errors"
+            role="alert"
+            hidden
+          ></p>
+          <div class="wb-profile-form__actions">
+            <button
+              class="wb-button wb-button--primary"
+              type="submit"
+              data-action="save-profile"
+            >
+              save profile
+            </button>
+            <button
+              class="wb-button"
+              id="wb-profile-unpin"
+              type="button"
+              data-action="unpin"
+            >
+              unpin
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <section class="wb-panel" id="wb-reply-panel" hidden>
+        <h2 class="wb-panel__title">Reply</h2>
+        <p class="wb-reply__hint">
+          The runner is paused waiting on a clarifying answer. Submit returns
+          the answer verbatim to <code>asl run --reply</code>; the draft is
+          never persisted to disk or browser storage.
+        </p>
+        <details class="wb-reply__context">
+          <summary>resolver prompt</summary>
+          <pre id="wb-reply-prompt" class="wb-reply__prompt"></pre>
+        </details>
+        <details class="wb-reply__context">
+          <summary>last message</summary>
+          <pre id="wb-reply-last-message" class="wb-reply__last"></pre>
+        </details>
+        <form id="wb-reply-form" class="wb-reply__form" autocomplete="off">
+          <label for="wb-reply-text" class="wb-reply__label">
+            answer <abbr title="required">*</abbr>
+          </label>
+          <textarea
+            id="wb-reply-text"
+            name="reply_text"
+            rows="6"
+            required
+            aria-required="true"
+            autocomplete="off"
+            spellcheck="true"
+          ></textarea>
+          <p
+            id="wb-reply-form-errors"
+            class="wb-form__errors"
+            role="alert"
+            hidden
+          ></p>
+          <div class="wb-reply__actions">
+            <button
+              class="wb-button wb-button--primary"
+              type="submit"
+              data-action="reply-submit"
+            >
+              submit reply
+            </button>
+            <button
+              class="wb-button wb-button--ghost"
+              id="wb-reply-clear"
+              type="button"
+              data-action="reply-clear"
+            >
+              clear
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <section class="wb-panel">
+        <h2 class="wb-panel__title">Sessions</h2>
+        <ul class="wb-session-list" id="wb-detail-sessions">
+          <li class="wb-empty">loading…</li>
+        </ul>
+      </section>
+
+      <section class="wb-panel">
+        <h2 class="wb-panel__title">Active turn</h2>
+        <dl id="wb-detail-active" class="wb-kv">
+          <div><dt>session</dt><dd data-field="session">-</dd></div>
+          <div><dt>turn</dt><dd data-field="turn">-</dd></div>
+          <div><dt>harness</dt><dd data-field="harness">-</dd></div>
+          <div><dt>model</dt><dd data-field="model">-</dd></div>
+          <div><dt>elapsed</dt><dd data-field="elapsed">-</dd></div>
+          <div><dt>idle</dt><dd data-field="idle">-</dd></div>
+          <div><dt>started</dt><dd data-field="started">-</dd></div>
+          <div><dt>run</dt><dd data-field="run">-</dd></div>
+        </dl>
+      </section>
+
+      <section class="wb-panel">
+        <h2 class="wb-panel__title">Verification</h2>
+        <div id="wb-detail-verification" class="wb-verification">
+          <p class="wb-empty">no active verification</p>
+        </div>
+      </section>
+
+      <section class="wb-panel">
+        <h2 class="wb-panel__title">Events</h2>
+        <ul class="wb-event-list" id="wb-detail-events">
+          <li class="wb-empty">no events yet</li>
+        </ul>
+      </section>
+
+      <section class="wb-panel">
+        <h2 class="wb-panel__title">stdout</h2>
+        <pre class="wb-log" id="wb-detail-stdout">(no log)</pre>
+        <h2 class="wb-panel__title">stderr</h2>
+        <pre class="wb-log" id="wb-detail-stderr">(no log)</pre>
+      </section>
+
+      <section class="wb-panel">
+        <h2 class="wb-panel__title">Progress journal</h2>
+        <ol class="wb-progress-list" id="wb-detail-progress">
+          <li class="wb-empty">no entries</li>
+        </ol>
+      </section>
+
+      <section class="wb-panel">
+        <h2 class="wb-panel__title">Artifacts</h2>
+        <ul class="wb-artifact-list" id="wb-detail-artifacts">
+          <li class="wb-empty">no artifacts yet</li>
+        </ul>
+      </section>
+    </main>
+
+    <template id="wb-row-template">
+      <article class="wb-row" data-plan-dir="">
+        <header class="wb-row__head">
+          <div class="wb-row__title">
+            <span class="wb-badge" data-field="state">unknown</span>
+            <a class="wb-row__label" href="#" data-field="label">(no label)</a>
+          </div>
+          <div class="wb-row__action">
+            <button
+              class="wb-button wb-button--primary"
+              type="button"
+              data-field="action"
+            >
+              run
+            </button>
+          </div>
+        </header>
+        <p class="wb-row__path" data-field="path"></p>
+        <dl class="wb-row__facts">
+          <div><dt>session</dt><dd data-field="session">-</dd></div>
+          <div><dt>harness</dt><dd data-field="harness">-</dd></div>
+          <div><dt>elapsed</dt><dd data-field="elapsed">-</dd></div>
+          <div><dt>idle</dt><dd data-field="idle">-</dd></div>
+          <div><dt>run id</dt><dd data-field="run">-</dd></div>
+          <div>
+            <dt>counts</dt>
+            <dd data-field="counts">-</dd>
+          </div>
+        </dl>
+        <p class="wb-row__hint" data-field="hint"></p>
+        <p class="wb-row__preview" data-field="preview" hidden></p>
+        <ul class="wb-row__warnings" data-field="warnings" hidden></ul>
+        <ul class="wb-row__artifacts" data-field="artifacts"></ul>
+      </article>
+    </template>
+
+    <template id="wb-session-row-template">
+      <li class="wb-session-row" data-session-id="">
+        <span class="wb-session-row__id" data-field="id"></span>
+        <span class="wb-session-row__status" data-field="status"></span>
+        <span class="wb-session-row__path" data-field="path"></span>
+      </li>
+    </template>
+
+    <template id="wb-event-row-template">
+      <li class="wb-event-row">
+        <time data-field="created_at"></time>
+        <span class="wb-event-row__name" data-field="name"></span>
+        <pre class="wb-event-row__payload" data-field="payload"></pre>
+      </li>
+    </template>
+
+    <template id="wb-progress-row-template">
+      <li class="wb-progress-row">
+        <header class="wb-progress-row__head">
+          <span data-field="session_id"></span>
+          <span data-field="status"></span>
+          <time data-field="completed_at"></time>
+        </header>
+        <p class="wb-progress-row__decisions" data-field="key_decisions"></p>
+        <ul class="wb-progress-row__list" data-field="files_modified"></ul>
+        <ul class="wb-progress-row__list" data-field="discovered_facts"></ul>
+        <ul class="wb-progress-row__list" data-field="open_questions"></ul>
+        <p class="wb-progress-row__blockers" data-field="blockers"></p>
+      </li>
+    </template>
+
+    <template id="wb-artifact-row-template">
+      <li class="wb-artifact-row">
+        <span class="wb-artifact-row__label" data-field="label"></span>
+        <code class="wb-artifact-row__path" data-field="path"></code>
+        <span class="wb-artifact-row__meta" data-field="meta"></span>
+      </li>
+    </template>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

@@ -105,6 +105,25 @@ class RunControlState:
                 next_harness=self._next_harness,
             )
 
+    def request_stop_after_current(self) -> RunControlAction | None:
+        """Idempotently mark stop-after-current as requested.
+
+        Returns the resulting action only when the flag flipped from
+        unset to set. Returns ``None`` when stop-after-current was
+        already requested so external producers cannot generate
+        duplicate "request" events by repeating the same command.
+        """
+        with self._lock:
+            if self._stop_after_current:
+                return None
+            self._stop_after_current = True
+            return RunControlAction(
+                action="request",
+                stop_after_current=True,
+                tail_enabled=self._tail_enabled,
+                next_harness=self._next_harness,
+            )
+
     def consume_stop_after_current(self) -> RunControlAction | None:
         with self._lock:
             if not self._stop_after_current:

@@ -1021,6 +1021,346 @@ prompt and the in-harness reply prompt side-by-side without invoking the
 harness, consuming the paused state, or writing the preview payload to
 `state.json`/`events.jsonl`.
 
+## Workbench
+
+`asl workbench [serve]` runs a stdlib-only HTTP control plane that
+surfaces every plan ASL can see in one local browser UI. It is
+intentionally loopback, single-user software: there is no remote-access
+mode, no multi-tenant auth, and no scheduling logic beyond a thin
+renderer over the runner, registry, control queue, launch, and unlock
+helpers.
+
+```bash
+asl workbench
+asl workbench serve
+asl workbench serve --port 0 --open
+asl workbench --plan-root ~/work/plans --plan-root ~/.local/share/agent-plans
+asl workbench serve --state-dir /tmp/asl-state --json
+```
+
+The bare `asl workbench` invocation defaults to `serve`; the same
+flags (`--host`, `--port`, `--state-dir`, `--plan-root`, `--open`,
+`--json`) are accepted on both the parent and the subcommand so either
+position works.
+
+The server binds `127.0.0.1:8765` by default. `--port 0` selects an
+ephemeral port (useful for tests or for running multiple workbenches side
+by side). `--state-dir DIR` mirrors the same flag on `asl run`; `--plan-root
+DIR` may be passed multiple times to add extra directories to plan
+discovery. `--open` best-effort launches the default browser at the
+tokenized URL; the URL and token are also printed regardless, so the
+operator can paste them by hand if the browser cannot be opened. `--json`
+prints a startup payload (`reason: serving`, `host`, `port`, `url`,
+`token`) instead of human text and the server still blocks until exit.
+
+CLI registry maintenance commands let operators manage pins without
+opening the UI:
+
+```bash
+asl workbench pin /path/to/plan-dir
+asl workbench pin /path/to/plan-dir --cwd /path/to/repo --label "Refactor"
+asl workbench unpin /path/to/plan-dir
+asl workbench registry --json
+```
+
+`pin` upserts a registry entry for the canonical `plan_dir`; `--cwd`
+sets the optional repository root and `--label` sets the optional
+human-readable name. Other launch-profile fields stay `null` (runner
+default) unless edited through the UI. `unpin` removes the matching
+pin. `registry` prints the loaded registry (pins, `plan_roots`, and
+any loader warnings); pass `--json` for the
+`responses.success_payload`-shaped envelope used elsewhere in the CLI.
+
+The console output for a normal start is:
+
+```text
+Workbench serving on http://127.0.0.1:8765
+Authorization token: <opaque secrets.token_urlsafe(32) value>
+```
+
+Open `http://127.0.0.1:8765/?token=<token>` (or use `--open`). The
+frontend strips `?token=...` from the URL after first load and persists
+it in `sessionStorage`; refreshing the tab keeps the token. The token is
+regenerated on every server start, so existing tabs need a fresh URL
+after a restart.
+
+### Security model
+
+- The default bind is `127.0.0.1`; the server never reaches outside the
+  local host without an SSH tunnel or other operator-initiated forward.
+- Every mutating endpoint (`POST /api/registry/pin`, `POST /api/launch`,
+  `POST /api/reply`, `POST /api/control/...`, `POST /api/unlock`) requires
+  an `Authorization: Bearer <token>` header. The token is generated with
+  `secrets.token_urlsafe(32)` at startup and compared with
+  `secrets.compare_digest`.
+- Read endpoints (`GET /api/queue`, `/api/plan`, `/api/state`,
+  `/api/events`, `/api/logs`, `/api/last-message`, `/api/result`,
+  `/api/verification`, `/api/commits`, `/api/progress`,
+  `/api/final-review`, `/api/questions`, `/api/registry`, `/api/artifacts`)
+  are **not** authenticated. They are loopback-only by construction. If
+  the Workbench is ever exposed beyond the local machine (e.g., SSH port
+  forwarding, a reverse proxy), plan inventory and resolver prompts —
+  including paused-Q&A `last-message` text — will leak. Treat the URL the
+  same way as any other unauthenticated local devtool.
+- Reply text only ever travels through the child process stdin via
+  `asl run --reply-stdin`. `POST /api/reply` accepts the operator answer
+  in the JSON body and forwards it to `workbench.resume_plan_with_reply`,
+  which writes it to the child stdin and discards the byte buffer. The
+  reply text is never persisted in `state.json`, `events.jsonl`, argv,
+  or turn artifacts; only the character count surfaces (as
+  `reply_length`) on the launch result and `REPLY_PROVIDED_EVENT`.
+- Stop controls are checkpoint-only and never terminate an active
+  harness subprocess. They are equivalent to typing `p`, `1`/`2`/`3`,
+  etc. at a text TTY runner.
+- `--unsafe-bypass` is still the runner default. The Workbench launch
+  form surfaces the choice and the UI confirms the launch before
+  spawning a child with bypass mode set, but flipping the toggle does
+  not change global runner defaults.
+
+### Registry, pins, launch profiles
+
+The Workbench registry is a JSON file stored at
+`$XDG_CONFIG_HOME/agent-session-loop/workbench.json` (default
+`~/.config/agent-session-loop/workbench.json`). Schema version `1`. The
+file is hand-editable; malformed pin or root entries become recoverable
+warnings on the loaded registry rather than failing the server.
+
+Pins record:
+
+- `plan_dir` — canonical absolute path (deduplicated).
+- `label` — optional human-readable name shown in the UI.
+- `profile` — optional `LaunchProfile` defaulting all fields to `null`.
+  Recognized fields mirror `asl run` flags: `cwd`, `harness`, `model`,
+  `effort`, `timeout`, `commit_mode` (`per-session` or `end`),
+  `review_harness`, `unsafe_bypass`, `allow_not_loop_ready`, and `note`.
+  `null` means "no preference"; the workbench falls back to the runner
+  default. `review_harness` must differ from `harness`.
+
+  The nullable booleans (`unsafe_bypass`, `allow_not_loop_ready`) are
+  surfaced in the UI as tri-state `<select>` controls with literal
+  `(default)`, `enabled`, and `disabled` options that round-trip
+  `null`/`true`/`false` through the registry without coercion. The
+  blank/default state emits **no** `--unsafe-bypass` and **no**
+  `--no-unsafe-bypass` argv — it leaves the runner default
+  (`--unsafe-bypass` today) in place. `enabled` adds
+  `--unsafe-bypass` / `--allow-not-loop-ready`; `disabled` adds
+  `--no-unsafe-bypass` (`allow_not_loop_ready=false` intentionally has
+  no negative flag because the runner has no opposite of
+  `--allow-not-loop-ready`).
+
+Concurrent pin/unpin writes (e.g., two browser tabs) are serialized
+through an advisory `fcntl.flock` on a sidecar file
+`workbench.json.lock` next to the registry. The lock file is created
+lazily on first write and inherits the same per-user permissions as the
+registry. The atomic write itself uses `tempfile.mkstemp` plus
+`os.replace`.
+
+`plan_roots` is a list of extra discovery directories the operator
+wants surfaced. They are merged with any `--plan-root` CLI overrides
+and the well-known defaults. Registry roots are scanned alongside
+CLI-supplied roots and both flow through `/api/queue` under the
+canonical `plan-root` discovery source label, so the queue surfaces
+plans from registry `plan_roots` even when the operator did not pass
+`--plan-root` on the command line.
+
+### Plan discovery
+
+Discovery sources, in stable canonical order, are:
+
+- `state` — every per-plan directory under the resolved ASL state root
+  (e.g., `~/.local/state/agent-session-loop/<plan-hash>/`).
+- `registry` — `plan_dir` for every pin in `workbench.json`.
+- `plan-root` — the union of registry `plan_roots`, CLI
+  `--plan-root DIR` values, and `$AGENT_PLANS_DIR` when set.
+- `agent-plans-dir` — `$AGENT_PLANS_DIR` itself when present.
+- `tmp-default` — `$TMPDIR/agent-plans` if it exists.
+- `share-default` — `$XDG_DATA_HOME/agent-plans` (or
+  `~/.local/share/agent-plans`) if it exists.
+
+A plan-root directory is scanned for immediate children that contain
+both `manifest.md` and `context.md`; nothing deeper is walked. Each
+discovered plan dedup-merges across sources and preserves the full list
+of sources that surfaced it.
+
+### HTTP API surface
+
+Read endpoints (loopback-open, no token required):
+
+- `GET /` — bundled Workbench HTML shell (`Cache-Control: no-store`).
+- `GET /static/<path>` — bundled JS/CSS assets
+  (`Cache-Control: no-cache, must-revalidate` plus strong-validator
+  `ETag` from `st_mtime_ns` + `st_size`; the server replies `304 Not
+  Modified` to a matching `If-None-Match`).
+- `GET /api/health` — liveness probe.
+- `GET /api/queue` — every discovered plan summarized via
+  `WorkbenchSummary` (counts, primary state, recommended action,
+  warnings, last-message preview, artifact paths) plus the resolved
+  `state_root` and `state_root_exists` fields used for that scan.
+- `GET /api/plan?plan_dir=<path>` — single-plan detail.
+- `GET /api/registry` — registry payload plus any loader warnings.
+- `GET /api/state?plan_dir=<path>` — latest runner `state.json` under
+  `state`, plus three top-level keys derived from the plan's session
+  files: `sessions` (ordered list with `id`/`status`/`raw_value`/
+  `line_number`/`path`, plus integer `number` for integer-only IDs;
+  dotted IDs such as `2.1` are preserved verbatim and sorted in
+  canonical dotted order), `counts` (`{pending, complete, empty,
+  unknown}`), and `next_pending_id` (string or `null`). The schema
+  matches `asl status --json` so frontend renderers can share a single
+  shape. Malformed plans (missing `manifest.md`/`context.md`, no
+  `session-*.md` files, etc.) return HTTP 500 with
+  `reason: "malformed-plan"` and a `details.plan_dir` field — operators
+  should branch on `reason`, not the HTTP status alone.
+- `GET /api/events?plan_dir=<path>&offset=N&limit=N` — paginated
+  `events.jsonl` entries (default 200, cap 2000).
+- `GET /api/logs?plan_dir=<path>&stream=stdout|stderr|...` — bounded
+  stdout/stderr tail or offset read (default 64 KiB, cap 1 MiB).
+  Accepts `stream=stdout|stderr` for the active turn or an explicit
+  `path=<absolute>` validated to be inside the plan's state directory.
+- `GET /api/last-message?plan_dir=<path>` — bounded last-message text.
+- `GET /api/result?plan_dir=<path>` — active turn `result.json` payload.
+- `GET /api/verification?plan_dir=<path>` — active verification block.
+- `GET /api/commits?plan_dir=<path>` — commit artifact metadata.
+- `GET /api/progress?plan_dir=<path>` — parsed `progress.md` entries.
+- `GET /api/final-review?plan_dir=<path>` — bounded `final-review.md`
+  content (default 256 KiB).
+- `GET /api/questions?plan_dir=<path>` — resolver prompt and Q&A
+  context for the paused turn (mirrors `asl questions --json`).
+- `GET /api/artifacts?plan_dir=<path>` — artifact paths and metadata
+  for the latest run.
+
+Mutating endpoints (bearer-token required):
+
+- `POST /api/registry/pin` — upsert a `RegistryPin`. Payload:
+  `{"plan_dir": "...", "label": "...", "profile": {...}}`.
+- `POST /api/registry/unpin` — `{"plan_dir": "..."}`.
+- `POST /api/launch` — spawn `asl run` for a plan. Payload:
+  `{"plan_dir": "...", "profile": {...}}`. Returns `pid`, `argv`
+  (with reply prompts redacted), `plan_dir`, `profile`, `reply_provided`,
+  `reply_length`, `reply_origin`, and `state_dir`.
+- `POST /api/reply` — resume a paused run with a verbatim reply.
+  Payload: `{"plan_dir": "...", "reply": "..."}`. The `reply` body is
+  streamed to the child via `--reply-stdin`; only `reply_length`
+  survives in the response.
+- `POST /api/control/stop-after-current` — enqueue a
+  `request-stop-after-current` command on the per-plan control queue.
+  The runner consumes it at the next checkpoint.
+- `POST /api/control/select-harness` — enqueue a
+  `select-future-harness` command. Payload:
+  `{"plan_dir": "...", "harness": "codex|claude|copilot"}`. The active
+  turn is never interrupted; the request takes effect at the next turn.
+- `POST /api/unlock` — remove an operational lock. Active locks return
+  409 unless the payload includes `"force": true`; idempotent missing
+  locks return 200 with `had_lock: false`.
+
+All control mutations enqueue records onto
+`<state-dir>/<plan-hash>/control-queue.jsonl` rather than touching
+`state.json` directly. The active runner drains the queue between
+lifecycle checkpoints and translates each accepted command into the
+same `RunControlAction` transitions that the in-process keyboard
+listener already emits, so `run_control` events look identical
+regardless of source.
+
+All responses use the `responses.success_payload`/`error_payload`
+envelopes with `command: "workbench"`. Stable error reasons reused
+verbatim from the underlying helpers include `invalid-plan`,
+`active-lock`, `malformed-plan`, `invalid-harness`, `bind-failed`, and
+the `control_queue`/`workbench` reason codes. Control endpoints surface
+the enqueued record under `queued_command` (not `command`) so the
+top-level envelope key is not overwritten.
+
+### Frontend behavior
+
+The bundled UI lives at `agent_session_loop/static/` and ships with
+the Python package (no build tooling, no third-party JS). Pages:
+
+- **Queue (`#queue`)** — the operator home. Filter chips collapse
+  `verifying` under `running` and `invalid` under `failed`; the other
+  primary states map 1:1. Rows show plan label/path, primary state,
+  counts, last-activity preview, next-action hint, and an artifact link
+  block. Queue metadata shows the resolved state root and last update;
+  if polling fails, the visible rows are explicitly marked stale. The
+  list polls every 5 s, pauses while the tab is hidden, and diffs rows
+  by `plan_dir` so scroll position and filter selection survive each
+  refresh.
+- **Detail (`#plan?dir=<encoded>`)** — per-plan view with active turn,
+  active verification, session table, recent events, progress journal,
+  artifacts, and operator controls (pin/unpin, edit profile, launch,
+  reply, stop-after-current, select harness, unlock). Dangerous actions
+  (unlock with an active lock, launch under unsafe-bypass) prompt for
+  in-page confirmation before the API call.
+
+  The session table iterates `payload.sessions` from `/api/state` and
+  renders the dotted `id` verbatim (e.g., `2.1`, `2.2`), the basename
+  of `path` (e.g., `session-2.1.md`), and the row's own `status`
+  string (`pending`, `complete`, `empty`, `unknown`). The row whose
+  `id` matches `state.active_turn.session_id` by exact string equality
+  is overridden to `active` — there is no integer-loop or
+  `parseInt(next_pending_session_id)` inference. The empty-state hint
+  still reads `state.detailPlan.next_pending_session_id` (sourced from
+  `/api/plan`, not `/api/state`); that fallback only surfaces before
+  the first successful `/api/state` poll.
+
+Static asset caching:
+
+- The HTML shell uses `Cache-Control: no-store` so a server upgrade is
+  never masked by a stale cached index.
+- `/static/<path>` uses `Cache-Control: no-cache, must-revalidate` with
+  a strong `ETag` derived from `st_mtime_ns + st_size`. The browser
+  validates each request; identical bundles short-circuit to `304 Not
+  Modified` without re-transferring bytes. If a build pipeline ever
+  normalizes mtimes, switch the ETag generator to a content hash before
+  the cache policy starts handing out stale 304s.
+
+### Shutdown and lifecycle
+
+`workbench_serve_from_args` installs signal handlers for SIGINT and
+SIGTERM via `_install_shutdown_handlers`. Both trigger
+`server.shutdown()` from a daemon thread, then the previous handlers
+are restored. Ctrl+C remains the documented exit path; `kill <pid>` or
+a systemd-style stop also exits cleanly and releases the listening
+socket immediately (re-binding to the same port should succeed without
+`EADDRINUSE`). Signal installation is silently skipped when the server
+is constructed off the main thread; test harnesses call
+`server.shutdown()` directly in that case.
+
+Race-safe reads: `/api/logs`, `/api/last-message`, `/api/state`, and
+`/api/verification` treat `FileNotFoundError` raised mid-read as "file
+absent" — they return `404` (or `present: false`) rather than a half-
+filled body with `error: ...`. Operators chasing a transient 500 during
+a runner cleanup window should retry once before opening a bug.
+
+### Workbench troubleshooting
+
+- **Token forgotten / browser refused** — restart the server. Tokens
+  are regenerated on every start, so reopening
+  `http://127.0.0.1:8765/?token=<new>` (or running with `--open`)
+  recovers access.
+- **Port in use** — bind fails with `EADDRINUSE`. Pass `--port 0` to
+  bind ephemerally, or `--port <free>` to choose another fixed port.
+- **Plan does not appear in the queue** — the discovery sources are
+  read in canonical order (`state`, `registry`, `plan-root`,
+  `agent-plans-dir`, `tmp-default`, `share-default`). If the plan
+  directory does not have both `manifest.md` and `context.md`, no
+  source will surface it; add a `--plan-root` parent or pin it through
+  the UI to force it in.
+- **Running loops look ready** — confirm the queue metadata state root
+  matches the root used by `asl run`/`asl sessions --running --json`.
+  Workbench and runner state only line up when they use the same
+  `--state-dir` value.
+- **Pinned plans missing after a manual edit** — `load_registry`
+  reports malformed entries as warnings on the returned payload. Check
+  `GET /api/registry` (or the UI badge) for the warning list before
+  re-pinning by hand.
+- **Stale lock CTA** — `/api/unlock` returns 409 for an active lock
+  unless `force: true` is set. Confirm the owning process is dead with
+  `asl status --json` (look for `runner_state.stale_unfinished`) before
+  unlocking with force.
+- **Reply submitted but the run did not resume** — `/api/reply`
+  forwards the body to `asl run --reply-stdin`. The runner refuses the
+  resume with `reason: no-paused-run`, `missing-question-context`, or
+  `reply-context-mismatch` if the paused turn is stale; the response
+  body carries the verbatim `reason`.
+
 ## Verification
 
 Run the regression suite and compile check from this repository:
@@ -1072,3 +1412,47 @@ Manual smoke checklist:
 - Create a synthetic active lock, confirm `unlock --json` reports
   `reason: active-lock`, then run `unlock --force --json` and confirm the lock
   is removed.
+
+Workbench browser workflow:
+
+- Start `asl workbench serve --open` and confirm the queue lists
+  state-backed plans, registry pins, and any `--plan-root` children.
+  Pin one extra plan from the UI and confirm `workbench.json` gains the
+  entry.
+- Edit a pin's launch profile (harness, model, commit mode), launch the
+  plan from the UI under a fake harness, watch the row transition from
+  `ready` → `running` → `complete`, and confirm the spawned child is a
+  detached `asl run` process (not a child of the server).
+- Start `asl run <plan-dir>` from a terminal while the Workbench is
+  running. Confirm the Workbench attaches to that lock and surfaces the
+  same active turn — both terminal and Workbench should observe the
+  same `state.json` without lock contention.
+- Pause a run with a blocked question (`RUNNER_PAUSE: blocked - ...`),
+  open the detail view, submit a reply through the reply panel, and
+  confirm `state.json`, `events.jsonl`, and the captured `argv` never
+  contain the reply text (only `reply_length` and the redacted argv
+  placeholder).
+- Click "stop after current" from the Workbench while a fake-harness
+  turn is in flight; confirm the turn is not killed and the next
+  lifecycle checkpoint records `run_control: stop-after-current-...`
+  events sourced from the control queue rather than the keyboard
+  listener.
+- Create a stale lock (e.g., kill the runner with SIGKILL), open the
+  detail view, confirm the "stale lock" CTA is offered, and unlock with
+  confirmation. Attempting to unlock an active lock should require the
+  force toggle.
+- From the detail view, open logs (`stdout` and `stderr`), the last
+  message, the active turn's `result.json`, the progress journal, and
+  `final-review.md` (when present); confirm every viewer respects the
+  bounded read window without 500-ing if the artifact file is missing
+  or rotated mid-poll.
+- Hard-refresh the page and confirm in browser devtools that
+  `/static/app.js` and `/static/styles.css` hit `304 Not Modified` on
+  the second load while `GET /` keeps returning `Cache-Control:
+  no-store`.
+- Open the Workbench in two tabs and pin/unpin different plans
+  concurrently; confirm `workbench.json` retains both edits (the
+  advisory `workbench.json.lock` sidecar serializes the writers).
+- Send SIGTERM to the Workbench process and confirm the listening
+  socket is released immediately (re-binding to the same port should
+  succeed without `EADDRINUSE`).

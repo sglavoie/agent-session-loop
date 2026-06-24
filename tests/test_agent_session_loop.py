@@ -19,12 +19,14 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
 from unittest import mock
 
 from agent_session_loop import (
     cli,
     config,
     contracts,
+    control_queue,
     events,
     harnesses,
     install_verify,
@@ -38,6 +40,8 @@ from agent_session_loop import (
     state,
     tail,
     verification,
+    workbench,
+    workbench_server,
 )
 from agent_session_loop.formatting import (
     format_duration_seconds,
@@ -4895,6 +4899,249 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 )
 
 
+class RunReplyStdinFlowTests(unittest.TestCase):
+    """`--reply-stdin` should match `--reply TEXT` except for argv exposure."""
+
+    def _build_args(
+        self,
+        plan_dir: Path,
+        state_dir: Path,
+        *,
+        reply: str | None = None,
+        reply_stdin: bool = False,
+        dry_run: bool = False,
+        json_output: bool = True,
+        cwd: Path | None = None,
+    ) -> argparse.Namespace:
+        return argparse.Namespace(
+            plan_dir=str(plan_dir),
+            cwd=str(cwd if cwd is not None else REPO_ROOT),
+            harness="codex",
+            review_harness=None,
+            state_dir=str(state_dir),
+            json=json_output,
+            dry_run=dry_run,
+            unsafe_bypass=True,
+            timeout=None,
+            max_sessions=None,
+            commit_mode=None,
+            model=None,
+            effort=None,
+            note=None,
+            allow_not_loop_ready=True,
+            reply=reply,
+            reply_stdin=reply_stdin,
+        )
+
+    def _run_with_stdin(
+        self,
+        args: argparse.Namespace,
+        stdin_text: str,
+    ) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        fake_stdin = io.StringIO(stdin_text)
+        with mock.patch.object(runner.sys, "stdin", fake_stdin):
+            with redirect_stdout(out), redirect_stderr(err):
+                code = runner.run_from_args(args)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_reply_stdin_and_reply_are_mutually_exclusive_at_cli(self) -> None:
+        parser = cli.build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "run",
+                    "/tmp/plan",
+                    "--reply",
+                    "argv-text",
+                    "--reply-stdin",
+                ]
+            )
+
+    def test_empty_stdin_reply_returns_empty_reply_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            seeder = RunReplyResumeFlowTests()
+            plan_dir, state_dir, _ = seeder._seed_paused_plan(Path(tmp))
+            args = self._build_args(plan_dir, state_dir, reply_stdin=True)
+
+            code, out, _err = self._run_with_stdin(args, "   \n  ")
+
+            self.assertEqual(1, code)
+            payload = json.loads(out)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("empty-reply", payload["reason"])
+            self.assertIn("--reply-stdin", payload["error"])
+
+    def test_conflicting_reply_and_reply_stdin_programmatic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            seeder = RunReplyResumeFlowTests()
+            plan_dir, state_dir, _ = seeder._seed_paused_plan(Path(tmp))
+            args = self._build_args(
+                plan_dir,
+                state_dir,
+                reply="argv-version",
+                reply_stdin=True,
+            )
+
+            code, out, _err = self._run_with_stdin(args, "stdin-version")
+
+            self.assertEqual(1, code)
+            payload = json.loads(out)
+            self.assertEqual("conflicting-reply", payload["reason"])
+
+    def test_reply_stdin_without_paused_run_returns_no_paused_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("pending", "pending"))
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            plan_state.mkdir(parents=True)
+            args = self._build_args(plan_dir, state_dir, reply_stdin=True)
+
+            code, out, _err = self._run_with_stdin(args, "continue with option 1a")
+
+            self.assertEqual(1, code)
+            payload = json.loads(out)
+            self.assertEqual(qna.REASON_NO_PAUSED_RUN, payload["reason"])
+
+    def test_reply_stdin_context_mismatch_when_paused_session_advanced(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            seeder = RunReplyResumeFlowTests()
+            plan_dir, state_dir, _ = seeder._seed_paused_plan(
+                Path(tmp),
+                statuses=("complete", "pending"),
+                paused_session_id="1",
+            )
+            args = self._build_args(plan_dir, state_dir, reply_stdin=True)
+
+            code, out, _err = self._run_with_stdin(args, "pick 1a")
+
+            self.assertEqual(1, code)
+            payload = json.loads(out)
+            self.assertEqual(
+                qna.REASON_REPLY_CONTEXT_MISMATCH, payload["reason"]
+            )
+
+    def test_reply_stdin_missing_question_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            seeder = RunReplyResumeFlowTests()
+            plan_dir, state_dir, last_message_path = seeder._seed_paused_plan(
+                tmp_dir
+            )
+            last_message_path.unlink()
+            args = self._build_args(plan_dir, state_dir, reply_stdin=True)
+
+            code, out, _err = self._run_with_stdin(args, "pick 1a")
+
+            self.assertEqual(1, code)
+            payload = json.loads(out)
+            self.assertEqual(
+                qna.REASON_MISSING_QUESTION_CONTEXT, payload["reason"]
+            )
+
+    def test_reply_stdin_dry_run_marks_stdin_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            seeder = RunReplyResumeFlowTests()
+            plan_dir, state_dir, _ = seeder._seed_paused_plan(tmp_dir)
+            args = self._build_args(
+                plan_dir,
+                state_dir,
+                reply_stdin=True,
+                dry_run=True,
+                cwd=tmp_dir,
+            )
+
+            code, out, _err = self._run_with_stdin(args, "use 1a")
+
+            self.assertEqual(0, code, out)
+            payload = json.loads(out)
+            planned = payload["planned"]
+            self.assertEqual("reply", planned["prompt_kind"])
+            reply_source = planned["reply_source"]
+            self.assertEqual(len("use 1a"), reply_source["reply_length"])
+            self.assertEqual("stdin", reply_source["origin"])
+
+    def test_reply_stdin_first_turn_matches_reply_argv_except_argv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            seeder = RunReplyResumeFlowTests()
+            plan_dir, state_dir, last_message_path = seeder._seed_paused_plan(
+                tmp_dir,
+                last_message_text="Pick 1a or 1b?\n",
+            )
+
+            def fake_run_harness(name, **kwargs):
+                plan = Path(kwargs["plan_dir"])
+                for session_file in sorted(plan.glob("session-*.md")):
+                    text = session_file.read_text(encoding="utf-8")
+                    if "- **Status**: pending" in text:
+                        session_file.write_text(
+                            text.replace(
+                                "- **Status**: pending",
+                                "- **Status**: complete",
+                                1,
+                            ),
+                            encoding="utf-8",
+                        )
+                        break
+                return harnesses.HarnessResult(
+                    name=name,
+                    argv=[name, "--prompt", str(kwargs.get("prompt", ""))],
+                    returncode=0,
+                    stdout="ok\n",
+                    stderr="",
+                )
+
+            reply_text = "use 1a stdin-secret"
+            args = self._build_args(
+                plan_dir,
+                state_dir,
+                reply_stdin=True,
+                cwd=tmp_dir,
+            )
+
+            with mock.patch.object(
+                runner.harnesses, "run_harness", side_effect=fake_run_harness
+            ) as patched:
+                code, out, _err = self._run_with_stdin(args, reply_text)
+
+            self.assertEqual(0, code, out)
+            first_prompt = patched.call_args_list[0].kwargs.get("prompt")
+            self.assertIn(runner.REPLY_CONTEXT_HEADING, first_prompt)
+            self.assertIn(reply_text, first_prompt)
+
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            events_path = plan_state / events.EVENTS_FILE_NAME
+            records = read_jsonl(events_path)
+            reply_events = [
+                record
+                for record in records
+                if record.get("name") == events.REPLY_PROVIDED_EVENT
+            ]
+            self.assertEqual(1, len(reply_events), records)
+            reply_payload = reply_events[0]["payload"]
+            self.assertEqual(len(reply_text), reply_payload["reply_length"])
+            source = reply_payload["source"]
+            self.assertEqual("stdin", source["origin"])
+            self.assertEqual(len(reply_text), source["reply_length"])
+            self.assertEqual(
+                str(last_message_path), source["last_message_path"]
+            )
+            # Reply text must never leak into any persisted artifact.
+            self.assertNotIn(reply_text, json.dumps(reply_events[0]))
+
+            state_path = plan_state / events.STATE_FILE_NAME
+            state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+            first_turn = state_payload["turns"][0]
+            self.assertEqual("reply", first_turn["prompt_kind"])
+            self.assertEqual("stdin", first_turn["reply_source"]["origin"])
+            for token in first_turn["argv"]:
+                self.assertNotIn(reply_text, str(token))
+
+
 class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
     def _seed_paused_plan(
         self,
@@ -7020,6 +7267,383 @@ class CommandAndConfigTests(unittest.TestCase):
             self.assertFalse(result.passed)
 
 
+class ControlQueueTests(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.plan_dir = self.tmp / "plan"
+        self.state_dir = self.tmp / "state"
+        self.plan_dir.mkdir()
+        (self.plan_dir / "manifest.md").write_text("# m\n", encoding="utf-8")
+        (self.plan_dir / "context.md").write_text("# c\n", encoding="utf-8")
+        (self.plan_dir / "session-1.md").write_text(
+            "## Handoff\n\n- **Status**: pending\n",
+            encoding="utf-8",
+        )
+
+    def queue_path(self) -> Path:
+        return control_queue.queue_path_for_plan(self.plan_dir, self.state_dir)
+
+    def test_append_then_drain_round_trip(self) -> None:
+        cmd = control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+            state_dir=self.state_dir,
+            command_id="cmd-1",
+            created_at="2026-06-24T00:00:00+00:00",
+        )
+        self.assertEqual("cmd-1", cmd.id)
+        self.assertEqual(
+            control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+            cmd.command,
+        )
+        self.assertIsNone(cmd.harness)
+
+        result = control_queue.drain_queue(
+            self.plan_dir, state_dir=self.state_dir
+        )
+        self.assertEqual(("cmd-1",), result.consumed_ids)
+        self.assertEqual(1, len(result.accepted))
+        self.assertEqual(
+            control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+            result.accepted[0].command,
+        )
+        self.assertEqual((), result.rejected)
+        # Queue file is left truncated, not deleted.
+        self.assertTrue(self.queue_path().exists())
+        self.assertEqual("", self.queue_path().read_text(encoding="utf-8"))
+
+    def test_drain_missing_file_is_empty_result(self) -> None:
+        result = control_queue.drain_queue(
+            self.plan_dir, state_dir=self.state_dir
+        )
+        self.assertEqual((), result.accepted)
+        self.assertEqual((), result.rejected)
+        self.assertEqual(self.queue_path(), result.queue_path)
+
+    def test_drain_preserves_order_across_commands(self) -> None:
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+            state_dir=self.state_dir,
+            command_id="a",
+        )
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_SELECT_FUTURE_HARNESS,
+            state_dir=self.state_dir,
+            harness="claude",
+            command_id="b",
+        )
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_SELECT_FUTURE_HARNESS,
+            state_dir=self.state_dir,
+            harness="codex",
+            command_id="c",
+        )
+        result = control_queue.drain_queue(
+            self.plan_dir, state_dir=self.state_dir
+        )
+        self.assertEqual(
+            ["a", "b", "c"],
+            [cmd.id for cmd in result.accepted],
+        )
+        self.assertEqual(
+            [None, "claude", "codex"],
+            [cmd.harness for cmd in result.accepted],
+        )
+
+    def test_duplicate_id_rejected_via_seen_ids(self) -> None:
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+            state_dir=self.state_dir,
+            command_id="dup",
+        )
+        result = control_queue.drain_queue(
+            self.plan_dir, state_dir=self.state_dir, seen_ids={"dup"}
+        )
+        self.assertEqual((), result.accepted)
+        self.assertEqual(1, len(result.rejected))
+        self.assertEqual(control_queue.REJECT_DUPLICATE_ID, result.rejected[0].reason)
+        self.assertEqual("dup", result.rejected[0].detail)
+
+    def test_invalid_json_line_rejected_other_lines_processed(self) -> None:
+        queue_path = self.queue_path()
+        queue_path.parent.mkdir(parents=True, exist_ok=True)
+        queue_path.write_text(
+            "not-json\n"
+            '{"id":"ok","command":"request-stop-after-current"}\n',
+            encoding="utf-8",
+        )
+        result = control_queue.drain_queue(
+            self.plan_dir, state_dir=self.state_dir
+        )
+        self.assertEqual(("ok",), result.consumed_ids)
+        self.assertEqual(1, len(result.rejected))
+        self.assertEqual(control_queue.REJECT_INVALID_JSON, result.rejected[0].reason)
+        self.assertEqual(1, result.rejected[0].line_number)
+
+    def test_unknown_command_rejected(self) -> None:
+        queue_path = self.queue_path()
+        queue_path.parent.mkdir(parents=True, exist_ok=True)
+        queue_path.write_text(
+            '{"id":"x","command":"reboot-the-runner"}\n',
+            encoding="utf-8",
+        )
+        result = control_queue.drain_queue(
+            self.plan_dir, state_dir=self.state_dir
+        )
+        self.assertEqual((), result.accepted)
+        self.assertEqual(1, len(result.rejected))
+        self.assertEqual(
+            control_queue.REJECT_UNKNOWN_COMMAND, result.rejected[0].reason
+        )
+
+    def test_select_future_harness_requires_known_harness(self) -> None:
+        queue_path = self.queue_path()
+        queue_path.parent.mkdir(parents=True, exist_ok=True)
+        queue_path.write_text(
+            '{"id":"a","command":"select-future-harness","harness":"gpt5"}\n'
+            '{"id":"b","command":"select-future-harness"}\n',
+            encoding="utf-8",
+        )
+        result = control_queue.drain_queue(
+            self.plan_dir, state_dir=self.state_dir
+        )
+        self.assertEqual((), result.accepted)
+        self.assertEqual(
+            [control_queue.REJECT_INVALID_HARNESS, control_queue.REJECT_MISSING_HARNESS],
+            [reject.reason for reject in result.rejected],
+        )
+
+    def test_missing_id_rejected(self) -> None:
+        queue_path = self.queue_path()
+        queue_path.parent.mkdir(parents=True, exist_ok=True)
+        queue_path.write_text(
+            '{"command":"request-stop-after-current"}\n'
+            '{"id":"","command":"request-stop-after-current"}\n',
+            encoding="utf-8",
+        )
+        result = control_queue.drain_queue(
+            self.plan_dir, state_dir=self.state_dir
+        )
+        self.assertEqual((), result.accepted)
+        self.assertEqual(
+            [control_queue.REJECT_MISSING_ID, control_queue.REJECT_MISSING_ID],
+            [reject.reason for reject in result.rejected],
+        )
+
+    def test_append_rejects_invalid_harness(self) -> None:
+        with self.assertRaises(control_queue.ControlQueueError):
+            control_queue.append_command(
+                self.plan_dir,
+                control_queue.COMMAND_SELECT_FUTURE_HARNESS,
+                state_dir=self.state_dir,
+                harness="gpt5",
+            )
+
+    def test_append_rejects_unknown_command(self) -> None:
+        with self.assertRaises(control_queue.ControlQueueError):
+            control_queue.append_command(
+                self.plan_dir,
+                "reboot",  # type: ignore[arg-type]
+                state_dir=self.state_dir,
+            )
+
+    def test_concurrent_appends_preserve_all_lines(self) -> None:
+        ids = [f"cmd-{i}" for i in range(50)]
+
+        def append(cid: str) -> None:
+            control_queue.append_command(
+                self.plan_dir,
+                control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+                state_dir=self.state_dir,
+                command_id=cid,
+            )
+
+        threads = [threading.Thread(target=append, args=(cid,)) for cid in ids]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        result = control_queue.drain_queue(
+            self.plan_dir, state_dir=self.state_dir
+        )
+        self.assertEqual(sorted(ids), sorted(cmd.id for cmd in result.accepted))
+        self.assertEqual((), result.rejected)
+
+
+class ControlQueueDrainInRunnerTests(unittest.TestCase):
+    """Validate the runner-side drain helper translates commands correctly."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.plan_dir = self.tmp / "plan"
+        self.state_dir = self.tmp / "state"
+        self.plan_dir.mkdir()
+        (self.plan_dir / "manifest.md").write_text("# m\n", encoding="utf-8")
+        (self.plan_dir / "context.md").write_text("# c\n", encoding="utf-8")
+
+        self.payload: dict[str, object] = {
+            "run_id": "test-run",
+            "control": {
+                "stop_after_current": False,
+                "tail_enabled": False,
+                "next_harness": None,
+                "consumed": False,
+                "last_action": None,
+            },
+            "harness": "codex",
+        }
+        self.control_payload = dict(self.payload["control"])  # type: ignore[arg-type]
+        self.event_path = self.state_dir / "events.jsonl"
+        self.event_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def drain(
+        self,
+        control_state: run_control.RunControlState,
+        seen_ids: set[str] | None = None,
+    ) -> tuple[control_queue.DrainResult, set[str]]:
+        seen = set() if seen_ids is None else seen_ids
+        result = runner._drain_external_control_queue(
+            plan_dir=self.plan_dir,
+            state_dir_arg=str(self.state_dir),
+            control_state=control_state,
+            seen_ids=seen,
+            payload=self.payload,
+            event_path=self.event_path,
+            control_payload=self.control_payload,
+            context=None,
+            persistence=runner._RunPersistence(),
+            run_control_lock=threading.Lock(),
+        )
+        return result, seen
+
+    def test_request_stop_after_current_updates_control_and_emits_event(self) -> None:
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+            state_dir=self.state_dir,
+            command_id="stop-1",
+        )
+        rc_state = run_control.RunControlState(current_harness="codex")
+        result, seen = self.drain(rc_state)
+
+        self.assertEqual(("stop-1",), result.consumed_ids)
+        self.assertTrue(rc_state.stop_after_current)
+        self.assertTrue(self.control_payload["stop_after_current"])
+        self.assertEqual(
+            events.RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED,
+            self.control_payload["last_action"],
+        )
+        self.assertEqual({"stop-1"}, seen)
+        records = read_jsonl(self.event_path)
+        run_control_events = [
+            r["payload"] for r in records if r["name"] == events.RUN_CONTROL_EVENT
+        ]
+        self.assertEqual(1, len(run_control_events))
+        self.assertEqual(
+            events.RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED,
+            run_control_events[0]["action"],
+        )
+
+    def test_idempotent_request_when_already_stopping(self) -> None:
+        rc_state = run_control.RunControlState(current_harness="codex")
+        rc_state.toggle_stop_after_current()  # already True
+        self.control_payload["stop_after_current"] = True
+
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+            state_dir=self.state_dir,
+            command_id="stop-dup",
+        )
+        result, _seen = self.drain(rc_state)
+        self.assertEqual(("stop-dup",), result.consumed_ids)
+        records = read_jsonl(self.event_path) if self.event_path.exists() else []
+        run_control_events = [
+            r for r in records if r["name"] == events.RUN_CONTROL_EVENT
+        ]
+        self.assertEqual(
+            0,
+            len(run_control_events),
+            "duplicate request must not emit an extra run_control event",
+        )
+
+    def test_select_future_harness_updates_control_payload(self) -> None:
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_SELECT_FUTURE_HARNESS,
+            state_dir=self.state_dir,
+            harness="claude",
+            command_id="sel-1",
+        )
+        rc_state = run_control.RunControlState(current_harness="codex")
+        result, _seen = self.drain(rc_state)
+        self.assertEqual(("sel-1",), result.consumed_ids)
+        self.assertEqual("claude", self.control_payload["next_harness"])
+        self.assertEqual(
+            events.RUN_CONTROL_ACTION_HARNESS_SELECTED,
+            self.control_payload["last_action"],
+        )
+
+    def test_select_future_harness_noop_when_already_selected(self) -> None:
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_SELECT_FUTURE_HARNESS,
+            state_dir=self.state_dir,
+            harness="codex",  # same as current
+            command_id="sel-noop",
+        )
+        rc_state = run_control.RunControlState(current_harness="codex")
+        result, _seen = self.drain(rc_state)
+        self.assertEqual(("sel-noop",), result.consumed_ids)
+        # next_harness stays None because select_harness returns None when
+        # the requested harness matches the current one.
+        self.assertIsNone(self.control_payload["next_harness"])
+        records = read_jsonl(self.event_path) if self.event_path.exists() else []
+        self.assertEqual(
+            0,
+            len([r for r in records if r["name"] == events.RUN_CONTROL_EVENT]),
+        )
+
+    def test_seen_ids_carry_across_drain_calls(self) -> None:
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+            state_dir=self.state_dir,
+            command_id="first",
+        )
+        rc_state = run_control.RunControlState(current_harness="codex")
+        seen: set[str] = set()
+        self.drain(rc_state, seen_ids=seen)
+        self.assertEqual({"first"}, seen)
+
+        # Replay an attacker-style file rewrite using the same id.
+        queue_path = control_queue.queue_path_for_plan(self.plan_dir, self.state_dir)
+        queue_path.write_text(
+            '{"id":"first","command":"request-stop-after-current"}\n',
+            encoding="utf-8",
+        )
+        # Reset the flag so we can detect another transition if it (wrongly)
+        # happens.
+        rc_state2 = run_control.RunControlState(current_harness="codex")
+        result2, _ = self.drain(rc_state2, seen_ids=seen)
+        self.assertEqual((), result2.consumed_ids)
+        self.assertEqual(1, len(result2.rejected))
+        self.assertEqual(
+            control_queue.REJECT_DUPLICATE_ID,
+            result2.rejected[0].reason,
+        )
+        self.assertFalse(rc_state2.stop_after_current)
+
+
 class RunControlTests(unittest.TestCase):
     def run_args(self, *, json_output: bool = False, dry_run: bool = False):
         return mock.Mock(json=json_output, dry_run=dry_run)
@@ -7557,6 +8181,7 @@ class FakeRunControlListener:
         status_on_start: tuple[run_control.RunControlAction, ...] = (),
         state_path: Path | None = None,
         events_path: Path | None = None,
+        current_harness: str | None = None,
     ) -> None:
         self.consume_on_call = consume_on_call
         self.actions_on_start = actions_on_start
@@ -7570,6 +8195,7 @@ class FakeRunControlListener:
         self.consume_calls = 0
         self.state_exists_at_start = False
         self.events_exists_at_start = False
+        self.state = run_control.RunControlState(current_harness=current_harness)
 
     def start(self) -> bool:
         self.start_calls += 1
@@ -7592,6 +8218,10 @@ class FakeRunControlListener:
 
     def consume_stop_after_current(self) -> run_control.RunControlAction | None:
         self.consume_calls += 1
+        # Real state takes precedence so the durable control queue tests
+        # observe the genuine transition.
+        if self.state.stop_after_current:
+            return self.state.consume_stop_after_current()
         if self.consume_on_call is None or self.consume_calls != self.consume_on_call:
             return None
         return run_control.RunControlAction(
@@ -9437,6 +10067,385 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual(2, consumed_event["total_sessions"])
         run_finished = event_records[self.event_index(event_records, "run_finished")]
         self.assertEqual(payload["control"], run_finished["payload"]["control"])
+
+    def test_external_queue_stop_after_current_is_honored_between_sessions(
+        self,
+    ) -> None:
+        listener = FakeRunControlListener(current_harness="codex")
+        calls: list[dict[str, object]] = []
+        plan_dir_box: list[Path] = []
+        state_dir_box: list[Path] = []
+
+        def complete_next_pending(plan_dir: Path) -> None:
+            for session_file in sorted(plan_dir.glob("session-*.md")):
+                text = session_file.read_text(encoding="utf-8")
+                if "- **Status**: pending" not in text:
+                    continue
+                session_file.write_text(
+                    text.replace(
+                        "- **Status**: pending",
+                        "- **Status**: complete",
+                        1,
+                    ),
+                    encoding="utf-8",
+                )
+                return
+
+        def fake_run_harness(
+            name: str,
+            **kwargs: object,
+        ) -> harnesses.HarnessResult:
+            calls.append({"harness": name, **kwargs})
+            plan_dir = Path(kwargs["plan_dir"])
+            complete_next_pending(plan_dir)
+            if len(calls) == 1:
+                # Workbench-style external producer queues a stop request
+                # while session 1 is in flight.
+                control_queue.append_command(
+                    plan_dir_box[0],
+                    control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+                    state_dir=state_dir_box[0],
+                    command_id="ext-stop-1",
+                )
+            return harnesses.HarnessResult(
+                name=name,
+                argv=[name, str(kwargs["prompt"])],
+                returncode=0,
+                stdout=f"{name} completed\n",
+                stderr="",
+            )
+
+        # Pre-resolve the plan_dir/state_dir the helper will create so the
+        # fake harness can append to the queue on its first call.
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+            statuses=("pending", "pending"),
+        )
+        plan_dir_box.append(plan_dir)
+        state_dir_box.append(state_dir)
+
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=fake_run_harness,
+        ):
+            args = argparse.Namespace(
+                plan_dir=str(plan_dir),
+                cwd=str(REPO_ROOT),
+                harness="codex",
+                state_dir=str(state_dir),
+                json=False,
+                dry_run=False,
+                unsafe_bypass=True,
+                timeout=None,
+                max_sessions=None,
+                commit_mode=None,
+                model=None,
+                effort=None,
+                note=None,
+                allow_not_loop_ready=True,
+            )
+
+            real_state_dir = state.plan_state_dir(plan_dir, state_dir)
+            listener.state_path = real_state_dir / events.STATE_FILE_NAME
+            listener.events_path = real_state_dir / events.EVENTS_FILE_NAME
+
+            def fake_for_run(*_args, **kwargs):
+                listener.on_action = kwargs.get("on_action")
+                listener.on_status = kwargs.get("on_status")
+                return listener
+
+            with (
+                patched_env(
+                    XDG_CONFIG_HOME=str(config_home),
+                    FAKE_CODEX_MODE="success",
+                    FAKE_CODEX_SLEEP="5",
+                    PYTHONPATH=str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+                ),
+                mock.patch.object(
+                    runner.run_control.RunControlListener,
+                    "for_run",
+                    side_effect=fake_for_run,
+                ),
+            ):
+                lock_info = state.acquire_lock(plan_dir, state_dir)
+                try:
+                    exit_code, payload = runner._run_locked(
+                        args=args,
+                        cwd=REPO_ROOT,
+                        timeout=None,
+                        max_sessions=None,
+                        commit_mode=None,
+                        lock_info=lock_info,
+                        run_id="test-run",
+                    )
+                finally:
+                    state.release_lock(plan_dir, state_dir)
+
+        self.assertEqual(0, exit_code, payload)
+        self.assertEqual("stopped", payload["reason"])
+        # Only session 1 ran; session 2 was not started.
+        self.assertEqual([1], payload["completed_sessions"])
+        self.assertEqual(1, len(calls))
+
+        control_events = [
+            record["payload"]
+            for record in read_jsonl(Path(payload["events_path"]))
+            if record["name"] == events.RUN_CONTROL_EVENT
+        ]
+        actions = [event["action"] for event in control_events]
+        self.assertIn("stop-after-current-requested", actions)
+        self.assertIn("stop-after-current-consumed", actions)
+        # The requested event must precede the consumed event so the queue
+        # transition is recorded before the lifecycle ack.
+        self.assertLess(
+            actions.index("stop-after-current-requested"),
+            actions.index("stop-after-current-consumed"),
+        )
+
+        # Queue file is left truncated, not deleted, after drain.
+        queue_path = control_queue.queue_path_for_plan(plan_dir, state_dir)
+        self.assertTrue(queue_path.exists())
+        self.assertEqual("", queue_path.read_text(encoding="utf-8"))
+
+    def test_external_queue_select_future_harness_switches_next_turn(self) -> None:
+        listener = FakeRunControlListener(current_harness="codex")
+        calls: list[dict[str, object]] = []
+        plan_dir_box: list[Path] = []
+        state_dir_box: list[Path] = []
+
+        def complete_next_pending(plan_dir: Path) -> None:
+            for session_file in sorted(plan_dir.glob("session-*.md")):
+                text = session_file.read_text(encoding="utf-8")
+                if "- **Status**: pending" not in text:
+                    continue
+                session_file.write_text(
+                    text.replace(
+                        "- **Status**: pending",
+                        "- **Status**: complete",
+                        1,
+                    ),
+                    encoding="utf-8",
+                )
+                return
+
+        def fake_run_harness(
+            name: str,
+            **kwargs: object,
+        ) -> harnesses.HarnessResult:
+            calls.append({"harness": name, **kwargs})
+            complete_next_pending(Path(kwargs["plan_dir"]))
+            if len(calls) == 1:
+                control_queue.append_command(
+                    plan_dir_box[0],
+                    control_queue.COMMAND_SELECT_FUTURE_HARNESS,
+                    state_dir=state_dir_box[0],
+                    harness="claude",
+                    command_id="ext-sel-1",
+                )
+            return harnesses.HarnessResult(
+                name=name,
+                argv=[name, str(kwargs["prompt"])],
+                returncode=0,
+                stdout=f"{name} completed\n",
+                stderr="",
+            )
+
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+            statuses=("pending", "pending"),
+            harness_config_overrides={"claude": sys.executable},
+        )
+        plan_dir_box.append(plan_dir)
+        state_dir_box.append(state_dir)
+
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=fake_run_harness,
+        ):
+            args = argparse.Namespace(
+                plan_dir=str(plan_dir),
+                cwd=str(REPO_ROOT),
+                harness="codex",
+                state_dir=str(state_dir),
+                json=False,
+                dry_run=False,
+                unsafe_bypass=True,
+                timeout=None,
+                max_sessions=None,
+                commit_mode=None,
+                model=None,
+                effort=None,
+                note=None,
+                allow_not_loop_ready=True,
+            )
+            real_state_dir = state.plan_state_dir(plan_dir, state_dir)
+            listener.state_path = real_state_dir / events.STATE_FILE_NAME
+            listener.events_path = real_state_dir / events.EVENTS_FILE_NAME
+
+            def fake_for_run(*_args, **kwargs):
+                listener.on_action = kwargs.get("on_action")
+                listener.on_status = kwargs.get("on_status")
+                return listener
+
+            with (
+                patched_env(
+                    XDG_CONFIG_HOME=str(config_home),
+                    FAKE_CODEX_MODE="success",
+                    FAKE_CODEX_SLEEP="5",
+                    PYTHONPATH=str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+                ),
+                mock.patch.object(
+                    runner.run_control.RunControlListener,
+                    "for_run",
+                    side_effect=fake_for_run,
+                ),
+            ):
+                lock_info = state.acquire_lock(plan_dir, state_dir)
+                try:
+                    exit_code, payload = runner._run_locked(
+                        args=args,
+                        cwd=REPO_ROOT,
+                        timeout=None,
+                        max_sessions=None,
+                        commit_mode=None,
+                        lock_info=lock_info,
+                        run_id="test-run",
+                    )
+                finally:
+                    state.release_lock(plan_dir, state_dir)
+
+        self.assertEqual(0, exit_code, payload)
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual(["codex", "claude"], [call["harness"] for call in calls])
+        self.assertEqual("claude", payload["control"]["next_harness"])
+
+        control_events = [
+            record["payload"]
+            for record in read_jsonl(Path(payload["events_path"]))
+            if record["name"] == events.RUN_CONTROL_EVENT
+        ]
+        actions = [event["action"] for event in control_events]
+        self.assertIn("harness-selected", actions)
+
+    def test_external_queue_does_not_interrupt_active_harness_subprocess(self) -> None:
+        """A queue command written mid-turn must not be applied until the turn ends."""
+
+        listener = FakeRunControlListener(current_harness="codex")
+        calls: list[dict[str, object]] = []
+        plan_dir_box: list[Path] = []
+        state_dir_box: list[Path] = []
+        stop_state_during_call: list[bool] = []
+
+        def complete_next_pending(plan_dir: Path) -> None:
+            for session_file in sorted(plan_dir.glob("session-*.md")):
+                text = session_file.read_text(encoding="utf-8")
+                if "- **Status**: pending" not in text:
+                    continue
+                session_file.write_text(
+                    text.replace(
+                        "- **Status**: pending",
+                        "- **Status**: complete",
+                        1,
+                    ),
+                    encoding="utf-8",
+                )
+                return
+
+        def fake_run_harness(
+            name: str,
+            **kwargs: object,
+        ) -> harnesses.HarnessResult:
+            calls.append({"harness": name, **kwargs})
+            plan_dir = Path(kwargs["plan_dir"])
+            # Queue arrives while the harness is "running". Observe the
+            # listener state before completing the session.
+            control_queue.append_command(
+                plan_dir_box[0],
+                control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+                state_dir=state_dir_box[0],
+                command_id=f"midflight-{len(calls)}",
+            )
+            stop_state_during_call.append(listener.state.stop_after_current)
+            complete_next_pending(plan_dir)
+            return harnesses.HarnessResult(
+                name=name,
+                argv=[name, str(kwargs["prompt"])],
+                returncode=0,
+                stdout=f"{name} completed\n",
+                stderr="",
+            )
+
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+            statuses=("pending", "pending"),
+        )
+        plan_dir_box.append(plan_dir)
+        state_dir_box.append(state_dir)
+
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=fake_run_harness,
+        ):
+            args = argparse.Namespace(
+                plan_dir=str(plan_dir),
+                cwd=str(REPO_ROOT),
+                harness="codex",
+                state_dir=str(state_dir),
+                json=False,
+                dry_run=False,
+                unsafe_bypass=True,
+                timeout=None,
+                max_sessions=None,
+                commit_mode=None,
+                model=None,
+                effort=None,
+                note=None,
+                allow_not_loop_ready=True,
+            )
+            real_state_dir = state.plan_state_dir(plan_dir, state_dir)
+            listener.state_path = real_state_dir / events.STATE_FILE_NAME
+            listener.events_path = real_state_dir / events.EVENTS_FILE_NAME
+
+            def fake_for_run(*_args, **kwargs):
+                listener.on_action = kwargs.get("on_action")
+                listener.on_status = kwargs.get("on_status")
+                return listener
+
+            with (
+                patched_env(
+                    XDG_CONFIG_HOME=str(config_home),
+                    FAKE_CODEX_MODE="success",
+                    FAKE_CODEX_SLEEP="5",
+                    PYTHONPATH=str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+                ),
+                mock.patch.object(
+                    runner.run_control.RunControlListener,
+                    "for_run",
+                    side_effect=fake_for_run,
+                ),
+            ):
+                lock_info = state.acquire_lock(plan_dir, state_dir)
+                try:
+                    exit_code, _payload = runner._run_locked(
+                        args=args,
+                        cwd=REPO_ROOT,
+                        timeout=None,
+                        max_sessions=None,
+                        commit_mode=None,
+                        lock_info=lock_info,
+                        run_id="test-run",
+                    )
+                finally:
+                    state.release_lock(plan_dir, state_dir)
+
+        self.assertEqual(0, exit_code)
+        # While the first harness call ran, the stop flag had not yet been
+        # propagated from the queue to the in-memory control state. Drain
+        # only happens between checkpoints.
+        self.assertFalse(stop_state_during_call[0])
+        # Exactly one harness call happened because the queued stop was
+        # applied at the post-session checkpoint and ended the run.
+        self.assertEqual(1, len(calls))
 
     def test_harness_selection_applies_to_next_session_and_recomputes_native_model(
         self,
@@ -18317,6 +19326,4313 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         self.assertEqual(
             artifact_keys,
             set(help_payload["artifact_paths"].keys()),
+        )
+
+
+def _write_plan_dir(plan_dir: Path) -> Path:
+    plan_dir.mkdir(parents=True, exist_ok=True)
+    (plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
+    (plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
+    return plan_dir
+
+
+class WorkbenchRegistryTests(unittest.TestCase):
+    def test_default_registry_path_uses_xdg_config_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            xdg = Path(tmp) / "config"
+            with patched_env(XDG_CONFIG_HOME=str(xdg)):
+                path = workbench.default_registry_path()
+            self.assertEqual(
+                path,
+                xdg.resolve() / config.APP_NAME / workbench.REGISTRY_FILE_NAME,
+            )
+
+    def test_load_returns_empty_registry_when_file_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / workbench.REGISTRY_FILE_NAME
+
+            registry = workbench.load_registry(registry_path)
+
+            self.assertEqual(workbench.REGISTRY_SCHEMA_VERSION, registry.schema_version)
+            self.assertEqual((), registry.pins)
+            self.assertEqual((), registry.plan_roots)
+            self.assertEqual((), registry.warnings)
+            self.assertEqual(registry_path.resolve(), registry.path)
+
+    def test_load_parses_pins_roots_and_profile_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
+            plan_root = tmp_path / "plans"
+            registry_path = tmp_path / workbench.REGISTRY_FILE_NAME
+            payload = {
+                "schema_version": workbench.REGISTRY_SCHEMA_VERSION,
+                "pins": [
+                    {
+                        "plan_dir": str(plan_dir),
+                        "label": "Alpha plan",
+                        "profile": {
+                            "cwd": str(tmp_path),
+                            "harness": "claude",
+                            "model": "claude-sonnet",
+                            "effort": "high",
+                            "timeout": 1200,
+                            "commit_mode": "per-session",
+                            "review_harness": "codex",
+                            "unsafe_bypass": True,
+                            "allow_not_loop_ready": False,
+                            "note": "ship soon",
+                        },
+                    },
+                    {"plan_dir": str(plan_dir / "missing-but-canonical")},
+                ],
+                "plan_roots": [str(plan_root)],
+            }
+            registry_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            registry = workbench.load_registry(registry_path)
+
+            self.assertEqual((), registry.warnings)
+            self.assertEqual(2, len(registry.pins))
+            first, second = registry.pins
+            self.assertEqual(str(plan_dir), first.plan_dir)
+            self.assertEqual("Alpha plan", first.label)
+            self.assertEqual("claude", first.profile.harness)
+            self.assertEqual("codex", first.profile.review_harness)
+            self.assertTrue(first.profile.unsafe_bypass)
+            self.assertFalse(first.profile.allow_not_loop_ready)
+            self.assertEqual("per-session", first.profile.commit_mode)
+            self.assertEqual(1200, first.profile.timeout)
+            self.assertIsNone(second.label)
+            self.assertEqual(workbench.LaunchProfile(), second.profile)
+            self.assertEqual((str(plan_root),), registry.plan_roots)
+
+    def test_load_warns_on_malformed_entries_without_failing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
+            registry_path = tmp_path / workbench.REGISTRY_FILE_NAME
+            payload = {
+                "schema_version": "not-a-number",
+                "pins": [
+                    "not-an-object",
+                    {"label": "missing plan_dir"},
+                    {
+                        "plan_dir": str(plan_dir),
+                        "profile": {
+                            "harness": "bogus",
+                            "commit_mode": "bogus",
+                            "review_harness": "bogus",
+                        },
+                    },
+                    {"plan_dir": str(plan_dir)},
+                ],
+                "plan_roots": "not-a-list",
+            }
+            registry_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            registry = workbench.load_registry(registry_path)
+
+            self.assertEqual(1, len(registry.pins))
+            self.assertEqual((), registry.plan_roots)
+            self.assertEqual(workbench.REGISTRY_SCHEMA_VERSION, registry.schema_version)
+            joined_warnings = "\n".join(registry.warnings)
+            self.assertIn("schema_version", joined_warnings)
+            self.assertIn("entry must be an object", joined_warnings)
+            self.assertIn("missing or invalid plan_dir", joined_warnings)
+            self.assertIn("unsupported harness 'bogus'", joined_warnings)
+            self.assertIn("unsupported commit_mode 'bogus'", joined_warnings)
+            self.assertIn("duplicate plan_dir", joined_warnings)
+            self.assertIn("plan_roots: must be a list", joined_warnings)
+
+    def test_load_raises_on_invalid_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / workbench.REGISTRY_FILE_NAME
+            registry_path.write_text("not json", encoding="utf-8")
+
+            with self.assertRaises(workbench.WorkbenchError):
+                workbench.load_registry(registry_path)
+
+    def test_load_warns_when_schema_version_is_newer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / workbench.REGISTRY_FILE_NAME
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": workbench.REGISTRY_SCHEMA_VERSION + 5,
+                        "pins": [],
+                        "plan_roots": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            registry = workbench.load_registry(registry_path)
+
+            self.assertEqual(
+                workbench.REGISTRY_SCHEMA_VERSION + 5, registry.schema_version
+            )
+            joined_warnings = "\n".join(registry.warnings)
+            self.assertIn("newer than supported", joined_warnings)
+
+    def test_save_round_trip_through_upsert_and_remove(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
+            other_dir = _write_plan_dir(tmp_path / "plans" / "beta")
+            registry_path = tmp_path / "config" / workbench.REGISTRY_FILE_NAME
+
+            registry = workbench.load_registry(registry_path)
+            self.assertEqual((), registry.pins)
+
+            registry = workbench.upsert_pin(
+                registry,
+                plan_dir,
+                label="Alpha",
+                profile=workbench.LaunchProfile(harness="codex", timeout=600),
+            )
+            registry = workbench.upsert_pin(registry, other_dir)
+            workbench.save_registry(registry, registry_path)
+            self.assertTrue(registry_path.is_file())
+
+            reloaded = workbench.load_registry(registry_path)
+            self.assertEqual(2, len(reloaded.pins))
+            alpha_pin = next(
+                pin for pin in reloaded.pins if pin.plan_dir == str(plan_dir)
+            )
+            self.assertEqual("Alpha", alpha_pin.label)
+            self.assertEqual("codex", alpha_pin.profile.harness)
+            self.assertEqual(600, alpha_pin.profile.timeout)
+
+            updated = workbench.upsert_pin(
+                reloaded, plan_dir, label="Renamed alpha"
+            )
+            self.assertEqual(2, len(updated.pins))
+            renamed_pin = next(
+                pin for pin in updated.pins if pin.plan_dir == str(plan_dir)
+            )
+            self.assertEqual("Renamed alpha", renamed_pin.label)
+            self.assertEqual(workbench.LaunchProfile(), renamed_pin.profile)
+
+            after_remove = workbench.remove_pin(updated, plan_dir)
+            self.assertEqual(1, len(after_remove.pins))
+            self.assertEqual(str(other_dir), after_remove.pins[0].plan_dir)
+
+
+class WorkbenchDiscoveryTests(unittest.TestCase):
+    def test_discovers_plans_from_state_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_root = tmp_path / "state"
+            plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
+            plan_state_dir = state_root / plans.path_sha256(plan_dir)
+            plan_state_dir.mkdir(parents=True)
+            (plan_state_dir / "state.json").write_text(
+                json.dumps({"plan_dir": str(plan_dir)}, sort_keys=True),
+                encoding="utf-8",
+            )
+
+            with patched_env(AGENT_PLANS_DIR=None):
+                result = workbench.discover_plans(
+                    state_root=state_root,
+                    include_default_dirs=False,
+                )
+
+            self.assertEqual(1, len(result.plans))
+            discovered = result.plans[0]
+            self.assertEqual(plan_dir, discovered.plan_dir)
+            self.assertEqual(("state",), discovered.sources)
+            self.assertTrue(discovered.exists)
+            self.assertIsNone(discovered.label)
+            self.assertIsNone(discovered.profile)
+            self.assertEqual((), result.warnings)
+
+    def test_discovers_plans_from_registry_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
+            missing_dir = tmp_path / "plans" / "ghost"
+            registry = workbench.WorkbenchRegistry(
+                pins=(
+                    workbench.RegistryPin(
+                        plan_dir=str(plan_dir),
+                        label="Alpha",
+                        profile=workbench.LaunchProfile(harness="claude"),
+                    ),
+                    workbench.RegistryPin(plan_dir=str(missing_dir)),
+                ),
+            )
+
+            result = workbench.discover_plans(
+                state_root=tmp_path / "state-empty",
+                registry=registry,
+                include_default_dirs=False,
+            )
+
+            self.assertEqual(2, len(result.plans))
+            by_path = {plan.plan_dir: plan for plan in result.plans}
+            alpha = by_path[plan_dir]
+            self.assertEqual(("registry",), alpha.sources)
+            self.assertEqual("Alpha", alpha.label)
+            self.assertEqual("claude", alpha.profile.harness)
+            self.assertTrue(alpha.exists)
+            ghost = by_path[missing_dir]
+            self.assertFalse(ghost.exists)
+            self.assertEqual(("registry",), ghost.sources)
+
+    def test_discovers_plans_from_explicit_plan_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_root = tmp_path / "plans"
+            plan_root.mkdir()
+            real_plan = _write_plan_dir(plan_root / "alpha")
+            (plan_root / "bare-file").write_text("ignored", encoding="utf-8")
+            (plan_root / "incomplete").mkdir()
+            (plan_root / "incomplete" / "manifest.md").write_text(
+                "no context", encoding="utf-8"
+            )
+
+            result = workbench.discover_plans(
+                state_root=tmp_path / "state-empty",
+                plan_roots=[plan_root],
+                include_default_dirs=False,
+            )
+
+            self.assertEqual(1, len(result.plans))
+            self.assertEqual(real_plan, result.plans[0].plan_dir)
+            self.assertEqual(("plan-root",), result.plans[0].sources)
+
+    def test_discovers_plans_from_environment_default_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            agent_dir = tmp_path / "agent-plans"
+            agent_dir.mkdir()
+            plan_a = _write_plan_dir(agent_dir / "alpha")
+            tmp_default = tmp_path / "tmp-root"
+            tmp_default.mkdir()
+            (tmp_default / "agent-plans").mkdir()
+            plan_b = _write_plan_dir(tmp_default / "agent-plans" / "beta")
+            share_default = tmp_path / "share-root"
+            share_default.mkdir()
+            (share_default / "agent-plans").mkdir()
+            plan_c = _write_plan_dir(share_default / "agent-plans" / "gamma")
+
+            with patched_env(
+                AGENT_PLANS_DIR=str(agent_dir),
+                TMPDIR=str(tmp_default),
+                XDG_DATA_HOME=str(share_default),
+                HOME=str(tmp_path / "home-overridden"),
+            ):
+                result = workbench.discover_plans(
+                    state_root=tmp_path / "state-empty",
+                    include_default_dirs=True,
+                )
+
+            paths_to_sources = {
+                plan.plan_dir: plan.sources for plan in result.plans
+            }
+            self.assertIn(plan_a, paths_to_sources)
+            self.assertIn(plan_b, paths_to_sources)
+            self.assertIn(plan_c, paths_to_sources)
+            self.assertEqual(("agent-plans-dir",), paths_to_sources[plan_a])
+            self.assertEqual(("tmp-default",), paths_to_sources[plan_b])
+            self.assertEqual(("share-default",), paths_to_sources[plan_c])
+
+    def test_dedupes_across_sources_and_records_each_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_root = tmp_path / "state"
+            plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
+            plan_state_dir = state_root / plans.path_sha256(plan_dir)
+            plan_state_dir.mkdir(parents=True)
+            (plan_state_dir / "state.json").write_text(
+                json.dumps({"plan_dir": str(plan_dir)}, sort_keys=True),
+                encoding="utf-8",
+            )
+            registry = workbench.WorkbenchRegistry(
+                pins=(
+                    workbench.RegistryPin(
+                        plan_dir=str(plan_dir),
+                        label="Alpha",
+                        profile=workbench.LaunchProfile(harness="codex"),
+                    ),
+                ),
+            )
+
+            result = workbench.discover_plans(
+                state_root=state_root,
+                registry=registry,
+                plan_roots=[tmp_path / "plans"],
+                include_default_dirs=False,
+            )
+
+            self.assertEqual(1, len(result.plans))
+            discovered = result.plans[0]
+            self.assertEqual(plan_dir, discovered.plan_dir)
+            self.assertEqual(
+                ("state", "registry", "plan-root"), discovered.sources
+            )
+            self.assertEqual("Alpha", discovered.label)
+            self.assertEqual("codex", discovered.profile.harness)
+
+    def test_discovers_plans_from_registry_plan_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_root = tmp_path / "registry-roots"
+            plan_root.mkdir()
+            real_plan = _write_plan_dir(plan_root / "alpha")
+            registry = workbench.WorkbenchRegistry(
+                plan_roots=(str(plan_root),),
+            )
+
+            result = workbench.discover_plans(
+                state_root=tmp_path / "state-empty",
+                registry=registry,
+                include_default_dirs=False,
+            )
+
+            self.assertEqual(1, len(result.plans))
+            discovered = result.plans[0]
+            self.assertEqual(real_plan, discovered.plan_dir)
+            self.assertEqual(("plan-root",), discovered.sources)
+            self.assertTrue(discovered.exists)
+
+    def test_dedupes_registry_and_cli_plan_roots_into_single_plan_root_source(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            registry_root = tmp_path / "registry-roots"
+            registry_root.mkdir()
+            cli_root = tmp_path / "cli-roots"
+            cli_root.mkdir()
+            shared_plan = _write_plan_dir(registry_root / "alpha")
+            cli_only_plan = _write_plan_dir(cli_root / "beta")
+            # Symlink the same plan into both roots so a single plan is
+            # surfaced by both registry roots and CLI roots.
+            (cli_root / "alpha").symlink_to(shared_plan)
+
+            registry = workbench.WorkbenchRegistry(
+                plan_roots=(str(registry_root),),
+            )
+
+            result = workbench.discover_plans(
+                state_root=tmp_path / "state-empty",
+                registry=registry,
+                plan_roots=[cli_root],
+                include_default_dirs=False,
+            )
+
+            by_path = {plan.plan_dir: plan for plan in result.plans}
+            self.assertIn(shared_plan, by_path)
+            self.assertIn(cli_only_plan, by_path)
+            self.assertEqual(("plan-root",), by_path[shared_plan].sources)
+            self.assertEqual(("plan-root",), by_path[cli_only_plan].sources)
+            # Order: registry roots scanned first, so shared_plan precedes
+            # the CLI-only plan in the discovery list.
+            ordered = [plan.plan_dir for plan in result.plans]
+            self.assertEqual([shared_plan, cli_only_plan], ordered)
+
+    def test_registry_pin_and_registry_root_merge_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_root = tmp_path / "registry-roots"
+            plan_root.mkdir()
+            plan_dir = _write_plan_dir(plan_root / "alpha")
+            registry = workbench.WorkbenchRegistry(
+                pins=(
+                    workbench.RegistryPin(
+                        plan_dir=str(plan_dir),
+                        label="Alpha",
+                        profile=workbench.LaunchProfile(harness="codex"),
+                    ),
+                ),
+                plan_roots=(str(plan_root),),
+            )
+
+            result = workbench.discover_plans(
+                state_root=tmp_path / "state-empty",
+                registry=registry,
+                include_default_dirs=False,
+            )
+
+            self.assertEqual(1, len(result.plans))
+            discovered = result.plans[0]
+            self.assertEqual(plan_dir, discovered.plan_dir)
+            self.assertEqual(("registry", "plan-root"), discovered.sources)
+            self.assertEqual("Alpha", discovered.label)
+            self.assertEqual("codex", discovered.profile.harness)
+
+    def test_missing_directories_and_invalid_inputs_become_warnings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            not_a_dir = tmp_path / "not-a-dir"
+            not_a_dir.write_text("file not directory", encoding="utf-8")
+
+            result = workbench.discover_plans(
+                state_root=tmp_path / "state-empty",
+                plan_roots=[tmp_path / "missing", not_a_dir],
+                include_default_dirs=False,
+            )
+
+            self.assertEqual((), result.plans)
+            joined = "\n".join(result.warnings)
+            self.assertIn("is not a directory", joined)
+
+    def test_registry_plan_root_missing_emits_no_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            missing_root = tmp_path / "missing-registry-root"
+            registry = workbench.WorkbenchRegistry(
+                plan_roots=(str(missing_root),),
+            )
+
+            result = workbench.discover_plans(
+                state_root=tmp_path / "state-empty",
+                registry=registry,
+                include_default_dirs=False,
+            )
+
+            self.assertEqual((), result.plans)
+            self.assertEqual((), result.warnings)
+
+    def test_registry_plan_root_warns_when_not_a_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            not_a_dir = tmp_path / "registry-root-file"
+            not_a_dir.write_text("file not directory", encoding="utf-8")
+            registry = workbench.WorkbenchRegistry(
+                plan_roots=(str(not_a_dir),),
+            )
+
+            result = workbench.discover_plans(
+                state_root=tmp_path / "state-empty",
+                registry=registry,
+                include_default_dirs=False,
+            )
+
+            self.assertEqual((), result.plans)
+            joined = "\n".join(result.warnings)
+            self.assertIn("registry_plan_root[0]", joined)
+            self.assertIn("is not a directory", joined)
+
+
+_WORKBENCH_DEAD_PID = 4_242_424
+
+
+def _make_workbench_plan(tmp_path: Path, name: str = "plan-alpha") -> Path:
+    plan_dir = tmp_path / name
+    write_plan(plan_dir, ("pending", "pending"))
+    return plans.canonicalize_path(plan_dir)
+
+
+def _write_state_payload(
+    plan_dir: Path,
+    state_root: Path,
+    payload: dict[str, object],
+) -> Path:
+    plan_state = state.plan_state_dir(plan_dir, state_root)
+    plan_state.mkdir(parents=True, exist_ok=True)
+    state_path = plan_state / events.STATE_FILE_NAME
+    state_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    return state_path
+
+
+def _write_lock_file(
+    plan_dir: Path,
+    state_root: Path,
+    *,
+    pid: int,
+) -> Path:
+    plan_state = state.plan_state_dir(plan_dir, state_root)
+    plan_state.mkdir(parents=True, exist_ok=True)
+    lock_path = plan_state / state.LOCK_FILE_NAME
+    lock_path.write_text(
+        json.dumps(
+            {
+                "pid": pid,
+                "plan_dir": str(plan_dir),
+                "created_at": "2026-06-19T00:00:00+00:00",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return lock_path
+
+
+def _discovered(plan_dir: Path, **overrides) -> workbench.DiscoveredPlan:
+    kwargs = {
+        "plan_dir": plan_dir,
+        "sources": ("state",),
+        "label": None,
+        "profile": None,
+        "exists": True,
+    }
+    kwargs.update(overrides)
+    return workbench.DiscoveredPlan(**kwargs)
+
+
+class WorkbenchSummaryTests(unittest.TestCase):
+    def test_invalid_when_plan_directory_does_not_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            missing = tmp_path / "ghost"
+            discovered = _discovered(missing, exists=False)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=tmp_path / "state"
+            )
+
+            self.assertEqual("invalid", summary.primary_state)
+            self.assertEqual("repair-plan", summary.recommended_action)
+            self.assertFalse(summary.exists)
+            self.assertIsNotNone(summary.detail)
+            self.assertIn(str(missing), summary.detail)
+
+    def test_invalid_when_plan_files_are_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = tmp_path / "broken"
+            plan_dir.mkdir()
+            (plan_dir / "context.md").write_text("# C\n", encoding="utf-8")
+            discovered = _discovered(plans.canonicalize_path(plan_dir))
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=tmp_path / "state"
+            )
+
+            self.assertEqual("invalid", summary.primary_state)
+            self.assertEqual("repair-plan", summary.recommended_action)
+            self.assertTrue(summary.exists)
+            self.assertIn("manifest.md", summary.detail or "")
+            self.assertIsNotNone(summary.state_path)
+            self.assertIsNotNone(summary.progress_path)
+
+    def test_ready_state_without_runner_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            discovered = _discovered(plan_dir)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=tmp_path / "state"
+            )
+
+            self.assertEqual("ready", summary.primary_state)
+            self.assertEqual("run", summary.recommended_action)
+            self.assertEqual("1", summary.next_pending_session_id)
+            self.assertIsNotNone(summary.next_pending_session_path)
+            self.assertEqual(2, summary.counts["pending"])
+            self.assertIsNone(summary.run_id)
+            self.assertEqual((), summary.warnings)
+
+    def test_complete_when_no_pending_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = tmp_path / "done-plan"
+            write_plan(plan_dir, ("complete", "complete"))
+            canonical = plans.canonicalize_path(plan_dir)
+            discovered = _discovered(canonical)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=tmp_path / "state"
+            )
+
+            self.assertEqual("complete", summary.primary_state)
+            self.assertEqual("view", summary.recommended_action)
+            self.assertIsNone(summary.next_pending_session_id)
+            self.assertEqual(2, summary.counts["complete"])
+
+    def test_running_classification_with_active_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            artifact_dir = tmp_path / "artifacts" / "turn-1"
+            artifact_dir.mkdir(parents=True)
+            stdout = artifact_dir / "stdout.log"
+            stdout.write_text("running", encoding="utf-8")
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": True,
+                    "paused": False,
+                    "run_id": "20260619T120000Z-1",
+                    "harness": "claude",
+                    "run_started_at": "2026-06-19T12:00:00+00:00",
+                    "run_finished_at": None,
+                    "active_turn": {
+                        "session_id": "1",
+                        "turn_index": 4,
+                        "artifact_dir": str(artifact_dir),
+                        "stdout_path": str(stdout),
+                        "last_message_path": str(artifact_dir / "last-message.txt"),
+                    },
+                    "active_verification": None,
+                },
+            )
+            _write_lock_file(plan_dir, state_root, pid=os.getpid())
+            discovered = _discovered(plan_dir)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=state_root
+            )
+
+            self.assertEqual("running", summary.primary_state)
+            self.assertEqual("watch", summary.recommended_action)
+            self.assertIn("session 1", summary.next_action_hint)
+            self.assertEqual("20260619T120000Z-1", summary.run_id)
+            self.assertEqual("claude", summary.harness)
+            self.assertEqual(artifact_dir, summary.artifact_dir)
+            self.assertEqual(stdout, summary.stdout_path)
+
+    def test_verifying_classification_with_active_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": True,
+                    "paused": False,
+                    "run_id": "20260619T130000Z-1",
+                    "harness": "codex",
+                    "run_started_at": "2026-06-19T13:00:00+00:00",
+                    "run_finished_at": None,
+                    "active_turn": None,
+                    "active_verification": {
+                        "session_id": "1",
+                        "turn_index": 2,
+                        "check_count": 2,
+                        "current_check_index": 1,
+                        "current_check_name": "pytest-suite",
+                        "current_check_kind": "command",
+                    },
+                },
+            )
+            _write_lock_file(plan_dir, state_root, pid=os.getpid())
+            discovered = _discovered(plan_dir)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=state_root
+            )
+
+            self.assertEqual("verifying", summary.primary_state)
+            self.assertEqual("watch", summary.recommended_action)
+            self.assertIn("2/2", summary.next_action_hint)
+            self.assertIn("pytest-suite", summary.next_action_hint)
+
+    def test_verifying_takes_priority_over_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": True,
+                    "paused": False,
+                    "run_id": "run",
+                    "harness": "claude",
+                    "run_finished_at": None,
+                    "active_turn": {"session_id": "1", "turn_index": 1},
+                    "active_verification": {
+                        "session_id": "1",
+                        "turn_index": 1,
+                        "check_count": 1,
+                        "current_check_index": 0,
+                        "current_check_name": "compile",
+                    },
+                },
+            )
+            _write_lock_file(plan_dir, state_root, pid=os.getpid())
+
+            summary = workbench.build_workbench_summary(
+                _discovered(plan_dir), state_dir=state_root
+            )
+
+            self.assertEqual("verifying", summary.primary_state)
+
+    def test_paused_for_reply_with_readable_last_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            artifact_dir = state.plan_state_dir(plan_dir, state_root) / "runs"
+            artifact_dir.mkdir(parents=True)
+            last_message = artifact_dir / "last-message.txt"
+            last_message.write_text(
+                "Need a decision: should we drop the v1 column?",
+                encoding="utf-8",
+            )
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "agent-question",
+                    "pause_reason": "agent-question",
+                    "pause_message": "Awaiting confirmation",
+                    "pause_details": {"category": "decision"},
+                    "run_id": "20260619T140000Z-1",
+                    "harness": "claude",
+                    "turns": [
+                        {
+                            "session_id": "1",
+                            "turn_index": 1,
+                            "last_message_path": str(last_message),
+                            "harness": "claude",
+                            "started_at": "2026-06-19T14:00:00+00:00",
+                        }
+                    ],
+                },
+            )
+            discovered = _discovered(plan_dir)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=state_root
+            )
+
+            self.assertEqual("paused-for-reply", summary.primary_state)
+            self.assertEqual("reply", summary.recommended_action)
+            self.assertEqual(last_message, summary.last_message_path)
+            self.assertIsNotNone(summary.last_message_preview)
+            self.assertIn("v1 column", summary.last_message_preview)
+            self.assertEqual("agent-question", summary.pause_reason)
+            self.assertEqual("Awaiting confirmation", summary.pause_message)
+            self.assertEqual((), summary.warnings)
+
+    def test_paused_for_reply_without_last_message_emits_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "agent-question",
+                    "run_id": "20260619T140000Z-1",
+                    "harness": "claude",
+                    "turns": [
+                        {
+                            "session_id": "1",
+                            "turn_index": 1,
+                            "harness": "claude",
+                        }
+                    ],
+                },
+            )
+            discovered = _discovered(plan_dir)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=state_root
+            )
+
+            self.assertEqual("paused-for-reply", summary.primary_state)
+            self.assertEqual("reply", summary.recommended_action)
+            self.assertIsNone(summary.last_message_preview)
+            self.assertEqual(1, len(summary.warnings))
+            self.assertIn("paused-q&a context unreadable", summary.warnings[0])
+
+    def test_failed_when_last_run_finished_with_ok_false(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": False,
+                    "paused": False,
+                    "run_id": "20260619T120000Z-2",
+                    "harness": "claude",
+                    "reason": "verify-failed",
+                    "run_started_at": "2026-06-19T12:00:00+00:00",
+                    "run_finished_at": "2026-06-19T12:05:00+00:00",
+                    "active_turn": None,
+                    "active_verification": None,
+                },
+            )
+            discovered = _discovered(plan_dir)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=state_root
+            )
+
+            self.assertEqual("failed", summary.primary_state)
+            self.assertEqual("inspect-failure", summary.recommended_action)
+            self.assertIn("verify-failed", summary.next_action_hint)
+
+    def test_stale_when_runner_state_unfinished_without_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": True,
+                    "paused": False,
+                    "run_id": "20260619T120000Z-3",
+                    "harness": "claude",
+                    "run_started_at": "2026-06-19T12:00:00+00:00",
+                    "run_finished_at": None,
+                    "active_turn": None,
+                    "active_verification": None,
+                },
+            )
+            discovered = _discovered(plan_dir)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=state_root
+            )
+
+            self.assertEqual("stale", summary.primary_state)
+            self.assertEqual("unlock", summary.recommended_action)
+            self.assertIn("no lock file is present", summary.detail or "")
+
+    def test_stale_when_lock_is_dead(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            _write_lock_file(plan_dir, state_root, pid=_WORKBENCH_DEAD_PID)
+            discovered = _discovered(plan_dir)
+
+            with mock.patch.object(
+                state,
+                "is_pid_running",
+                side_effect=lambda pid: pid == os.getpid(),
+            ):
+                summary = workbench.build_workbench_summary(
+                    discovered, state_dir=state_root
+                )
+
+            self.assertEqual("stale", summary.primary_state)
+            self.assertEqual("unlock", summary.recommended_action)
+
+    def test_recent_when_finished_ok_with_pending_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": True,
+                    "paused": False,
+                    "run_id": "20260619T120000Z-4",
+                    "harness": "claude",
+                    "run_started_at": "2026-06-19T12:00:00+00:00",
+                    "run_finished_at": "2026-06-19T12:30:00+00:00",
+                    "active_turn": None,
+                    "active_verification": None,
+                },
+            )
+            discovered = _discovered(plan_dir)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=state_root
+            )
+
+            self.assertEqual("recent", summary.primary_state)
+            self.assertEqual("run", summary.recommended_action)
+            self.assertEqual("1", summary.next_pending_session_id)
+            self.assertIn("2026-06-19T12:30:00+00:00", summary.detail or "")
+
+    def test_preserves_registry_label_profile_and_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            (plan_dir / workbench.FINAL_REVIEW_FILE_NAME).write_text(
+                "# Final review\n", encoding="utf-8"
+            )
+            plans.append_progress_entry(
+                plan_dir,
+                plans.ProgressEntry(
+                    session_id=plans.parse_session_id("1"),
+                    status="complete",
+                    completed_at="2026-06-19T14:22:00Z",
+                ),
+            )
+            discovered = workbench.DiscoveredPlan(
+                plan_dir=plan_dir,
+                sources=("state", "registry"),
+                label="Alpha",
+                profile=workbench.LaunchProfile(harness="claude", timeout=900),
+                exists=True,
+            )
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=state_root
+            )
+
+            self.assertEqual("ready", summary.primary_state)
+            self.assertEqual("Alpha", summary.label)
+            self.assertIsNotNone(summary.profile)
+            self.assertEqual("claude", summary.profile.harness)
+            self.assertEqual(900, summary.profile.timeout)
+            self.assertEqual(("state", "registry"), summary.sources)
+            self.assertIsNotNone(summary.final_review_path)
+            self.assertTrue(summary.progress_path.name == "progress.md")
+
+            payload = summary.to_payload()
+            self.assertEqual("ready", payload["primary_state"])
+            self.assertEqual("run", payload["recommended_action"])
+            self.assertEqual(["state", "registry"], payload["sources"])
+            self.assertEqual("Alpha", payload["label"])
+            self.assertEqual("claude", payload["profile"]["harness"])
+            self.assertEqual(str(plan_dir), payload["plan_dir"])
+            self.assertEqual(str(summary.progress_path), payload["progress_path"])
+            self.assertEqual(
+                str(plan_dir / workbench.FINAL_REVIEW_FILE_NAME),
+                payload["final_review_path"],
+            )
+
+    def test_build_workbench_summaries_orders_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_a = _make_workbench_plan(tmp_path, "alpha")
+            plan_b = _make_workbench_plan(tmp_path, "beta")
+            discovered = [_discovered(plan_a), _discovered(plan_b)]
+
+            summaries = workbench.build_workbench_summaries(
+                discovered, state_dir=tmp_path / "state"
+            )
+
+            self.assertEqual(2, len(summaries))
+            self.assertEqual(plan_a, summaries[0].plan_dir)
+            self.assertEqual(plan_b, summaries[1].plan_dir)
+            for summary in summaries:
+                self.assertEqual("ready", summary.primary_state)
+
+
+class _FakePopen:
+    """Minimal Popen stand-in that records argv/cwd/env and captures stdin."""
+
+    def __init__(
+        self,
+        argv,
+        *,
+        stdin=None,
+        stdout=None,
+        stderr=None,
+        env=None,
+        cwd=None,
+        text=False,
+    ) -> None:
+        self.argv = list(argv)
+        self.cwd = cwd
+        self.env = dict(env) if env is not None else None
+        self.text = text
+        self.pid = 4242
+        self.returncode: int | None = None
+        self._stdin_buffer = io.StringIO() if text else io.BytesIO()
+
+        class _StdinProxy:
+            def __init__(self, buf, owner):
+                self._buf = buf
+                self._owner = owner
+                self.closed = False
+
+            def write(self, data):
+                self._buf.write(data)
+
+            def close(self):
+                self.closed = True
+                self._owner.stdin_text = self._buf.getvalue()
+
+        if stdin == subprocess.PIPE:
+            self.stdin = _StdinProxy(self._stdin_buffer, self)
+        else:
+            self.stdin = None
+
+        self.stdin_text: str | bytes = "" if text else b""
+
+    def wait(self) -> int:
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
+
+    def kill(self) -> None:  # pragma: no cover - only used on error paths
+        if self.returncode is None:
+            self.returncode = -9
+
+
+class _BrokenStdinFakePopen(_FakePopen):
+    """Variant whose stdin raises BrokenPipeError on the first write."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+        class _BrokenStdin:
+            closed = False
+
+            def write(self, _data):
+                raise BrokenPipeError("simulated broken pipe")
+
+            def close(self):
+                self.closed = True
+
+        if self.stdin is not None:
+            self.stdin = _BrokenStdin()
+
+
+class WorkbenchLaunchTests(unittest.TestCase):
+    """Cover build_launch_argv, validation, and Popen-based launch behavior."""
+
+    def _seed_launchable_plan(self, tmp_path: Path) -> Path:
+        plan_dir = tmp_path / "plan"
+        write_plan(plan_dir, ("pending", "pending"))
+        return plans.canonicalize_path(plan_dir)
+
+    def test_build_launch_argv_maps_profile_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            profile = workbench.LaunchProfile(
+                cwd="/tmp/repo",
+                harness="codex",
+                model="o4-mini",
+                effort="high",
+                timeout=900,
+                commit_mode="per-session",
+                review_harness="claude",
+                unsafe_bypass=True,
+                allow_not_loop_ready=True,
+                note="launch note",
+            )
+
+            argv = workbench.build_launch_argv(
+                plan_dir,
+                profile=profile,
+                state_dir=tmp_path / "state",
+                python_executable="/usr/bin/python3-pinned",
+            )
+
+            self.assertEqual(argv[0], "/usr/bin/python3-pinned")
+            self.assertEqual(argv[1:4], ["-m", "agent_session_loop", "run"])
+            self.assertEqual(argv[4], str(plan_dir))
+            self.assertIn("--cwd", argv)
+            self.assertEqual(argv[argv.index("--cwd") + 1], "/tmp/repo")
+            self.assertIn("--harness", argv)
+            self.assertEqual(argv[argv.index("--harness") + 1], "codex")
+            self.assertIn("--review-harness", argv)
+            self.assertEqual(argv[argv.index("--review-harness") + 1], "claude")
+            self.assertIn("--model", argv)
+            self.assertEqual(argv[argv.index("--model") + 1], "o4-mini")
+            self.assertIn("--effort", argv)
+            self.assertEqual(argv[argv.index("--effort") + 1], "high")
+            self.assertIn("--timeout", argv)
+            self.assertEqual(argv[argv.index("--timeout") + 1], "900")
+            self.assertIn("--commit-per-session", argv)
+            self.assertNotIn("--commit-at-end", argv)
+            self.assertIn("--unsafe-bypass", argv)
+            self.assertNotIn("--no-unsafe-bypass", argv)
+            self.assertIn("--allow-not-loop-ready", argv)
+            self.assertIn("--note", argv)
+            self.assertEqual(argv[argv.index("--note") + 1], "launch note")
+            self.assertIn("--state-dir", argv)
+            self.assertEqual(
+                argv[argv.index("--state-dir") + 1], str(tmp_path / "state")
+            )
+            self.assertIn("--json", argv)
+            self.assertNotIn("--reply", argv)
+            self.assertNotIn("--reply-stdin", argv)
+
+    def test_build_launch_argv_handles_commit_at_end_and_no_unsafe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            profile = workbench.LaunchProfile(
+                commit_mode="end",
+                unsafe_bypass=False,
+            )
+
+            argv = workbench.build_launch_argv(
+                plan_dir,
+                profile=profile,
+                reply_via_stdin=True,
+                json_output=False,
+            )
+
+            self.assertIn("--commit-at-end", argv)
+            self.assertNotIn("--commit-per-session", argv)
+            self.assertIn("--no-unsafe-bypass", argv)
+            self.assertNotIn("--unsafe-bypass", argv)
+            self.assertNotIn("--json", argv)
+            self.assertIn("--reply-stdin", argv)
+            self.assertNotIn("--reply", argv)
+
+    def test_build_launch_argv_empty_profile_uses_minimal_argv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+
+            argv = workbench.build_launch_argv(plan_dir)
+
+            self.assertEqual(argv[1:4], ["-m", "agent_session_loop", "run"])
+            self.assertEqual(argv[4], str(plan_dir))
+            for unexpected in (
+                "--cwd",
+                "--harness",
+                "--model",
+                "--effort",
+                "--timeout",
+                "--commit-per-session",
+                "--commit-at-end",
+                "--allow-not-loop-ready",
+                "--note",
+                "--state-dir",
+                "--reply",
+                "--reply-stdin",
+            ):
+                self.assertNotIn(unexpected, argv)
+            self.assertIn("--json", argv)
+
+    def test_invalid_plan_dir_missing_raises_invalid_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "absent"
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.build_launch_argv(missing)
+
+            self.assertEqual(workbench.LAUNCH_REASON_INVALID_PLAN, ctx.exception.reason)
+
+    def test_invalid_plan_dir_missing_manifest_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            broken = tmp_path / "broken"
+            broken.mkdir()
+            (broken / "context.md").write_text("# Context\n", encoding="utf-8")
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.build_launch_argv(broken)
+
+            self.assertEqual(workbench.LAUNCH_REASON_INVALID_PLAN, ctx.exception.reason)
+            self.assertIn("manifest.md", ctx.exception.message)
+
+    def test_invalid_plan_dir_missing_context_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            broken = tmp_path / "broken"
+            broken.mkdir()
+            (broken / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.build_launch_argv(broken)
+
+            self.assertEqual(workbench.LAUNCH_REASON_INVALID_PLAN, ctx.exception.reason)
+            self.assertIn("context.md", ctx.exception.message)
+
+    def test_invalid_profile_harness_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            profile = workbench.LaunchProfile(harness="bogus")
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.build_launch_argv(plan_dir, profile=profile)
+
+            self.assertEqual(
+                workbench.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
+            )
+
+    def test_invalid_profile_review_harness_matches_harness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            profile = workbench.LaunchProfile(harness="codex", review_harness="codex")
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.build_launch_argv(plan_dir, profile=profile)
+
+            self.assertEqual(
+                workbench.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
+            )
+
+    def test_invalid_profile_commit_mode_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            profile = workbench.LaunchProfile(commit_mode="weekly")  # type: ignore[arg-type]
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.build_launch_argv(plan_dir, profile=profile)
+
+            self.assertEqual(
+                workbench.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
+            )
+
+    def test_invalid_profile_non_positive_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            profile = workbench.LaunchProfile(timeout=0)
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.build_launch_argv(plan_dir, profile=profile)
+
+            self.assertEqual(
+                workbench.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
+            )
+
+    def test_launch_plan_records_metadata_without_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            captured: list[_FakePopen] = []
+
+            def factory(argv, **kwargs):
+                proc = _FakePopen(argv, **kwargs)
+                captured.append(proc)
+                return proc
+
+            result = workbench.launch_plan(
+                plan_dir,
+                profile=workbench.LaunchProfile(harness="codex", timeout=42),
+                state_dir=tmp_path / "state",
+                popen_factory=factory,
+            )
+
+            self.assertEqual(1, len(captured))
+            spawned = captured[0]
+            self.assertFalse(result.reply_provided)
+            self.assertIsNone(result.reply_length)
+            self.assertIsNone(result.reply_origin)
+            self.assertEqual(spawned.pid, result.pid)
+            self.assertEqual(tuple(spawned.argv), result.argv)
+            self.assertIn("--harness", result.argv)
+            self.assertNotIn("--reply-stdin", result.argv)
+            self.assertNotIn("--reply", result.argv)
+            self.assertEqual(plan_dir, result.plan_dir)
+            self.assertEqual(
+                (tmp_path / "state").resolve(), result.state_dir
+            )
+            payload = result.to_payload()
+            self.assertEqual("codex", payload["profile"]["harness"])
+            self.assertEqual(42, payload["profile"]["timeout"])
+            self.assertFalse(payload["reply_provided"])
+            self.assertIsNone(payload["reply_origin"])
+
+    def test_launch_plan_streams_reply_through_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            captured: list[_FakePopen] = []
+
+            def factory(argv, **kwargs):
+                proc = _FakePopen(argv, **kwargs)
+                captured.append(proc)
+                return proc
+
+            reply = "answer is 1a"
+            result = workbench.launch_plan(
+                plan_dir,
+                reply_text=reply,
+                popen_factory=factory,
+            )
+
+            self.assertEqual(1, len(captured))
+            spawned = captured[0]
+            self.assertTrue(result.reply_provided)
+            self.assertEqual(len(reply), result.reply_length)
+            self.assertEqual("stdin", result.reply_origin)
+            self.assertIn("--reply-stdin", spawned.argv)
+            self.assertNotIn("--reply", spawned.argv)
+            for token in spawned.argv:
+                self.assertNotIn(reply, token)
+            self.assertEqual(reply, spawned.stdin_text)
+            self.assertTrue(spawned.stdin.closed)
+
+    def test_launch_plan_resume_helper_streams_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            captured: list[_FakePopen] = []
+
+            def factory(argv, **kwargs):
+                proc = _FakePopen(argv, **kwargs)
+                captured.append(proc)
+                return proc
+
+            result = workbench.resume_plan_with_reply(
+                plan_dir,
+                reply_text="resume with option B",
+                popen_factory=factory,
+            )
+
+            self.assertTrue(result.reply_provided)
+            self.assertEqual("stdin", result.reply_origin)
+            self.assertEqual(1, len(captured))
+            self.assertEqual("resume with option B", captured[0].stdin_text)
+
+    def test_launch_plan_empty_reply_raises_empty_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            captured: list[_FakePopen] = []
+
+            def factory(argv, **kwargs):
+                proc = _FakePopen(argv, **kwargs)
+                captured.append(proc)
+                return proc
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.launch_plan(
+                    plan_dir,
+                    reply_text="   \n  ",
+                    popen_factory=factory,
+                )
+
+            self.assertEqual(workbench.LAUNCH_REASON_EMPTY_REPLY, ctx.exception.reason)
+            self.assertEqual(0, len(captured), "process must not be spawned")
+
+    def test_launch_plan_propagates_popen_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+
+            def factory(argv, **kwargs):
+                raise OSError("permission denied")
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.launch_plan(plan_dir, popen_factory=factory)
+
+            self.assertEqual(
+                workbench.LAUNCH_REASON_PROCESS_FAILED, ctx.exception.reason
+            )
+
+    def test_launch_plan_stdin_failure_kills_child(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            captured: list[_BrokenStdinFakePopen] = []
+
+            def factory(argv, **kwargs):
+                proc = _BrokenStdinFakePopen(argv, **kwargs)
+                captured.append(proc)
+                return proc
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.launch_plan(
+                    plan_dir,
+                    reply_text="oops",
+                    popen_factory=factory,
+                )
+
+            self.assertEqual(
+                workbench.LAUNCH_REASON_PROCESS_FAILED, ctx.exception.reason
+            )
+            self.assertEqual(1, len(captured))
+            self.assertEqual(-9, captured[0].returncode)
+
+    def test_launch_plan_fake_harness_creates_normal_asl_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            state_dir = tmp_path / "state"
+            config_home = tmp_path / "config"
+            harness_config_path = (
+                config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+            )
+            harness_config_path.parent.mkdir(parents=True, exist_ok=True)
+            fake_codex = install_fake_codex(tmp_path)
+            harness_config_path.write_text(
+                json.dumps({"codex": {"executable": str(fake_codex)}}),
+                encoding="utf-8",
+            )
+
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(config_home)
+            env["FAKE_CODEX_MODE"] = "success"
+            env["FAKE_CODEX_SLEEP"] = "0"
+            env["PYTHONPATH"] = (
+                str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+            )
+
+            profile = workbench.LaunchProfile(
+                cwd=str(REPO_ROOT),
+                harness="codex",
+                allow_not_loop_ready=True,
+            )
+
+            captured: list[subprocess.Popen] = []
+
+            def factory(argv, **kwargs):
+                proc = subprocess.Popen(argv, **kwargs)
+                captured.append(proc)
+                return proc
+
+            result = workbench.launch_plan(
+                plan_dir,
+                profile=profile,
+                state_dir=state_dir,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                popen_factory=factory,
+            )
+
+            self.assertEqual(1, len(captured))
+            child = captured[0]
+            try:
+                returncode = child.wait(timeout=120)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+                self.fail("launched subprocess did not exit within timeout")
+
+            self.assertEqual(0, returncode)
+            self.assertEqual(child.pid, result.pid)
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            self.assertTrue((plan_state / events.STATE_FILE_NAME).exists())
+            self.assertTrue((plan_state / events.EVENTS_FILE_NAME).exists())
+            self.assertEqual(plan_dir, result.plan_dir)
+            self.assertFalse(result.reply_provided)
+
+
+def _http_request(
+    url: str,
+    *,
+    method: str = "GET",
+    body: dict | None = None,
+    headers: dict | None = None,
+    timeout: float = 5.0,
+) -> tuple[int, dict, dict]:
+    """Make an HTTP request against the Workbench server.
+
+    Returns ``(status, parsed_json, response_headers)``. JSON-decode errors
+    bubble up as test failures via raising.
+    """
+    import urllib.error
+    import urllib.request
+
+    data = None
+    request_headers = {"Accept": "application/json"}
+    if body is not None:
+        payload = json.dumps(body).encode("utf-8")
+        data = payload
+        request_headers["Content-Type"] = "application/json"
+        request_headers["Content-Length"] = str(len(payload))
+    if headers:
+        request_headers.update(headers)
+    request = urllib.request.Request(
+        url, data=data, headers=request_headers, method=method
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = response.status
+            raw = response.read()
+            response_headers = dict(response.headers.items())
+    except urllib.error.HTTPError as error:
+        status = error.code
+        raw = error.read()
+        response_headers = dict(error.headers.items())
+    text = raw.decode("utf-8") if raw else ""
+    parsed = json.loads(text) if text else {}
+    return status, parsed, response_headers
+
+
+class WorkbenchServerTests(unittest.TestCase):
+    """End-to-end coverage for the loopback HTTP control plane."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name).resolve()
+        self.state_dir = self.tmp_path / "state"
+        self.state_dir.mkdir()
+        self.registry_path = self.tmp_path / "workbench.json"
+        self.plan_dir = self.tmp_path / "plans" / "alpha"
+        write_plan(self.plan_dir, ("pending", "pending"))
+        self.canonical_plan_dir = plans.canonicalize_path(self.plan_dir)
+        self.servers: list[workbench_server.WorkbenchHTTPServer] = []
+
+    def tearDown(self) -> None:
+        for srv in self.servers:
+            try:
+                srv.shutdown()
+            finally:
+                srv.server_close()
+
+    def _start_server(
+        self,
+        *,
+        token: str | None = None,
+        plan_roots: tuple[str, ...] = (),
+    ) -> workbench_server.WorkbenchHTTPServer:
+        server = workbench_server.create_server(
+            host="127.0.0.1",
+            port=0,
+            state_dir=self.state_dir,
+            registry_path=self.registry_path,
+            plan_roots=plan_roots,
+            include_default_dirs=False,
+            token=token,
+        )
+        thread = threading.Thread(
+            target=server.serve_forever, name="workbench-test", daemon=True
+        )
+        thread.start()
+        self.servers.append(server)
+
+        def _shutdown() -> None:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        self.addCleanup(_shutdown)
+        return server
+
+    def _base_url(self, server: workbench_server.WorkbenchHTTPServer) -> str:
+        return f"http://{server.bound_host}:{server.bound_port}"
+
+    def _auth(self, server: workbench_server.WorkbenchHTTPServer) -> dict:
+        return {"Authorization": f"Bearer {server.token}"}
+
+    def test_server_binds_to_ephemeral_port(self) -> None:
+        server = self._start_server(token="fixed-token-1")
+        self.assertEqual("127.0.0.1", server.bound_host)
+        self.assertNotEqual(0, server.bound_port)
+        self.assertEqual("fixed-token-1", server.token)
+
+    def test_health_endpoint_does_not_require_token(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/health")
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+        self.assertEqual("workbench", body["command"])
+        self.assertEqual("ok", body["reason"])
+
+    def test_token_generated_when_not_provided(self) -> None:
+        server = self._start_server()
+        # Default tokens should be url-safe and non-empty.
+        self.assertTrue(server.token)
+        self.assertGreaterEqual(len(server.token), 32)
+
+    def test_queue_returns_summaries_with_registry_pins(self) -> None:
+        registry = workbench.load_registry(self.registry_path)
+        registry = workbench.upsert_pin(
+            registry,
+            self.canonical_plan_dir,
+            label="Alpha plan",
+            profile=workbench.LaunchProfile(harness="codex"),
+        )
+        workbench.save_registry(registry, self.registry_path)
+
+        server = self._start_server()
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/queue")
+
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+        plan_payloads = body["plans"]
+        self.assertEqual(1, len(plan_payloads))
+        plan_payload = plan_payloads[0]
+        self.assertEqual(str(self.canonical_plan_dir), plan_payload["plan_dir"])
+        self.assertEqual("Alpha plan", plan_payload["label"])
+        self.assertIn(plan_payload["primary_state"], workbench.PRIMARY_STATES)
+        self.assertEqual(str(state.state_root(self.state_dir)), body["state_root"])
+        self.assertTrue(body["state_root_exists"])
+        self.assertEqual([], body["registry_warnings"])
+
+    def test_queue_classifies_active_locked_turn_as_running(self) -> None:
+        registry = workbench.load_registry(self.registry_path)
+        registry = workbench.upsert_pin(registry, self.canonical_plan_dir)
+        workbench.save_registry(registry, self.registry_path)
+        _write_state_payload(
+            self.canonical_plan_dir,
+            self.state_dir,
+            {
+                "ok": True,
+                "paused": False,
+                "run_id": "run-active",
+                "harness": "claude",
+                "run_finished_at": None,
+                "active_turn": {"session_id": "1", "turn_index": 2},
+                "active_verification": None,
+            },
+        )
+        _write_lock_file(
+            self.canonical_plan_dir,
+            self.state_dir,
+            pid=os.getpid(),
+        )
+
+        server = self._start_server()
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/queue")
+
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+        self.assertEqual(1, len(body["plans"]))
+        plan_payload = body["plans"][0]
+        self.assertEqual("running", plan_payload["primary_state"])
+        self.assertEqual("watch", plan_payload["recommended_action"])
+        self.assertIn("session 1", plan_payload["next_action_hint"])
+
+    def test_queue_surfaces_plans_from_registry_plan_roots(self) -> None:
+        plan_root = plans.canonicalize_path(self.plan_dir.parent)
+        registry = workbench.WorkbenchRegistry(
+            plan_roots=(str(plan_root),),
+        )
+        workbench.save_registry(registry, self.registry_path)
+
+        server = self._start_server()
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/queue")
+
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+        plan_payloads = body["plans"]
+        self.assertEqual(1, len(plan_payloads))
+        plan_payload = plan_payloads[0]
+        self.assertEqual(str(self.canonical_plan_dir), plan_payload["plan_dir"])
+        self.assertEqual([], body["registry_warnings"])
+        self.assertEqual([], body["discovery_warnings"])
+
+    def test_plan_endpoint_returns_single_summary(self) -> None:
+        server = self._start_server()
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/plan?{query}"
+        )
+
+        self.assertEqual(200, status)
+        plan_payload = body["plan"]
+        self.assertEqual(
+            str(self.canonical_plan_dir), plan_payload["plan_dir"]
+        )
+        self.assertIn("primary_state", plan_payload)
+        self.assertIn(plan_payload["recommended_action"], workbench.RECOMMENDED_ACTIONS)
+
+    def test_plan_endpoint_rejects_missing_plan_dir(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/plan")
+        self.assertEqual(400, status)
+        self.assertFalse(body["ok"])
+        self.assertEqual("invalid-request", body["reason"])
+
+    def test_registry_get_returns_empty_when_unset(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/registry")
+        self.assertEqual(200, status)
+        self.assertEqual([], body["registry"]["pins"])
+        self.assertEqual([], body["registry"]["plan_roots"])
+
+    def test_artifacts_endpoint_describes_known_paths(self) -> None:
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {"plan_dir": str(self.canonical_plan_dir)}
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/artifacts?{query}"
+        )
+        self.assertEqual(200, status)
+        artifacts = body["artifacts"]
+        self.assertIn("state_path", artifacts)
+        self.assertIn("events_path", artifacts)
+        # No runner state exists yet so these are not present.
+        self.assertFalse(artifacts["state_path"]["exists"])
+
+    def test_mutating_endpoint_rejects_missing_token(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/registry/pin",
+            method="POST",
+            body={"plan_dir": str(self.canonical_plan_dir)},
+        )
+        self.assertEqual(401, status)
+        self.assertFalse(body["ok"])
+        self.assertEqual("unauthorized", body["reason"])
+
+    def test_mutating_endpoint_rejects_wrong_token(self) -> None:
+        server = self._start_server(token="correct-token")
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/registry/pin",
+            method="POST",
+            body={"plan_dir": str(self.canonical_plan_dir)},
+            headers={"Authorization": "Bearer wrong-token"},
+        )
+        self.assertEqual(401, status)
+        self.assertEqual("unauthorized", body["reason"])
+
+    def test_registry_pin_persists_to_disk(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/registry/pin",
+            method="POST",
+            body={
+                "plan_dir": str(self.canonical_plan_dir),
+                "label": "Alpha plan",
+                "profile": {"harness": "codex", "timeout": 600},
+            },
+            headers=self._auth(server),
+        )
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+        reloaded = workbench.load_registry(self.registry_path)
+        self.assertEqual(1, len(reloaded.pins))
+        self.assertEqual("Alpha plan", reloaded.pins[0].label)
+        self.assertEqual("codex", reloaded.pins[0].profile.harness)
+        self.assertEqual(600, reloaded.pins[0].profile.timeout)
+
+    def test_registry_unpin_removes_pin(self) -> None:
+        seeded = workbench.upsert_pin(
+            workbench.load_registry(self.registry_path),
+            self.canonical_plan_dir,
+            label="seed",
+        )
+        workbench.save_registry(seeded, self.registry_path)
+        server = self._start_server()
+
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/registry/unpin",
+            method="POST",
+            body={"plan_dir": str(self.canonical_plan_dir)},
+            headers=self._auth(server),
+        )
+
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+        self.assertEqual([], body["registry"]["pins"])
+        reloaded = workbench.load_registry(self.registry_path)
+        self.assertEqual((), reloaded.pins)
+
+    def test_launch_endpoint_uses_workbench_helper(self) -> None:
+        server = self._start_server()
+        sentinel = workbench.LaunchResult(
+            pid=4242,
+            argv=("python3", "-m", "agent_session_loop", "run"),
+            plan_dir=self.canonical_plan_dir,
+            profile_payload=workbench.LaunchProfile().to_payload(),
+            reply_provided=False,
+            reply_length=None,
+            reply_origin=None,
+            state_dir=self.state_dir,
+        )
+        with mock.patch.object(
+            workbench, "launch_plan", return_value=sentinel
+        ) as patched:
+            status, body, _ = _http_request(
+                f"{self._base_url(server)}/api/launch",
+                method="POST",
+                body={"plan_dir": str(self.canonical_plan_dir)},
+                headers=self._auth(server),
+            )
+        self.assertEqual(200, status)
+        self.assertEqual(4242, body["launch"]["pid"])
+        patched.assert_called_once()
+        kwargs = patched.call_args.kwargs
+        self.assertEqual(self.state_dir, kwargs["state_dir"])
+        self.assertIsNone(kwargs["profile"])
+
+    def test_launch_endpoint_maps_invalid_plan_error(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/launch",
+            method="POST",
+            body={"plan_dir": str(self.tmp_path / "does-not-exist")},
+            headers=self._auth(server),
+        )
+        self.assertEqual(400, status)
+        self.assertEqual(workbench.LAUNCH_REASON_INVALID_PLAN, body["reason"])
+
+    def test_reply_endpoint_invokes_resume_helper(self) -> None:
+        server = self._start_server()
+        sentinel = workbench.LaunchResult(
+            pid=99,
+            argv=("python3", "-m", "agent_session_loop", "run"),
+            plan_dir=self.canonical_plan_dir,
+            profile_payload=workbench.LaunchProfile().to_payload(),
+            reply_provided=True,
+            reply_length=5,
+            reply_origin="stdin",
+            state_dir=self.state_dir,
+        )
+        with mock.patch.object(
+            workbench, "resume_plan_with_reply", return_value=sentinel
+        ) as patched:
+            status, body, _ = _http_request(
+                f"{self._base_url(server)}/api/reply",
+                method="POST",
+                body={
+                    "plan_dir": str(self.canonical_plan_dir),
+                    "reply_text": "go-ok",
+                },
+                headers=self._auth(server),
+            )
+        self.assertEqual(200, status)
+        self.assertEqual(99, body["launch"]["pid"])
+        self.assertTrue(body["launch"]["reply_provided"])
+        kwargs = patched.call_args.kwargs
+        self.assertEqual("go-ok", kwargs["reply_text"])
+
+    def test_reply_endpoint_requires_reply_text(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/reply",
+            method="POST",
+            body={"plan_dir": str(self.canonical_plan_dir)},
+            headers=self._auth(server),
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("invalid-request", body["reason"])
+        self.assertIn("reply_text", body["error"])
+
+    def test_control_stop_after_current_enqueues_command(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/control/stop-after-current",
+            method="POST",
+            body={"plan_dir": str(self.canonical_plan_dir)},
+            headers=self._auth(server),
+        )
+        self.assertEqual(202, status)
+        self.assertTrue(body["ok"])
+        queued = body["queued_command"]
+        self.assertEqual(
+            control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+            queued["command"],
+        )
+        queue_path = control_queue.queue_path_for_plan(
+            self.canonical_plan_dir, self.state_dir
+        )
+        self.assertTrue(queue_path.is_file())
+        lines = queue_path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(1, len(lines))
+        record = json.loads(lines[0])
+        self.assertEqual(queued["id"], record["id"])
+
+    def test_control_select_harness_validates_name(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/control/select-harness",
+            method="POST",
+            body={
+                "plan_dir": str(self.canonical_plan_dir),
+                "harness": "bogus",
+            },
+            headers=self._auth(server),
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("invalid-harness", body["reason"])
+
+    def test_control_select_harness_accepts_supported_name(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/control/select-harness",
+            method="POST",
+            body={
+                "plan_dir": str(self.canonical_plan_dir),
+                "harness": "codex",
+            },
+            headers=self._auth(server),
+        )
+        self.assertEqual(202, status)
+        self.assertEqual(
+            control_queue.COMMAND_SELECT_FUTURE_HARNESS,
+            body["queued_command"]["command"],
+        )
+        self.assertEqual("codex", body["queued_command"]["harness"])
+
+    def test_unlock_rejects_active_lock_with_409(self) -> None:
+        plan_state = state.plan_state_dir(self.canonical_plan_dir, self.state_dir)
+        plan_state.mkdir(parents=True, exist_ok=True)
+        lock_path = plan_state / state.LOCK_FILE_NAME
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "plan_dir": str(self.canonical_plan_dir),
+                    "created_at": "2026-06-24T00:00:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        server = self._start_server()
+
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/unlock",
+            method="POST",
+            body={"plan_dir": str(self.canonical_plan_dir)},
+            headers=self._auth(server),
+        )
+
+        self.assertEqual(409, status)
+        self.assertEqual("active-lock", body["reason"])
+        self.assertTrue(lock_path.exists())
+
+    def test_unlock_force_removes_active_lock(self) -> None:
+        plan_state = state.plan_state_dir(self.canonical_plan_dir, self.state_dir)
+        plan_state.mkdir(parents=True, exist_ok=True)
+        lock_path = plan_state / state.LOCK_FILE_NAME
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "plan_dir": str(self.canonical_plan_dir),
+                    "created_at": "2026-06-24T00:00:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        server = self._start_server()
+
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/unlock",
+            method="POST",
+            body={
+                "plan_dir": str(self.canonical_plan_dir),
+                "force": True,
+            },
+            headers=self._auth(server),
+        )
+
+        self.assertEqual(200, status)
+        self.assertTrue(body["removed"])
+        self.assertFalse(lock_path.exists())
+
+    def test_unlock_idempotent_when_no_lock(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/unlock",
+            method="POST",
+            body={"plan_dir": str(self.canonical_plan_dir)},
+            headers=self._auth(server),
+        )
+        self.assertEqual(200, status)
+        self.assertFalse(body["had_lock"])
+        self.assertFalse(body["removed"])
+
+    def test_post_with_malformed_json_returns_400(self) -> None:
+        server = self._start_server()
+        import urllib.error
+        import urllib.request
+
+        request = urllib.request.Request(
+            f"{self._base_url(server)}/api/registry/pin",
+            data=b"{not valid json",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {server.token}",
+            },
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(400, ctx.exception.code)
+        body = json.loads(ctx.exception.read())
+        self.assertEqual("invalid-request", body["reason"])
+
+    def test_post_with_missing_required_field_returns_400(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/control/stop-after-current",
+            method="POST",
+            body={},
+            headers=self._auth(server),
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("invalid-request", body["reason"])
+        self.assertIn("plan_dir", body["error"])
+
+    def test_unknown_route_returns_404(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/does-not-exist"
+        )
+        self.assertEqual(404, status)
+        self.assertEqual("not-found", body["reason"])
+
+    def test_wrong_method_returns_405_with_allow(self) -> None:
+        server = self._start_server()
+        status, body, headers = _http_request(
+            f"{self._base_url(server)}/api/queue",
+            method="POST",
+            body={},
+            headers=self._auth(server),
+        )
+        self.assertEqual(405, status)
+        self.assertEqual("method-not-allowed", body["reason"])
+        self.assertIn("GET", body["allow"])
+
+    def test_response_has_no_store_cache_control(self) -> None:
+        server = self._start_server()
+        _, _, headers = _http_request(f"{self._base_url(server)}/api/health")
+        self.assertEqual("no-store", headers.get("Cache-Control"))
+
+    def test_registry_pin_round_trip_preserves_every_profile_field(
+        self,
+    ) -> None:
+        # The frontend profile editor reads-modifies-writes pin payloads.
+        # Confirm every dataclass field survives a POST + GET round trip
+        # so the detail view does not silently drop operator settings.
+        server = self._start_server()
+        full_profile_body = {
+            "cwd": "/tmp/cwd",
+            "harness": "codex",
+            "model": "o3-mini",
+            "effort": "medium",
+            "timeout": 1234,
+            "commit_mode": "per-session",
+            "review_harness": "claude",
+            "unsafe_bypass": True,
+            "allow_not_loop_ready": True,
+            "note": "scratch profile",
+        }
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/registry/pin",
+            method="POST",
+            body={
+                "plan_dir": str(self.canonical_plan_dir),
+                "label": "Round Trip",
+                "profile": full_profile_body,
+            },
+            headers=self._auth(server),
+        )
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/registry"
+        )
+        self.assertEqual(200, status)
+        pins = body["registry"]["pins"]
+        self.assertEqual(1, len(pins))
+        pin = pins[0]
+        self.assertEqual("Round Trip", pin["label"])
+        profile = pin["profile"]
+        for key, expected in full_profile_body.items():
+            self.assertEqual(
+                expected,
+                profile.get(key),
+                msg=f"profile field {key!r} did not round-trip",
+            )
+
+    def test_registry_pin_round_trip_preserves_nullable_boolean_states(
+        self,
+    ) -> None:
+        # Nullable launch booleans must survive a POST + GET round trip in
+        # each of their three states (null / false / true). A blank launch
+        # profile that records explicit ``None`` must not silently coerce
+        # to ``False`` because the runner would then emit
+        # ``--no-unsafe-bypass`` and override the harness default.
+        server = self._start_server()
+        cases = (
+            ("explicit-null", None, None),
+            ("explicit-false", False, False),
+            ("explicit-true", True, True),
+        )
+        for label, unsafe_value, allow_value in cases:
+            profile_body = {
+                "unsafe_bypass": unsafe_value,
+                "allow_not_loop_ready": allow_value,
+            }
+            status, body, _ = _http_request(
+                f"{self._base_url(server)}/api/registry/pin",
+                method="POST",
+                body={
+                    "plan_dir": str(self.canonical_plan_dir),
+                    "label": label,
+                    "profile": profile_body,
+                },
+                headers=self._auth(server),
+            )
+            self.assertEqual(200, status, msg=f"case={label}")
+            self.assertTrue(body["ok"], msg=f"case={label}")
+
+            status, body, _ = _http_request(
+                f"{self._base_url(server)}/api/registry"
+            )
+            self.assertEqual(200, status, msg=f"case={label}")
+            pins = body["registry"]["pins"]
+            self.assertEqual(1, len(pins), msg=f"case={label}")
+            profile = pins[0]["profile"]
+            # ``profile.get`` would conflate a missing key with ``None``;
+            # assert the key is present so a future regression that drops
+            # the field entirely cannot pass silently.
+            self.assertIn("unsafe_bypass", profile, msg=f"case={label}")
+            self.assertIn(
+                "allow_not_loop_ready", profile, msg=f"case={label}"
+            )
+            self.assertIs(
+                unsafe_value,
+                profile["unsafe_bypass"],
+                msg=f"case={label} unsafe_bypass",
+            )
+            self.assertIs(
+                allow_value,
+                profile["allow_not_loop_ready"],
+                msg=f"case={label} allow_not_loop_ready",
+            )
+
+    def test_reply_response_never_echoes_reply_text(self) -> None:
+        # The reply endpoint must never persist or echo the operator's
+        # answer text; only the length + origin marker are surfaced.
+        server = self._start_server()
+        sensitive_reply = "TOKEN-XYZ-must-not-leak"
+        sentinel = workbench.LaunchResult(
+            pid=77,
+            argv=("python3", "-m", "agent_session_loop", "run"),
+            plan_dir=self.canonical_plan_dir,
+            profile_payload=workbench.LaunchProfile().to_payload(),
+            reply_provided=True,
+            reply_length=len(sensitive_reply),
+            reply_origin="stdin",
+            state_dir=self.state_dir,
+        )
+        with mock.patch.object(
+            workbench, "resume_plan_with_reply", return_value=sentinel
+        ):
+            status, body, _ = _http_request(
+                f"{self._base_url(server)}/api/reply",
+                method="POST",
+                body={
+                    "plan_dir": str(self.canonical_plan_dir),
+                    "reply_text": sensitive_reply,
+                },
+                headers=self._auth(server),
+            )
+
+        self.assertEqual(200, status)
+        encoded = json.dumps(body)
+        self.assertNotIn(
+            sensitive_reply,
+            encoded,
+            msg="reply text leaked into the response body",
+        )
+        self.assertTrue(body["launch"]["reply_provided"])
+        self.assertEqual(len(sensitive_reply), body["launch"]["reply_length"])
+        self.assertEqual("stdin", body["launch"]["reply_origin"])
+
+
+class WorkbenchQuestionsAPITests(unittest.TestCase):
+    """Cover ``GET /api/questions`` paused-run resolver context."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name).resolve()
+        self.state_dir = self.tmp_path / "state"
+        self.state_dir.mkdir()
+        self.registry_path = self.tmp_path / "workbench.json"
+        self.servers: list[workbench_server.WorkbenchHTTPServer] = []
+
+    def tearDown(self) -> None:
+        for srv in self.servers:
+            try:
+                srv.shutdown()
+            finally:
+                srv.server_close()
+
+    def _start_server(self) -> workbench_server.WorkbenchHTTPServer:
+        server = workbench_server.create_server(
+            host="127.0.0.1",
+            port=0,
+            state_dir=self.state_dir,
+            registry_path=self.registry_path,
+            plan_roots=(),
+            include_default_dirs=False,
+        )
+        thread = threading.Thread(
+            target=server.serve_forever,
+            name="workbench-questions-test",
+            daemon=True,
+        )
+        thread.start()
+        self.servers.append(server)
+
+        def _shutdown() -> None:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        self.addCleanup(_shutdown)
+        return server
+
+    def _base_url(self, server: workbench_server.WorkbenchHTTPServer) -> str:
+        return f"http://{server.bound_host}:{server.bound_port}"
+
+    def _seed_paused_plan(
+        self,
+        *,
+        statuses: tuple[str, ...] = ("pending", "pending"),
+        paused_session_id: str = "1",
+        paused: bool = True,
+        last_message_text: str = "Should we use 1a or 1b?\n",
+    ) -> Path:
+        plan_dir = self.tmp_path / "plans" / "qna"
+        if plan_dir.exists():
+            shutil.rmtree(plan_dir)
+        write_plan(plan_dir, statuses)
+        canonical = plans.canonicalize_path(plan_dir)
+        plan_state = state.plan_state_dir(canonical, self.state_dir)
+        plan_state.mkdir(parents=True, exist_ok=True)
+        state_path = plan_state / events.STATE_FILE_NAME
+        last_message_path = plan_state / "last-message.txt"
+        last_message_path.write_text(last_message_text, encoding="utf-8")
+        turn: dict[str, object] = {
+            "run_id": "run-1",
+            "turn_index": 1,
+            "session_id": paused_session_id,
+            "session": int(paused_session_id),
+            "session_number": int(paused_session_id),
+            "harness": "fake",
+            "model": "test-model",
+            "model_source": "default",
+            "effort": "medium",
+            "effort_source": "default",
+            "artifact_dir": str(plan_state / "turn-0001"),
+            "stdout_path": str(plan_state / "stdout.log"),
+            "stderr_path": str(plan_state / "stderr.log"),
+            "last_message_path": str(last_message_path),
+            "result_path": str(plan_state / "result.json"),
+        }
+        payload = {
+            "ok": False if paused else True,
+            "paused": paused,
+            "reason": "runner-pause",
+            "pause_reason": "runner-pause",
+            "pause_message": "agent asked a question",
+            "pause_details": {"session": int(paused_session_id)},
+            "details": {"session": int(paused_session_id)},
+            "run_id": "run-1",
+            "run_dir": str(plan_state / "runs" / "run-1"),
+            "harness": "fake",
+            "model": "test-model",
+            "effort": "medium",
+            "turns": [turn],
+        }
+        state_path.write_text(json.dumps(payload), encoding="utf-8")
+        return canonical
+
+    def test_questions_endpoint_returns_rendered_prompt_and_last_message(
+        self,
+    ) -> None:
+        canonical = self._seed_paused_plan()
+        server = self._start_server()
+        query = urllib.parse.urlencode({"plan_dir": str(canonical)})
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/questions?{query}"
+        )
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+        self.assertEqual("workbench", body["command"])
+        self.assertEqual("ok", body["reason"])
+        self.assertIn("rendered_prompt", body)
+        self.assertIn("last_message", body)
+        self.assertIn("Should we use 1a or 1b?", body["last_message"])
+        self.assertEqual("1", body["session_id"])
+        self.assertEqual("runner-pause", body["pause_reason"])
+
+    def test_questions_endpoint_returns_404_when_no_paused_run(self) -> None:
+        plan_dir = self.tmp_path / "plans" / "no-paused"
+        write_plan(plan_dir, ("pending", "pending"))
+        canonical = plans.canonicalize_path(plan_dir)
+        # No state file at all → load_qna_context raises no-paused-run.
+        server = self._start_server()
+        query = urllib.parse.urlencode({"plan_dir": str(canonical)})
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/questions?{query}"
+        )
+        self.assertEqual(404, status)
+        self.assertFalse(body["ok"])
+        self.assertEqual("no-paused-run", body["reason"])
+
+    def test_questions_endpoint_returns_400_on_reply_context_mismatch(
+        self,
+    ) -> None:
+        # Session 1 already completed, session 2 pending, but the paused
+        # state references session 1: a context mismatch.
+        canonical = self._seed_paused_plan(
+            statuses=("complete", "pending"),
+            paused_session_id="1",
+        )
+        server = self._start_server()
+        query = urllib.parse.urlencode({"plan_dir": str(canonical)})
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/questions?{query}"
+        )
+        self.assertEqual(400, status)
+        self.assertFalse(body["ok"])
+        self.assertEqual("reply-context-mismatch", body["reason"])
+
+    def test_questions_endpoint_requires_plan_dir(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/questions"
+        )
+        self.assertEqual(400, status)
+        self.assertFalse(body["ok"])
+        self.assertEqual("invalid-request", body["reason"])
+
+
+class WorkbenchArtifactReadAPITests(unittest.TestCase):
+    """Cover read-only artifact, event, log, progress, and review APIs."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name).resolve()
+        self.state_dir = self.tmp_path / "state"
+        self.state_dir.mkdir()
+        self.registry_path = self.tmp_path / "workbench.json"
+        self.plan_dir = self.tmp_path / "plans" / "alpha"
+        write_plan(self.plan_dir, ("pending", "pending"))
+        self.canonical_plan_dir = plans.canonicalize_path(self.plan_dir)
+        self.plan_state_dir = state.plan_state_dir(
+            self.canonical_plan_dir, self.state_dir
+        )
+        self.plan_state_dir.mkdir(parents=True, exist_ok=True)
+        self.servers: list[workbench_server.WorkbenchHTTPServer] = []
+
+    def tearDown(self) -> None:
+        for srv in self.servers:
+            try:
+                srv.shutdown()
+            finally:
+                srv.server_close()
+
+    def _start_server(self) -> workbench_server.WorkbenchHTTPServer:
+        server = workbench_server.create_server(
+            host="127.0.0.1",
+            port=0,
+            state_dir=self.state_dir,
+            registry_path=self.registry_path,
+            plan_roots=(),
+            include_default_dirs=False,
+        )
+        thread = threading.Thread(
+            target=server.serve_forever, name="workbench-test", daemon=True
+        )
+        thread.start()
+        self.servers.append(server)
+
+        def _shutdown() -> None:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        self.addCleanup(_shutdown)
+        return server
+
+    def _base_url(self, server: workbench_server.WorkbenchHTTPServer) -> str:
+        return f"http://{server.bound_host}:{server.bound_port}"
+
+    def _write_state(self, payload: dict) -> Path:
+        state_path = self.plan_state_dir / "state.json"
+        state_path.write_text(
+            json.dumps(payload, sort_keys=True), encoding="utf-8"
+        )
+        return state_path
+
+    def _write_events(self, records: list[dict]) -> Path:
+        events_path = self.plan_state_dir / "events.jsonl"
+        lines = [json.dumps(record, sort_keys=True) for record in records]
+        events_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return events_path
+
+    def _make_turn(
+        self,
+        *,
+        run_id: str = "run-1",
+        turn_index: int = 1,
+        stdout_path: str | None = None,
+        stderr_path: str | None = None,
+        last_message_path: str | None = None,
+        result_path: str | None = None,
+    ) -> dict:
+        return {
+            "run_id": run_id,
+            "turn_index": turn_index,
+            "session_id": "1",
+            "stdout_path": stdout_path,
+            "stderr_path": stderr_path,
+            "last_message_path": last_message_path,
+            "result_path": result_path,
+        }
+
+    def test_state_endpoint_returns_runner_payload(self) -> None:
+        self._write_state(
+            {
+                "run_id": "run-x",
+                "harness": "codex",
+                "ok": True,
+                "active_turn": self._make_turn(),
+                "active_verification": None,
+            }
+        )
+        server = self._start_server()
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/state?{query}"
+        )
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+        self.assertEqual("run-x", body["state"]["run_id"])
+        self.assertEqual("codex", body["state"]["harness"])
+        self.assertTrue(body["state"]["present"])
+        self.assertEqual(["1", "2"], [s["id"] for s in body["sessions"]])
+        self.assertEqual(
+            ["pending", "pending"], [s["status"] for s in body["sessions"]]
+        )
+        self.assertEqual(
+            {"pending": 2, "complete": 0, "empty": 0, "unknown": 0},
+            body["counts"],
+        )
+        self.assertEqual("1", body["next_pending_id"])
+
+    def test_state_endpoint_handles_missing_state(self) -> None:
+        server = self._start_server()
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/state?{query}"
+        )
+        self.assertEqual(200, status)
+        self.assertFalse(body["state"]["present"])
+        self.assertEqual(["1", "2"], [s["id"] for s in body["sessions"]])
+        self.assertEqual(
+            {"pending": 2, "complete": 0, "empty": 0, "unknown": 0},
+            body["counts"],
+        )
+        self.assertEqual("1", body["next_pending_id"])
+
+    def test_state_endpoint_returns_dotted_sessions_and_counts(self) -> None:
+        dotted_plan_dir = self.tmp_path / "plans" / "dotted"
+        write_plan_with_ids(
+            dotted_plan_dir,
+            (
+                ("1", "complete"),
+                ("2", "complete"),
+                ("2.1", "pending"),
+                ("2.2", "pending"),
+                ("3", "pending"),
+            ),
+        )
+        canonical_dotted = plans.canonicalize_path(dotted_plan_dir)
+        server = self._start_server()
+        query = urllib.parse.urlencode({"plan_dir": str(canonical_dotted)})
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/state?{query}"
+        )
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+        self.assertEqual(
+            ["1", "2", "2.1", "2.2", "3"],
+            [s["id"] for s in body["sessions"]],
+        )
+        self.assertEqual(
+            ["complete", "complete", "pending", "pending", "pending"],
+            [s["status"] for s in body["sessions"]],
+        )
+        self.assertEqual(
+            {"pending": 3, "complete": 2, "empty": 0, "unknown": 0},
+            body["counts"],
+        )
+        self.assertEqual("2.1", body["next_pending_id"])
+
+    def test_state_endpoint_reports_malformed_plan_error(self) -> None:
+        (self.canonical_plan_dir / "manifest.md").unlink()
+        server = self._start_server()
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/state?{query}"
+        )
+        self.assertEqual(500, status)
+        self.assertFalse(body["ok"])
+        self.assertEqual("malformed-plan", body["reason"])
+        self.assertEqual(
+            str(self.canonical_plan_dir), body["details"]["plan_dir"]
+        )
+
+    def test_events_endpoint_paginates_and_filters_by_run(self) -> None:
+        records = [
+            {
+                "name": "run_started",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "payload": {"run_id": "run-a"},
+            },
+            {
+                "name": "turn_started",
+                "created_at": "2026-01-01T00:00:01+00:00",
+                "payload": {"run_id": "run-a", "session_id": "1"},
+            },
+            {
+                "name": "turn_finished",
+                "created_at": "2026-01-01T00:00:02+00:00",
+                "payload": {"run_id": "run-a", "session_id": "1"},
+            },
+            {
+                "name": "run_started",
+                "created_at": "2026-01-01T00:00:03+00:00",
+                "payload": {"run_id": "run-b"},
+            },
+        ]
+        self._write_events(records)
+        self._write_state(
+            {"run_id": "run-b", "active_turn": None, "active_verification": None}
+        )
+
+        server = self._start_server()
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/events?{query}"
+        )
+        self.assertEqual(200, status)
+        self.assertEqual("run-b", body["run_id"])
+        self.assertEqual(1, body["total"])
+
+        query = urllib.parse.urlencode(
+            {
+                "plan_dir": str(self.canonical_plan_dir),
+                "run_id": "run-a",
+                "limit": "2",
+            }
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/events?{query}"
+        )
+        self.assertEqual(200, status)
+        self.assertEqual(3, body["total"])
+        self.assertEqual(2, len(body["events"]))
+        self.assertEqual(2, body["next_offset"])
+
+        query = urllib.parse.urlencode(
+            {
+                "plan_dir": str(self.canonical_plan_dir),
+                "run_id": "run-a",
+                "limit": "2",
+                "offset": "2",
+            }
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/events?{query}"
+        )
+        self.assertEqual(200, status)
+        self.assertEqual(1, len(body["events"]))
+        self.assertIsNone(body["next_offset"])
+
+    def test_events_endpoint_rejects_negative_offset(self) -> None:
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {"plan_dir": str(self.canonical_plan_dir), "offset": "-1"}
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/events?{query}"
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("invalid-request", body["reason"])
+
+    def test_events_endpoint_rejects_limit_over_max(self) -> None:
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {
+                "plan_dir": str(self.canonical_plan_dir),
+                "limit": str(workbench_server.MAX_EVENT_LIMIT + 1),
+            }
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/events?{query}"
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("invalid-request", body["reason"])
+
+    def test_logs_endpoint_returns_tail_with_bound(self) -> None:
+        stdout_path = self.plan_state_dir / "stdout.log"
+        stdout_path.write_text(
+            "line 1\nline 2\nline 3\nline 4\nline 5\n", encoding="utf-8"
+        )
+        self._write_state(
+            {
+                "active_turn": self._make_turn(stdout_path=str(stdout_path)),
+                "active_verification": None,
+            }
+        )
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {
+                "plan_dir": str(self.canonical_plan_dir),
+                "stream": "stdout",
+                "tail_lines": "2",
+                "max_bytes": "1024",
+            }
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/logs?{query}"
+        )
+        self.assertEqual(200, status)
+        self.assertEqual("line 4\nline 5", body["text"])
+        self.assertTrue(body["exists"])
+        self.assertEqual(str(stdout_path), body["path"])
+
+    def test_logs_endpoint_returns_offset_window(self) -> None:
+        stdout_path = self.plan_state_dir / "stdout.log"
+        stdout_path.write_text("0123456789abcdef", encoding="utf-8")
+        self._write_state(
+            {
+                "active_turn": self._make_turn(stdout_path=str(stdout_path)),
+                "active_verification": None,
+            }
+        )
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {
+                "plan_dir": str(self.canonical_plan_dir),
+                "stream": "stdout",
+                "offset": "4",
+                "max_bytes": "4",
+            }
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/logs?{query}"
+        )
+        self.assertEqual(200, status)
+        self.assertEqual("4567", body["text"])
+        self.assertEqual(4, body["offset"])
+        self.assertEqual(8, body["next_offset"])
+        self.assertTrue(body["truncated_head"])
+        self.assertTrue(body["truncated_tail"])
+
+    def test_logs_endpoint_404_when_no_active_stream(self) -> None:
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {"plan_dir": str(self.canonical_plan_dir), "stream": "stdout"}
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/logs?{query}"
+        )
+        self.assertEqual(404, status)
+        self.assertEqual("not-found", body["reason"])
+
+    def test_logs_endpoint_rejects_outside_plan_state(self) -> None:
+        outside = self.tmp_path / "outside.log"
+        outside.write_text("hi\n", encoding="utf-8")
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {
+                "plan_dir": str(self.canonical_plan_dir),
+                "path": str(outside),
+            }
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/logs?{query}"
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("invalid-request", body["reason"])
+
+    def test_logs_endpoint_accepts_explicit_path_inside_plan_state(
+        self,
+    ) -> None:
+        nested = self.plan_state_dir / "runs" / "turn-001"
+        nested.mkdir(parents=True)
+        log_path = nested / "stdout.log"
+        log_path.write_text("inside\n", encoding="utf-8")
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {
+                "plan_dir": str(self.canonical_plan_dir),
+                "path": str(log_path),
+                "max_bytes": "1024",
+            }
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/logs?{query}"
+        )
+        self.assertEqual(200, status)
+        self.assertEqual("inside\n", body["text"])
+
+    def test_logs_endpoint_requires_stream_or_path(self) -> None:
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {"plan_dir": str(self.canonical_plan_dir)}
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/logs?{query}"
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("invalid-request", body["reason"])
+
+    def test_last_message_endpoint_returns_bounded_text(self) -> None:
+        last_message = self.plan_state_dir / "last-message.txt"
+        last_message.write_text("hello world\n" * 200, encoding="utf-8")
+        self._write_state(
+            {
+                "active_turn": self._make_turn(
+                    last_message_path=str(last_message)
+                ),
+                "active_verification": None,
+            }
+        )
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {
+                "plan_dir": str(self.canonical_plan_dir),
+                "max_bytes": "24",
+            }
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/last-message?{query}"
+        )
+        self.assertEqual(200, status)
+        self.assertTrue(body["truncated"])
+        self.assertEqual(24, len(body["text"]))
+
+    def test_last_message_endpoint_404_when_unset(self) -> None:
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {"plan_dir": str(self.canonical_plan_dir)}
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/last-message?{query}"
+        )
+        self.assertEqual(404, status)
+        self.assertEqual("not-found", body["reason"])
+
+    def test_result_endpoint_returns_parsed_json(self) -> None:
+        result_path = self.plan_state_dir / "result.json"
+        result_path.write_text(
+            json.dumps({"status_result": "complete", "argv": ["asl", "run"]}),
+            encoding="utf-8",
+        )
+        self._write_state(
+            {
+                "active_turn": self._make_turn(result_path=str(result_path)),
+                "active_verification": None,
+            }
+        )
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {"plan_dir": str(self.canonical_plan_dir)}
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/result?{query}"
+        )
+        self.assertEqual(200, status)
+        self.assertEqual("complete", body["result"]["status_result"])
+        self.assertEqual(["asl", "run"], body["result"]["argv"])
+
+    def test_result_endpoint_does_not_expose_reply_text(self) -> None:
+        """Persisted argv must already be redacted; the API just passes through."""
+        redacted_argv = [
+            "asl",
+            "run",
+            "--reply",
+            "<asl reply prompt redacted: 12 chars>",
+        ]
+        result_path = self.plan_state_dir / "result.json"
+        result_path.write_text(
+            json.dumps({"argv": redacted_argv, "prompt_kind": "reply"}),
+            encoding="utf-8",
+        )
+        self._write_state(
+            {
+                "active_turn": self._make_turn(result_path=str(result_path)),
+                "active_verification": None,
+            }
+        )
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {"plan_dir": str(self.canonical_plan_dir)}
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/result?{query}"
+        )
+        self.assertEqual(200, status)
+        self.assertEqual(redacted_argv, body["result"]["argv"])
+
+    def test_result_endpoint_404_when_missing(self) -> None:
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {"plan_dir": str(self.canonical_plan_dir)}
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/result?{query}"
+        )
+        self.assertEqual(404, status)
+        self.assertEqual("not-found", body["reason"])
+
+    def test_verification_endpoint_returns_active_verification(self) -> None:
+        verification_payload = {
+            "session_id": "1",
+            "turn_index": 1,
+            "check_count": 3,
+            "current_check_index": 1,
+            "checks": [{"name": "tests"}],
+        }
+        self._write_state(
+            {
+                "run_id": "run-v",
+                "harness": "codex",
+                "active_turn": None,
+                "active_verification": verification_payload,
+            }
+        )
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {"plan_dir": str(self.canonical_plan_dir)}
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/verification?{query}"
+        )
+        self.assertEqual(200, status)
+        self.assertEqual(verification_payload, body["active_verification"])
+        self.assertEqual("run-v", body["run_id"])
+
+    def test_verification_endpoint_returns_none_when_idle(self) -> None:
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {"plan_dir": str(self.canonical_plan_dir)}
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/verification?{query}"
+        )
+        self.assertEqual(200, status)
+        self.assertIsNone(body["active_verification"])
+
+    def test_commits_endpoint_pairs_started_and_finished_events(self) -> None:
+        records = [
+            {
+                "name": "commit_started",
+                "created_at": "2026-02-01T00:00:00+00:00",
+                "payload": {
+                    "run_id": "run-c",
+                    "commit_index": 0,
+                    "scope": "session",
+                    "session_id": "1",
+                    "stdout_path": "/tmp/stdout.log",
+                    "stderr_path": "/tmp/stderr.log",
+                    "result_path": "/tmp/result.json",
+                },
+            },
+            {
+                "name": "commit_finished",
+                "created_at": "2026-02-01T00:00:05+00:00",
+                "payload": {
+                    "run_id": "run-c",
+                    "commit_index": 0,
+                    "scope": "session",
+                    "session_id": "1",
+                    "status_result": "success",
+                    "commit_sha": "abc123",
+                    "duration_seconds": 5.0,
+                },
+            },
+            {
+                "name": "commit_started",
+                "created_at": "2026-02-01T00:01:00+00:00",
+                "payload": {
+                    "run_id": "run-c",
+                    "commit_index": 1,
+                    "scope": "end",
+                },
+            },
+        ]
+        self._write_events(records)
+        self._write_state(
+            {
+                "run_id": "run-c",
+                "active_turn": None,
+                "active_verification": None,
+            }
+        )
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {"plan_dir": str(self.canonical_plan_dir)}
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/commits?{query}"
+        )
+        self.assertEqual(200, status)
+        commits = body["commits"]
+        self.assertEqual(2, len(commits))
+        self.assertEqual(0, commits[0]["commit_index"])
+        self.assertEqual("success", commits[0]["status_result"])
+        self.assertEqual("abc123", commits[0]["commit_sha"])
+        self.assertEqual(1, commits[1]["commit_index"])
+        self.assertIsNone(commits[1]["status_result"])
+        self.assertIsNone(commits[1]["finished_at"])
+
+    def test_progress_endpoint_returns_entries(self) -> None:
+        progress_path = self.canonical_plan_dir / plans.PROGRESS_FILE_NAME
+        progress_path.write_text(
+            "\n".join(
+                [
+                    "# Progress Journal",
+                    "<!-- agent-session-loop progress-journal v1 -->",
+                    "",
+                    "## Session 1 — complete (2026-01-01T00:00:00+00:00)",
+                    "- Files touched: a.py, b.py",
+                    "- Decisions: pick option A",
+                    "- Discovered facts:",
+                    "  - fact one",
+                    "- Open questions: none",
+                    "- Blockers: none",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {"plan_dir": str(self.canonical_plan_dir)}
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/progress?{query}"
+        )
+        self.assertEqual(200, status)
+        self.assertTrue(body["exists"])
+        self.assertEqual(1, len(body["entries"]))
+        entry = body["entries"][0]
+        self.assertEqual("1", entry["session_id"])
+        self.assertEqual(["a.py", "b.py"], entry["files_modified"])
+        self.assertEqual("pick option A", entry["key_decisions"])
+        self.assertEqual(["fact one"], entry["discovered_facts"])
+
+    def test_progress_endpoint_returns_empty_when_missing(self) -> None:
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {"plan_dir": str(self.canonical_plan_dir)}
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/progress?{query}"
+        )
+        self.assertEqual(200, status)
+        self.assertFalse(body["exists"])
+        self.assertEqual([], body["entries"])
+
+    def test_progress_endpoint_500_on_malformed_journal(self) -> None:
+        progress_path = self.canonical_plan_dir / plans.PROGRESS_FILE_NAME
+        progress_path.write_text(
+            "# Progress Journal\nno schema header\n", encoding="utf-8"
+        )
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {"plan_dir": str(self.canonical_plan_dir)}
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/progress?{query}"
+        )
+        self.assertEqual(500, status)
+        self.assertEqual("malformed-plan", body["reason"])
+
+    def test_final_review_endpoint_returns_bounded_text(self) -> None:
+        review_path = self.canonical_plan_dir / "final-review.md"
+        review_path.write_text("# Findings\n" + ("x" * 1000), encoding="utf-8")
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {
+                "plan_dir": str(self.canonical_plan_dir),
+                "max_bytes": "32",
+            }
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/final-review?{query}"
+        )
+        self.assertEqual(200, status)
+        self.assertTrue(body["truncated"])
+        self.assertEqual(32, len(body["text"]))
+
+    def test_final_review_endpoint_404_when_missing(self) -> None:
+        server = self._start_server()
+        query = urllib.parse.urlencode(
+            {"plan_dir": str(self.canonical_plan_dir)}
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/final-review?{query}"
+        )
+        self.assertEqual(404, status)
+        self.assertEqual("not-found", body["reason"])
+
+    def test_read_endpoints_do_not_require_token(self) -> None:
+        server = self._start_server()
+        # Hit several read endpoints without an Authorization header.
+        for endpoint in (
+            "/api/state",
+            "/api/events",
+            "/api/progress",
+            "/api/verification",
+        ):
+            query = urllib.parse.urlencode(
+                {"plan_dir": str(self.canonical_plan_dir)}
+            )
+            status, _, _ = _http_request(
+                f"{self._base_url(server)}{endpoint}?{query}"
+            )
+            self.assertIn(status, (200, 404), f"endpoint={endpoint}")
+
+    def test_read_endpoints_require_plan_dir(self) -> None:
+        server = self._start_server()
+        for endpoint in (
+            "/api/state",
+            "/api/events",
+            "/api/logs",
+            "/api/last-message",
+            "/api/result",
+            "/api/verification",
+            "/api/commits",
+            "/api/progress",
+            "/api/final-review",
+        ):
+            status, body, _ = _http_request(
+                f"{self._base_url(server)}{endpoint}"
+            )
+            self.assertEqual(400, status, f"endpoint={endpoint}")
+            self.assertEqual(
+                "invalid-request", body["reason"], f"endpoint={endpoint}"
+            )
+
+
+def _http_request_raw(
+    url: str,
+    *,
+    method: str = "GET",
+    headers: dict | None = None,
+    timeout: float = 5.0,
+) -> tuple[int, bytes, dict]:
+    """Make an HTTP request and return ``(status, body_bytes, headers)``.
+
+    Mirrors :func:`_http_request` but does not attempt to JSON-decode the
+    response body. Use for static-asset tests where the response is HTML,
+    CSS, or JS rather than JSON.
+    """
+    import urllib.error
+    import urllib.request
+
+    request_headers = {"Accept": "*/*"}
+    if headers:
+        request_headers.update(headers)
+    request = urllib.request.Request(url, headers=request_headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = response.status
+            raw = response.read()
+            response_headers = dict(response.headers.items())
+    except urllib.error.HTTPError as error:
+        status = error.code
+        raw = error.read()
+        response_headers = dict(error.headers.items())
+    return status, raw, response_headers
+
+
+class WorkbenchStaticAssetTests(unittest.TestCase):
+    """Cover the bundled vanilla frontend served at ``/`` and ``/static/*``."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name).resolve()
+        self.state_dir = self.tmp_path / "state"
+        self.state_dir.mkdir()
+        self.registry_path = self.tmp_path / "workbench.json"
+        self.servers: list[workbench_server.WorkbenchHTTPServer] = []
+
+    def tearDown(self) -> None:
+        for srv in self.servers:
+            try:
+                srv.shutdown()
+            finally:
+                srv.server_close()
+
+    def _start_server(self) -> workbench_server.WorkbenchHTTPServer:
+        server = workbench_server.create_server(
+            host="127.0.0.1",
+            port=0,
+            state_dir=self.state_dir,
+            registry_path=self.registry_path,
+            plan_roots=(),
+            include_default_dirs=False,
+        )
+        thread = threading.Thread(
+            target=server.serve_forever, name="workbench-static-test", daemon=True
+        )
+        thread.start()
+        self.servers.append(server)
+
+        def _shutdown() -> None:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        self.addCleanup(_shutdown)
+        return server
+
+    def _base_url(self, server: workbench_server.WorkbenchHTTPServer) -> str:
+        return f"http://{server.bound_host}:{server.bound_port}"
+
+    def test_static_dir_ships_required_assets(self) -> None:
+        static_dir = workbench_server.STATIC_DIR
+        self.assertTrue(static_dir.is_dir(), str(static_dir))
+        for relative in ("index.html", "styles.css", "app.js"):
+            self.assertTrue(
+                (static_dir / relative).is_file(),
+                f"missing bundled asset: {relative}",
+            )
+
+    def test_root_serves_html_shell(self) -> None:
+        server = self._start_server()
+        status, body, headers = _http_request_raw(self._base_url(server) + "/")
+        self.assertEqual(200, status)
+        decoded = body.decode("utf-8")
+        self.assertIn("<title>ASL Workbench</title>", decoded)
+        self.assertIn("/static/styles.css", decoded)
+        self.assertIn("/static/app.js", decoded)
+        content_type = headers.get("Content-Type") or headers.get("content-type")
+        self.assertIsNotNone(content_type)
+        self.assertIn("text/html", content_type)
+        cache = headers.get("Cache-Control") or headers.get("cache-control")
+        self.assertEqual("no-store", cache)
+
+    def test_static_css_served_with_css_mime(self) -> None:
+        server = self._start_server()
+        status, body, headers = _http_request_raw(
+            self._base_url(server) + "/static/styles.css"
+        )
+        self.assertEqual(200, status)
+        decoded = body.decode("utf-8")
+        self.assertIn(".wb-row", decoded)
+        content_type = headers.get("Content-Type") or headers.get("content-type")
+        self.assertIsNotNone(content_type)
+        self.assertIn("text/css", content_type)
+
+    def test_static_css_makes_hidden_authoritative(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request_raw(
+            self._base_url(server) + "/static/styles.css"
+        )
+        self.assertEqual(200, status)
+        decoded = body.decode("utf-8")
+        self.assertIn("[hidden]", decoded)
+        self.assertIn("display: none !important;", decoded)
+
+    def test_static_js_served_with_js_mime(self) -> None:
+        server = self._start_server()
+        status, body, headers = _http_request_raw(
+            self._base_url(server) + "/static/app.js"
+        )
+        self.assertEqual(200, status)
+        decoded = body.decode("utf-8")
+        self.assertIn("renderQueue", decoded)
+        self.assertIn("FILTER_GROUPS", decoded)
+        content_type = headers.get("Content-Type") or headers.get("content-type")
+        self.assertIsNotNone(content_type)
+        self.assertIn("javascript", content_type)
+
+    def test_static_missing_returns_json_not_found(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(
+            self._base_url(server) + "/static/does-not-exist.css"
+        )
+        self.assertEqual(404, status)
+        self.assertFalse(body["ok"])
+        self.assertEqual("not-found", body["reason"])
+
+    def test_static_path_traversal_rejected(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(
+            self._base_url(server) + "/static/../workbench_server.py"
+        )
+        # urllib normalizes ``..`` segments before sending so the server sees
+        # ``/workbench_server.py`` which is not a known route. The defense in
+        # depth still matters for clients that do not normalize; test the
+        # server-side check directly via the handler helper below.
+        self.assertIn(status, (400, 404))
+        self.assertFalse(body["ok"])
+
+    def test_static_path_traversal_blocked_at_handler(self) -> None:
+        # urllib normalizes ``..`` in URLs before the request leaves the
+        # client, so a unit test against the helper exercises the guard.
+        server = self._start_server()
+        bad_paths = [
+            "../workbench_server.py",
+            "..%2Fworkbench_server.py",
+            "/etc/passwd",
+            "subdir/../../../etc/passwd",
+        ]
+        for relative in bad_paths:
+            encoded = urllib.parse.quote(relative, safe="")
+            status, body, _ = _http_request(
+                self._base_url(server) + f"/static/{encoded}"
+            )
+            self.assertIn(
+                status, (400, 404), msg=f"path={relative} status={status}"
+            )
+            self.assertFalse(body["ok"], msg=f"path={relative}")
+
+    def test_static_post_falls_through_to_404(self) -> None:
+        # Static serving only accepts GET; POSTs reach the routes table and
+        # 404 because /static/... is not a registered POST endpoint.
+        server = self._start_server()
+        status, body, _ = _http_request(
+            self._base_url(server) + "/static/app.js",
+            method="POST",
+            body={},
+            headers={"Authorization": "Bearer ignored"},
+        )
+        self.assertEqual(404, status)
+        self.assertFalse(body["ok"])
+
+    def test_root_html_references_template_id(self) -> None:
+        # Smoke check that the template the JS app depends on is bundled.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/")
+        decoded = body.decode("utf-8")
+        self.assertIn('id="wb-row-template"', decoded)
+        self.assertIn('id="wb-filters"', decoded)
+        self.assertIn('id="wb-queue-meta"', decoded)
+        self.assertIn('id="wb-queue"', decoded)
+
+    def test_root_html_bundles_detail_view_shell(self) -> None:
+        # The detail view markup, controls, profile form, reply panel, and
+        # row templates must ship in index.html so the SPA can render the
+        # per-plan route without additional fetches.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/")
+        decoded = body.decode("utf-8")
+        required_ids = (
+            'id="wb-detail"',
+            'id="wb-detail-back"',
+            'id="wb-controls"',
+            'id="wb-control-launch"',
+            'id="wb-control-stop"',
+            'id="wb-control-unlock"',
+            'id="wb-profile-form"',
+            'id="wb-profile-form-errors"',
+            'id="wb-profile-unpin"',
+            'id="wb-reply-panel"',
+            'id="wb-reply-form"',
+            'id="wb-reply-prompt"',
+            'id="wb-reply-last-message"',
+            'id="wb-reply-text"',
+            'id="wb-detail-sessions"',
+            'id="wb-detail-events"',
+            'id="wb-detail-progress"',
+            'id="wb-detail-artifacts"',
+            'id="wb-session-row-template"',
+            'id="wb-event-row-template"',
+            'id="wb-progress-row-template"',
+            'id="wb-artifact-row-template"',
+        )
+        for marker in required_ids:
+            self.assertIn(marker, decoded, msg=f"missing marker: {marker}")
+
+    def test_app_js_enforces_safe_control_confirmations(self) -> None:
+        # The detail view must confirm destructive or sensitive actions
+        # before issuing the POST. These strings are load-bearing — the
+        # reply textarea must also never be persisted to browser storage.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
+        decoded = body.decode("utf-8")
+        # Hash routing wiring + detail-view scaffolding.
+        self.assertIn("parseHashRoute", decoded)
+        self.assertIn("refreshDetail", decoded)
+        self.assertIn("validateLaunchPayload", decoded)
+        self.assertIn("clearReplyTextarea", decoded)
+        # Confirmation prompts for dangerous actions.
+        self.assertIn("--unsafe-bypass", decoded)
+        self.assertIn("Force-unlock this plan?", decoded)
+        self.assertIn("Submit this reply", decoded)
+        # Privacy guard: the reply text must never be persisted.
+        # Search for any sessionStorage/localStorage write touching the
+        # reply field; a positive match would mean the draft leaks.
+        import re as _re
+
+        leak_patterns = (
+            r"sessionStorage\.setItem\([^)]*reply",
+            r"localStorage\.setItem\([^)]*reply",
+            r"setItem\([^)]*wb\.reply",
+        )
+        for pattern in leak_patterns:
+            self.assertIsNone(
+                _re.search(pattern, decoded),
+                msg=f"reply text persisted via {pattern!r}",
+            )
+
+    def test_profile_form_uses_tri_state_selects_for_nullable_booleans(
+        self,
+    ) -> None:
+        # The launch profile booleans must be nullable so a blank profile
+        # records "no preference" instead of forcing an explicit false (which
+        # would emit --no-unsafe-bypass at launch). The HTML must ship a
+        # tri-state <select> for each nullable boolean with the literal
+        # default/enabled/disabled options.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/")
+        decoded = body.decode("utf-8")
+        for field_id in (
+            "wb-profile-unsafe-bypass",
+            "wb-profile-allow-not-loop-ready",
+        ):
+            self.assertIn(f'id="{field_id}"', decoded)
+        # The tri-state markers must not regress back into <input
+        # type="checkbox"> elements for either nullable boolean field.
+        self.assertNotIn(
+            'name="unsafe_bypass"\n                type="checkbox"', decoded
+        )
+        self.assertNotIn(
+            'name="allow_not_loop_ready"\n                type="checkbox"',
+            decoded,
+        )
+        # Every tri-state select ships the three canonical option values:
+        # "" (default/null), "true" (enabled), and "false" (disabled).
+        import re as _re
+
+        select_pattern = _re.compile(
+            r'<select\s+[^>]*name="(unsafe_bypass|allow_not_loop_ready)"[^>]*>'
+            r"(.*?)</select>",
+            _re.DOTALL,
+        )
+        matches = select_pattern.findall(decoded)
+        self.assertEqual(
+            2,
+            len(matches),
+            msg="expected one tri-state select per nullable boolean field",
+        )
+        for name, inner in matches:
+            for option_value in ("", "true", "false"):
+                self.assertIn(
+                    f'value="{option_value}"',
+                    inner,
+                    msg=(
+                        f"tri-state select {name!r} missing option "
+                        f"value={option_value!r}"
+                    ),
+                )
+
+    def test_app_js_serializes_tri_state_booleans_with_null_default(
+        self,
+    ) -> None:
+        # The JS reader must round-trip the tri-state HTML selects into
+        # the JSON shape the backend expects: true, false, or null. The
+        # blank/default option must serialize as null so a fresh profile
+        # does not emit --no-unsafe-bypass at launch.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
+        decoded = body.decode("utf-8")
+        self.assertIn("readTriStateValue", decoded)
+        self.assertIn("setTriStateValue", decoded)
+        self.assertIn('readTriStateValue(form, "unsafe_bypass")', decoded)
+        self.assertIn(
+            'readTriStateValue(form, "allow_not_loop_ready")', decoded
+        )
+        # The render side must also write the tri-state value back from
+        # null/true/false instead of toggling a checkbox.
+        self.assertIn('setTriStateValue(form, "unsafe_bypass"', decoded)
+        self.assertIn(
+            'setTriStateValue(\n      form,\n      "allow_not_loop_ready"',
+            decoded,
+        )
+        # The reader must distinguish the three string values and fall
+        # back to null on anything else.
+        self.assertIn('if (raw === "true") return true;', decoded)
+        self.assertIn('if (raw === "false") return false;', decoded)
+        self.assertIn("return null;", decoded)
+
+    def test_app_js_renders_dotted_sessions_from_state_payload(self) -> None:
+        # The detail session list must consume the new top-level
+        # ``sessions`` array from /api/state and render dotted IDs (e.g.,
+        # ``2.1``) literally instead of looping over ``total_sessions``
+        # and inferring status with ``parseInt(next_pending_session_id)``.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
+        decoded = body.decode("utf-8")
+        # The new implementation must consume the sessions array and
+        # use string equality against active_turn.session_id.
+        self.assertIn("renderSessionsFromState", decoded)
+        self.assertIn("payload.sessions", decoded)
+        self.assertIn("Array.isArray(payload.sessions)", decoded)
+        # The active-row override still uses active_turn.session_id from
+        # the runner state envelope, but with string equality only.
+        self.assertIn("active_turn", decoded)
+        self.assertIn("activeTurn.session_id", decoded)
+        # The legacy integer-loop / parseInt() inference must be gone.
+        import re as _re
+
+        self.assertIsNone(
+            _re.search(
+                r"parseInt\([^)]*state\.detailPlan\.next_pending_session_id",
+                decoded,
+            ),
+            msg="parseInt(next_pending_session_id) inference must be removed",
+        )
+        self.assertIsNone(
+            _re.search(
+                r"for\s*\(\s*let\s+i\s*=\s*1\s*;\s*i\s*<=\s*totalSessions",
+                decoded,
+            ),
+            msg="integer session loop must be removed",
+        )
+        self.assertNotIn("turn.total_sessions", decoded)
+        self.assertNotIn('"session-" + i + ".md"', decoded)
+
+
+class WorkbenchHardeningTests(unittest.TestCase):
+    """Disappearing-file, concurrency, caching, and shutdown hardening."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name).resolve()
+        self.state_dir = self.tmp_path / "state"
+        self.state_dir.mkdir()
+        self.registry_path = self.tmp_path / "workbench.json"
+        self.plan_dir = self.tmp_path / "plans" / "alpha"
+        write_plan(self.plan_dir, ("pending", "pending"))
+        self.canonical_plan_dir = plans.canonicalize_path(self.plan_dir)
+        self.plan_state_dir = state.plan_state_dir(
+            self.canonical_plan_dir, self.state_dir
+        )
+        self.plan_state_dir.mkdir(parents=True, exist_ok=True)
+        self.servers: list[workbench_server.WorkbenchHTTPServer] = []
+
+    def tearDown(self) -> None:
+        for srv in self.servers:
+            try:
+                srv.shutdown()
+            finally:
+                srv.server_close()
+
+    def _start_server(self) -> workbench_server.WorkbenchHTTPServer:
+        server = workbench_server.create_server(
+            host="127.0.0.1",
+            port=0,
+            state_dir=self.state_dir,
+            registry_path=self.registry_path,
+            plan_roots=(),
+            include_default_dirs=False,
+        )
+        thread = threading.Thread(
+            target=server.serve_forever,
+            name="workbench-hardening-test",
+            daemon=True,
+        )
+        thread.start()
+        self.servers.append(server)
+
+        def _shutdown() -> None:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        self.addCleanup(_shutdown)
+        return server
+
+    def _base_url(self, server: workbench_server.WorkbenchHTTPServer) -> str:
+        return f"http://{server.bound_host}:{server.bound_port}"
+
+    def _write_state_with_turn(self, *, stdout_path: Path) -> None:
+        state_path = self.plan_state_dir / "state.json"
+        payload = {
+            "run_id": "run-h",
+            "harness": "codex",
+            "active_turn": {
+                "run_id": "run-h",
+                "turn_index": 1,
+                "session_id": "1",
+                "stdout_path": str(stdout_path),
+                "stderr_path": None,
+                "last_message_path": None,
+                "result_path": None,
+            },
+            "active_verification": None,
+        }
+        state_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    # -- Cache-Control / ETag ----------------------------------------------
+
+    def test_static_asset_emits_etag_and_revalidate_cache_control(self) -> None:
+        server = self._start_server()
+        status, body, headers = _http_request_raw(
+            self._base_url(server) + "/static/app.js"
+        )
+        self.assertEqual(200, status)
+        self.assertGreater(len(body), 0)
+        cache_control = headers.get("Cache-Control") or headers.get("cache-control")
+        self.assertEqual("no-cache, must-revalidate", cache_control)
+        etag = headers.get("ETag") or headers.get("etag")
+        self.assertIsNotNone(etag)
+        self.assertTrue(etag.startswith('"') and etag.endswith('"'), etag)
+
+    def test_static_asset_returns_304_when_etag_matches(self) -> None:
+        server = self._start_server()
+        # First request: capture the ETag.
+        _, _, headers = _http_request_raw(
+            self._base_url(server) + "/static/styles.css"
+        )
+        etag = headers.get("ETag") or headers.get("etag")
+        self.assertIsNotNone(etag)
+        # Second request with If-None-Match should short-circuit to 304.
+        status, body, headers2 = _http_request_raw(
+            self._base_url(server) + "/static/styles.css",
+            headers={"If-None-Match": etag},
+        )
+        self.assertEqual(304, status)
+        self.assertEqual(b"", body)
+        echo = headers2.get("ETag") or headers2.get("etag")
+        self.assertEqual(etag, echo)
+
+    def test_static_asset_serves_full_body_on_stale_etag(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request_raw(
+            self._base_url(server) + "/static/styles.css",
+            headers={"If-None-Match": '"stale-etag"'},
+        )
+        self.assertEqual(200, status)
+        self.assertGreater(len(body), 0)
+
+    def test_root_html_keeps_no_store_cache_control(self) -> None:
+        # Regression: the HTML shell must never be cached so a server
+        # upgrade is not masked by stale UI.
+        server = self._start_server()
+        _, _, headers = _http_request_raw(self._base_url(server) + "/")
+        cache_control = headers.get("Cache-Control") or headers.get("cache-control")
+        self.assertEqual("no-store", cache_control)
+        self.assertIsNone(headers.get("ETag") or headers.get("etag"))
+
+    # -- Disappearing-file races -------------------------------------------
+
+    def test_logs_endpoint_returns_404_when_file_disappears_mid_read(self) -> None:
+        log_path = self.plan_state_dir / "stdout.log"
+        log_path.write_text("hello world\n", encoding="utf-8")
+        self._write_state_with_turn(stdout_path=log_path)
+        server = self._start_server()
+        canonical_log = plans.canonicalize_path(log_path)
+        original_open = Path.open
+
+        def race_open(self_path: Path, *args, **kwargs):
+            if plans.canonicalize_path(self_path) == canonical_log:
+                raise FileNotFoundError(
+                    errno.ENOENT, "vanished", os.fspath(canonical_log)
+                )
+            return original_open(self_path, *args, **kwargs)
+
+        query = urllib.parse.urlencode(
+            {"plan_dir": str(self.canonical_plan_dir), "stream": "stdout"}
+        )
+        with mock.patch.object(Path, "open", race_open):
+            status, body, _ = _http_request(
+                f"{self._base_url(server)}/api/logs?{query}"
+            )
+        self.assertEqual(404, status)
+        self.assertFalse(body["ok"])
+        self.assertEqual("not-found", body["reason"])
+
+    def test_last_message_endpoint_returns_404_when_file_disappears(self) -> None:
+        last_msg_path = self.plan_state_dir / "last-message.txt"
+        last_msg_path.write_text("paused", encoding="utf-8")
+        state_path = self.plan_state_dir / "state.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "active_turn": {
+                        "run_id": "run-lm",
+                        "turn_index": 1,
+                        "session_id": "1",
+                        "last_message_path": str(last_msg_path),
+                    },
+                    "active_verification": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        server = self._start_server()
+        canonical_msg = plans.canonicalize_path(last_msg_path)
+        original_open = Path.open
+
+        def race_open(self_path: Path, *args, **kwargs):
+            if plans.canonicalize_path(self_path) == canonical_msg:
+                raise FileNotFoundError(
+                    errno.ENOENT, "vanished", os.fspath(canonical_msg)
+                )
+            return original_open(self_path, *args, **kwargs)
+
+        query = urllib.parse.urlencode(
+            {"plan_dir": str(self.canonical_plan_dir)}
+        )
+        with mock.patch.object(Path, "open", race_open):
+            status, body, _ = _http_request(
+                f"{self._base_url(server)}/api/last-message?{query}"
+            )
+        self.assertEqual(404, status)
+        self.assertEqual("not-found", body["reason"])
+
+    def test_state_endpoint_handles_state_file_disappearing_mid_read(self) -> None:
+        state_path = self.plan_state_dir / "state.json"
+        state_path.write_text(
+            json.dumps({"run_id": "run-x", "active_turn": None}),
+            encoding="utf-8",
+        )
+        server = self._start_server()
+        canonical_state = plans.canonicalize_path(state_path)
+        original_open = Path.open
+
+        def race_open(self_path: Path, *args, **kwargs):
+            if plans.canonicalize_path(self_path) == canonical_state:
+                raise FileNotFoundError(
+                    errno.ENOENT, "vanished", os.fspath(canonical_state)
+                )
+            return original_open(self_path, *args, **kwargs)
+
+        query = urllib.parse.urlencode(
+            {"plan_dir": str(self.canonical_plan_dir)}
+        )
+        with mock.patch.object(Path, "open", race_open):
+            status, body, _ = _http_request(
+                f"{self._base_url(server)}/api/state?{query}"
+            )
+        self.assertEqual(200, status)
+        self.assertFalse(body["state"]["present"])
+        self.assertIsNone(body["state"]["error"])
+
+    # -- Concurrent registry updates ---------------------------------------
+
+    def test_concurrent_pin_updates_do_not_lose_entries(self) -> None:
+        server = self._start_server()
+        # Pre-create unique plan dirs so each pin canonicalizes cleanly.
+        plan_dirs: list[Path] = []
+        for index in range(6):
+            plan_dir = self.tmp_path / "plans" / f"concurrent-{index}"
+            write_plan(plan_dir, ("pending",))
+            plan_dirs.append(plans.canonicalize_path(plan_dir))
+
+        url = f"{self._base_url(server)}/api/registry/pin"
+        auth = {"Authorization": f"Bearer {server.token}"}
+        errors: list[str] = []
+
+        def pin(target: Path) -> None:
+            try:
+                status, body, _ = _http_request(
+                    url,
+                    method="POST",
+                    body={"plan_dir": str(target), "label": target.name},
+                    headers=auth,
+                )
+                if status != 200 or not body.get("ok"):
+                    errors.append(f"{target.name}: {status} {body!r}")
+            except Exception as error:  # noqa: BLE001
+                errors.append(f"{target.name}: {error!r}")
+
+        threads = [
+            threading.Thread(target=pin, args=(target,))
+            for target in plan_dirs
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual([], errors)
+
+        registry = workbench.load_registry(self.registry_path)
+        persisted_plan_dirs = {pin.plan_dir for pin in registry.pins}
+        for target in plan_dirs:
+            self.assertIn(str(target), persisted_plan_dirs)
+
+    # -- Lock-aware control surface ---------------------------------------
+
+    def test_unlock_endpoint_removes_stale_lock(self) -> None:
+        # Seed a stale lock owned by a non-existent pid so unlock can
+        # remove it without --force.
+        lock_path = state.lock_path_for_plan(
+            self.canonical_plan_dir, self.state_dir
+        )
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "owner": "test",
+                    "pid": 999_999,
+                    "plan_dir": str(self.canonical_plan_dir),
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/unlock",
+            method="POST",
+            body={"plan_dir": str(self.canonical_plan_dir)},
+            headers={"Authorization": f"Bearer {server.token}"},
+        )
+        self.assertEqual(200, status, msg=body)
+        self.assertTrue(body["had_lock"])
+        self.assertTrue(body["removed"])
+        self.assertTrue(body["stale"])
+        self.assertFalse(lock_path.exists())
+
+    # -- Shutdown / browser-open wiring -----------------------------------
+
+    def test_install_shutdown_handlers_routes_signals_to_server_shutdown(
+        self,
+    ) -> None:
+        # Validate the handler installation logic by inspecting captured
+        # signal.signal calls rather than actually sending signals.
+        server = self._start_server()
+        captured: dict[int, object] = {}
+        previous_handlers: dict[int, object] = {}
+
+        original_signal = signal.signal
+
+        def recording_signal(signum, handler):
+            previous = original_signal(signum, signal.SIG_DFL)
+            previous_handlers[signum] = previous
+            captured[signum] = handler
+            return previous
+
+        try:
+            with mock.patch("agent_session_loop.workbench_server.signal.signal", side_effect=recording_signal):
+                restore = workbench_server._install_shutdown_handlers(server)
+            self.assertIn(signal.SIGINT, captured)
+            self.assertIn(signal.SIGTERM, captured)
+            # Invoke the captured SIGTERM handler and confirm it triggers
+            # ``server.shutdown()`` from a daemon thread; the call must
+            # not raise.
+            shutdown_called = threading.Event()
+            original_shutdown = server.shutdown
+
+            def fake_shutdown() -> None:
+                shutdown_called.set()
+
+            server.shutdown = fake_shutdown  # type: ignore[assignment]
+            try:
+                captured[signal.SIGTERM](signal.SIGTERM, None)
+                self.assertTrue(shutdown_called.wait(timeout=2.0))
+            finally:
+                server.shutdown = original_shutdown  # type: ignore[assignment]
+            # restore() should return the original handlers without raising.
+            with mock.patch("agent_session_loop.workbench_server.signal.signal", side_effect=original_signal):
+                restore()
+        finally:
+            # Defensive: ensure default handlers come back even if the
+            # test failed mid-way.
+            for signum, previous in previous_handlers.items():
+                try:
+                    original_signal(signum, previous)
+                except (ValueError, OSError):
+                    pass
+
+    def test_serve_from_args_invokes_open_browser_with_token_url(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_open(url: str) -> bool:
+            captured["url"] = url
+            return True
+
+        def fake_serve(server: workbench_server.WorkbenchHTTPServer) -> None:
+            captured["bound_port"] = server.bound_port
+
+        def fake_install(server: workbench_server.WorkbenchHTTPServer):
+            captured["installed"] = True
+
+            def restore() -> None:
+                captured["restored"] = True
+
+            return restore
+
+        args = argparse.Namespace(
+            host="127.0.0.1",
+            port=0,
+            state_dir=str(self.state_dir),
+            plan_root=None,
+            open=True,
+            json=True,
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            result = workbench_server.workbench_serve_from_args(
+                args,
+                open_browser=fake_open,
+                serve_forever=fake_serve,
+                install_signal_handlers=fake_install,
+            )
+        self.assertEqual(0, result)
+        url = captured.get("url")
+        self.assertIsInstance(url, str)
+        self.assertIn("token=", url)
+        self.assertIn("127.0.0.1", url)
+        self.assertIsNotNone(captured.get("bound_port"))
+        self.assertTrue(captured.get("installed"))
+        self.assertTrue(captured.get("restored"))
+
+    def test_serve_from_args_skips_open_when_flag_unset(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_open(url: str) -> bool:
+            captured["url"] = url
+            return True
+
+        args = argparse.Namespace(
+            host="127.0.0.1",
+            port=0,
+            state_dir=str(self.state_dir),
+            plan_root=None,
+            open=False,
+            json=True,
+        )
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            result = workbench_server.workbench_serve_from_args(
+                args,
+                open_browser=fake_open,
+                serve_forever=lambda srv: None,
+                install_signal_handlers=lambda srv: (lambda: None),
+            )
+        self.assertEqual(0, result)
+        self.assertNotIn("url", captured)
+
+    def test_serve_from_args_closes_server_even_on_keyboard_interrupt(self) -> None:
+        # ``serve_forever`` raising KeyboardInterrupt is the operator's
+        # Ctrl+C path. The CLI must still release the listening socket.
+        bound_port_holder: dict[str, int] = {}
+
+        def fake_serve(server: workbench_server.WorkbenchHTTPServer) -> None:
+            bound_port_holder["port"] = server.bound_port
+            raise KeyboardInterrupt
+
+        args = argparse.Namespace(
+            host="127.0.0.1",
+            port=0,
+            state_dir=str(self.state_dir),
+            plan_root=None,
+            open=False,
+            json=True,
+        )
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            result = workbench_server.workbench_serve_from_args(
+                args,
+                open_browser=lambda url: True,
+                serve_forever=fake_serve,
+                install_signal_handlers=lambda srv: (lambda: None),
+            )
+        self.assertEqual(0, result)
+        # The socket should be releasable now; rebinding to the same
+        # ephemeral port should not collide because server_close() ran.
+        # (We cannot rebind the exact port reliably across platforms;
+        # asserting result==0 confirms the finally branch executed.)
+        self.assertIn("port", bound_port_holder)
+
+
+class WorkbenchServeCliTests(unittest.TestCase):
+    """Cover the ``asl workbench serve`` argparse wiring."""
+
+    def test_parser_registers_workbench_serve_subcommand(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(
+            [
+                "workbench",
+                "serve",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "0",
+                "--state-dir",
+                "/tmp/state",
+                "--plan-root",
+                "/tmp/plans-a",
+                "--plan-root",
+                "/tmp/plans-b",
+                "--open",
+                "--json",
+            ]
+        )
+        self.assertEqual("workbench", args.command)
+        self.assertEqual("serve", args.workbench_command)
+        self.assertEqual(0, args.port)
+        self.assertEqual("/tmp/state", args.state_dir)
+        self.assertEqual(["/tmp/plans-a", "/tmp/plans-b"], args.plan_root)
+        self.assertTrue(args.open)
+        self.assertTrue(args.json)
+        self.assertIs(
+            workbench_server.workbench_serve_from_args, args.handler
+        )
+
+    def test_parser_defaults_bare_workbench_to_serve(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(
+            [
+                "workbench",
+                "--port",
+                "0",
+                "--state-dir",
+                "/tmp/state",
+                "--plan-root",
+                "/tmp/plans",
+                "--json",
+            ]
+        )
+        self.assertEqual("workbench", args.command)
+        self.assertIsNone(args.workbench_command)
+        self.assertEqual(0, args.port)
+        self.assertEqual("/tmp/state", args.state_dir)
+        self.assertEqual(["/tmp/plans"], args.plan_root)
+        self.assertTrue(args.json)
+        self.assertIs(
+            workbench_server.workbench_serve_from_args, args.handler
+        )
+
+    def test_parser_preserves_parent_position_flags_before_serve(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(
+            [
+                "workbench",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "0",
+                "--state-dir",
+                "/tmp/state",
+                "--plan-root",
+                "/tmp/plans-a",
+                "--plan-root",
+                "/tmp/plans-b",
+                "--open",
+                "--json",
+                "serve",
+            ]
+        )
+        self.assertEqual("workbench", args.command)
+        self.assertEqual("serve", args.workbench_command)
+        self.assertEqual("0.0.0.0", args.host)
+        self.assertEqual(0, args.port)
+        self.assertEqual("/tmp/state", args.state_dir)
+        self.assertEqual(["/tmp/plans-a", "/tmp/plans-b"], args.plan_root)
+        self.assertTrue(args.open)
+        self.assertTrue(args.json)
+        self.assertFalse(
+            any(name.startswith("_workbench_serve_") for name in vars(args))
+        )
+        self.assertIs(
+            workbench_server.workbench_serve_from_args, args.handler
+        )
+
+    def test_parser_merges_plan_roots_split_around_serve(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(
+            [
+                "workbench",
+                "--plan-root",
+                "/tmp/plans-a",
+                "serve",
+                "--plan-root",
+                "/tmp/plans-b",
+                "--plan-root",
+                "/tmp/plans-c",
+            ]
+        )
+
+        self.assertEqual(
+            ["/tmp/plans-a", "/tmp/plans-b", "/tmp/plans-c"],
+            args.plan_root,
+        )
+
+    def test_parser_child_position_flags_override_parent_position_flags(
+        self,
+    ) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(
+            [
+                "workbench",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "1234",
+                "serve",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "5678",
+            ]
+        )
+
+        self.assertEqual("0.0.0.0", args.host)
+        self.assertEqual(5678, args.port)
+
+    def test_parser_registers_workbench_pin_subcommand(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(
+            [
+                "workbench",
+                "pin",
+                "/tmp/plan",
+                "--cwd",
+                "/repo",
+                "--label",
+                "Alpha",
+            ]
+        )
+        self.assertEqual("pin", args.workbench_command)
+        self.assertEqual("/tmp/plan", args.plan_dir)
+        self.assertEqual("/repo", args.cwd)
+        self.assertEqual("Alpha", args.label)
+        self.assertIs(workbench.workbench_pin_from_args, args.handler)
+
+    def test_parser_pin_supports_minimal_invocation(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(["workbench", "pin", "/tmp/plan"])
+        self.assertEqual("/tmp/plan", args.plan_dir)
+        self.assertIsNone(args.cwd)
+        self.assertIsNone(args.label)
+
+    def test_parser_registers_workbench_unpin_subcommand(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(["workbench", "unpin", "/tmp/plan"])
+        self.assertEqual("unpin", args.workbench_command)
+        self.assertEqual("/tmp/plan", args.plan_dir)
+        self.assertIs(workbench.workbench_unpin_from_args, args.handler)
+
+    def test_parser_registers_workbench_registry_subcommand(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(["workbench", "registry", "--json"])
+        self.assertEqual("registry", args.workbench_command)
+        self.assertTrue(args.json)
+        self.assertIs(workbench.workbench_registry_from_args, args.handler)
+
+
+class WorkbenchCliHandlerTests(unittest.TestCase):
+    """Cover the ``asl workbench`` pin/unpin/registry CLI handlers."""
+
+    def _xdg(self, tmp: str) -> Path:
+        return Path(tmp) / "config"
+
+    def test_pin_handler_creates_registry_with_profile_and_label(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
+            args = argparse.Namespace(
+                plan_dir=str(plan_dir),
+                cwd=str(tmp_path / "repo"),
+                label="Alpha plan",
+            )
+            with patched_env(XDG_CONFIG_HOME=str(self._xdg(tmp))):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                    rc = workbench.workbench_pin_from_args(args)
+                self.assertEqual(0, rc)
+                registry_path = workbench.default_registry_path()
+                self.assertTrue(registry_path.is_file())
+                self.assertIn(str(registry_path), stdout.getvalue())
+                reloaded = workbench.load_registry(registry_path)
+            self.assertEqual(1, len(reloaded.pins))
+            pin = reloaded.pins[0]
+            self.assertEqual(str(plan_dir), pin.plan_dir)
+            self.assertEqual("Alpha plan", pin.label)
+            self.assertEqual(str(tmp_path / "repo"), pin.profile.cwd)
+
+    def test_pin_handler_updates_existing_pin_in_place(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
+            with patched_env(XDG_CONFIG_HOME=str(self._xdg(tmp))):
+                first = argparse.Namespace(
+                    plan_dir=str(plan_dir), cwd=None, label="First"
+                )
+                second = argparse.Namespace(
+                    plan_dir=str(plan_dir),
+                    cwd=str(tmp_path / "newrepo"),
+                    label="Second",
+                )
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    self.assertEqual(0, workbench.workbench_pin_from_args(first))
+                    self.assertEqual(0, workbench.workbench_pin_from_args(second))
+                reloaded = workbench.load_registry()
+            self.assertEqual(1, len(reloaded.pins))
+            pin = reloaded.pins[0]
+            self.assertEqual("Second", pin.label)
+            self.assertEqual(str(tmp_path / "newrepo"), pin.profile.cwd)
+
+    def test_pin_handler_reports_error_on_invalid_plan_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patched_env(XDG_CONFIG_HOME=str(self._xdg(tmp))):
+                args = argparse.Namespace(plan_dir="   ", cwd=None, label=None)
+                stderr = io.StringIO()
+                with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                    rc = workbench.workbench_pin_from_args(args)
+                self.assertEqual(1, rc)
+                self.assertIn("workbench pin", stderr.getvalue())
+
+    def test_unpin_handler_removes_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
+            with patched_env(XDG_CONFIG_HOME=str(self._xdg(tmp))):
+                seeded = workbench.upsert_pin(
+                    workbench.load_registry(),
+                    plan_dir,
+                    label="seed",
+                )
+                workbench.save_registry(seeded)
+                args = argparse.Namespace(plan_dir=str(plan_dir))
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    rc = workbench.workbench_unpin_from_args(args)
+                self.assertEqual(0, rc)
+                reloaded = workbench.load_registry()
+            self.assertEqual((), reloaded.pins)
+
+    def test_unpin_handler_is_idempotent_for_missing_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patched_env(XDG_CONFIG_HOME=str(self._xdg(tmp))):
+                args = argparse.Namespace(plan_dir=str(Path(tmp) / "nothing"))
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    rc = workbench.workbench_unpin_from_args(args)
+                self.assertEqual(0, rc)
+
+    def test_registry_handler_text_output_lists_pins_and_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
+            with patched_env(XDG_CONFIG_HOME=str(self._xdg(tmp))):
+                seeded = workbench.upsert_pin(
+                    workbench.load_registry(), plan_dir, label="Alpha"
+                )
+                workbench.save_registry(seeded)
+                args = argparse.Namespace(json=False)
+                stdout = io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                    rc = workbench.workbench_registry_from_args(args)
+                self.assertEqual(0, rc)
+            text = stdout.getvalue()
+            self.assertIn("Pins (1)", text)
+            self.assertIn(str(plan_dir), text)
+            self.assertIn("[Alpha]", text)
+            self.assertIn("Plan roots: none", text)
+
+    def test_registry_handler_json_output_includes_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
+            with patched_env(XDG_CONFIG_HOME=str(self._xdg(tmp))):
+                seeded = workbench.upsert_pin(
+                    workbench.load_registry(),
+                    plan_dir,
+                    label="Alpha",
+                    profile=workbench.LaunchProfile(cwd=str(tmp_path)),
+                )
+                workbench.save_registry(seeded)
+                args = argparse.Namespace(json=True)
+                stdout = io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                    rc = workbench.workbench_registry_from_args(args)
+                self.assertEqual(0, rc)
+            payload = json.loads(stdout.getvalue())
+            self.assertTrue(payload["ok"])
+            self.assertEqual("workbench", payload["command"])
+            self.assertEqual("ok", payload["reason"])
+            self.assertEqual(1, len(payload["registry"]["pins"]))
+            self.assertEqual(
+                str(plan_dir), payload["registry"]["pins"][0]["plan_dir"]
+            )
+            self.assertEqual(
+                str(tmp_path),
+                payload["registry"]["pins"][0]["profile"]["cwd"],
+            )
+
+
+class WorkbenchDocsRegressionTests(unittest.TestCase):
+    """Lock the documentation against regressing the four review findings.
+
+    The review called out four concrete gaps the docs/README must reflect:
+
+    1. The Workbench CLI surface (`asl workbench [serve]`, `pin`, `unpin`,
+       `registry --json`) — including the bare-`workbench` default to
+       `serve`.
+    2. Registry `plan_roots` participate in plan discovery via the queue.
+    3. Launch profile nullable booleans are tri-state; blank means "leave
+       the runner default alone" (no `--no-unsafe-bypass` argv).
+    4. `/api/state` surfaces dotted-session `sessions`/`counts`/
+       `next_pending_id`, and the frontend renders dotted IDs verbatim.
+    """
+
+    def _read(self, relative: str) -> str:
+        path = REPO_ROOT / relative
+        return path.read_text(encoding="utf-8")
+
+    def test_readme_documents_workbench_cli_surface(self) -> None:
+        readme = self._read("README.md")
+        self.assertIn("asl workbench [serve]", readme)
+        self.assertIn(
+            "asl workbench pin PLAN_DIR [--cwd REPO_ROOT] [--label LABEL]",
+            readme,
+        )
+        self.assertIn("asl workbench unpin PLAN_DIR", readme)
+        self.assertIn("asl workbench registry [--json]", readme)
+        # Reflects the registry plan_roots discovery wiring.
+        self.assertIn("registry `plan_roots`", readme)
+        # Reflects the tri-state nullable default behavior.
+        self.assertIn(
+            "tri-state nullable launch profiles", readme
+        )
+        # Reflects the dotted session API/frontend rendering.
+        self.assertIn("dotted session IDs", readme)
+
+    def test_docs_describe_workbench_cli_pin_unpin_registry(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        self.assertIn("asl workbench [serve]", docs)
+        self.assertIn(
+            "bare `asl workbench` invocation defaults to `serve`", docs
+        )
+        self.assertIn("asl workbench pin /path/to/plan-dir", docs)
+        self.assertIn("asl workbench unpin /path/to/plan-dir", docs)
+        self.assertIn("asl workbench registry --json", docs)
+
+    def test_docs_describe_registry_plan_roots_discovery(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        # Discovery section must say registry plan_roots feed the queue.
+        self.assertIn(
+            "Registry roots are scanned alongside\nCLI-supplied roots",
+            docs,
+        )
+        self.assertIn(
+            "canonical `plan-root` discovery source label", docs
+        )
+
+    def test_docs_describe_tri_state_nullable_launch_profile(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        self.assertIn(
+            "nullable booleans (`unsafe_bypass`, `allow_not_loop_ready`)",
+            docs,
+        )
+        self.assertIn("tri-state `<select>` controls", docs)
+        # Blank/default must mean "leave the runner default alone".
+        self.assertIn(
+            "blank/default state emits **no** `--unsafe-bypass` and **no**\n"
+            "  `--no-unsafe-bypass` argv",
+            docs,
+        )
+
+    def test_docs_describe_state_endpoint_session_payload(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        self.assertIn("`sessions` (ordered list with", docs)
+        self.assertIn(
+            "`counts` (`{pending, complete, empty,\n  unknown}`)", docs
+        )
+        self.assertIn("`next_pending_id`", docs)
+        self.assertIn(
+            "schema\n  matches `asl status --json`", docs
+        )
+        self.assertIn("`reason: \"malformed-plan\"`", docs)
+
+    def test_docs_describe_dotted_session_frontend_rendering(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        self.assertIn("session table iterates `payload.sessions`", docs)
+        self.assertIn(
+            "renders the dotted `id` verbatim (e.g., `2.1`, `2.2`)", docs
+        )
+        self.assertIn(
+            "no integer-loop or\n  `parseInt(next_pending_session_id)` inference",
+            docs,
         )
 
 

@@ -28,6 +28,7 @@ from typing import Any, TextIO
 from . import (
     config,
     contracts,
+    control_queue,
     events,
     harnesses,
     plans,
@@ -319,6 +320,21 @@ def build_harness_invocation(
 
 
 REPLY_CONTEXT_HEADING = "## ASL reply context"
+REPLY_ORIGIN_ARGV = "argv"
+REPLY_ORIGIN_STDIN = "stdin"
+REPLY_ORIGINS: tuple[str, ...] = (REPLY_ORIGIN_ARGV, REPLY_ORIGIN_STDIN)
+
+
+def read_reply_from_stdin() -> str:
+    """Read the entire reply payload from ``sys.stdin``.
+
+    Returns the raw text (no stripping) so the existing empty-reply check
+    sees whitespace-only input the same way it sees ``--reply ""``.
+    """
+    stdin = sys.stdin
+    if stdin is None:
+        return ""
+    return stdin.read()
 
 
 def build_reply_prompt(
@@ -2752,7 +2768,7 @@ class _LiveVerification:
     def _record_heartbeat(self) -> dict[str, Any] | None:
         moment = _utc_now()
         with self._lock:
-            if self._started_at is None:
+            if self._started_at is None or self._check_started_at is None:
                 return None
             self._heartbeat_count += 1
             state_payload = self._state_payload(now=moment)
@@ -2931,6 +2947,70 @@ def _pause_run(
                 "details": {} if details is None else details,
             },
         )
+
+
+def _apply_external_control_command(
+    command: control_queue.ControlCommand,
+    control_state: run_control.RunControlState,
+) -> run_control.RunControlAction | None:
+    """Translate one queued command into a RunControlAction, if it changes state."""
+    if command.command == control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT:
+        return control_state.request_stop_after_current()
+    if command.command == control_queue.COMMAND_SELECT_FUTURE_HARNESS:
+        assert command.harness is not None
+        return control_state.select_harness(command.harness)
+    return None
+
+
+def _drain_external_control_queue(
+    *,
+    plan_dir: Path,
+    state_dir_arg: str | None,
+    control_state: run_control.RunControlState,
+    seen_ids: set[str],
+    payload: dict[str, Any],
+    event_path: Path,
+    control_payload: dict[str, Any],
+    context: dict[str, Any] | None,
+    persistence: _RunPersistence,
+    run_control_lock: threading.Lock,
+) -> control_queue.DrainResult:
+    """Drain queued external control commands and record any state changes.
+
+    Each accepted command is translated into the same ``RunControlAction``
+    the keyboard listener would emit and persisted through
+    ``_record_run_control_action`` so events and the ``control`` payload
+    look identical regardless of source. Commands whose IDs are already
+    in ``seen_ids`` are rejected by the drain function itself. Accepted
+    IDs are added to ``seen_ids`` so even a queue file rewritten by an
+    external producer cannot replay the same command in this process.
+    """
+    try:
+        result = control_queue.drain_queue(
+            plan_dir,
+            state_dir=state_dir_arg,
+            seen_ids=seen_ids,
+        )
+    except OSError:
+        return control_queue.DrainResult(
+            queue_path=control_queue.queue_path_for_plan(plan_dir, state_dir_arg)
+        )
+
+    for command in result.accepted:
+        seen_ids.add(command.id)
+        with run_control_lock:
+            action = _apply_external_control_command(command, control_state)
+            if action is None:
+                continue
+            _record_run_control_action(
+                event_path=event_path,
+                payload=payload,
+                control_payload=control_payload,
+                action=action,
+                context=context,
+                persistence=persistence,
+            )
+    return result
 
 
 def _consume_run_control_stop(
@@ -3819,6 +3899,7 @@ def _dry_run_payload(
     run_dir: Path,
     reply_text: str | None = None,
     reply_context: qna.QnAContext | None = None,
+    reply_origin: str = REPLY_ORIGIN_ARGV,
 ) -> dict[str, Any]:
     model_effort = _selected_model_effort_payload(args)
     review_harness = getattr(args, "review_harness", None)
@@ -3860,6 +3941,7 @@ def _dry_run_payload(
             "turn_index": reply_context.turn_index,
             "last_message_path": str(reply_context.last_message_path),
             "reply_length": len(reply_text),
+            "origin": reply_origin,
         }
     else:
         prompt = build_session_prompt(args.harness, snapshot.plan_dir)
@@ -3904,6 +3986,7 @@ def _run_locked(
     lock_info: state.LockInfo,
     run_id: str,
     reply_text: str | None = None,
+    reply_origin: str = REPLY_ORIGIN_ARGV,
 ) -> tuple[int, dict[str, Any]]:
     snapshot = plans.inspect_plan(args.plan_dir)
     state_dir = state.plan_state_dir(snapshot.plan_dir, args.state_dir)
@@ -4061,6 +4144,7 @@ def _run_locked(
                 run_dir=run_dir,
                 reply_text=reply_text,
                 reply_context=reply_context,
+                reply_origin=reply_origin,
             )
         _finish_run(event_path, payload, progress, persistence=persistence)
         return finish_run_locked(0, payload)
@@ -4258,6 +4342,22 @@ def _run_locked(
     commit_at_end_attempted = False
     review_appended = False
     last_session_details: dict[str, Any] = {}
+    seen_external_command_ids: set[str] = set()
+
+    # Drain any commands that were queued before the run started so the
+    # first turn already reflects them.
+    _drain_external_control_queue(
+        plan_dir=snapshot.plan_dir,
+        state_dir_arg=args.state_dir,
+        control_state=run_controls.state,
+        seen_ids=seen_external_command_ids,
+        payload=payload,
+        event_path=event_path,
+        control_payload=control_payload,
+        context=None,
+        persistence=persistence,
+        run_control_lock=run_control_lock,
+    )
     try:
         while True:
             pending_session = snapshot.next_pending
@@ -4427,6 +4527,22 @@ def _run_locked(
             if is_review_session:
                 turn_harness = args.review_harness
             else:
+                _drain_external_control_queue(
+                    plan_dir=before.plan_dir,
+                    state_dir_arg=args.state_dir,
+                    control_state=run_controls.state,
+                    seen_ids=seen_external_command_ids,
+                    payload=payload,
+                    event_path=event_path,
+                    control_payload=control_payload,
+                    context={
+                        **session_identity,
+                        "turn_index": turn_index,
+                        "total_sessions": sum(_status_counts(before).values()),
+                    },
+                    persistence=persistence,
+                    run_control_lock=run_control_lock,
+                )
                 with run_control_lock:
                     turn_harness = _selected_future_harness(args, control_payload)
             turn_model_effort = _selected_model_effort_payload(
@@ -4472,6 +4588,7 @@ def _run_locked(
                     "turn_index": reply_context.turn_index,
                     "last_message_path": str(reply_context.last_message_path),
                     "reply_length": len(reply_text),
+                    "origin": reply_origin,
                 }
                 persisted_prompt = _reply_argv_placeholder(len(reply_text))
             else:
@@ -4973,6 +5090,18 @@ def _run_locked(
                     payload["reason"] = "all-complete"
                 break
 
+            _drain_external_control_queue(
+                plan_dir=snapshot.plan_dir,
+                state_dir_arg=args.state_dir,
+                control_state=run_controls.state,
+                seen_ids=seen_external_command_ids,
+                payload=payload,
+                event_path=event_path,
+                control_payload=control_payload,
+                context=turn_payload,
+                persistence=persistence,
+                run_control_lock=run_control_lock,
+            )
             with run_control_lock:
                 should_stop_after_current = _consume_run_control_stop(
                     run_controls,
@@ -5241,11 +5370,38 @@ def run_from_args(args: argparse.Namespace) -> int:
         return 1
 
     reply_text = getattr(args, "reply", None)
+    reply_via_stdin = bool(getattr(args, "reply_stdin", False))
+    reply_origin = REPLY_ORIGIN_ARGV
+    if reply_via_stdin:
+        if reply_text is not None:
+            payload = _error_payload(
+                args,
+                reason="conflicting-reply",
+                message="--reply and --reply-stdin are mutually exclusive",
+                paused=False,
+                cwd=cwd,
+            )
+            _emit_run_payload(args, payload)
+            return 1
+        try:
+            reply_text = read_reply_from_stdin()
+        except OSError as error:
+            payload = _error_payload(
+                args,
+                reason="reply-read-error",
+                message=str(error),
+                paused=False,
+                cwd=cwd,
+            )
+            _emit_run_payload(args, payload)
+            return 1
+        reply_origin = REPLY_ORIGIN_STDIN
     if reply_text is not None and not reply_text.strip():
+        flag = "--reply-stdin" if reply_via_stdin else "--reply"
         payload = _error_payload(
             args,
             reason="empty-reply",
-            message="--reply requires non-whitespace content",
+            message=f"{flag} requires non-whitespace content",
             paused=False,
             cwd=cwd,
         )
@@ -5292,6 +5448,7 @@ def run_from_args(args: argparse.Namespace) -> int:
                 lock_info=lock_info,
                 run_id=run_id,
                 reply_text=reply_text,
+                reply_origin=reply_origin,
             )
         finally:
             state.release_lock(initial_snapshot.plan_dir, args.state_dir)

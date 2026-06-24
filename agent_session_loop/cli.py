@@ -17,7 +17,126 @@ from . import (
     state,
     tail,
     verification,
+    workbench,
+    workbench_server,
 )
+
+
+_WORKBENCH_SERVE_CHILD_DESTS = {
+    "host": "_workbench_serve_host",
+    "port": "_workbench_serve_port",
+    "state_dir": "_workbench_serve_state_dir",
+    "plan_root": "_workbench_serve_plan_root",
+    "open": "_workbench_serve_open",
+    "json": "_workbench_serve_json",
+}
+
+
+def _workbench_dest(name: str, *, child_parser: bool) -> str:
+    if child_parser:
+        return _WORKBENCH_SERVE_CHILD_DESTS[name]
+    return name
+
+
+def _workbench_default(value: object, *, child_parser: bool) -> object:
+    if child_parser:
+        return argparse.SUPPRESS
+    return value
+
+
+def _normalize_workbench_serve_args(args: argparse.Namespace) -> argparse.Namespace:
+    if (
+        getattr(args, "command", None) != "workbench"
+        or getattr(args, "workbench_command", None) != "serve"
+    ):
+        return args
+
+    for public_dest, child_dest in _WORKBENCH_SERVE_CHILD_DESTS.items():
+        if public_dest == "plan_root":
+            continue
+        if hasattr(args, child_dest):
+            setattr(args, public_dest, getattr(args, child_dest))
+            delattr(args, child_dest)
+
+    child_plan_root = _WORKBENCH_SERVE_CHILD_DESTS["plan_root"]
+    if hasattr(args, child_plan_root):
+        plan_roots = list(getattr(args, "plan_root", None) or ())
+        plan_roots.extend(getattr(args, child_plan_root))
+        args.plan_root = plan_roots
+        delattr(args, child_plan_root)
+
+    return args
+
+
+class _AgentSessionLoopArgumentParser(argparse.ArgumentParser):
+    def parse_args(
+        self,
+        args: Sequence[str] | None = None,
+        namespace: argparse.Namespace | None = None,
+    ) -> argparse.Namespace:
+        parsed = super().parse_args(args, namespace)
+        return _normalize_workbench_serve_args(parsed)
+
+
+def _add_workbench_serve_args(
+    parser: argparse.ArgumentParser, *, child_parser: bool = False
+) -> None:
+    parser.add_argument(
+        "--host",
+        dest=_workbench_dest("host", child_parser=child_parser),
+        default=_workbench_default(
+            workbench_server.DEFAULT_HOST, child_parser=child_parser
+        ),
+        metavar="HOST",
+        help=(
+            f"Host interface to bind (default: {workbench_server.DEFAULT_HOST})"
+        ),
+    )
+    parser.add_argument(
+        "--port",
+        dest=_workbench_dest("port", child_parser=child_parser),
+        type=int,
+        default=_workbench_default(
+            workbench_server.DEFAULT_PORT, child_parser=child_parser
+        ),
+        metavar="PORT",
+        help=(
+            f"TCP port to bind (default: {workbench_server.DEFAULT_PORT}; "
+            "use 0 for an ephemeral port)"
+        ),
+    )
+    parser.add_argument(
+        "--state-dir",
+        dest=_workbench_dest("state_dir", child_parser=child_parser),
+        default=_workbench_default(None, child_parser=child_parser),
+        metavar="DIR",
+        help="Override operational state directory",
+    )
+    parser.add_argument(
+        "--plan-root",
+        dest=_workbench_dest("plan_root", child_parser=child_parser),
+        action="append",
+        default=_workbench_default(None, child_parser=child_parser),
+        metavar="DIR",
+        help=(
+            "Extra plan root directory to scan for discoverable plans "
+            "(may be repeated)"
+        ),
+    )
+    parser.add_argument(
+        "--open",
+        dest=_workbench_dest("open", child_parser=child_parser),
+        action="store_true",
+        default=_workbench_default(False, child_parser=child_parser),
+        help="Open the Workbench URL in the default browser after binding",
+    )
+    parser.add_argument(
+        "--json",
+        dest=_workbench_dest("json", child_parser=child_parser),
+        action="store_true",
+        default=_workbench_default(False, child_parser=child_parser),
+        help="Print machine-readable JSON startup output",
+    )
 
 
 def _add_unsafe_bypass_flags(parser: argparse.ArgumentParser) -> None:
@@ -37,7 +156,7 @@ def _add_unsafe_bypass_flags(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _AgentSessionLoopArgumentParser(
         prog=prog,
         description="Run split agent session plans one session at a time.",
     )
@@ -130,14 +249,25 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
             "marked loop-ready (preflight findings are still reported)"
         ),
     )
-    run_parser.add_argument(
+    reply_group = run_parser.add_mutually_exclusive_group()
+    reply_group.add_argument(
         "--reply",
         help=(
             "Resume the latest paused session with an inline reply; the "
             "text is sent as the operator answer for the first resumed turn"
         ),
     )
-    run_parser.set_defaults(handler=runner.run_from_args)
+    reply_group.add_argument(
+        "--reply-stdin",
+        dest="reply_stdin",
+        action="store_true",
+        help=(
+            "Read the operator reply from stdin instead of --reply, so the "
+            "text never appears in argv; behaves identically to --reply TEXT "
+            "otherwise"
+        ),
+    )
+    run_parser.set_defaults(handler=runner.run_from_args, reply_stdin=False)
 
     questions_parser = subparsers.add_parser(
         "questions",
@@ -408,6 +538,75 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Print parsed entries as machine-readable JSON",
     )
     progress_parser.set_defaults(handler=progress_cli.progress_from_args)
+
+    workbench_parser = subparsers.add_parser(
+        "workbench",
+        help="Run the local Workbench HTTP control plane.",
+    )
+    _add_workbench_serve_args(workbench_parser)
+    workbench_parser.set_defaults(
+        workbench_command=None,
+        handler=workbench_server.workbench_serve_from_args,
+    )
+    workbench_sub = workbench_parser.add_subparsers(
+        dest="workbench_command",
+    )
+
+    workbench_serve_parser = workbench_sub.add_parser(
+        "serve",
+        help="Start the loopback Workbench HTTP server.",
+    )
+    _add_workbench_serve_args(workbench_serve_parser, child_parser=True)
+    workbench_serve_parser.set_defaults(
+        handler=workbench_server.workbench_serve_from_args,
+    )
+
+    workbench_pin_parser = workbench_sub.add_parser(
+        "pin",
+        help="Pin a plan directory in the Workbench registry.",
+    )
+    workbench_pin_parser.add_argument(
+        "plan_dir",
+        help="Plan directory to pin (must exist on disk)",
+    )
+    workbench_pin_parser.add_argument(
+        "--cwd",
+        default=None,
+        help="Default working directory the Workbench should launch this plan in",
+    )
+    workbench_pin_parser.add_argument(
+        "--label",
+        default=None,
+        help="Human-readable label for the pin",
+    )
+    workbench_pin_parser.set_defaults(
+        handler=workbench.workbench_pin_from_args,
+    )
+
+    workbench_unpin_parser = workbench_sub.add_parser(
+        "unpin",
+        help="Remove a pinned plan directory from the Workbench registry.",
+    )
+    workbench_unpin_parser.add_argument(
+        "plan_dir",
+        help="Plan directory to unpin",
+    )
+    workbench_unpin_parser.set_defaults(
+        handler=workbench.workbench_unpin_from_args,
+    )
+
+    workbench_registry_parser = workbench_sub.add_parser(
+        "registry",
+        help="Print the current Workbench registry contents.",
+    )
+    workbench_registry_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the registry payload as machine-readable JSON",
+    )
+    workbench_registry_parser.set_defaults(
+        handler=workbench.workbench_registry_from_args,
+    )
 
     return parser
 

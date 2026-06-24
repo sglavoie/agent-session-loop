@@ -314,6 +314,17 @@ def _runner_state_payload(state_path: Path) -> dict[str, Any]:
 
     try:
         raw = json.loads(state_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        # The file vanished between ``exists()`` and ``read_text()``; treat
+        # it as absent rather than malformed so concurrent runner cleanup
+        # does not surface a 500 to the Workbench UI.
+        return {
+            "present": False,
+            "path": str(state_path),
+            "error": None,
+            "active_turn": None,
+            "active_verification": None,
+        }
     except (OSError, json.JSONDecodeError) as error:
         return {
             "present": True,
