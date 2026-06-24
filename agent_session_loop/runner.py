@@ -32,6 +32,7 @@ from . import (
     harnesses,
     plans,
     preflight,
+    progress_repair,
     qna,
     responses,
     run_control,
@@ -3140,6 +3141,166 @@ def _strip_own_lock_findings(
     )
 
 
+def _readiness_gate_blockers(
+    report: preflight.PreflightReport,
+) -> tuple[preflight.PreflightFinding, ...]:
+    return tuple(
+        finding
+        for finding in report.findings
+        if finding.severity in {"red", "yellow"}
+    )
+
+
+def _repair_readiness_gate(
+    report: preflight.PreflightReport,
+    *,
+    plan_dir: Path,
+    lock_info: state.LockInfo,
+    cwd: Path,
+    harness: str | None,
+    commit_mode: str | None,
+    state_dir: str | Path | None,
+    event_path: Path,
+    persistence: _RunPersistence,
+    snapshot: plans.PlanSnapshot,
+    review_requested: bool,
+) -> tuple[preflight.PreflightReport, dict[str, Any]]:
+    """Try to auto-repair progress/manifest-readiness-only gate failures.
+
+    The helper only repairs categories the operator can safely have the
+    runner rebuild from authoritative state:
+
+    - ``progress-journal-missing`` via force rebuild from completed
+      handoffs.
+    - ``manifest-readiness`` via a canonical ``loop-ready`` metadata
+      write, but only when no other blockers remain after the progress
+      phase. This also covers strict gate failures that have no preflight
+      finding, such as ``running`` or ``complete`` readiness with a current
+      SHA on a pending plan. When the run is a review-only complete start
+      (``--review-harness`` against a fully-complete plan whose original
+      readiness was ``complete``), the rewrite uses ``complete`` instead
+      so the auto-repair does not downgrade the lifecycle marker just to
+      pass the gate.
+
+    Any other red/yellow finding is left in place, and the caller is
+    expected to fall through to the usual ``not-loop-ready`` pause.
+    """
+
+    def rerun() -> preflight.PreflightReport | None:
+        try:
+            rerun_report = preflight.run_preflight(
+                plan_dir,
+                cwd=cwd,
+                harness=harness,
+                commit_mode=commit_mode,
+                state_dir=state_dir,
+            )
+        except plans.PlanError:
+            return None
+        return _strip_own_lock_findings(rerun_report, lock_info=lock_info)
+
+    attempted: list[str] = []
+    auto_repairs: list[preflight.AutoRepair] = []
+    errors: list[dict[str, str]] = []
+
+    blockers = _readiness_gate_blockers(report)
+    if any(blocker.category == "progress-journal-missing" for blocker in blockers):
+        attempted.append("progress-journal-missing")
+        try:
+            repair_result = progress_repair.repair_progress_journal(plan_dir)
+        except (plans.PlanError, OSError) as error:
+            errors.append(
+                {
+                    "category": "progress-journal-missing",
+                    "error": str(error),
+                }
+            )
+        else:
+            repair = preflight.AutoRepair(
+                action=repair_result.action,
+                category="progress-journal-missing",
+                path=str(repair_result.path),
+                entries_written=repair_result.entries_written,
+                completed_session_ids=repair_result.completed_session_ids,
+                journal_replaced=repair_result.journal_replaced,
+            )
+            auto_repairs.append(repair)
+            persistence.append_event(
+                event_path,
+                events.PREFLIGHT_AUTO_REPAIRED_EVENT,
+                asdict(repair),
+            )
+            rerun_report = rerun()
+            if rerun_report is not None:
+                report = rerun_report
+
+    blockers = _readiness_gate_blockers(report)
+    non_readiness_blockers = tuple(
+        blocker
+        for blocker in blockers
+        if blocker.category != "manifest-readiness"
+    )
+    if (
+        not _readiness_gate_passed(report)
+        and not non_readiness_blockers
+        and not _review_only_complete_start(
+            report,
+            review_requested=review_requested,
+            snapshot=snapshot,
+        )
+    ):
+        attempted.append("manifest-readiness")
+        target_state: plans.ReadinessState = "loop-ready"
+        if (
+            review_requested
+            and _all_sessions_complete(snapshot)
+            and report.readiness is not None
+            and report.readiness.state == "complete"
+        ):
+            target_state = "complete"
+        success, error = _write_readiness_state(plan_dir, target_state)
+        if not success:
+            errors.append(
+                {
+                    "category": "manifest-readiness",
+                    "error": error or "readiness write failed",
+                }
+            )
+        else:
+            repair = preflight.AutoRepair(
+                action="rewrite",
+                category="manifest-readiness",
+                path=str(plan_dir / "manifest.md"),
+                entries_written=0,
+                completed_session_ids=(),
+                journal_replaced=False,
+                target_state=target_state,
+            )
+            auto_repairs.append(repair)
+            persistence.append_event(
+                event_path,
+                events.PREFLIGHT_AUTO_REPAIRED_EVENT,
+                asdict(repair),
+            )
+            rerun_report = rerun()
+            if rerun_report is not None:
+                report = rerun_report
+
+    final_counts = {
+        "red": len(report.red_findings),
+        "yellow": len(report.yellow_findings),
+        "green": len(report.green_findings),
+    }
+    repair_payload: dict[str, Any] = {
+        "attempted": list(attempted),
+        "auto_repairs": [asdict(repair) for repair in auto_repairs],
+        "errors": errors,
+        "final_findings_by_severity": final_counts,
+        "ok": _readiness_gate_passed(report),
+    }
+    return report, repair_payload
+
+
 def _verification_failure_summary(
     result: verification.VerificationResult,
 ) -> str:
@@ -3932,19 +4093,44 @@ def _run_locked(
         and not allow_not_loop_ready
         and not review_only_complete_start
     ):
-        gate_message = _readiness_gate_failure_message(preflight_report)
-        with persistence.lock:
-            payload["final_snapshot"] = _snapshot_payload(snapshot)
-        _pause_run(
-            event_path,
-            payload,
-            reason="not-loop-ready",
-            message=gate_message,
-            details=gate_payload,
+        preflight_report, repair_payload = _repair_readiness_gate(
+            preflight_report,
+            plan_dir=snapshot.plan_dir,
+            lock_info=lock_info,
+            cwd=cwd,
+            harness=args.harness,
+            commit_mode=commit_mode,
+            state_dir=args.state_dir,
+            event_path=event_path,
             persistence=persistence,
+            snapshot=snapshot,
+            review_requested=review_requested,
         )
-        _finish_run(event_path, payload, progress, persistence=persistence)
-        return finish_run_locked(1, payload)
+        gate_payload = _readiness_gate_payload(preflight_report)
+        gate_passed = gate_payload["ok"]
+        review_only_complete_start = _review_only_complete_start(
+            preflight_report,
+            review_requested=review_requested,
+            snapshot=snapshot,
+        )
+        with persistence.lock:
+            payload["readiness_gate"] = gate_payload
+            payload["readiness_gate_repair"] = repair_payload
+
+        if not gate_passed and not review_only_complete_start:
+            gate_message = _readiness_gate_failure_message(preflight_report)
+            with persistence.lock:
+                payload["final_snapshot"] = _snapshot_payload(snapshot)
+            _pause_run(
+                event_path,
+                payload,
+                reason="not-loop-ready",
+                message=gate_message,
+                details=gate_payload,
+                persistence=persistence,
+            )
+            _finish_run(event_path, payload, progress, persistence=persistence)
+            return finish_run_locked(1, payload)
 
     try:
         if commit_mode == COMMIT_MODE_END:

@@ -77,8 +77,11 @@ Both `run` and `doctor` default to the current directory; pass
 The canonical loop-ready lifecycle is **split → expand → repair if needed →
 run**. In directory mode, `session-expand` validates the split plan and then
 runs final preflight with `--mark-loop-ready`; a clean plan is left ready for
-`session-run`. The runner hard-gates on the `loop-ready` readiness state, and
-each session is gated on its `## Completion Contract` `### Verify` recipe.
+`session-run`. `asl run` hard-gates on the `loop-ready` readiness state, but
+self-heals derived progress/readiness drift (stale or missing `progress.md`
+and recomputable `manifest.md` readiness metadata) before pausing, so a freshly
+split-and-expanded plan rarely needs a manual repair step. Each session is
+gated on its `## Completion Contract` `### Verify` recipe.
 
 1. Create the split plan with `session-split`. The skill writes
    `manifest.md` with three readiness lines populated as
@@ -125,8 +128,11 @@ $session-expand ~/.local/share/agent-plans/example-plan/
 
    You can also run the final gate manually. `--mark-loop-ready` repairs
    manifest-readiness-only findings (missing readiness lines, stale SHA, or
-   `draft`/`reviewed` state), but it still refuses when non-readiness red/yellow
-   findings remain:
+   `draft`/`reviewed` state) **and** auto-backfills stale/missing `progress.md`
+   (force semantics) when the only non-readiness blockers are
+   `progress-journal-missing` findings; both repairs surface in the JSON
+   payload's `auto_repairs` array. It still refuses when other non-readiness
+   red/yellow findings remain:
 
 ```bash
 asl preflight ~/.local/share/agent-plans/example-plan/ --cwd $PWD --json --mark-loop-ready
@@ -149,12 +155,22 @@ The runner stops when every `session-<id>.md` handoff status is `complete`, when
 when a pause condition requires review. Resume a paused run by re-running the
 same command after fixing the blocker.
 
-`asl run` hard-refuses any plan whose `**Readiness**` is not `loop-ready`.
+`asl run` refuses any plan whose `**Readiness**` is not `loop-ready`, but it
+first attempts to self-heal recoverable drift before pausing. The runner's
+readiness gate auto-repairs stale or missing `progress.md` (force semantics)
+and recomputable `manifest.md` readiness metadata (state, SHA, checked-at), then
+reruns preflight; if every blocker was derived, the run proceeds without
+operator intervention and the JSON payload's `readiness_gate_repair` field
+records what was rewritten. Non-derived blockers (contracts, paths, cwd,
+locks, harness availability, commit preflight, ambiguity sentinels, malformed
+plans, verification failures) still pause as before.
+
 Override with `--allow-not-loop-ready` for emergency execution; preflight
-findings are still reported in the run payload. The override also suppresses
-the per-session verification gate's `no-contract` pause, but it does not
-suppress failures from contracts that are present — a malformed or failing
-contract still pauses the run.
+findings are still reported in the run payload, and the readiness-gate
+auto-repair is skipped because the gate itself is bypassed. The override also
+suppresses the per-session verification gate's `no-contract` pause, but it
+does not suppress failures from contracts that are present — a malformed or
+failing contract still pauses the run.
 
 ASL is sequential by design. `session-run` always selects the next pending
 session from the manifest and runs one session per harness turn; there is no
@@ -298,11 +314,18 @@ asl unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
 `run` acquires a per-plan lock, inspects the first pending session, invokes the
 selected harness, records turn artifacts, and verifies that exactly the expected
 session changed from `pending` to `complete`. `run` also enforces the loop-ready
-gate: it refuses any plan whose `manifest.md` `**Readiness**` line is not
-`loop-ready`, unless `--allow-not-loop-ready` is passed. After each completed
-session, the runner invokes the same `asl verify` recipe; a non-zero exit pauses
-the run with `reason: verify-failed`. `--allow-not-loop-ready` also suppresses
-the verification gate's `no-contract` pause for sessions that lack a
+gate: unless `--allow-not-loop-ready` is passed, it requires `manifest.md`
+`**Readiness**` to be `loop-ready` after first attempting to repair derived
+drift. The repair path force-rebuilds stale or missing `progress.md`, rewrites
+recomputable readiness metadata, reruns preflight, and surfaces the attempt in
+the run JSON as `readiness_gate_repair`. Each repair entry uses the same fields
+as preflight `auto_repairs`; manifest-readiness rewrites set `target_state` to
+`"loop-ready"` or, for the complete-plan review path, `"complete"`.
+`--allow-not-loop-ready` skips this readiness-gate repair because the gate is
+bypassed. After each completed session, the runner invokes the same
+`asl verify` recipe; a non-zero exit pauses the run with
+`reason: verify-failed`. `--allow-not-loop-ready` also suppresses the
+verification gate's `no-contract` pause for sessions that lack a
 `## Completion Contract`, but it never suppresses a failing contract that is
 present. `--commit-per-session` then runs
 `spec commit --yes --no-verify` before the next harness turn starts.
@@ -342,10 +365,13 @@ harness/commit-mode prerequisites when `--cwd`, `--harness`, or a commit-mode
 flag is supplied. JSON output carries a stable shape with `findings`,
 `findings_by_severity`, `repair_hints`, `readiness`,
 `expected_readiness_sha256`, `mark_loop_ready_requested`, and
-`marked_loop_ready` fields. `--mark-loop-ready` flips `**Readiness**` to
-`loop-ready` and re-stamps the SHA and timestamp when the only blocking
-findings are manifest-readiness findings. It refuses when any non-readiness red
-or yellow finding remains.
+`marked_loop_ready` fields. JSON also always includes `auto_repairs`; it is an
+empty list unless `--mark-loop-ready` performed a derived repair.
+`--mark-loop-ready` force-backfills stale or missing `progress.md` when
+`progress-journal-missing` is the only non-readiness blocker, then flips
+`**Readiness**` to `loop-ready` and re-stamps the SHA and timestamp when the
+only remaining blocking findings are manifest-readiness findings. It refuses
+when any other non-readiness red or yellow finding remains.
 
 The readiness hash includes session files and expansion notes. Legacy
 `parallel-validation.md`, `## Parallel Execution` manifest blocks, and
@@ -459,8 +485,9 @@ plus a `reply_source` summary; the literal reply text is never stored in
 substitutes a placeholder like `<asl reply prompt redacted: N chars>` for the
 full in-harness reply prompt).
 The reply is consumed only after the resumed harness turn starts; pre-harness
-failures such as `not-loop-ready` preserve the previous paused `state.json` and
-`events.jsonl` so the same reply can be retried after repair.
+failures such as an uncleared `not-loop-ready` gate preserve the previous
+paused `state.json` and `events.jsonl` so the same reply can be retried after
+repair.
 Subsequent turns in the same run drop back to the plain session prompt. The
 flag is allowed only when the most recent turn paused with a non-empty
 `last-message.txt`; otherwise `run --reply` exits non-zero with `reason:
@@ -815,9 +842,11 @@ Common pause reasons:
   the lock is released, and `pause_details` identifies the session, requested
   harness, configured executable, resolved executable when available, config
   path, and error.
-- `not-loop-ready`: the plan's `manifest.md` `**Readiness**` is not `loop-ready`
-  and the run did not pass `--allow-not-loop-ready`. The pause payload includes
-  the readiness state and the preflight finding summary.
+- `not-loop-ready`: the plan's `manifest.md` `**Readiness**` is not
+  `loop-ready` after the runner attempted any eligible derived repair, and the
+  run did not pass `--allow-not-loop-ready`. The pause payload includes the
+  readiness state, preflight finding summary, and `readiness_gate_repair` when
+  a repair was attempted.
 - `unsafe`, `blocked`, `dependent`, `unresolved-prerequisite`: a
   `RUNNER_PAUSE: <reason> - ...` line from the invoked `session-run` skill
   carried a structured pause reason. The runner preserves that reason instead

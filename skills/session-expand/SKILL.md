@@ -313,7 +313,7 @@ In **directory mode**, after every other check is complete and any factual fixes
 asl preflight <plan-dir> --cwd <codebase-root> --json --mark-loop-ready
 ```
 
-Use the codebase root resolved in Step 1. If the codebase root is unknown, omit `--cwd` and say so in the summary. Treat the JSON response as the authoritative cross-cutting finding set and readiness gate — this skill should not re-implement every preflight rule. The command is expected to repair manifest-readiness-only findings (missing readiness lines, stale SHA, or `draft`/`reviewed` state) and mark the plan `loop-ready` when no other red/yellow findings remain. Capture and surface in the summary:
+Use the codebase root resolved in Step 1. If the codebase root is unknown, omit `--cwd` and say so in the summary. Treat the JSON response as the authoritative cross-cutting finding set and readiness gate — this skill should not re-implement every preflight rule. The command is expected to repair manifest-readiness-only findings (missing readiness lines, stale SHA, or `draft`/`reviewed` state) **and** auto-backfill stale/missing `progress.md` (force semantics) when the only non-readiness blockers are `progress-journal-missing` findings; any such auto-repair surfaces in the JSON payload's `auto_repairs` array with `action: "rewrite"`. Once those derived blockers are cleared, `--mark-loop-ready` marks the plan `loop-ready` when no other red/yellow findings remain. Capture and surface in the summary:
 
 - The total counts from `findings_by_severity` (red / yellow / green).
 - The `reason` field (e.g., `preflight-red`, `preflight-yellow`, `ok`, `loop-ready-marked`).
@@ -346,7 +346,7 @@ Print a concise summary:
 - Note they can optionally read the `.expand.md` files for concrete line numbers and patterns
 - When final preflight fails despite zero expansion issues, report the remaining preflight categories and recommend `<skill-prefix>plan-preflight-iterate <plan-dir>` before `session-run`.
 
-Only when final preflight succeeds with `ok: true` and readiness is `loop-ready`, end by printing the ready-to-paste `<skill-prefix>session-run <plan-directory>/` command so the user can proceed directly to execution without switching context. Otherwise, end with the ready-to-paste `<skill-prefix>plan-preflight-iterate <plan-directory>/` command.
+Only when final preflight succeeds with `ok: true` and readiness is `loop-ready`, end by printing the ready-to-paste `<skill-prefix>session-run <plan-directory>/` command so the user can proceed directly to execution without switching context. Otherwise, end with the ready-to-paste `<skill-prefix>plan-preflight-iterate <plan-directory>/` command. Note that `asl run <plan-directory>` self-heals stale/missing `progress.md` and recomputable `manifest.md` readiness metadata before pausing (surfaced via `readiness_gate_repair` in the run JSON), so the iterate skill is only required when a non-derived blocker (contracts, paths, locks, etc.) remains.
 
 ## Important Notes
 

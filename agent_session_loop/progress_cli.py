@@ -15,38 +15,15 @@ exercise it without real sleeps.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
 from pathlib import Path
 import sys
 import threading
 from typing import Any, TextIO
 
-from . import plans, responses, tail
+from . import plans, progress_repair, responses, tail
 
 
 DEFAULT_POLL_INTERVAL_SECONDS = tail.POLL_INTERVAL_SECONDS
-
-
-def _handoff_to_progress_entry(
-    handoff: plans.SessionHandoff,
-    completed_at: str,
-) -> plans.ProgressEntry:
-    files_modified: tuple[str, ...] = ()
-    if handoff.files_modified:
-        inline = handoff.files_modified[0]
-        files_modified = tuple(
-            part.strip() for part in inline.split(",") if part.strip()
-        )
-    return plans.ProgressEntry(
-        session_id=handoff.session_id,
-        status=handoff.status,
-        completed_at=completed_at,
-        files_modified=files_modified,
-        key_decisions=handoff.key_decisions,
-        discovered_facts=handoff.discovered_facts,
-        open_questions=handoff.open_questions,
-        blockers=handoff.blockers,
-    )
 
 
 def _entry_to_json(entry: plans.ProgressEntry) -> dict[str, Any]:
@@ -62,24 +39,6 @@ def _entry_to_json(entry: plans.ProgressEntry) -> dict[str, Any]:
     }
 
 
-def _utc_iso_from_mtime(path: Path) -> str:
-    moment = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
-    return moment.isoformat()
-
-
-def _build_backfill_entries(
-    snapshot: plans.PlanSnapshot,
-) -> list[plans.ProgressEntry]:
-    entries: list[plans.ProgressEntry] = []
-    for session_status in snapshot.sessions:
-        if session_status.status != "complete":
-            continue
-        handoff = plans.read_session_handoff(session_status.session)
-        completed_at = _utc_iso_from_mtime(session_status.session.path)
-        entries.append(_handoff_to_progress_entry(handoff, completed_at))
-    return entries
-
-
 def backfill_progress_from_args(args: argparse.Namespace) -> int:
     """Reconstruct ``progress.md`` from completed session handoffs."""
     plan_dir_arg = args.plan_dir
@@ -88,7 +47,7 @@ def backfill_progress_from_args(args: argparse.Namespace) -> int:
 
     try:
         snapshot = plans.inspect_plan(plan_dir_arg)
-        entries = _build_backfill_entries(snapshot)
+        entries = progress_repair.build_backfill_entries(snapshot)
     except plans.PlanError as error:
         print(
             f"agent-session-loop backfill-progress: {error}",
@@ -112,7 +71,9 @@ def backfill_progress_from_args(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        plans.write_progress_journal(snapshot.plan_dir, tuple(entries))
+        result = progress_repair.repair_progress_journal(
+            snapshot.plan_dir, snapshot=snapshot
+        )
     except (plans.PlanError, OSError) as error:
         print(
             f"agent-session-loop backfill-progress: {error}",
@@ -121,8 +82,8 @@ def backfill_progress_from_args(args: argparse.Namespace) -> int:
         return 1
 
     print(
-        f"agent-session-loop backfill-progress: wrote {len(entries)} entries "
-        f"to {progress_file}"
+        f"agent-session-loop backfill-progress: wrote {result.entries_written} "
+        f"entries to {result.path}"
     )
     return 0
 

@@ -31,6 +31,7 @@ from agent_session_loop import (
     plans,
     preflight,
     progress_cli,
+    progress_repair,
     qna,
     run_control,
     runner,
@@ -13948,6 +13949,135 @@ class PreflightCliTests(unittest.TestCase):
         self.assertIsNotNone(readiness)
         self.assertEqual("draft", readiness.state)
 
+    def test_preflight_mark_loop_ready_auto_backfills_missing_progress_journal(
+        self,
+    ) -> None:
+        _write_loop_ready_plan(
+            self.plan_dir,
+            ("complete",),
+            contracts_by_id={
+                "1": _contract_block(
+                    '{"type": "file_exists", "path": "README.md", '
+                    '"name": "readme-1"}',
+                    session="1",
+                )
+            },
+        )
+        progress_file = plans.progress_path(self.plan_dir)
+        self.assertFalse(progress_file.exists())
+
+        completed = self._run_preflight(mark_loop_ready=True)
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("loop-ready-marked", payload["reason"])
+        self.assertTrue(payload["marked_loop_ready"])
+        self.assertIn("auto_repairs", payload)
+        self.assertEqual(1, len(payload["auto_repairs"]))
+        repair = payload["auto_repairs"][0]
+        self.assertEqual("rewrite", repair["action"])
+        self.assertEqual("progress-journal-missing", repair["category"])
+        self.assertEqual(str(progress_file), repair["path"])
+        self.assertEqual(1, repair["entries_written"])
+        self.assertEqual(["1"], repair["completed_session_ids"])
+        self.assertFalse(repair["journal_replaced"])
+        # The progress.md was actually rebuilt and the rerun no longer surfaces
+        # progress-journal-missing.
+        self.assertTrue(progress_file.exists())
+        categories = {finding["category"] for finding in payload["findings"]}
+        self.assertNotIn("progress-journal-missing", categories)
+        entries = plans.read_progress_entries(self.plan_dir)
+        self.assertEqual(("1",), tuple(entry.session_id.value for entry in entries))
+
+    def test_preflight_mark_loop_ready_refuses_when_progress_plus_other_blocker(
+        self,
+    ) -> None:
+        _write_loop_ready_plan(
+            self.plan_dir,
+            ("complete",),
+            contracts_by_id={
+                "1": _contract_block(
+                    '{"type": "file_exists", "path": "README.md", '
+                    '"name": "readme-1"}',
+                    session="1",
+                )
+            },
+        )
+        # Inject a yellow ambiguity sentinel so progress-journal-missing is not
+        # the only non-readiness blocker. Readiness SHA excludes handoffs and
+        # sentinel-only edits do not affect the stable hash because they live
+        # inside the instructions body, so refresh readiness explicitly.
+        session_path = self.plan_dir / "session-1.md"
+        text = session_path.read_text(encoding="utf-8")
+        session_path.write_text(
+            text.replace("Instructions.", "Instructions. TODO: revisit later"),
+            encoding="utf-8",
+        )
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        progress_file = plans.progress_path(self.plan_dir)
+        self.assertFalse(progress_file.exists())
+
+        completed = self._run_preflight(mark_loop_ready=True)
+
+        self.assertEqual(1, completed.returncode)
+        payload = json.loads(completed.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("preflight-yellow", payload["reason"])
+        self.assertTrue(payload["mark_loop_ready_requested"])
+        self.assertFalse(payload["marked_loop_ready"])
+        self.assertIn("non-readiness", payload["mark_error"])
+        self.assertEqual([], payload["auto_repairs"])
+        # No repair attempted because the blockers were not progress-only.
+        self.assertFalse(progress_file.exists())
+        categories = {finding["category"] for finding in payload["findings"]}
+        self.assertIn("progress-journal-missing", categories)
+        self.assertIn("ambiguity-sentinel", categories)
+
+    def test_preflight_json_auto_repairs_empty_when_no_repair_runs(self) -> None:
+        completed = self._run_preflight(mark_loop_ready=True)
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertIn("auto_repairs", payload)
+        self.assertEqual([], payload["auto_repairs"])
+
+    def test_preflight_text_output_mentions_auto_repair(self) -> None:
+        _write_loop_ready_plan(
+            self.plan_dir,
+            ("complete",),
+            contracts_by_id={
+                "1": _contract_block(
+                    '{"type": "file_exists", "path": "README.md", '
+                    '"name": "readme-1"}',
+                    session="1",
+                )
+            },
+        )
+        completed = self._run_preflight(
+            json_output=False,
+            mark_loop_ready=True,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn(
+            "Auto-repair: rebuilt progress journal", completed.stdout
+        )
+        self.assertIn("1 entry written", completed.stdout)
+        self.assertIn("Preflight: ok", completed.stdout)
+        self.assertIn("Loop-ready: marked", completed.stdout)
+        # Stable reason strings remain unaffected.
+        self.assertNotIn("loop-ready-refused", completed.stdout)
+        self.assertNotIn("loop-ready-write-failed", completed.stdout)
+
     def test_preflight_text_output_lists_findings(self) -> None:
         path_value = self._path_value("codex", "spec", "amx")
         completed = self._run_preflight(
@@ -14396,40 +14526,98 @@ class RunReadinessGateTests(unittest.TestCase):
         )
         return completed, json.loads(completed.stdout)
 
-    def test_run_refuses_when_readiness_metadata_missing(self) -> None:
+    def test_run_auto_repairs_when_readiness_metadata_missing(self) -> None:
         self._write_plan(("pending",), readiness=None)
 
         completed, payload = self._run()
 
-        self.assertEqual(1, completed.returncode)
-        self.assertFalse(payload["ok"])
-        self.assertTrue(payload["paused"])
-        self.assertEqual("not-loop-ready", payload["pause_reason"])
-        self.assertIn("readiness metadata", payload["pause_message"])
-        gate = payload["readiness_gate"]
-        self.assertFalse(gate["ok"])
-        self.assertIsNone(gate["readiness_state"])
-        self.assertIsNone(payload["readiness_state_initial"])
-        self.assertIsNone(payload["readiness_state_final"])
-        self.assertIsNone(plans.read_readiness_metadata(self.plan_dir))
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+        repair_payload = payload["readiness_gate_repair"]
+        self.assertEqual(["manifest-readiness"], repair_payload["attempted"])
+        self.assertTrue(repair_payload["ok"])
+        self.assertEqual([], repair_payload["errors"])
+        self.assertEqual(1, len(repair_payload["auto_repairs"]))
+        repair = repair_payload["auto_repairs"][0]
+        self.assertEqual("rewrite", repair["action"])
+        self.assertEqual("manifest-readiness", repair["category"])
+        self.assertEqual(
+            str((self.plan_dir / "manifest.md").resolve()), repair["path"]
+        )
+        self.assertEqual(0, repair["entries_written"])
+        self.assertEqual([], repair["completed_session_ids"])
+        self.assertFalse(repair["journal_replaced"])
+        # Readiness lifecycle picks up from the repaired metadata.
+        self.assertEqual("complete", payload["readiness_state_final"])
+        metadata = plans.read_readiness_metadata(self.plan_dir)
+        self.assertIsNotNone(metadata)
+        self.assertEqual(
+            plans.stable_readiness_sha256(self.plan_dir),
+            metadata.readiness_sha256,
+        )
 
-    def test_run_refuses_when_state_is_reviewed(self) -> None:
+    def test_run_auto_repairs_when_state_is_reviewed(self) -> None:
         self._write_plan(("pending",), readiness="reviewed")
 
         completed, payload = self._run()
 
-        self.assertEqual(1, completed.returncode)
-        self.assertTrue(payload["paused"])
-        self.assertEqual("not-loop-ready", payload["pause_reason"])
-        gate = payload["readiness_gate"]
-        self.assertFalse(gate["ok"])
-        self.assertEqual("reviewed", gate["readiness_state"])
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
         self.assertEqual("reviewed", payload["readiness_state_initial"])
+        repair_payload = payload["readiness_gate_repair"]
+        self.assertEqual(["manifest-readiness"], repair_payload["attempted"])
+        self.assertTrue(repair_payload["ok"])
+        # Metadata was rewritten to ``loop-ready`` and then lifecycled to
+        # ``complete`` once the only pending session finished.
         self.assertEqual(
-            "reviewed", plans.read_readiness_metadata(self.plan_dir).state
+            "complete", plans.read_readiness_metadata(self.plan_dir).state
         )
 
-    def test_run_refuses_when_recorded_sha_does_not_match(self) -> None:
+    def test_run_auto_repairs_when_state_is_complete_on_pending_plan(self) -> None:
+        self._write_plan(("pending",), readiness="complete")
+
+        completed, payload = self._run()
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual("complete", payload["readiness_state_initial"])
+        repair_payload = payload["readiness_gate_repair"]
+        self.assertEqual(["manifest-readiness"], repair_payload["attempted"])
+        self.assertTrue(repair_payload["ok"])
+        self.assertEqual([], repair_payload["errors"])
+        self.assertEqual(1, len(repair_payload["auto_repairs"]))
+        repair = repair_payload["auto_repairs"][0]
+        self.assertEqual("manifest-readiness", repair["category"])
+        self.assertEqual("loop-ready", repair["target_state"])
+        self.assertEqual(
+            "complete", plans.read_readiness_metadata(self.plan_dir).state
+        )
+
+    def test_run_auto_repairs_when_state_is_running_on_pending_plan(self) -> None:
+        self._write_plan(("pending",), readiness="running")
+
+        completed, payload = self._run()
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual("running", payload["readiness_state_initial"])
+        repair_payload = payload["readiness_gate_repair"]
+        self.assertEqual(["manifest-readiness"], repair_payload["attempted"])
+        self.assertTrue(repair_payload["ok"])
+        self.assertEqual([], repair_payload["errors"])
+        self.assertEqual(1, len(repair_payload["auto_repairs"]))
+        repair = repair_payload["auto_repairs"][0]
+        self.assertEqual("manifest-readiness", repair["category"])
+        self.assertEqual("loop-ready", repair["target_state"])
+        self.assertEqual(
+            "complete", plans.read_readiness_metadata(self.plan_dir).state
+        )
+
+    def test_run_auto_repairs_when_recorded_sha_does_not_match(self) -> None:
         self._write_plan(
             ("pending",),
             readiness="loop-ready",
@@ -14438,23 +14626,19 @@ class RunReadinessGateTests(unittest.TestCase):
 
         completed, payload = self._run()
 
-        self.assertEqual(1, completed.returncode)
-        self.assertTrue(payload["paused"])
-        self.assertEqual("not-loop-ready", payload["pause_reason"])
-        gate = payload["readiness_gate"]
-        self.assertFalse(gate["ok"])
-        self.assertFalse(gate["preflight_ok"])
-        self.assertEqual("0" * 64, gate["recorded_readiness_sha256"])
-        self.assertNotEqual(
-            gate["recorded_readiness_sha256"],
-            gate["expected_readiness_sha256"],
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+        repair_payload = payload["readiness_gate_repair"]
+        self.assertEqual(["manifest-readiness"], repair_payload["attempted"])
+        self.assertTrue(repair_payload["ok"])
+        metadata = plans.read_readiness_metadata(self.plan_dir)
+        self.assertIsNotNone(metadata)
+        self.assertNotEqual("0" * 64, metadata.readiness_sha256)
+        self.assertEqual(
+            plans.stable_readiness_sha256(self.plan_dir),
+            metadata.readiness_sha256,
         )
-        manifest_readiness_findings = [
-            finding
-            for finding in gate["findings"]
-            if finding["category"] == "manifest-readiness"
-        ]
-        self.assertTrue(manifest_readiness_findings)
 
     def test_allow_not_loop_ready_lets_run_proceed_and_reports_findings(
         self,
@@ -14562,6 +14746,135 @@ class RunReadinessGateTests(unittest.TestCase):
         self.assertEqual("reviewed", payload["readiness_state_final"])
         metadata = plans.read_readiness_metadata(self.plan_dir)
         self.assertEqual("reviewed", metadata.state)
+
+    def test_run_auto_repairs_missing_progress_journal_and_proceeds(self) -> None:
+        self._write_plan(("complete", "pending"), readiness="loop-ready")
+        progress_file = plans.progress_path(self.plan_dir)
+        self.assertFalse(progress_file.exists())
+
+        completed, payload = self._run()
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual("all-complete", payload["reason"])
+
+        repair_payload = payload["readiness_gate_repair"]
+        self.assertEqual(["progress-journal-missing"], repair_payload["attempted"])
+        self.assertEqual([], repair_payload["errors"])
+        self.assertTrue(repair_payload["ok"])
+        self.assertEqual(1, len(repair_payload["auto_repairs"]))
+        repair = repair_payload["auto_repairs"][0]
+        self.assertEqual("rewrite", repair["action"])
+        self.assertEqual("progress-journal-missing", repair["category"])
+        self.assertEqual(str(progress_file), repair["path"])
+        self.assertEqual(1, repair["entries_written"])
+        self.assertEqual(["1"], repair["completed_session_ids"])
+        self.assertFalse(repair["journal_replaced"])
+
+        self.assertTrue(payload["readiness_gate"]["ok"])
+        self.assertTrue(progress_file.exists())
+        entries = plans.read_progress_entries(self.plan_dir)
+        self.assertEqual(
+            ["1", "2"], [entry.session_id.value for entry in entries]
+        )
+
+        event_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir)
+            / events.EVENTS_FILE_NAME
+        )
+        repair_events = [
+            record
+            for record in read_jsonl(event_path)
+            if record["name"] == events.PREFLIGHT_AUTO_REPAIRED_EVENT
+        ]
+        self.assertEqual(1, len(repair_events))
+        self.assertEqual(
+            "progress-journal-missing", repair_events[0]["payload"]["category"]
+        )
+
+    def test_run_auto_repairs_progress_and_readiness_together(self) -> None:
+        self._write_plan(("complete", "pending"), readiness=None)
+
+        completed, payload = self._run()
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+
+        repair_payload = payload["readiness_gate_repair"]
+        self.assertEqual(
+            ["progress-journal-missing", "manifest-readiness"],
+            repair_payload["attempted"],
+        )
+        self.assertEqual([], repair_payload["errors"])
+        self.assertTrue(repair_payload["ok"])
+        categories = [
+            repair["category"] for repair in repair_payload["auto_repairs"]
+        ]
+        self.assertEqual(
+            ["progress-journal-missing", "manifest-readiness"], categories
+        )
+        self.assertTrue(plans.progress_path(self.plan_dir).exists())
+        metadata = plans.read_readiness_metadata(self.plan_dir)
+        self.assertIsNotNone(metadata)
+
+    def test_allow_not_loop_ready_skips_auto_repair(self) -> None:
+        self._write_plan(("pending",), readiness=None)
+
+        completed, payload = self._run(allow_not_loop_ready=True)
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        # The bypass path never runs auto-repair, so the field is absent.
+        self.assertNotIn("readiness_gate_repair", payload)
+        # Readiness metadata was not synthesised on behalf of the bypass.
+        self.assertIsNone(plans.read_readiness_metadata(self.plan_dir))
+
+    def test_run_pauses_when_non_repairable_finding_remains(self) -> None:
+        self._write_plan(("complete", "pending"), readiness="loop-ready")
+        # Inject a yellow ambiguity sentinel so progress-journal-missing is not
+        # the only non-readiness blocker. Refresh readiness SHA so the
+        # manifest-readiness drift does not also fire.
+        session_path = self.plan_dir / "session-2.md"
+        text = session_path.read_text(encoding="utf-8")
+        session_path.write_text(
+            text.replace("Instructions.", "Instructions. TODO: revisit later"),
+            encoding="utf-8",
+        )
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        progress_file = plans.progress_path(self.plan_dir)
+        self.assertFalse(progress_file.exists())
+
+        completed, payload = self._run()
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("not-loop-ready", payload["pause_reason"])
+
+        repair_payload = payload["readiness_gate_repair"]
+        # Progress repair was attempted (it is always attempted when the
+        # category is present), but manifest-readiness was not (other blocker
+        # remained after the progress repair).
+        self.assertEqual(["progress-journal-missing"], repair_payload["attempted"])
+        self.assertEqual([], repair_payload["errors"])
+        self.assertFalse(repair_payload["ok"])
+        self.assertEqual(1, len(repair_payload["auto_repairs"]))
+
+        # The journal really was rebuilt even though the run paused.
+        self.assertTrue(progress_file.exists())
+        # The final gate payload still surfaces the unresolved sentinel.
+        gate_findings = payload["readiness_gate"]["findings"]
+        categories = {finding["category"] for finding in gate_findings}
+        self.assertIn("ambiguity-sentinel", categories)
+        self.assertNotIn("progress-journal-missing", categories)
 
 
 class RunVerificationEnforcementTests(unittest.TestCase):
@@ -15861,6 +16174,210 @@ class ProgressCliTests(unittest.TestCase):
         self.assertTrue(args.json)
 
 
+class ProgressRepairHelperTests(unittest.TestCase):
+    """Coverage for the shared `progress_repair.repair_progress_journal`."""
+
+    def _write_completed_plan(
+        self,
+        plan_dir: Path,
+        session_ids: tuple[str, ...] = ("1", "2", "3"),
+        *,
+        complete_ids: tuple[str, ...] | None = None,
+    ) -> None:
+        plan_dir.mkdir(parents=True, exist_ok=True)
+        (plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
+        (plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
+        complete = set(complete_ids) if complete_ids is not None else set(session_ids)
+        for session_id in session_ids:
+            filename = plans.session_id_to_filename(session_id)
+            label = plans.session_id_display_label(session_id)
+            status = "complete" if session_id in complete else "pending"
+            (plan_dir / filename).write_text(
+                "\n".join(
+                    [
+                        f"# {label}: Test",
+                        "",
+                        "Instructions.",
+                        "",
+                        "## Handoff",
+                        "",
+                        f"- **Status**: {status}",
+                        f"- **Files modified**: file-{session_id}.py",
+                        f"- **Key decisions**: decision for {session_id}",
+                        "- **Blockers for next session**: (none)",
+                        f"- **Notes**: notes for {session_id}",
+                        "",
+                        "### Discovered Facts",
+                        "",
+                        f"- fact about {session_id}",
+                        "",
+                        "### Open Questions",
+                        "",
+                        f"- question about {session_id}",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+    def test_repair_writes_fresh_journal_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            self._write_completed_plan(plan_dir, ("1", "2"))
+            progress_file = plans.progress_path(plan_dir)
+            self.assertFalse(progress_file.exists())
+
+            result = progress_repair.repair_progress_journal(plan_dir)
+
+            self.assertEqual("rewrite", result.action)
+            self.assertEqual(progress_file, result.path)
+            self.assertEqual(2, result.entries_written)
+            self.assertEqual(("1", "2"), result.completed_session_ids)
+            self.assertFalse(result.journal_replaced)
+            entries = plans.read_progress_entries(plan_dir)
+            self.assertEqual(
+                ["1", "2"],
+                [entry.session_id.value for entry in entries],
+            )
+            self.assertEqual(("file-1.py",), entries[0].files_modified)
+
+    def test_repair_replaces_header_only_journal_with_full_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            self._write_completed_plan(plan_dir, ("1", "2"))
+            plans.write_progress_journal(plan_dir, ())
+            self.assertEqual(
+                plans.PROGRESS_HEADER,
+                plans.progress_path(plan_dir).read_text(encoding="utf-8"),
+            )
+
+            result = progress_repair.repair_progress_journal(plan_dir)
+
+            self.assertTrue(result.journal_replaced)
+            self.assertEqual(2, result.entries_written)
+            self.assertEqual(("1", "2"), result.completed_session_ids)
+            self.assertEqual(
+                ["1", "2"],
+                [
+                    entry.session_id.value
+                    for entry in plans.read_progress_entries(plan_dir)
+                ],
+            )
+
+    def test_repair_overwrites_stale_journal_with_authoritative_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            self._write_completed_plan(plan_dir, ("1", "2"))
+            stale_only = (
+                plans.ProgressEntry(
+                    session_id=plans.parse_session_id("1"),
+                    status="complete",
+                    completed_at="2020-01-01T00:00:00Z",
+                    files_modified=("stale.py",),
+                    key_decisions="stale decision",
+                    discovered_facts=(),
+                    open_questions=(),
+                    blockers=None,
+                ),
+            )
+            plans.write_progress_journal(plan_dir, stale_only)
+
+            result = progress_repair.repair_progress_journal(plan_dir)
+
+            self.assertTrue(result.journal_replaced)
+            self.assertEqual(2, result.entries_written)
+            self.assertEqual(("1", "2"), result.completed_session_ids)
+            entries = plans.read_progress_entries(plan_dir)
+            self.assertEqual(
+                ["1", "2"],
+                [entry.session_id.value for entry in entries],
+            )
+            for entry in entries:
+                self.assertEqual(
+                    f"decision for {entry.session_id.value}",
+                    entry.key_decisions,
+                )
+                self.assertNotEqual("stale decision", entry.key_decisions)
+
+    def test_repair_force_replaces_malformed_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            self._write_completed_plan(plan_dir, ("1",))
+            progress_file = plans.progress_path(plan_dir)
+            progress_file.write_text(
+                "# Progress Journal\n"
+                "<!-- agent-session-loop progress-journal v999 -->\n"
+                "garbage that the parser would reject\n",
+                encoding="utf-8",
+            )
+
+            result = progress_repair.repair_progress_journal(plan_dir)
+
+            self.assertTrue(result.journal_replaced)
+            self.assertEqual(1, result.entries_written)
+            self.assertIn(
+                plans.PROGRESS_SCHEMA_COMMENT,
+                progress_file.read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                ("1",),
+                tuple(
+                    entry.session_id.value
+                    for entry in plans.read_progress_entries(plan_dir)
+                ),
+            )
+
+    def test_repair_writes_header_only_when_no_completed_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            self._write_completed_plan(
+                plan_dir, ("1", "2"), complete_ids=()
+            )
+            progress_file = plans.progress_path(plan_dir)
+            self.assertFalse(progress_file.exists())
+
+            result = progress_repair.repair_progress_journal(plan_dir)
+
+            self.assertEqual(0, result.entries_written)
+            self.assertEqual((), result.completed_session_ids)
+            self.assertFalse(result.journal_replaced)
+            self.assertEqual(
+                plans.PROGRESS_HEADER,
+                progress_file.read_text(encoding="utf-8"),
+            )
+            self.assertEqual((), plans.read_progress_entries(plan_dir))
+
+    def test_repair_uses_atomic_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            self._write_completed_plan(plan_dir, ("1", "2"))
+
+            with mock.patch(
+                "agent_session_loop.plans.os.replace",
+                wraps=os.replace,
+            ) as replace:
+                progress_repair.repair_progress_journal(plan_dir)
+
+            self.assertEqual(1, replace.call_count)
+
+    def test_repair_uses_provided_snapshot_without_reinspecting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            self._write_completed_plan(plan_dir, ("1",))
+            snapshot = plans.inspect_plan(plan_dir)
+
+            with mock.patch(
+                "agent_session_loop.progress_repair.plans.inspect_plan"
+            ) as inspect:
+                result = progress_repair.repair_progress_journal(
+                    plan_dir, snapshot=snapshot
+                )
+
+            inspect.assert_not_called()
+            self.assertEqual(1, result.entries_written)
+            self.assertEqual(("1",), result.completed_session_ids)
+
+
 class RunReviewHarnessLifecycleTests(unittest.TestCase):
     """End-to-end coverage for ``--review-harness`` lifecycle integration."""
 
@@ -16155,6 +16672,93 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         # 'complete' once all sessions (impl + review) ended complete.
         self.assertEqual("complete", payload["readiness_state_initial"])
         self.assertEqual("complete", payload["readiness_state_final"])
+
+    def test_complete_plan_review_harness_repairs_progress_journal(
+        self,
+    ) -> None:
+        # Complete plan with `readiness=complete`; delete the journal so the
+        # auto-repair must rebuild it. The repair must rebuild progress.md
+        # without entering the manifest-readiness phase (no SHA drift) and
+        # without downgrading the `complete` readiness marker.
+        self._write_plan(("complete",), readiness="complete")
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        self._precreate_final_review()
+        progress_file = plans.progress_path(self.plan_dir)
+        self.assertTrue(progress_file.exists())
+        progress_file.unlink()
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertTrue(payload["review_completed"])
+        self.assertEqual("complete", payload["readiness_state_initial"])
+        self.assertEqual("complete", payload["readiness_state_final"])
+        self.assertTrue(progress_file.exists())
+
+        repair_payload = payload["readiness_gate_repair"]
+        self.assertEqual(
+            ["progress-journal-missing"], repair_payload["attempted"]
+        )
+        self.assertEqual([], repair_payload["errors"])
+        # `ok` is the strict readiness-gate state (`loop-ready`); the
+        # complete plan stays at `complete`, so the strict gate stays
+        # False even though the run proceeds via the review-only
+        # complete-start exception.
+        self.assertFalse(repair_payload["ok"])
+        # Only the progress repair fired; manifest-readiness was not needed.
+        categories = [
+            repair["category"] for repair in repair_payload["auto_repairs"]
+        ]
+        self.assertEqual(["progress-journal-missing"], categories)
+        # Final on-disk readiness is `complete` (the lifecycle finishes
+        # writing it after the review session completes).
+        metadata = plans.read_readiness_metadata(self.plan_dir)
+        self.assertEqual("complete", metadata.state)
+
+    def test_complete_plan_review_harness_repairs_sha_keeps_complete_readiness(
+        self,
+    ) -> None:
+        # Complete plan with `readiness=complete` but a stale SHA. The
+        # auto-repair must rewrite the manifest readiness metadata with the
+        # current SHA *and* keep the state at `complete`, not downgrade to
+        # `loop-ready` just to satisfy the readiness gate.
+        self._write_plan(
+            ("complete",), readiness="complete", sha_override="0" * 64
+        )
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        self._precreate_final_review()
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertTrue(payload["review_completed"])
+        self.assertEqual("complete", payload["readiness_state_initial"])
+        self.assertEqual("complete", payload["readiness_state_final"])
+
+        repair_payload = payload["readiness_gate_repair"]
+        self.assertEqual(
+            ["manifest-readiness"], repair_payload["attempted"]
+        )
+        self.assertEqual([], repair_payload["errors"])
+        # `ok` is the strict readiness-gate state (`loop-ready`); the
+        # complete plan stays at `complete`, so the strict gate stays
+        # False even though the run proceeds via the review-only
+        # complete-start exception.
+        self.assertFalse(repair_payload["ok"])
+        self.assertEqual(1, len(repair_payload["auto_repairs"]))
+        repair = repair_payload["auto_repairs"][0]
+        self.assertEqual("manifest-readiness", repair["category"])
+        # The fix: target_state is `complete`, not `loop-ready`. This is the
+        # whole point of the review-only complete start branch in
+        # `_repair_readiness_gate`.
+        self.assertEqual("complete", repair["target_state"])
+        metadata = plans.read_readiness_metadata(self.plan_dir)
+        self.assertEqual("complete", metadata.state)
+        self.assertNotEqual("0" * 64, metadata.readiness_sha256)
 
     def test_resumes_existing_pending_review_session(self) -> None:
         # Author the plan as fully complete + readiness=loop-ready first,
@@ -17483,10 +18087,71 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         self.assertFalse(resume_payload["paused"])
         self.assertEqual("all-complete", resume_payload["reason"])
 
+    def test_reply_resume_after_auto_repair_fixes_readiness_and_succeeds(
+        self,
+    ) -> None:
+        # The first run is allow-not-loop-ready so the missing readiness
+        # metadata does not block the initial pause on the operator
+        # question. The reply attempt must run with the gate enforced
+        # so the runner-side auto-repair fires before consuming the
+        # paused reply context.
+        self._write_plan()
+        first_completed, first_payload = self._run_run(mode="reply-aware")
+        self.assertEqual(1, first_completed.returncode, first_completed.stderr)
+        self.assertTrue(first_payload["paused"])
+        self.assertIsNone(plans.read_readiness_metadata(self.plan_dir))
+
+        resume_completed, resume_payload = self._run_run(
+            mode="reply-aware",
+            reply=self.REPLY_TEXT,
+            allow_not_loop_ready=False,
+        )
+
+        self.assertEqual(
+            0, resume_completed.returncode, resume_completed.stderr
+        )
+        self.assertTrue(resume_payload["ok"])
+        self.assertFalse(resume_payload["paused"])
+        self.assertEqual("all-complete", resume_payload["reason"])
+        repair_payload = resume_payload["readiness_gate_repair"]
+        self.assertEqual(["manifest-readiness"], repair_payload["attempted"])
+        self.assertEqual([], repair_payload["errors"])
+        self.assertTrue(repair_payload["ok"])
+        self.assertEqual(1, len(repair_payload["auto_repairs"]))
+        self.assertEqual(
+            "loop-ready", repair_payload["auto_repairs"][0]["target_state"]
+        )
+        self.assertEqual("reply", resume_payload["turns"][0]["prompt_kind"])
+        session_text = (self.plan_dir / "session-1.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("- **Status**: complete", session_text)
+        # The reply was actually consumed: only metadata, not the operator
+        # text, leaks into the persisted reply event.
+        plan_state = state.plan_state_dir(self.plan_dir, self.state_dir)
+        records = read_jsonl(plan_state / events.EVENTS_FILE_NAME)
+        reply_events = [
+            record
+            for record in records
+            if record.get("name") == events.REPLY_PROVIDED_EVENT
+        ]
+        self.assertEqual(1, len(reply_events))
+        self.assertNotIn(self.REPLY_TEXT, json.dumps(reply_events[0]))
+
     def test_failed_reply_readiness_gate_preserves_paused_context_for_retry(
         self,
     ) -> None:
         self._write_plan()
+        # Inject a yellow ambiguity sentinel so the readiness gate retains a
+        # non-repairable blocker; otherwise the runner-side auto-repair would
+        # rebuild the missing readiness metadata and let the reply through.
+        session_path = self.plan_dir / "session-1.md"
+        session_path.write_text(
+            session_path.read_text(encoding="utf-8").replace(
+                "Instructions.", "Instructions. TODO: revisit later"
+            ),
+            encoding="utf-8",
+        )
         first_completed, first_payload = self._run_run(mode="reply-aware")
         self.assertEqual(1, first_completed.returncode, first_completed.stderr)
         self.assertTrue(first_payload["paused"])

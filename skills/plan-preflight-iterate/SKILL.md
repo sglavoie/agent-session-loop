@@ -77,7 +77,7 @@ Capture stdout. Parse the JSON body. Expect the stable shape emitted by `agent_s
 
 If exit code is non-zero and the JSON body contains a `reason` of `plan-structure`, print the error and stop — the plan directory itself is malformed and must be repaired or recreated with `session-split` before this skill can help.
 
-If `ok` is `True` and the baseline already has no red/yellow findings, skip directly to Step 5 (Mark Loop-Ready). If the only red/yellow findings are `manifest-readiness` findings, also skip to Step 5 because `asl preflight --mark-loop-ready` is the canonical repair for missing readiness metadata, stale readiness SHA, and `draft`/`reviewed` readiness state.
+If `ok` is `True` and the baseline already has no red/yellow findings, skip directly to Step 5 (Mark Loop-Ready). If the only red/yellow findings are `manifest-readiness` and/or `progress-journal-missing` findings, also skip to Step 5: `asl preflight --mark-loop-ready` is the canonical repair for missing readiness metadata, stale readiness SHA, and `draft`/`reviewed` readiness state, **and** it auto-backfills stale/missing `progress.md` (force semantics) when `progress-journal-missing` is the only remaining non-readiness blocker. Both repairs surface in the JSON payload's `auto_repairs` array.
 
 Print a one-line baseline summary (e.g., `Baseline: 3 red, 2 yellow, 8 green`) so the user can see the starting state.
 
@@ -126,6 +126,11 @@ Choose the option set based on `fix_category`:
   - `Edit manifest.md` / "Edit the readiness block manually"
   - `Skip for now` / "Leave this finding unresolved this round"
 
+- `progress-journal-missing.backfill`
+  - `Run backfill --force` / "Run `asl backfill-progress --force <plan-dir>` to rebuild `progress.md`, then rerun preflight and mark-loop-ready"
+  - `Defer to mark-loop-ready` / "Skip the direct backfill; `asl preflight --mark-loop-ready` will auto-backfill in Step 5 when this is the only remaining non-readiness blocker"
+  - `Skip for now` / "Leave this finding unresolved this round"
+
 - `filename-rename`
   - `Apply the rename` / "Rename the file to the canonical name shown in the finding detail"
   - `Skip for now` / "Leave this finding unresolved this round"
@@ -165,6 +170,8 @@ Apply edits one finding at a time:
 
 - **manifest-update**: When the user picked `Run mark-loop-ready`, defer it until Step 5. When they picked `Edit manifest.md`, open `manifest.md` and use Edit to fix the `**Readiness**`, `**Readiness SHA-256**`, or `**Readiness checked at**` line called out in the finding `message`/`detail`.
 
+- **progress-journal-missing.backfill**: When the user picked `Run backfill --force`, run `asl backfill-progress --force <plan-dir>` via Bash; the command rewrites `progress.md` atomically from completed handoffs. Confirm the file exists after the call. When the user picked `Defer to mark-loop-ready`, take no action this round — Step 5 will auto-backfill via `asl preflight --mark-loop-ready` when no non-readiness/non-progress blockers remain.
+
 - **filename-rename**: Use Bash to `git mv` (preferred when the plan directory is tracked) or `mv` the source to the canonical target named in the finding `detail` (which is always formatted as `rename to <target>`). Never rename outside the plan directory.
 
 - **session-recipe-edit**: Open the session file. The Verify recipe is a fenced ```json``` block inside `## Completion Contract`. Edit only that block: bump timeouts, fix `path` values, relax regex patterns — never silently delete a check. If the user picked `Skip for now`, leave the recipe alone.
@@ -187,7 +194,7 @@ After processing the round's batch, rerun `asl preflight <plan-dir> --json` with
 
 Compare `findings_by_severity` against the previous report:
 
-- If red+yellow strictly decreased: continue to the next round with the remaining unresolved findings, unless only `manifest-readiness` findings remain; in that case proceed to Step 5.
+- If red+yellow strictly decreased: continue to the next round with the remaining unresolved findings, unless only `manifest-readiness` and/or `progress-journal-missing` findings remain; in that case proceed to Step 5 (both are auto-repaired by `asl preflight --mark-loop-ready`).
 - If red+yellow stayed the same or increased: surface the diff to the user. Ask whether to retry the same batch with different answers, skip to the next finding, or stop. Do not silently loop on findings that are not improving.
 - If red+yellow reached zero: proceed to Step 5.
 
@@ -197,15 +204,15 @@ If five rounds complete without reaching green, stop the loop. Step 5 will refus
 
 ### Step 5: Mark Loop-Ready
 
-When the most recent preflight returns `ok: true`, or when its only remaining red/yellow findings are `manifest-readiness` findings, run:
+When the most recent preflight returns `ok: true`, or when its only remaining red/yellow findings are `manifest-readiness` and/or `progress-journal-missing` findings, run:
 
 ```text
 asl preflight <plan-dir> --json --mark-loop-ready [--cwd <repo>] [--harness <name>] [--commit-per-session|--commit-at-end] [--state-dir <dir>]
 ```
 
-Forward the same flags that the iteration used so the readiness check sees the same environment. Parse the response:
+Forward the same flags that the iteration used so the readiness check sees the same environment. `--mark-loop-ready` auto-backfills `progress.md` (force semantics) when the only non-readiness blockers are `progress-journal-missing` findings; any such repair appears in the JSON payload's `auto_repairs` array with `action: "rewrite"` and `category: "progress-journal-missing"`. Parse the response:
 
-- Success path: the JSON `reason` is `loop-ready-marked`, `marked_loop_ready` is `true`, `ok` is `true`, and `readiness.state` is `loop-ready`. Report success.
+- Success path: the JSON `reason` is `loop-ready-marked`, `marked_loop_ready` is `true`, `ok` is `true`, and `readiness.state` is `loop-ready`. Report success. If `auto_repairs` is non-empty, mention which categories were auto-repaired in the per-edit confirmation list.
 - Refusal path: `reason` is `loop-ready-refused` and `mark_error` describes why. This is rare here because Step 4 should have driven the report to green; if it happens, treat it as a regression — rerun a single Step 4 round on the new findings, then retry the mark.
 - Write-failure path: `reason` is `loop-ready-write-failed`. Print the `mark_error` and stop without retrying — the manifest write itself failed.
 
@@ -237,7 +244,7 @@ Do not re-print every preflight finding; the per-round confirmations already nam
 
 ## Important Notes
 
-- This skill only repairs an existing split plan. It never creates a plan, runs sessions, or invokes the harness directly. The runner contract (`asl run`) still hard-gates on `loop-ready`; this skill is the supported path to reach that state without hand-editing manifest metadata.
+- This skill only repairs an existing split plan. It never creates a plan, runs sessions, or invokes the harness directly. The runner contract (`asl run`) hard-gates on `loop-ready`, but it now self-heals stale/missing `progress.md` and recomputable `manifest.md` readiness metadata before pausing (surfaced via `readiness_gate_repair` in the run JSON); this skill is still the canonical interactive path for plan-edit, contract, env, and other non-derived blockers.
 - The `repair_hints` array is the source of truth for what each finding means and how to fix it. Do not invent question wording from `finding.message` alone — use the hint's `question_template` so the UX is consistent with the preflight package's stable surface.
 - Never modify a session file outside its `<plan-dir>`. Never modify the source plan referenced by `manifest.md`'s `**Split from**` line.
 - `manifest.md` and `context.md` readiness rows and status tables are derived bookkeeping. The session-file handoffs remain the source of truth for completion. This skill must not change handoff statuses; it only repairs structure and metadata so the runner can start.

@@ -14,7 +14,7 @@ Execute one session from a split plan directory. The skill is sequential by desi
 
 The user provides a plan directory path as the host agent command or skill invocation argument.
 
-`asl run` appends `--runner-managed` to the skill invocation it sends to the harness. Treat that flag as an internal execution-mode marker, not as user-facing syntax: in runner-managed mode the Python runner already holds the plan lock, has run the authoritative readiness gate, and will run verification, handoff revert, derived ledger sync, and readiness refresh after this skill returns.
+`asl run` appends `--runner-managed` to the skill invocation it sends to the harness. Treat that flag as an internal execution-mode marker, not as user-facing syntax: in runner-managed mode the Python runner already holds the plan lock, has run the authoritative readiness gate (auto-repairing stale/missing `progress.md` and recomputable `manifest.md` readiness metadata before pausing), and will run verification, handoff revert, derived ledger sync, and readiness refresh after this skill returns. The skill itself must still never write `progress.md` (see Step 6d).
 
 Runner-managed prompts may carry extra context beyond the first invocation line. When `asl run --reply TEXT` resumes a paused session, the runner prepends the `<skill-prefix>session-run <plan-dir>/ --runner-managed` invocation on line 1 and appends an `## ASL reply context` block containing the operator reply, the previous pause metadata, the paused turn's last message, and resume instructions. The first line is the only CLI invocation — everything below the `## ASL reply context` heading is prompt context for this skill, not additional CLI syntax. Do not try to parse the reply block as flags or other tokens; parse only the first line for the plan directory and the optional `--runner-managed` marker.
 
@@ -150,10 +150,10 @@ asl preflight <plan-dir> --json
 Stop unless the command exits zero, `ok` is true, and the payload's readiness state is `loop-ready`. Emit:
 
 ```text
-RUNNER_PAUSE: unsafe - plan is not loop-ready; run `asl preflight <plan-dir> --mark-loop-ready` before continuing
+RUNNER_PAUSE: unsafe - plan is not loop-ready; run `asl preflight <plan-dir> --mark-loop-ready` (auto-backfills stale/missing progress.md) or `asl run <plan-dir>` (self-heals derived progress/readiness drift before pausing) before continuing
 ```
 
-Do not repair readiness from the skill except by telling the user the exact `asl preflight --mark-loop-ready` command. If `preflight` reports contract findings, surface its `repair_hints` rather than interpreting `session-<ID>.expand.md` contract prose as authoritative.
+Do not repair readiness from the skill. `asl preflight --mark-loop-ready` is the canonical manual repair: it auto-backfills `progress.md` when the only blockers are `progress-journal-missing` and then marks the plan loop-ready. `asl run` performs the same auto-repair from inside the loop. Non-derived findings (contracts, paths, locks, etc.) still pause; if `preflight` reports contract findings, surface its `repair_hints` rather than interpreting `session-<ID>.expand.md` contract prose as authoritative.
 
 ### Step 5: Implement
 

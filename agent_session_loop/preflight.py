@@ -41,7 +41,7 @@ import subprocess
 import sys
 from typing import Any, Literal
 
-from . import harnesses, responses, state
+from . import harnesses, progress_repair, responses, state
 from .contracts import (
     COMPLETION_CONTRACT_HEADING,
     CompletionContract,
@@ -1586,6 +1586,30 @@ PREFLIGHT_EXIT_REASON_MARK_REFUSED = "loop-ready-refused"
 PREFLIGHT_EXIT_REASON_MARK_FAILED = "loop-ready-write-failed"
 
 
+@dataclass(frozen=True)
+class AutoRepair:
+    """Structured record of an auto-repair action run during preflight.
+
+    Surfaced through the ``auto_repairs`` JSON payload field so callers
+    (including the runner-managed loop-ready gate planned for session 3)
+    can mirror the shape when reporting their own readiness-gate repairs.
+
+    ``target_state`` is populated for ``manifest-readiness`` rewrites so
+    consumers can tell whether the repair wrote ``"loop-ready"`` (the
+    default) or preserved a ``"complete"`` readiness marker for review-
+    only complete starts. Repairs that do not change readiness state
+    (e.g. ``progress-journal-missing``) leave it as the empty string.
+    """
+
+    action: str
+    category: PreflightCategory
+    path: str
+    entries_written: int
+    completed_session_ids: tuple[str, ...]
+    journal_replaced: bool
+    target_state: str = ""
+
+
 def _finding_payload(finding: PreflightFinding) -> dict[str, Any]:
     return asdict(finding)
 
@@ -1621,6 +1645,7 @@ def _preflight_payload_fields(
     mark_loop_ready: bool,
     marked: bool | None = None,
     mark_error: str | None = None,
+    auto_repairs: tuple[AutoRepair, ...] = (),
 ) -> dict[str, Any]:
     fields: dict[str, Any] = {
         "plan_dir": plan_dir_arg,
@@ -1637,6 +1662,7 @@ def _preflight_payload_fields(
         "mark_loop_ready_requested": mark_loop_ready,
         "marked_loop_ready": bool(marked) if marked is not None else False,
         "repair_hints": [asdict(hint) for hint in report.repair_hints],
+        "auto_repairs": [asdict(repair) for repair in auto_repairs],
     }
     if mark_error is not None:
         fields["mark_error"] = mark_error
@@ -1665,6 +1691,7 @@ def _print_text_preflight(
     marked: bool,
     mark_loop_ready: bool,
     mark_error: str | None,
+    auto_repairs: tuple[AutoRepair, ...] = (),
 ) -> None:
     counts = _counts_by_severity(report)
     session_count = (
@@ -1684,6 +1711,8 @@ def _print_text_preflight(
     )
     for finding in report.findings:
         print(_format_finding_text(finding))
+    for repair in auto_repairs:
+        print(_format_auto_repair_text(repair))
     if report.ok:
         print("Preflight: ok")
     else:
@@ -1701,6 +1730,16 @@ def _print_text_preflight(
                 "Loop-ready: refused (preflight not ok)",
                 file=sys.stderr,
             )
+
+
+def _format_auto_repair_text(repair: AutoRepair) -> str:
+    if repair.category == "progress-journal-missing":
+        noun = "entry" if repair.entries_written == 1 else "entries"
+        return (
+            f"Auto-repair: rebuilt progress journal "
+            f"({repair.entries_written} {noun} written)"
+        )
+    return f"Auto-repair: {repair.action} ({repair.category})"
 
 
 def _mark_loop_ready(
@@ -1792,14 +1831,31 @@ def preflight_from_args(args: argparse.Namespace) -> int:
     marked = False
     mark_error: str | None = None
     mark_write_failed = False
+    auto_repairs: list[AutoRepair] = []
     if mark_loop_ready:
         blockers = _mark_loop_ready_blockers(report)
-        if blockers:
-            mark_error = _mark_loop_ready_refusal_message(blockers)
-        else:
-            marked, mark_error = _mark_loop_ready(report)
-            mark_write_failed = mark_error is not None
-            if marked:
+        if blockers and all(
+            blocker.category == "progress-journal-missing" for blocker in blockers
+        ):
+            try:
+                repair_result = progress_repair.repair_progress_journal(
+                    report.plan_dir
+                )
+            except (PlanError, OSError):
+                # Leave blockers in place; the refusal path below will surface
+                # them to the caller. Auto-repair is best-effort.
+                pass
+            else:
+                auto_repairs.append(
+                    AutoRepair(
+                        action=repair_result.action,
+                        category="progress-journal-missing",
+                        path=str(repair_result.path),
+                        entries_written=repair_result.entries_written,
+                        completed_session_ids=repair_result.completed_session_ids,
+                        journal_replaced=repair_result.journal_replaced,
+                    )
+                )
                 try:
                     report = run_preflight(
                         plan_dir_arg,
@@ -1811,6 +1867,26 @@ def preflight_from_args(args: argparse.Namespace) -> int:
                 except PlanError as error:
                     mark_error = str(error)
                     mark_write_failed = True
+                else:
+                    blockers = _mark_loop_ready_blockers(report)
+        if not mark_write_failed:
+            if blockers:
+                mark_error = _mark_loop_ready_refusal_message(blockers)
+            else:
+                marked, mark_error = _mark_loop_ready(report)
+                mark_write_failed = mark_error is not None
+                if marked:
+                    try:
+                        report = run_preflight(
+                            plan_dir_arg,
+                            cwd=cwd_arg,
+                            harness=harness_arg,
+                            commit_mode=commit_mode_arg,
+                            state_dir=state_dir_arg,
+                        )
+                    except PlanError as error:
+                        mark_error = str(error)
+                        mark_write_failed = True
 
     payload_fields = _preflight_payload_fields(
         report,
@@ -1822,6 +1898,7 @@ def preflight_from_args(args: argparse.Namespace) -> int:
         mark_loop_ready=mark_loop_ready,
         marked=marked,
         mark_error=mark_error,
+        auto_repairs=tuple(auto_repairs),
     )
 
     if want_json:
@@ -1890,6 +1967,7 @@ def preflight_from_args(args: argparse.Namespace) -> int:
             marked=marked,
             mark_loop_ready=mark_loop_ready,
             mark_error=mark_error,
+            auto_repairs=tuple(auto_repairs),
         )
 
     if not report.ok:
