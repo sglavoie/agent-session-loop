@@ -1195,8 +1195,14 @@ Read endpoints (loopback-open, no token required):
 - `GET /api/queue` — every discovered plan summarized via
   `WorkbenchSummary` (counts, primary state, recommended action,
   warnings, last-message preview, artifact paths) plus the resolved
-  `state_root` and `state_root_exists` fields used for that scan.
-- `GET /api/plan?plan_dir=<path>` — single-plan detail.
+  `state_root` and `state_root_exists` fields used for that scan. Each
+  plan summary also carries the additive triage fields documented under
+  [Triage queue payload](#triage-queue-payload) so the frontend can
+  sort, group, and search without re-deriving status from raw counts.
+- `GET /api/plan?plan_dir=<path>` — single-plan detail. The payload
+  carries the same additive triage fields as `/api/queue` (`urgency_rank`,
+  `urgency_group`, `activity_label`, `concise_reason`, `last_activity_at`,
+  `last_activity_source`, `searchable_text`).
 - `GET /api/registry` — registry payload plus any loader warnings.
 - `GET /api/state?plan_dir=<path>` — latest runner `state.json` under
   `state`, plus three top-level keys derived from the plan's session
@@ -1238,8 +1244,8 @@ Mutating endpoints (bearer-token required):
   (with reply prompts redacted), `plan_dir`, `profile`, `reply_provided`,
   `reply_length`, `reply_origin`, and `state_dir`.
 - `POST /api/reply` — resume a paused run with a verbatim reply.
-  Payload: `{"plan_dir": "...", "reply": "..."}`. The `reply` body is
-  streamed to the child via `--reply-stdin`; only `reply_length`
+  Payload: `{"plan_dir": "...", "reply_text": "..."}`. The `reply_text`
+  body is streamed to the child via `--reply-stdin`; only `reply_length`
   survives in the response.
 - `POST /api/control/stop-after-current` — enqueue a
   `request-stop-after-current` command on the per-plan control queue.
@@ -1268,26 +1274,128 @@ the `control_queue`/`workbench` reason codes. Control endpoints surface
 the enqueued record under `queued_command` (not `command`) so the
 top-level envelope key is not overwritten.
 
+### Triage queue payload
+
+Each plan summary in `/api/queue` (and `/api/plan`) carries additive
+fields the frontend uses to triage at a glance. All fields are
+backwards-compatible — no existing key is renamed or removed.
+
+- `urgency_rank` (int) — lower means higher priority; the queue sorts
+  ascending by default. Operator-blocking states come first.
+- `urgency_group` (string) — one of `needs-action`, `in-progress`,
+  `ready`, or `complete`. Mirrors `workbench.URGENCY_GROUPS`.
+- `activity_label` (string) — short status string for the row
+  ("Awaiting reply", "Running", "Complete", …). Mirrors
+  `workbench.ACTIVITY_LABEL_BY_STATE`.
+- `concise_reason` (string) — one-line cause behind the current state
+  (pause reason, last failure summary, etc.).
+- `last_activity_at` (ISO 8601 string or `null`) — most recent
+  meaningful activity timestamp.
+- `last_activity_source` (string or `null`) — provenance of the
+  timestamp. One of `active-verification`, `active-turn`,
+  `run-finished`, `run-started`, `lock-created`, `progress-journal`.
+  Mirrors `workbench.LAST_ACTIVITY_SOURCES`.
+- `searchable_text` (string) — pre-lowercased, whitespace-collapsed
+  concatenation of label, plan_dir, primary_state, recommended_action,
+  urgency_group, activity_label, concise_reason, next_action_hint,
+  detail, `"session <N>"`, pause_reason, pause_message,
+  last_message_preview, run_id, harness, and discovery sources. The
+  frontend's search input does a substring match against this field;
+  callers should not re-normalize it.
+
+Urgency rank constants (lower = higher priority), mirrored from
+`workbench.URGENCY_RANK_BY_STATE`. The `activity_label` column shows
+the literal UI badge string the queue renders for each state, so
+external readers can predict row text without consulting
+`workbench.ACTIVITY_LABEL_BY_STATE`:
+
+| Primary state     | urgency_rank | urgency_group | activity_label                |
+| ----------------- | -----------: | ------------- | ----------------------------- |
+| paused-for-reply  |           10 | needs-action  | Reply needed                  |
+| failed            |           20 | needs-action  | Last run failed               |
+| stale             |           30 | needs-action  | Stale state                   |
+| invalid           |           40 | needs-action  | Plan unreadable               |
+| verifying         |           50 | in-progress   | Verifying                     |
+| running           |           60 | in-progress   | Active turn                   |
+| recent            |           70 | ready         | Run finished, sessions remain |
+| ready             |           80 | ready         | Ready to run                  |
+| complete          |           90 | complete      | All sessions complete         |
+
+The exported Python constants (`workbench.URGENCY_GROUPS`,
+`workbench.LAST_ACTIVITY_SOURCES`, `workbench.URGENCY_RANK_BY_STATE`,
+`workbench.URGENCY_GROUP_BY_STATE`, `workbench.ACTIVITY_LABEL_BY_STATE`)
+are the source of truth — keep any external code that branches on these
+strings in sync with that module.
+
 ### Frontend behavior
 
 The bundled UI lives at `agent_session_loop/static/` and ships with
 the Python package (no build tooling, no third-party JS). Pages:
 
-- **Queue (`#queue`)** — the operator home. Filter chips collapse
-  `verifying` under `running` and `invalid` under `failed`; the other
-  primary states map 1:1. Rows show plan label/path, primary state,
-  counts, last-activity preview, next-action hint, and an artifact link
-  block. Queue metadata shows the resolved state root and last update;
-  if polling fails, the visible rows are explicitly marked stale. The
-  list polls every 5 s, pauses while the tab is hidden, and diffs rows
-  by `plan_dir` so scroll position and filter selection survive each
-  refresh.
-- **Detail (`#plan?dir=<encoded>`)** — per-plan view with active turn,
-  active verification, session table, recent events, progress journal,
-  artifacts, and operator controls (pin/unpin, edit profile, launch,
-  reply, stop-after-current, select harness, unlock). Dangerous actions
-  (unlock with an active lock, launch under unsafe-bypass) prompt for
-  in-page confirmation before the API call.
+- **Queue (`#queue`)** — the operator home, framed as a triage inbox.
+  Filter chips collapse `verifying` under `running` and `invalid` under
+  `failed`; the other primary states map 1:1. Rows show plan label/path,
+  primary state, counts, last-activity preview, next-action hint, and an
+  artifact link block. Queue metadata shows the resolved state root and
+  last update; if polling fails, the visible rows are explicitly marked
+  stale. The list polls every 5 s, pauses while the tab is hidden, and
+  diffs rows by `plan_dir` so scroll position and filter selection
+  survive each refresh.
+
+  The queue defaults to triage mode: rows sort ascending by
+  `urgency_rank` (paused-for-reply first, complete last), and any plan
+  whose `urgency_group === "complete"` (or `primary_state === "complete"`)
+  is hidden unless the operator flips the "show completed" toggle or
+  selects the `complete` chip. A control bar between the filter chips
+  and the inbox shell hosts a search input (matches against
+  `searchable_text`), a sort `<select>` with the four supported modes
+  (`urgency`, `recent`, `label`, `path`), and the "show completed"
+  toggle. The search input debounces at 150 ms so a typing burst
+  collapses into one `/api/queue` fetch; the clear button bypasses the
+  debounce. When zero rows match, the empty-state element writes a
+  stable kind onto `data-state` (`loading`, `no-plans`,
+  `no-search-results`, `no-filter-matches`, `completed-hidden`, or
+  `no-actionable`) and surfaces context-aware recovery actions (clear
+  search, show completed, reset filter) for the kinds that have one.
+
+  Row action buttons are navigation-only: clicking a row's action
+  routes to the detail view with a focus hint (`#plan?dir=…&focus=<key>`)
+  instead of issuing mutating POSTs from the queue. The button carries
+  a `data-action-kind="<RecommendedAction>"` attribute (`watch`,
+  `reply`, `inspect-failure`, `unlock`, `view`, `run`, `repair-plan`)
+  so CSS can style row intent without re-parsing labels. Clicking the
+  row body (outside the label `<a>` and the action `<button>`) selects
+  the plan and updates the preview without leaving the queue route.
+
+  On viewports ≥ 960 px the queue and detail panels render as a
+  two-pane shell: the queue stays sticky on the left while the right
+  pane shows either a placeholder ("select a plan to inspect") or the
+  selected plan's preview panel. The preview reads from the cached
+  queue payload (no extra fetch) and re-renders on selection clicks so
+  the operator can scan triage state, pause reason, and last-message
+  preview without leaving the queue. Below 960 px the layout collapses
+  to a single-pane route toggle (queue ↔ detail) so phones get a clean
+  stacked layout with no overlapping or clipped controls.
+
+  The shell exposes three data attributes (`data-route="queue|detail"`,
+  `data-viewport="mobile|desktop"`, `data-preview="empty|active"`) so
+  CSS can target the placeholder/preview swap without re-querying
+  `matchMedia` on every render.
+- **Detail (`#plan?dir=<encoded>[&focus=<key>]`)** — per-plan view with
+  active turn, active verification, session table, recent events,
+  progress journal, artifacts, and operator controls (pin/unpin, edit
+  profile, launch, reply, stop-after-current, select harness, unlock).
+  Dangerous actions (unlock with an active lock, launch under
+  unsafe-bypass) prompt for in-page confirmation before the API call.
+
+  The optional `focus=<key>` hash query parameter accepts the keys
+  registered in `DETAIL_FOCUS_TARGETS` (`reply`, `events`, `active`,
+  `launch`, `unlock`). The router validates the key against the map and
+  silently drops unknown values. `applyDetailFocus` is one-shot — it
+  scrolls and focuses the target element on the first render after
+  navigation, then clears `state.route.focus` so subsequent 5 s polls
+  do not keep snapping the viewport (the param itself stays in the URL,
+  so a manual reload will re-focus once).
 
   The session table iterates `payload.sessions` from `/api/state` and
   renders the dotted `id` verbatim (e.g., `2.1`, `2.2`), the basename
@@ -1299,6 +1407,20 @@ the Python package (no build tooling, no third-party JS). Pages:
   still reads `state.detailPlan.next_pending_session_id` (sourced from
   `/api/plan`, not `/api/state`); that fallback only surfaces before
   the first successful `/api/state` poll.
+
+Persistence and privacy:
+
+- The frontend persists operator preferences under the `wb.*`
+  sessionStorage namespace: `wb.token` (bearer token), `wb.filter`
+  (active chip), `wb.search` (search text), `wb.sort` (sort mode),
+  `wb.completed` (show-completed toggle), and `wb.selected` (selected
+  plan_dir for the preview pane). Each refresh poll preserves these
+  preferences and the queue/detail scroll position.
+- The reply textarea is intentionally **not** persisted: no
+  sessionStorage or localStorage key under the `wb.reply` namespace is
+  written, and no refresh path mutates `#wb-reply-text.value` outside
+  the explicit clear-on-success flow. An in-progress reply draft
+  survives any number of 5 s polls without being clobbered.
 
 Static asset caching:
 
@@ -1456,3 +1578,34 @@ Workbench browser workflow:
 - Send SIGTERM to the Workbench process and confirm the listening
   socket is released immediately (re-binding to the same port should
   succeed without `EADDRINUSE`).
+- Open the queue against a discovery root that contains a mix of
+  paused, failed, running, ready, and complete plans. Confirm the
+  default view sorts by `urgency_rank` (paused-for-reply rows surface
+  first, complete rows are hidden) and that flipping the "show
+  completed" toggle reveals the completed rows in every chip.
+- Type a substring that appears only in one plan's label, plan_dir, or
+  pause message; confirm the queue narrows to that plan after the
+  150 ms search debounce and that the empty-state element renders with
+  `data-state="no-search-results"` (and a "clear search" recovery
+  button) when the query matches nothing. Switch the sort `<select>`
+  through `urgency`, `recent`, `label`, and `path` and confirm the
+  order changes accordingly. Reload the page and confirm the search
+  text, sort mode, completed-visibility toggle, active filter chip,
+  and selected plan all survive via sessionStorage (`wb.search`,
+  `wb.sort`, `wb.completed`, `wb.filter`, `wb.selected`).
+- On a viewport ≥ 960 px, click a row body (outside the label and
+  action button) and confirm the right pane shows the selected plan
+  preview (state badge, triage reason, last-message preview) without
+  leaving the queue route. Resize below 960 px and confirm the layout
+  collapses to a single pane with no overlapping controls.
+- Click a row's "reply" action button on a paused-for-reply plan and
+  confirm the URL becomes `#plan?dir=…&focus=reply`, the detail view
+  scrolls the reply panel into view, and the reply textarea is focused.
+  Repeat with an "unlock" action and confirm the controls panel
+  scrolls into view and the Force-unlock button is focused (bail
+  without confirming to verify the confirmation gate still works).
+- Start typing a reply draft in the paused-Q&A panel, wait through two
+  or three 5 s refresh polls, and confirm the draft is still present
+  in the textarea (the reply text must never be persisted to
+  sessionStorage/localStorage and must never be overwritten by
+  polling).

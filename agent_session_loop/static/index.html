@@ -57,6 +57,47 @@
       </button>
     </nav>
 
+    <div
+      class="wb-controls-bar"
+      id="wb-controls-bar"
+      role="group"
+      aria-label="Queue controls"
+    >
+      <label class="wb-controls-bar__search">
+        <span class="wb-controls-bar__label">search</span>
+        <input
+          type="search"
+          id="wb-search"
+          name="search"
+          placeholder="label, path, state, harness, run id…"
+          autocomplete="off"
+          spellcheck="false"
+          aria-label="search plans"
+        />
+      </label>
+      <button
+        class="wb-button wb-button--ghost"
+        id="wb-search-clear"
+        type="button"
+        hidden
+      >
+        clear
+      </button>
+      <label class="wb-controls-bar__sort">
+        <span class="wb-controls-bar__label">sort</span>
+        <select id="wb-sort" name="sort" aria-label="sort mode">
+          <option value="urgency">urgency</option>
+          <option value="recent">last activity</option>
+          <option value="label">label</option>
+          <option value="path">plan path</option>
+        </select>
+      </label>
+      <label class="wb-controls-bar__completed">
+        <input type="checkbox" id="wb-show-completed" />
+        <span>show completed</span>
+      </label>
+    </div>
+
     <section
       id="wb-warnings"
       class="wb-warnings"
@@ -71,11 +112,47 @@
       hidden
     ></section>
 
-    <main class="wb-queue" id="wb-queue">
-      <p class="wb-empty" id="wb-empty">loading queue…</p>
-    </main>
+    <div class="wb-shell" id="wb-shell" data-route="queue" data-viewport="mobile">
+      <main class="wb-queue" id="wb-queue">
+        <div class="wb-empty" id="wb-empty" data-state="loading">
+          <p class="wb-empty__primary" id="wb-empty-primary">
+            loading queue…
+          </p>
+          <p
+            class="wb-empty__secondary"
+            id="wb-empty-secondary"
+            hidden
+          ></p>
+          <div class="wb-empty__actions" id="wb-empty-actions" hidden>
+            <button
+              class="wb-button wb-button--ghost"
+              type="button"
+              id="wb-empty-clear-search"
+              hidden
+            >
+              clear search
+            </button>
+            <button
+              class="wb-button wb-button--ghost"
+              type="button"
+              id="wb-empty-show-completed"
+              hidden
+            >
+              show completed
+            </button>
+            <button
+              class="wb-button wb-button--ghost"
+              type="button"
+              id="wb-empty-reset-filter"
+              hidden
+            >
+              reset filter
+            </button>
+          </div>
+        </div>
+      </main>
 
-    <main class="wb-detail" id="wb-detail" hidden>
+      <main class="wb-detail" id="wb-detail" hidden>
       <div class="wb-detail__head">
         <button
           class="wb-button wb-button--ghost"
@@ -384,7 +461,63 @@
           <li class="wb-empty">no artifacts yet</li>
         </ul>
       </section>
-    </main>
+      </main>
+
+      <aside class="wb-shell__placeholder" id="wb-shell-placeholder" hidden>
+        <p>select a plan from the queue to inspect it</p>
+      </aside>
+
+      <aside class="wb-shell__preview" id="wb-shell-preview" hidden aria-live="polite">
+        <header class="wb-preview__head">
+          <div class="wb-preview__head-text">
+            <h2 class="wb-preview__label" id="wb-preview-label">(no plan)</h2>
+            <p class="wb-preview__path" id="wb-preview-path"></p>
+            <p class="wb-preview__badges">
+              <span class="wb-badge" id="wb-preview-state" data-state="unknown">unknown</span>
+              <span
+                class="wb-badge wb-badge--ghost"
+                id="wb-preview-activity"
+                hidden
+              ></span>
+              <span
+                class="wb-badge wb-badge--ghost"
+                id="wb-preview-activity-source"
+                data-source=""
+                hidden
+              ></span>
+            </p>
+            <p class="wb-preview__reason" id="wb-preview-reason" hidden></p>
+            <p class="wb-preview__action" id="wb-preview-action" hidden></p>
+          </div>
+          <div class="wb-preview__head-actions">
+            <a
+              class="wb-button wb-button--primary"
+              id="wb-preview-open"
+              href="#"
+              data-action="open-detail"
+            >
+              open detail
+            </a>
+          </div>
+        </header>
+        <dl class="wb-preview__facts" id="wb-preview-facts">
+          <div><dt>next session</dt><dd data-field="next">-</dd></div>
+          <div><dt>counts</dt><dd data-field="counts">-</dd></div>
+          <div><dt>harness</dt><dd data-field="harness">-</dd></div>
+          <div><dt>run id</dt><dd data-field="run">-</dd></div>
+          <div><dt>last activity</dt><dd data-field="activity">-</dd></div>
+        </dl>
+        <section class="wb-preview__pause" id="wb-preview-pause" hidden>
+          <h3 class="wb-preview__subtitle">pause</h3>
+          <p class="wb-preview__pause-reason" id="wb-preview-pause-reason"></p>
+          <p class="wb-preview__pause-message" id="wb-preview-pause-message"></p>
+        </section>
+        <section class="wb-preview__last-message" id="wb-preview-last-message-section" hidden>
+          <h3 class="wb-preview__subtitle">last message</h3>
+          <pre class="wb-preview__last-message-body" id="wb-preview-last-message-body"></pre>
+        </section>
+      </aside>
+    </div>
 
     <template id="wb-row-template">
       <article class="wb-row" data-plan-dir="">

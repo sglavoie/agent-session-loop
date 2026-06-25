@@ -78,6 +78,73 @@ RECOMMENDED_ACTIONS: tuple[RecommendedAction, ...] = (
 )
 
 
+UrgencyGroup = Literal["needs-action", "in-progress", "ready", "complete"]
+URGENCY_GROUPS: tuple[UrgencyGroup, ...] = (
+    "needs-action",
+    "in-progress",
+    "ready",
+    "complete",
+)
+
+
+LastActivitySource = Literal[
+    "active-verification",
+    "active-turn",
+    "run-finished",
+    "run-started",
+    "lock-created",
+    "progress-journal",
+]
+LAST_ACTIVITY_SOURCES: tuple[LastActivitySource, ...] = (
+    "active-verification",
+    "active-turn",
+    "run-finished",
+    "run-started",
+    "lock-created",
+    "progress-journal",
+)
+
+
+# Lower rank == surface higher in the triage queue.
+URGENCY_RANK_BY_STATE: dict[PrimaryState, int] = {
+    "paused-for-reply": 10,
+    "failed": 20,
+    "stale": 30,
+    "invalid": 40,
+    "verifying": 50,
+    "running": 60,
+    "recent": 70,
+    "ready": 80,
+    "complete": 90,
+}
+
+
+URGENCY_GROUP_BY_STATE: dict[PrimaryState, UrgencyGroup] = {
+    "paused-for-reply": "needs-action",
+    "failed": "needs-action",
+    "stale": "needs-action",
+    "invalid": "needs-action",
+    "verifying": "in-progress",
+    "running": "in-progress",
+    "recent": "ready",
+    "ready": "ready",
+    "complete": "complete",
+}
+
+
+ACTIVITY_LABEL_BY_STATE: dict[PrimaryState, str] = {
+    "invalid": "Plan unreadable",
+    "verifying": "Verifying",
+    "running": "Active turn",
+    "paused-for-reply": "Reply needed",
+    "failed": "Last run failed",
+    "stale": "Stale state",
+    "complete": "All sessions complete",
+    "recent": "Run finished, sessions remain",
+    "ready": "Ready to run",
+}
+
+
 REGISTRY_FILE_NAME = "workbench.json"
 REGISTRY_SCHEMA_VERSION = 1
 DEFAULT_PLANS_DIR_NAME = "agent-plans"
@@ -911,6 +978,13 @@ class WorkbenchSummary:
     pause_reason: str | None
     pause_message: str | None
     last_message_preview: str | None
+    urgency_rank: int = 0
+    urgency_group: UrgencyGroup = "needs-action"
+    last_activity_at: str | None = None
+    last_activity_source: LastActivitySource | None = None
+    activity_label: str = ""
+    concise_reason: str = ""
+    searchable_text: str = ""
     warnings: tuple[str, ...] = ()
 
     def to_payload(self) -> dict[str, Any]:
@@ -924,7 +998,14 @@ class WorkbenchSummary:
             "exists": self.exists,
             "primary_state": self.primary_state,
             "recommended_action": self.recommended_action,
+            "urgency_rank": self.urgency_rank,
+            "urgency_group": self.urgency_group,
             "next_action_hint": self.next_action_hint,
+            "activity_label": self.activity_label,
+            "concise_reason": self.concise_reason,
+            "last_activity_at": self.last_activity_at,
+            "last_activity_source": self.last_activity_source,
+            "searchable_text": self.searchable_text,
             "detail": self.detail,
             "next_pending_session_id": self.next_pending_session_id,
             "next_pending_session_path": (
@@ -1019,6 +1100,75 @@ def _final_review_path_if_exists(plan_dir: Path) -> Path | None:
     return None
 
 
+def _first_activity(
+    candidates: Sequence[tuple[Any, LastActivitySource]],
+) -> tuple[str | None, LastActivitySource | None]:
+    for value, source in candidates:
+        if isinstance(value, str) and value:
+            return value, source
+    return None, None
+
+
+def _last_progress_entry_at(plan_dir: Path) -> str | None:
+    try:
+        entries = plans.read_progress_entries(plan_dir)
+    except plans.PlanError:
+        return None
+    if not entries:
+        return None
+    return entries[-1].completed_at
+
+
+def _searchable_text(
+    *,
+    plan_dir: Path,
+    label: str | None,
+    primary_state: PrimaryState,
+    recommended_action: RecommendedAction,
+    urgency_group: UrgencyGroup,
+    activity_label: str,
+    concise_reason: str,
+    detail: str | None,
+    next_action_hint: str,
+    next_pending_session_id: str | None,
+    pause_reason: str | None,
+    pause_message: str | None,
+    last_message_preview: str | None,
+    run_id: str | None,
+    harness: str | None,
+    sources: tuple[DiscoverySource, ...],
+) -> str:
+    parts: list[str] = [
+        str(plan_dir),
+        plan_dir.name,
+        primary_state,
+        recommended_action,
+        urgency_group,
+        activity_label,
+        concise_reason,
+        next_action_hint,
+    ]
+    if label:
+        parts.append(label)
+    if detail:
+        parts.append(detail)
+    if next_pending_session_id:
+        parts.extend(["session", next_pending_session_id])
+    if pause_reason:
+        parts.append(pause_reason)
+    if pause_message:
+        parts.append(pause_message)
+    if last_message_preview:
+        parts.append(last_message_preview)
+    if run_id:
+        parts.append(run_id)
+    if harness:
+        parts.append(harness)
+    parts.extend(sources)
+    joined = " ".join(part for part in parts if part)
+    return " ".join(joined.lower().split())
+
+
 def _build_invalid_summary(
     plan: DiscoveredPlan,
     *,
@@ -1030,15 +1180,38 @@ def _build_invalid_summary(
         state_path, events_path, progress_path = state_paths
     else:
         state_path = events_path = progress_path = None
+    primary_state: PrimaryState = "invalid"
+    recommended_action: RecommendedAction = "repair-plan"
+    next_action_hint = "Plan cannot be inspected; repair it before continuing."
+    activity_label = ACTIVITY_LABEL_BY_STATE[primary_state]
+    concise_reason = detail
+    searchable_text = _searchable_text(
+        plan_dir=plan.plan_dir,
+        label=plan.label,
+        primary_state=primary_state,
+        recommended_action=recommended_action,
+        urgency_group=URGENCY_GROUP_BY_STATE[primary_state],
+        activity_label=activity_label,
+        concise_reason=concise_reason,
+        detail=detail,
+        next_action_hint=next_action_hint,
+        next_pending_session_id=None,
+        pause_reason=None,
+        pause_message=None,
+        last_message_preview=None,
+        run_id=None,
+        harness=None,
+        sources=plan.sources,
+    )
     return WorkbenchSummary(
         plan_dir=plan.plan_dir,
         label=plan.label,
         profile=plan.profile,
         sources=plan.sources,
         exists=exists,
-        primary_state="invalid",
-        recommended_action="repair-plan",
-        next_action_hint="Plan cannot be inspected; repair it before continuing.",
+        primary_state=primary_state,
+        recommended_action=recommended_action,
+        next_action_hint=next_action_hint,
         detail=detail,
         next_pending_session_id=None,
         next_pending_session_path=None,
@@ -1057,6 +1230,13 @@ def _build_invalid_summary(
         pause_reason=None,
         pause_message=None,
         last_message_preview=None,
+        urgency_rank=URGENCY_RANK_BY_STATE[primary_state],
+        urgency_group=URGENCY_GROUP_BY_STATE[primary_state],
+        last_activity_at=None,
+        last_activity_source=None,
+        activity_label=activity_label,
+        concise_reason=concise_reason,
+        searchable_text=searchable_text,
         warnings=(),
     )
 
@@ -1149,7 +1329,34 @@ def build_workbench_summary(
         pause_reason: str | None = None,
         pause_message: str | None = None,
         last_message_preview: str | None = None,
+        last_activity_at: str | None = None,
+        last_activity_source: LastActivitySource | None = None,
+        concise_reason: str | None = None,
     ) -> WorkbenchSummary:
+        urgency_group = URGENCY_GROUP_BY_STATE[primary_state]
+        activity_label = ACTIVITY_LABEL_BY_STATE[primary_state]
+        resolved_reason = concise_reason or detail or next_action_hint
+        next_pending_session_id = (
+            next_pending.id if next_pending is not None else None
+        )
+        searchable_text = _searchable_text(
+            plan_dir=snapshot.plan_dir,
+            label=plan.label,
+            primary_state=primary_state,
+            recommended_action=recommended_action,
+            urgency_group=urgency_group,
+            activity_label=activity_label,
+            concise_reason=resolved_reason,
+            detail=detail,
+            next_action_hint=next_action_hint,
+            next_pending_session_id=next_pending_session_id,
+            pause_reason=pause_reason,
+            pause_message=pause_message,
+            last_message_preview=last_message_preview,
+            run_id=run_id,
+            harness=harness,
+            sources=plan.sources,
+        )
         return WorkbenchSummary(
             plan_dir=snapshot.plan_dir,
             label=plan.label,
@@ -1160,9 +1367,7 @@ def build_workbench_summary(
             recommended_action=recommended_action,
             next_action_hint=next_action_hint,
             detail=detail,
-            next_pending_session_id=(
-                next_pending.id if next_pending is not None else None
-            ),
+            next_pending_session_id=next_pending_session_id,
             next_pending_session_path=(
                 next_pending.path if next_pending is not None else None
             ),
@@ -1181,6 +1386,13 @@ def build_workbench_summary(
             pause_reason=pause_reason,
             pause_message=pause_message,
             last_message_preview=last_message_preview,
+            urgency_rank=URGENCY_RANK_BY_STATE[primary_state],
+            urgency_group=urgency_group,
+            last_activity_at=last_activity_at,
+            last_activity_source=last_activity_source,
+            activity_label=activity_label,
+            concise_reason=resolved_reason,
+            searchable_text=searchable_text,
             warnings=warnings,
         )
 
@@ -1192,6 +1404,14 @@ def build_workbench_summary(
         )
         position = _verification_position(active_verification)
         check_name = active_verification.get("current_check_name") or "pending"
+        verifying_activity, verifying_source = _first_activity((
+            (
+                active_verification.get("current_check_started_at"),
+                "active-verification",
+            ),
+            (active_verification.get("started_at"), "active-verification"),
+            (runner_state.get("run_started_at"), "run-started"),
+        ))
         return base_kwargs(
             primary_state="verifying",
             recommended_action="watch",
@@ -1200,11 +1420,21 @@ def build_workbench_summary(
                 f"({check_name})"
             ),
             detail=f"Active verification on session {session_label}",
+            last_activity_at=verifying_activity,
+            last_activity_source=verifying_source,
+            concise_reason=(
+                f"On check {position} ({check_name}) of session {session_label}"
+            ),
         )
 
     if lock_info is not None and lock_info.active and isinstance(active_turn, dict):
         session_label = _session_identifier_from_payload(active_turn) or "?"
         turn_index = active_turn.get("turn_index")
+        running_activity, running_source = _first_activity((
+            (active_turn.get("last_activity_at"), "active-turn"),
+            (active_turn.get("started_at"), "active-turn"),
+            (runner_state.get("run_started_at"), "run-started"),
+        ))
         return base_kwargs(
             primary_state="running",
             recommended_action="watch",
@@ -1212,6 +1442,11 @@ def build_workbench_summary(
                 f"Running session {session_label} turn {turn_index}"
             ),
             detail=f"Active turn on session {session_label}",
+            last_activity_at=running_activity,
+            last_activity_source=running_source,
+            concise_reason=(
+                f"Session {session_label}, turn {turn_index}"
+            ),
         )
 
     if runner_state.get("paused") is True:
@@ -1220,6 +1455,9 @@ def build_workbench_summary(
         pause_message = None
         preview = None
         qna_last_message_path = last_message_path
+        paused_activity, paused_source = _first_activity((
+            (runner_state.get("run_started_at"), "run-started"),
+        ))
         try:
             context = qna.load_qna_context(snapshot.plan_dir, state_dir=state_dir)
         except qna.QnAError as error:
@@ -1265,6 +1503,11 @@ def build_workbench_summary(
                 pause_reason=pause_reason,
                 pause_message=pause_message,
                 last_message_preview=preview,
+                last_activity_at=paused_activity,
+                last_activity_source=paused_source,
+                concise_reason=(
+                    pause_message or pause_reason or "Awaiting operator reply"
+                ),
             )
 
         return base_kwargs(
@@ -1277,6 +1520,11 @@ def build_workbench_summary(
             pause_reason=pause_reason,
             pause_message=pause_message,
             last_message_preview=preview,
+            last_activity_at=paused_activity,
+            last_activity_source=paused_source,
+            concise_reason=(
+                pause_message or pause_reason or "Awaiting operator reply"
+            ),
         )
 
     if stale_unfinished or (lock_info is not None and lock_info.stale):
@@ -1286,11 +1534,23 @@ def build_workbench_summary(
             reason_text = (
                 lock_info.reason if lock_info is not None else "stale lock"
             )
+        lock_created_at = (
+            lock_info.created_at
+            if lock_info is not None and lock_info.created_at
+            else None
+        )
+        stale_activity, stale_source = _first_activity((
+            (lock_created_at, "lock-created"),
+            (runner_state.get("run_started_at"), "run-started"),
+        ))
         return base_kwargs(
             primary_state="stale",
             recommended_action="unlock",
             next_action_hint=f"Stale state detected: {reason_text}",
             detail=reason_text,
+            last_activity_at=stale_activity,
+            last_activity_source=stale_source,
+            concise_reason=reason_text,
         )
 
     if (
@@ -1299,34 +1559,62 @@ def build_workbench_summary(
         and runner_state.get("ok") is False
     ):
         reason_text = runner_state.get("reason") or "Last run finished with errors"
+        failed_activity, failed_source = _first_activity((
+            (runner_state.get("run_finished_at"), "run-finished"),
+            (runner_state.get("run_started_at"), "run-started"),
+        ))
         return base_kwargs(
             primary_state="failed",
             recommended_action="inspect-failure",
             next_action_hint=f"Last run failed: {reason_text}",
             detail=reason_text,
+            last_activity_at=failed_activity,
+            last_activity_source=failed_source,
+            concise_reason=reason_text,
         )
 
     if next_pending is None:
+        complete_activity, complete_source = _first_activity((
+            (_last_progress_entry_at(snapshot.plan_dir), "progress-journal"),
+            (runner_state.get("run_finished_at"), "run-finished"),
+        ))
         return base_kwargs(
             primary_state="complete",
             recommended_action="view",
             next_action_hint="All sessions complete",
             detail="No pending sessions remain",
+            last_activity_at=complete_activity,
+            last_activity_source=complete_source,
+            concise_reason="No pending sessions remain",
         )
 
     if runner_state.get("present") and runner_state.get("run_finished_at"):
+        recent_activity, recent_source = _first_activity((
+            (runner_state.get("run_finished_at"), "run-finished"),
+        ))
         return base_kwargs(
             primary_state="recent",
             recommended_action="run",
             next_action_hint=f"Resume with session {next_pending.id}",
             detail=f"Last run finished at {runner_state.get('run_finished_at')}",
+            last_activity_at=recent_activity,
+            last_activity_source=recent_source,
+            concise_reason=(
+                f"Last run finished at {runner_state.get('run_finished_at')}"
+            ),
         )
 
+    ready_activity, ready_source = _first_activity((
+        (_last_progress_entry_at(snapshot.plan_dir), "progress-journal"),
+    ))
     return base_kwargs(
         primary_state="ready",
         recommended_action="run",
         next_action_hint=f"Start session {next_pending.id}",
         detail="Ready to run; no prior runner state",
+        last_activity_at=ready_activity,
+        last_activity_source=ready_source,
+        concise_reason=f"Next: session {next_pending.id}",
     )
 
 

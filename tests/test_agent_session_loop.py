@@ -20319,6 +20319,415 @@ class WorkbenchSummaryTests(unittest.TestCase):
             for summary in summaries:
                 self.assertEqual("ready", summary.primary_state)
 
+    def test_triage_fields_for_ready_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            discovered = _discovered(plan_dir)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=tmp_path / "state"
+            )
+
+            self.assertEqual("ready", summary.primary_state)
+            self.assertEqual(
+                workbench.URGENCY_RANK_BY_STATE["ready"], summary.urgency_rank
+            )
+            self.assertEqual("ready", summary.urgency_group)
+            self.assertEqual(
+                workbench.ACTIVITY_LABEL_BY_STATE["ready"], summary.activity_label
+            )
+            self.assertIn("session 1", summary.concise_reason)
+            self.assertIsNone(summary.last_activity_at)
+            self.assertIsNone(summary.last_activity_source)
+            self.assertIn(plan_dir.name.lower(), summary.searchable_text)
+            self.assertIn("ready", summary.searchable_text)
+            self.assertIn("session 1", summary.searchable_text)
+
+    def test_triage_fields_for_invalid_missing_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            missing = tmp_path / "ghost"
+            discovered = _discovered(missing, exists=False)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=tmp_path / "state"
+            )
+
+            self.assertEqual("invalid", summary.primary_state)
+            self.assertEqual("needs-action", summary.urgency_group)
+            self.assertEqual(
+                workbench.URGENCY_RANK_BY_STATE["invalid"], summary.urgency_rank
+            )
+            self.assertEqual(
+                workbench.ACTIVITY_LABEL_BY_STATE["invalid"],
+                summary.activity_label,
+            )
+            self.assertIn(str(missing), summary.concise_reason)
+            self.assertIsNone(summary.last_activity_at)
+            self.assertIsNone(summary.last_activity_source)
+            self.assertIn("invalid", summary.searchable_text)
+            self.assertIn("repair-plan", summary.searchable_text)
+
+    def test_triage_fields_for_running_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": True,
+                    "paused": False,
+                    "run_id": "20260619T120000Z-1",
+                    "harness": "claude",
+                    "run_started_at": "2026-06-19T12:00:00+00:00",
+                    "run_finished_at": None,
+                    "active_turn": {
+                        "session_id": "1",
+                        "turn_index": 4,
+                        "started_at": "2026-06-19T12:00:01+00:00",
+                        "last_activity_at": "2026-06-19T12:01:30+00:00",
+                    },
+                    "active_verification": None,
+                },
+            )
+            _write_lock_file(plan_dir, state_root, pid=os.getpid())
+            discovered = _discovered(plan_dir)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=state_root
+            )
+
+            self.assertEqual("running", summary.primary_state)
+            self.assertEqual("in-progress", summary.urgency_group)
+            self.assertEqual(
+                workbench.URGENCY_RANK_BY_STATE["running"], summary.urgency_rank
+            )
+            self.assertEqual(
+                "2026-06-19T12:01:30+00:00", summary.last_activity_at
+            )
+            self.assertEqual("active-turn", summary.last_activity_source)
+            self.assertIn("turn 4", summary.concise_reason)
+            self.assertIn("claude", summary.searchable_text)
+            self.assertIn("20260619t120000z-1", summary.searchable_text)
+
+    def test_triage_fields_for_verifying_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": True,
+                    "paused": False,
+                    "run_id": "20260619T130000Z-1",
+                    "harness": "codex",
+                    "run_started_at": "2026-06-19T13:00:00+00:00",
+                    "run_finished_at": None,
+                    "active_turn": None,
+                    "active_verification": {
+                        "session_id": "1",
+                        "turn_index": 2,
+                        "check_count": 2,
+                        "current_check_index": 1,
+                        "current_check_name": "pytest-suite",
+                        "current_check_kind": "command",
+                        "started_at": "2026-06-19T13:00:05+00:00",
+                        "current_check_started_at": "2026-06-19T13:00:20+00:00",
+                    },
+                },
+            )
+            _write_lock_file(plan_dir, state_root, pid=os.getpid())
+            discovered = _discovered(plan_dir)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=state_root
+            )
+
+            self.assertEqual("verifying", summary.primary_state)
+            self.assertEqual("in-progress", summary.urgency_group)
+            self.assertEqual(
+                "2026-06-19T13:00:20+00:00", summary.last_activity_at
+            )
+            self.assertEqual(
+                "active-verification", summary.last_activity_source
+            )
+            self.assertIn("pytest-suite", summary.concise_reason)
+            self.assertIn("2/2", summary.concise_reason)
+
+    def test_triage_fields_for_paused_for_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            artifact_dir = state.plan_state_dir(plan_dir, state_root) / "runs"
+            artifact_dir.mkdir(parents=True)
+            last_message = artifact_dir / "last-message.txt"
+            last_message.write_text(
+                "Need a decision: should we drop the v1 column?",
+                encoding="utf-8",
+            )
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "agent-question",
+                    "pause_reason": "agent-question",
+                    "pause_message": "Awaiting confirmation",
+                    "pause_details": {"category": "decision"},
+                    "run_id": "20260619T140000Z-1",
+                    "harness": "claude",
+                    "run_started_at": "2026-06-19T14:00:00+00:00",
+                    "turns": [
+                        {
+                            "session_id": "1",
+                            "turn_index": 1,
+                            "last_message_path": str(last_message),
+                            "harness": "claude",
+                            "started_at": "2026-06-19T14:00:00+00:00",
+                        }
+                    ],
+                },
+            )
+            discovered = _discovered(plan_dir)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=state_root
+            )
+
+            self.assertEqual("paused-for-reply", summary.primary_state)
+            self.assertEqual("needs-action", summary.urgency_group)
+            self.assertEqual(
+                workbench.URGENCY_RANK_BY_STATE["paused-for-reply"],
+                summary.urgency_rank,
+            )
+            self.assertEqual(
+                "2026-06-19T14:00:00+00:00", summary.last_activity_at
+            )
+            self.assertEqual("run-started", summary.last_activity_source)
+            self.assertEqual("Awaiting confirmation", summary.concise_reason)
+            self.assertIn("v1 column", summary.searchable_text)
+            self.assertIn("agent-question", summary.searchable_text)
+
+    def test_triage_fields_for_paused_without_last_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "agent-question",
+                    "run_id": "20260619T140000Z-1",
+                    "harness": "claude",
+                    "run_started_at": "2026-06-19T14:00:00+00:00",
+                    "turns": [
+                        {
+                            "session_id": "1",
+                            "turn_index": 1,
+                            "harness": "claude",
+                        }
+                    ],
+                },
+            )
+            discovered = _discovered(plan_dir)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=state_root
+            )
+
+            self.assertEqual("paused-for-reply", summary.primary_state)
+            self.assertEqual(
+                "2026-06-19T14:00:00+00:00", summary.last_activity_at
+            )
+            self.assertEqual("run-started", summary.last_activity_source)
+            self.assertEqual("agent-question", summary.concise_reason)
+
+    def test_triage_fields_for_failed_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": False,
+                    "paused": False,
+                    "run_id": "20260619T120000Z-2",
+                    "harness": "claude",
+                    "reason": "verify-failed",
+                    "run_started_at": "2026-06-19T12:00:00+00:00",
+                    "run_finished_at": "2026-06-19T12:05:00+00:00",
+                    "active_turn": None,
+                    "active_verification": None,
+                },
+            )
+            discovered = _discovered(plan_dir)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=state_root
+            )
+
+            self.assertEqual("failed", summary.primary_state)
+            self.assertEqual("needs-action", summary.urgency_group)
+            self.assertEqual(
+                "2026-06-19T12:05:00+00:00", summary.last_activity_at
+            )
+            self.assertEqual("run-finished", summary.last_activity_source)
+            self.assertEqual("verify-failed", summary.concise_reason)
+            self.assertIn("verify-failed", summary.searchable_text)
+
+    def test_triage_fields_for_stale_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            _write_lock_file(plan_dir, state_root, pid=_WORKBENCH_DEAD_PID)
+            discovered = _discovered(plan_dir)
+
+            with mock.patch.object(
+                state,
+                "is_pid_running",
+                side_effect=lambda pid: pid == os.getpid(),
+            ):
+                summary = workbench.build_workbench_summary(
+                    discovered, state_dir=state_root
+                )
+
+            self.assertEqual("stale", summary.primary_state)
+            self.assertEqual("needs-action", summary.urgency_group)
+            self.assertEqual(
+                "2026-06-19T00:00:00+00:00", summary.last_activity_at
+            )
+            self.assertEqual("lock-created", summary.last_activity_source)
+
+    def test_triage_fields_for_recent_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": True,
+                    "paused": False,
+                    "run_id": "20260619T120000Z-4",
+                    "harness": "claude",
+                    "run_started_at": "2026-06-19T12:00:00+00:00",
+                    "run_finished_at": "2026-06-19T12:30:00+00:00",
+                    "active_turn": None,
+                    "active_verification": None,
+                },
+            )
+            discovered = _discovered(plan_dir)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=state_root
+            )
+
+            self.assertEqual("recent", summary.primary_state)
+            self.assertEqual("ready", summary.urgency_group)
+            self.assertEqual(
+                "2026-06-19T12:30:00+00:00", summary.last_activity_at
+            )
+            self.assertEqual("run-finished", summary.last_activity_source)
+            self.assertIn("12:30:00", summary.concise_reason)
+
+    def test_triage_fields_for_complete_uses_progress_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = tmp_path / "done-plan"
+            write_plan(plan_dir, ("complete", "complete"))
+            canonical = plans.canonicalize_path(plan_dir)
+            plans.append_progress_entry(
+                canonical,
+                plans.ProgressEntry(
+                    session_id=plans.parse_session_id("1"),
+                    status="complete",
+                    completed_at="2026-06-19T14:22:00+00:00",
+                ),
+            )
+            plans.append_progress_entry(
+                canonical,
+                plans.ProgressEntry(
+                    session_id=plans.parse_session_id("2"),
+                    status="complete",
+                    completed_at="2026-06-19T15:10:00+00:00",
+                ),
+            )
+            discovered = _discovered(canonical)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=tmp_path / "state"
+            )
+
+            self.assertEqual("complete", summary.primary_state)
+            self.assertEqual("complete", summary.urgency_group)
+            self.assertEqual(
+                "2026-06-19T15:10:00+00:00", summary.last_activity_at
+            )
+            self.assertEqual("progress-journal", summary.last_activity_source)
+            self.assertEqual(
+                workbench.URGENCY_RANK_BY_STATE["complete"], summary.urgency_rank
+            )
+
+    def test_searchable_text_lowercases_and_includes_label(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            discovered = workbench.DiscoveredPlan(
+                plan_dir=plan_dir,
+                sources=("state",),
+                label="Workbench Alpha",
+                profile=None,
+                exists=True,
+            )
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=tmp_path / "state"
+            )
+
+            self.assertIn("workbench alpha", summary.searchable_text)
+            self.assertNotIn("Workbench Alpha", summary.searchable_text)
+            self.assertIn("state", summary.searchable_text)
+
+    def test_payload_exposes_triage_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            discovered = _discovered(plan_dir)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=tmp_path / "state"
+            )
+
+            payload = summary.to_payload()
+
+            self.assertEqual(summary.urgency_rank, payload["urgency_rank"])
+            self.assertEqual(summary.urgency_group, payload["urgency_group"])
+            self.assertEqual(summary.activity_label, payload["activity_label"])
+            self.assertEqual(summary.concise_reason, payload["concise_reason"])
+            self.assertEqual(
+                summary.last_activity_at, payload["last_activity_at"]
+            )
+            self.assertEqual(
+                summary.last_activity_source, payload["last_activity_source"]
+            )
+            self.assertEqual(
+                summary.searchable_text, payload["searchable_text"]
+            )
+
 
 class _FakePopen:
     """Minimal Popen stand-in that records argv/cwd/env and captures stdin."""
@@ -20923,6 +21332,235 @@ class WorkbenchServerTests(unittest.TestCase):
         # Default tokens should be url-safe and non-empty.
         self.assertTrue(server.token)
         self.assertGreaterEqual(len(server.token), 32)
+
+    def test_queue_exposes_triage_payload_fields(self) -> None:
+        registry = workbench.load_registry(self.registry_path)
+        registry = workbench.upsert_pin(
+            registry,
+            self.canonical_plan_dir,
+            label="Alpha plan",
+        )
+        workbench.save_registry(registry, self.registry_path)
+
+        server = self._start_server()
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/queue")
+
+        self.assertEqual(200, status)
+        plan_payload = body["plans"][0]
+        for key in (
+            "urgency_rank",
+            "urgency_group",
+            "activity_label",
+            "concise_reason",
+            "last_activity_at",
+            "last_activity_source",
+            "searchable_text",
+        ):
+            self.assertIn(key, plan_payload)
+        self.assertIn(
+            plan_payload["urgency_group"], workbench.URGENCY_GROUPS
+        )
+        self.assertIsInstance(plan_payload["urgency_rank"], int)
+        self.assertIn("alpha plan", plan_payload["searchable_text"])
+
+    def test_plan_endpoint_exposes_triage_payload_fields(self) -> None:
+        server = self._start_server()
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/plan?{query}"
+        )
+
+        self.assertEqual(200, status)
+        plan_payload = body["plan"]
+        for key in (
+            "urgency_rank",
+            "urgency_group",
+            "activity_label",
+            "concise_reason",
+            "last_activity_at",
+            "last_activity_source",
+            "searchable_text",
+        ):
+            self.assertIn(key, plan_payload)
+        self.assertIn(
+            plan_payload["urgency_group"], workbench.URGENCY_GROUPS
+        )
+
+    def test_queue_payload_preserves_legacy_fields_alongside_triage(
+        self,
+    ) -> None:
+        # Session 8 regression: adding the additive triage fields in
+        # session 1 must not have dropped any pre-existing payload key
+        # the frontend / external consumers rely on. Assert the full
+        # legacy contract still ships in both /api/queue and /api/plan
+        # so a future refactor cannot silently regress backwards
+        # compatibility.
+        registry = workbench.load_registry(self.registry_path)
+        registry = workbench.upsert_pin(
+            registry,
+            self.canonical_plan_dir,
+            label="Alpha plan",
+            profile=workbench.LaunchProfile(harness="codex"),
+        )
+        workbench.save_registry(registry, self.registry_path)
+
+        legacy_keys = (
+            "plan_dir",
+            "label",
+            "profile",
+            "sources",
+            "exists",
+            "primary_state",
+            "recommended_action",
+            "next_action_hint",
+            "detail",
+            "next_pending_session_id",
+            "next_pending_session_path",
+            "counts",
+            "state_path",
+            "events_path",
+            "progress_path",
+            "final_review_path",
+            "artifact_dir",
+            "stdout_path",
+            "stderr_path",
+            "last_message_path",
+            "result_path",
+            "run_id",
+            "harness",
+            "pause_reason",
+            "pause_message",
+            "last_message_preview",
+            "warnings",
+        )
+        triage_keys = (
+            "urgency_rank",
+            "urgency_group",
+            "activity_label",
+            "concise_reason",
+            "last_activity_at",
+            "last_activity_source",
+            "searchable_text",
+        )
+
+        server = self._start_server()
+        status, queue_body, _ = _http_request(
+            f"{self._base_url(server)}/api/queue"
+        )
+        self.assertEqual(200, status)
+        plans_payload = queue_body["plans"]
+        self.assertEqual(1, len(plans_payload))
+        queue_plan = plans_payload[0]
+        for key in legacy_keys + triage_keys:
+            self.assertIn(
+                key,
+                queue_plan,
+                msg=f"queue payload missing key: {key}",
+            )
+        self.assertEqual("Alpha plan", queue_plan["label"])
+        self.assertEqual("codex", queue_plan["profile"]["harness"])
+        self.assertEqual(str(self.canonical_plan_dir), queue_plan["plan_dir"])
+
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
+        status, plan_body, _ = _http_request(
+            f"{self._base_url(server)}/api/plan?{query}"
+        )
+        self.assertEqual(200, status)
+        plan_payload = plan_body["plan"]
+        for key in legacy_keys + triage_keys:
+            self.assertIn(
+                key,
+                plan_payload,
+                msg=f"plan payload missing key: {key}",
+            )
+
+    def test_queue_payload_urgency_rank_sorts_across_primary_states(
+        self,
+    ) -> None:
+        # Session 8 integration regression: build a queue with plans in
+        # multiple primary states and assert urgency_rank,
+        # urgency_group, and activity_label match the runtime
+        # constants. The frontend sorts ascending by urgency_rank
+        # client-side, so a server-side regression here would break the
+        # default triage order in the browser too.
+        ready_plan = self.canonical_plan_dir
+        registry = workbench.load_registry(self.registry_path)
+        registry = workbench.upsert_pin(registry, ready_plan, label="Ready plan")
+
+        complete_dir = self.tmp_path / "plans" / "done"
+        write_plan(complete_dir, ("complete", "complete"))
+        complete_plan = plans.canonicalize_path(complete_dir)
+        registry = workbench.upsert_pin(registry, complete_plan, label="Done plan")
+
+        failed_dir = self.tmp_path / "plans" / "failed"
+        write_plan(failed_dir, ("pending", "pending"))
+        failed_plan = plans.canonicalize_path(failed_dir)
+        _write_state_payload(
+            failed_plan,
+            self.state_dir,
+            {
+                "ok": False,
+                "paused": False,
+                "run_id": "run-failed",
+                "harness": "claude",
+                "run_finished_at": "2026-06-19T18:00:00+00:00",
+                "active_turn": None,
+                "active_verification": None,
+            },
+        )
+        registry = workbench.upsert_pin(
+            registry, failed_plan, label="Failed plan"
+        )
+
+        workbench.save_registry(registry, self.registry_path)
+
+        server = self._start_server()
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/queue")
+        self.assertEqual(200, status)
+        plans_by_dir = {
+            payload["plan_dir"]: payload for payload in body["plans"]
+        }
+        self.assertEqual(
+            {str(ready_plan), str(complete_plan), str(failed_plan)},
+            set(plans_by_dir),
+        )
+
+        for plan_path, expected_state in (
+            (ready_plan, "ready"),
+            (complete_plan, "complete"),
+            (failed_plan, "failed"),
+        ):
+            payload = plans_by_dir[str(plan_path)]
+            self.assertEqual(
+                expected_state,
+                payload["primary_state"],
+                msg=f"{plan_path} expected primary_state={expected_state}",
+            )
+            self.assertEqual(
+                workbench.URGENCY_RANK_BY_STATE[expected_state],
+                payload["urgency_rank"],
+                msg=f"{plan_path} urgency_rank drift",
+            )
+            self.assertEqual(
+                workbench.URGENCY_GROUP_BY_STATE[expected_state],
+                payload["urgency_group"],
+                msg=f"{plan_path} urgency_group drift",
+            )
+            self.assertEqual(
+                workbench.ACTIVITY_LABEL_BY_STATE[expected_state],
+                payload["activity_label"],
+                msg=f"{plan_path} activity_label drift",
+            )
+
+        sorted_by_rank = [
+            payload["primary_state"]
+            for payload in sorted(
+                body["plans"], key=lambda payload: payload["urgency_rank"]
+            )
+        ]
+        # failed (20) < ready (80) < complete (90) is the canonical
+        # triage ordering surfaced by the queue UI.
+        self.assertEqual(["failed", "ready", "complete"], sorted_by_rank)
 
     def test_queue_returns_summaries_with_registry_pins(self) -> None:
         registry = workbench.load_registry(self.registry_path)
@@ -22776,6 +23414,898 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         self.assertNotIn("turn.total_sessions", decoded)
         self.assertNotIn('"session-" + i + ".md"', decoded)
 
+    def test_app_js_queue_state_exposes_triage_preference_keys(self) -> None:
+        # Session 2 contract: the queue state model carries search text,
+        # sort mode, completed visibility, and stable selected plan, each
+        # restored from and persisted to sessionStorage under a distinct
+        # key. The reply textarea is still excluded from any persistence
+        # path (see the privacy assertions below).
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
+        decoded = body.decode("utf-8")
+        for key_decl in (
+            'SEARCH_STORAGE_KEY = "wb.search"',
+            'SORT_STORAGE_KEY = "wb.sort"',
+            'COMPLETED_STORAGE_KEY = "wb.completed"',
+            'SELECTED_STORAGE_KEY = "wb.selected"',
+        ):
+            self.assertIn(key_decl, decoded, msg=f"missing storage key: {key_decl}")
+        for state_field in (
+            "searchText:",
+            "sortMode:",
+            "showCompleted:",
+            "selectedPlan:",
+        ):
+            self.assertIn(
+                state_field, decoded, msg=f"missing state field: {state_field}"
+            )
+        for helper in (
+            "restoreSearchText",
+            "persistSearchText",
+            "setSearchText",
+            "restoreSortMode",
+            "persistSortMode",
+            "setSortMode",
+            "restoreShowCompleted",
+            "persistShowCompleted",
+            "setShowCompleted",
+            "restoreSelectedPlan",
+            "persistSelectedPlan",
+            "setSelectedPlan",
+            "clearSelectedPlan",
+        ):
+            self.assertIn(helper, decoded, msg=f"missing helper: {helper}")
+        # init() must hydrate every preference at boot so refreshes pick
+        # up the operator's last choice instead of resetting to defaults.
+        self.assertIn("state.searchText = restoreSearchText()", decoded)
+        self.assertIn("state.sortMode = restoreSortMode()", decoded)
+        self.assertIn("state.showCompleted = restoreShowCompleted()", decoded)
+        self.assertIn("state.selectedPlan = restoreSelectedPlan()", decoded)
+
+    def test_app_js_queue_sort_uses_urgency_rank_payload(self) -> None:
+        # Sort must consume the server-side urgency_rank (and
+        # last_activity_at tiebreaker) added in session 1 instead of the
+        # legacy hard-coded ranking map.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
+        decoded = body.decode("utf-8")
+        self.assertIn("urgencyRankFor", decoded)
+        self.assertIn("plan.urgency_rank", decoded)
+        self.assertIn("compareByUrgencyRank", decoded)
+        self.assertIn("compareByActivity", decoded)
+        self.assertIn("comparePlanRowsFor", decoded)
+        self.assertIn(
+            'SORT_MODES = ["urgency", "recent", "label", "path"]', decoded
+        )
+        self.assertIn('DEFAULT_SORT_MODE = "urgency"', decoded)
+        # The legacy stateOrder remains as a defensive fallback for
+        # payloads that pre-date urgency_rank, but must no longer be the
+        # only ranking signal.
+        self.assertIn("stateOrder", decoded)
+        self.assertIn("return stateOrder(plan && plan.primary_state);", decoded)
+        self.assertNotIn("stateOrder(plan && plan.primary_state) * 10", decoded)
+        for primary_state, rank in workbench.URGENCY_RANK_BY_STATE.items():
+            self.assertIn(
+                f'"{primary_state}": {rank}',
+                decoded,
+                msg=(
+                    f"legacy JS fallback rank for {primary_state!r} must "
+                    "match workbench.URGENCY_RANK_BY_STATE"
+                ),
+            )
+
+    def test_app_js_queue_visibility_hides_completed_by_default(self) -> None:
+        # Needs-attention default: completed plans are filtered out
+        # unless the operator toggles them on or explicitly picks the
+        # "complete" chip. Search text must also gate visibility via the
+        # server-supplied searchable_text field.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
+        decoded = body.decode("utf-8")
+        self.assertIn("matchesFilter", decoded)
+        self.assertIn("matchesCompletedVisibility", decoded)
+        self.assertIn("matchesSearchText", decoded)
+        self.assertIn("searchableTextFor", decoded)
+        self.assertIn("plan.searchable_text", decoded)
+        self.assertIn("plan.urgency_group", decoded)
+        self.assertIn('group === "complete"', decoded)
+        self.assertIn('activeFilter === "complete"', decoded)
+        # Default state must keep completed hidden until the operator
+        # opts in.
+        self.assertIn("showCompleted: false", decoded)
+        # Stable selection: render must mark the selected row so the
+        # two-pane shell can keep the preview pinned across refreshes.
+        self.assertIn("reconcileSelectedPlan", decoded)
+        self.assertIn('row.setAttribute("data-selected"', decoded)
+
+    def test_app_js_queue_prefs_do_not_persist_reply_text(self) -> None:
+        # Privacy regression: the new queue UI preference keys must not
+        # accidentally include reply text, and the reply textarea must
+        # still never reach sessionStorage or localStorage.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
+        decoded = body.decode("utf-8")
+        for key in (
+            '"wb.search"',
+            '"wb.sort"',
+            '"wb.completed"',
+            '"wb.selected"',
+        ):
+            self.assertIn(key, decoded, msg=f"missing storage key literal: {key}")
+        # No new key may collide with the wb.reply namespace.
+        self.assertNotIn('"wb.reply"', decoded)
+        import re as _re
+
+        leak_patterns = (
+            r"sessionStorage\.setItem\([^)]*reply",
+            r"localStorage\.setItem\([^)]*reply",
+            r"setItem\([^)]*wb\.reply",
+            r"sessionStorage\.setItem\(\s*SEARCH_STORAGE_KEY[^)]*reply",
+        )
+        for pattern in leak_patterns:
+            self.assertIsNone(
+                _re.search(pattern, decoded),
+                msg=f"reply text persisted via {pattern!r}",
+            )
+
+    def test_root_html_wraps_queue_and_detail_in_inbox_shell(self) -> None:
+        # Session 3 contract: the two-pane inbox shell wraps both the queue
+        # list and the detail panel in a single shell container so CSS can
+        # promote them to a side-by-side grid on desktop while the existing
+        # mobile route toggle keeps working.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/")
+        decoded = body.decode("utf-8")
+        self.assertIn('id="wb-shell"', decoded)
+        self.assertIn('id="wb-shell-placeholder"', decoded)
+        shell_idx = decoded.find('id="wb-shell"')
+        queue_idx = decoded.find('id="wb-queue"')
+        detail_idx = decoded.find('id="wb-detail"')
+        placeholder_idx = decoded.find('id="wb-shell-placeholder"')
+        # The shell container must precede both panes so the grid layout
+        # parents them; the placeholder is a sibling rendered after detail
+        # so the "select a plan" hint sits in the right-pane slot.
+        self.assertLess(shell_idx, queue_idx)
+        self.assertLess(shell_idx, detail_idx)
+        self.assertLess(detail_idx, placeholder_idx)
+        # The shell defaults to queue route + mobile viewport so initial
+        # render shows the queue full-width before JS hydrates.
+        self.assertIn('data-route="queue"', decoded)
+        self.assertIn('data-viewport="mobile"', decoded)
+
+    def test_static_css_two_pane_shell_layout(self) -> None:
+        # Session 3 contract: the shell becomes a two-column grid on
+        # desktop viewports while staying single-column on mobile so the
+        # existing route toggle still owns mobile visibility.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(
+            self._base_url(server) + "/static/styles.css"
+        )
+        decoded = body.decode("utf-8")
+        self.assertIn(".wb-shell", decoded)
+        self.assertIn("min-width: 960px", decoded)
+        self.assertIn("grid-template-columns", decoded)
+        # The desktop branch is gated by the data-viewport attribute the JS
+        # sets after init() resolves the media query.
+        self.assertIn('.wb-shell[data-viewport="desktop"]', decoded)
+        # Selected-row styling so the queue can highlight the plan whose
+        # detail occupies the right pane.
+        self.assertIn('.wb-row[data-selected="true"]', decoded)
+        # Placeholder styling must follow [data-route="queue"] so the right
+        # pane shows a "select a plan" hint when no plan is selected.
+        self.assertIn(
+            '.wb-shell[data-viewport="desktop"][data-route="queue"]', decoded
+        )
+
+    def test_app_js_two_pane_shell_keeps_queue_visible_on_desktop(self) -> None:
+        # Session 3 contract: applyRoute delegates pane visibility to a
+        # viewport-aware applyShellLayout helper that keeps the queue
+        # visible on desktop while the detail panel is open. The 960px
+        # breakpoint must match the CSS so the JS and CSS agree on what
+        # "desktop" means.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(
+            self._base_url(server) + "/static/app.js"
+        )
+        decoded = body.decode("utf-8")
+        import re as _re
+
+        self.assertIn("applyShellLayout", decoded)
+        self.assertIn("isDesktopShell", decoded)
+        self.assertIn("wireShellViewport", decoded)
+        self.assertIn("matchMedia", decoded)
+        self.assertIn('DESKTOP_SHELL_MEDIA_QUERY = "(min-width: 960px)"', decoded)
+        # The shell layout must persist the route + viewport on the
+        # container so CSS can target it without re-reading matchMedia.
+        self.assertIn('shell.setAttribute("data-route"', decoded)
+        self.assertIn('shell.setAttribute("data-viewport"', decoded)
+        # Desktop detail mode keeps the queue refresh loop running so the
+        # left pane stays current alongside the open plan.
+        self.assertIn("if (desktop) {", decoded)
+        self.assertIn("function shouldPollQueue()", decoded)
+        should_poll_match = _re.search(
+            r"function shouldPollQueue\(\)\s*\{.*?"
+            r'state\.route\.name === "queue".*?'
+            r'state\.route\.name === "detail" && isDesktopShell\(\).*?'
+            r"\n  \}",
+            decoded,
+            flags=_re.DOTALL,
+        )
+        self.assertIsNotNone(
+            should_poll_match,
+            msg="queue polling must continue on queue route and desktop detail route",
+        )
+        self.assertIn("if (shouldPollQueue()) scheduleRefresh();", decoded)
+        self.assertNotIn(
+            'if (state.route.name === "queue") scheduleRefresh();',
+            decoded,
+        )
+        # When viewport changes while a detail route is open, the queue timer
+        # must start on desktop and stop on mobile so the two-pane lifecycle
+        # follows the currently visible panes.
+        viewport_match = _re.search(
+            r"function wireShellViewport\(\)\s*\{.*?\n  \}",
+            decoded,
+            flags=_re.DOTALL,
+        )
+        self.assertIsNotNone(viewport_match)
+        viewport_body = viewport_match.group(0)
+        self.assertIn("scheduleRefresh()", viewport_body)
+        self.assertIn("stopQueueTimer()", viewport_body)
+        # Mobile detail is a single-pane route; queue-only controls must hide
+        # with the filters and queue rows below the 960px breakpoint.
+        self.assertIn('document.getElementById("wb-controls-bar")', decoded)
+        self.assertIn("if (controlsEl) controlsEl.hidden = !desktop;", decoded)
+        self.assertIn("if (controlsEl) controlsEl.hidden = false;", decoded)
+        # The legacy "hide everything on detail" branch must be gone:
+        # applyRoute should no longer unconditionally hide the queue/filters.
+        self.assertIsNone(
+            _re.search(
+                r"if \(queueEl\) queueEl\.hidden = true;\s*\n\s*if \(filtersEl\) filtersEl\.hidden = true;",
+                decoded,
+            ),
+            msg="applyRoute still unconditionally hides queue+filters on detail",
+        )
+
+    def test_root_html_includes_plan_preview_panel(self) -> None:
+        # Session 4 contract: the two-pane shell hosts a lightweight
+        # plan-preview panel as a sibling of the empty-state placeholder.
+        # The preview must ship every field the operator needs to triage a
+        # selected plan without leaving the queue route.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/")
+        decoded = body.decode("utf-8")
+        required_ids = (
+            'id="wb-shell-preview"',
+            'id="wb-preview-label"',
+            'id="wb-preview-path"',
+            'id="wb-preview-state"',
+            'id="wb-preview-activity"',
+            'id="wb-preview-activity-source"',
+            'id="wb-preview-reason"',
+            'id="wb-preview-action"',
+            'id="wb-preview-facts"',
+            'id="wb-preview-pause"',
+            'id="wb-preview-pause-reason"',
+            'id="wb-preview-pause-message"',
+            'id="wb-preview-last-message-section"',
+            'id="wb-preview-last-message-body"',
+            'id="wb-preview-open"',
+        )
+        for marker in required_ids:
+            self.assertIn(marker, decoded, msg=f"missing marker: {marker}")
+        # The preview must live inside the inbox shell so the grid layout
+        # can drop it into the right-pane slot, and as a sibling of the
+        # placeholder so the two states swap cleanly.
+        shell_idx = decoded.find('id="wb-shell"')
+        preview_idx = decoded.find('id="wb-shell-preview"')
+        placeholder_idx = decoded.find('id="wb-shell-placeholder"')
+        self.assertGreater(preview_idx, shell_idx)
+        self.assertGreater(preview_idx, placeholder_idx)
+        # Each fact slot must ship a `data-field` so the renderer can
+        # populate it without DOM queries by ID.
+        for field in ("next", "counts", "harness", "run", "activity"):
+            self.assertIn(
+                f'data-field="{field}"',
+                decoded,
+                msg=f"missing preview fact field: {field}",
+            )
+
+    def test_static_css_plan_preview_gated_by_preview_attribute(self) -> None:
+        # Session 4 contract: the shell uses a data-preview attribute to
+        # swap between the "select a plan" placeholder and the active
+        # preview panel, and the preview is only visible on the queue
+        # route on desktop viewports.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(
+            self._base_url(server) + "/static/styles.css"
+        )
+        decoded = body.decode("utf-8")
+        self.assertIn(".wb-shell__preview", decoded)
+        self.assertIn('[data-preview="empty"]', decoded)
+        self.assertIn('[data-preview="active"]', decoded)
+        # Placeholder visibility must be gated on data-preview="empty" so
+        # a selected plan does not also show the placeholder underneath.
+        import re as _re
+
+        placeholder_rule = _re.search(
+            r'\.wb-shell\[data-viewport="desktop"\]\[data-route="queue"\]'
+            r'\[data-preview="empty"\][^{]*\.wb-shell__placeholder',
+            decoded,
+        )
+        self.assertIsNotNone(
+            placeholder_rule,
+            msg="placeholder selector must require data-preview=empty",
+        )
+        preview_rule = _re.search(
+            r'\.wb-shell\[data-viewport="desktop"\]\[data-route="queue"\]'
+            r'\[data-preview="active"\][^{]*\.wb-shell__preview',
+            decoded,
+        )
+        self.assertIsNotNone(
+            preview_rule,
+            msg="preview selector must require data-preview=active",
+        )
+        # Preview-specific layout primitives must ship so the panel does
+        # not regress into an unstyled block.
+        self.assertIn(".wb-preview__head", decoded)
+        self.assertIn(".wb-preview__facts", decoded)
+        self.assertIn(".wb-preview__pause", decoded)
+        self.assertIn(".wb-preview__last-message", decoded)
+
+    def test_app_js_renders_plan_preview_from_queue_payload(self) -> None:
+        # Session 4 contract: the preview renders from the queue payload
+        # for state.selectedPlan, falls back to the highest-priority
+        # visible plan when no explicit selection exists, and updates the
+        # shell's data-preview attribute through applyShellLayout. Clicks
+        # on the row body select the plan without leaving the queue route.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(
+            self._base_url(server) + "/static/app.js"
+        )
+        decoded = body.decode("utf-8")
+        # State + helpers.
+        self.assertIn("previewPlan:", decoded)
+        self.assertIn("lastVisiblePlans:", decoded)
+        for helper in (
+            "previewPlanFor",
+            "updatePreview",
+            "renderPreview",
+            "wirePreviewOpen",
+            "formatLastActivity",
+            "selectPlanFromRow",
+            "ACTIVITY_SOURCE_LABELS",
+        ):
+            self.assertIn(helper, decoded, msg=f"missing helper: {helper}")
+        # Selection fallback rule: when no explicit selection matches a
+        # visible plan, the preview falls back to the first entry of the
+        # already-sorted visible list (highest-priority by urgency_rank).
+        self.assertIn("visibleSorted.find", decoded)
+        self.assertIn("visibleSorted[0]", decoded)
+        # The preview is driven off the cached queue payload, not a
+        # separate detail fetch.
+        self.assertIn("state.lastVisiblePlans = visible", decoded)
+        self.assertIn(
+            "updatePreview(state.lastVisiblePlans || [])", decoded
+        )
+        # applyShellLayout writes data-preview so CSS can swap the
+        # placeholder for the active preview.
+        self.assertIn('shell.setAttribute("data-preview"', decoded)
+        self.assertIn('"active"', decoded)
+        self.assertIn('"empty"', decoded)
+        # The preview must surface every triage field from the queue
+        # payload: state, activity label/source, concise reason, next
+        # session, counts, harness, run id, last activity, pause reason,
+        # pause message, and last-message preview.
+        self.assertIn("plan.activity_label", decoded)
+        self.assertIn("plan.last_activity_source", decoded)
+        self.assertIn("plan.last_activity_at", decoded)
+        self.assertIn("plan.concise_reason", decoded)
+        self.assertIn("plan.next_pending_session_id", decoded)
+        self.assertIn("plan.harness", decoded)
+        self.assertIn("plan.run_id", decoded)
+        self.assertIn("plan.pause_reason", decoded)
+        self.assertIn("plan.pause_message", decoded)
+        self.assertIn("plan.last_message_preview", decoded)
+        # Row click handlers must support a select-without-navigate
+        # gesture so the preview can update from the queue.
+        self.assertIn('target.closest(\'[data-field="label"]\')', decoded)
+        self.assertIn('target.closest(\'[data-field="action"]\')', decoded)
+        self.assertIn("selectPlanFromRow(planDir)", decoded)
+        # The "open detail" link in the preview must use the normal
+        # navigateToDetail flow so selection persists across the route.
+        self.assertIn("wb-preview-open", decoded)
+        self.assertIn("navigateToDetail", decoded)
+        # The reply text remains excluded from any preview rendering or
+        # persistence path (privacy regression alongside session 2).
+        import re as _re
+
+        leak_patterns = (
+            r"sessionStorage\.setItem\([^)]*reply",
+            r"localStorage\.setItem\([^)]*reply",
+            r"setItem\([^)]*wb\.reply",
+        )
+        for pattern in leak_patterns:
+            self.assertIsNone(
+                _re.search(pattern, decoded),
+                msg=f"reply text persisted via {pattern!r}",
+            )
+
+    def test_app_js_detail_route_syncs_selected_plan_from_hash(self) -> None:
+        # Direct #plan?dir=... loads and row-label hash links both enter the
+        # detail route without calling navigateToDetail(), so applyRoute must
+        # derive the selected plan from the parsed route before rendering.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(
+            self._base_url(server) + "/static/app.js"
+        )
+        decoded = body.decode("utf-8")
+        import re as _re
+
+        route_match = _re.search(
+            r"function applyRoute\(\)\s*\{.*?\n  \}",
+            decoded,
+            flags=_re.DOTALL,
+        )
+        self.assertIsNotNone(route_match, msg="applyRoute body not found")
+        route_body = route_match.group(0)
+        detail_match = _re.search(
+            r'if \(next\.name === "detail"\) \{(?P<body>.*?)\n    \} else \{',
+            route_body,
+            flags=_re.DOTALL,
+        )
+        self.assertIsNotNone(detail_match, msg="detail route branch not found")
+        detail_body = detail_match.group("body")
+        select_idx = detail_body.find("setSelectedPlan(next.planDir);")
+        refresh_idx = detail_body.find("refreshDetail();")
+        self.assertNotEqual(-1, select_idx)
+        self.assertNotEqual(-1, refresh_idx)
+        self.assertLess(
+            select_idx,
+            refresh_idx,
+            msg="detail route must select the hash plan before rendering detail",
+        )
+        sync_idx = detail_body.find("syncSelectedPlanView();")
+        self.assertNotEqual(-1, sync_idx)
+        self.assertLess(
+            sync_idx,
+            refresh_idx,
+            msg="detail route must update row markers/preview before queue refresh",
+        )
+
+    def test_root_html_ships_search_sort_and_completed_controls(self) -> None:
+        # Session 5 contract: the queue header gains a control bar with a
+        # search input, sort selector with the four supported modes
+        # (urgency, last activity, label, plan path), and a "show
+        # completed" toggle. The empty-state element grows structured
+        # primary/secondary text plus contextual action buttons so the
+        # operator can recover from filter/search/completed-hidden dead
+        # ends without leaving the queue.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/")
+        decoded = body.decode("utf-8")
+        required_ids = (
+            'id="wb-controls-bar"',
+            'id="wb-search"',
+            'id="wb-search-clear"',
+            'id="wb-sort"',
+            'id="wb-show-completed"',
+            'id="wb-empty"',
+            'id="wb-empty-primary"',
+            'id="wb-empty-secondary"',
+            'id="wb-empty-actions"',
+            'id="wb-empty-clear-search"',
+            'id="wb-empty-show-completed"',
+            'id="wb-empty-reset-filter"',
+        )
+        for marker in required_ids:
+            self.assertIn(marker, decoded, msg=f"missing marker: {marker}")
+        # The control bar must sit above the inbox shell (between filters
+        # and the queue/detail panes) so it applies globally to the queue
+        # without competing for the right-pane preview space.
+        filters_idx = decoded.find('id="wb-filters"')
+        controls_idx = decoded.find('id="wb-controls-bar"')
+        shell_idx = decoded.find('id="wb-shell"')
+        self.assertGreater(controls_idx, filters_idx)
+        self.assertLess(controls_idx, shell_idx)
+        # Sort selector must ship all four supported modes (urgency,
+        # last activity, label, plan path) as <option value=...> markers
+        # so operators get the new "plan path" mode session 5 contracts.
+        for value in ("urgency", "recent", "label", "path"):
+            self.assertIn(
+                f'value="{value}"', decoded, msg=f"missing sort option: {value}"
+            )
+        # The empty-state primary/secondary/action subnodes must render
+        # without competing with the existing legacy ".wb-empty" text
+        # node usage in other sections (sessions/events/etc.) — the new
+        # markup uses dedicated ids so the renderer can target them.
+        self.assertIn('class="wb-empty__primary"', decoded)
+        self.assertIn('class="wb-empty__secondary"', decoded)
+        self.assertIn('class="wb-empty__actions"', decoded)
+
+    def test_static_css_styles_search_sort_controls_and_empty_state(
+        self,
+    ) -> None:
+        # Session 5 contract: the new control bar and structured empty
+        # state ship with layout primitives so they do not regress into
+        # an unstyled block. The empty state must layout vertically with
+        # primary/secondary text and an actions row.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(
+            self._base_url(server) + "/static/styles.css"
+        )
+        decoded = body.decode("utf-8")
+        self.assertIn(".wb-controls-bar", decoded)
+        self.assertIn(".wb-controls-bar__search", decoded)
+        self.assertIn(".wb-controls-bar__sort", decoded)
+        self.assertIn(".wb-controls-bar__completed", decoded)
+        self.assertIn(".wb-empty__primary", decoded)
+        self.assertIn(".wb-empty__secondary", decoded)
+        self.assertIn(".wb-empty__actions", decoded)
+        # Loading-state styling lets the renderer distinguish "no plans
+        # discovered yet" from any of the matched-zero empty-state kinds.
+        self.assertIn('.wb-empty[data-state="loading"]', decoded)
+
+    def test_app_js_wires_search_sort_and_completed_controls(self) -> None:
+        # Session 5 contract: the controls call into the existing
+        # session-2 setters (setSearchText/setSortMode/setShowCompleted)
+        # and refresh() so the queue re-renders against the new filters
+        # without a page reload. SORT_MODES must grow the new "path"
+        # entry and the comparator must consume plan.plan_dir for that
+        # mode. The empty-state classifier must distinguish "no plans",
+        # "no search results", "no filter matches", "completed hidden",
+        # and "no actionable plans" with stable kinds the action buttons
+        # branch on.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(
+            self._base_url(server) + "/static/app.js"
+        )
+        decoded = body.decode("utf-8")
+        # New control wiring functions.
+        for helper in (
+            "wireSearchControl",
+            "wireSortControl",
+            "wireShowCompletedControl",
+            "wireEmptyStateActions",
+            "hydrateQueueControls",
+            "updateSearchClearVisibility",
+            "renderEmptyState",
+            "classifyEmptyState",
+            "compareByPath",
+        ):
+            self.assertIn(helper, decoded, msg=f"missing helper: {helper}")
+        # SORT_MODES gains the "path" entry; the comparator branches on
+        # it and uses plan_dir as the primary sort key for that mode.
+        self.assertIn(
+            'SORT_MODES = ["urgency", "recent", "label", "path"]', decoded
+        )
+        self.assertIn('sortMode === "path"', decoded)
+        self.assertIn("plan_dir", decoded)
+        # Sort labels map exists so the selector can display friendly
+        # names without hard-coding the same vocabulary in two places.
+        self.assertIn("SORT_MODE_LABELS", decoded)
+        # Listeners call the session-2 setters so persistence stays
+        # consistent with the rest of the queue UI.
+        self.assertIn("setSearchText(input.value)", decoded)
+        self.assertIn("setSortMode(select.value)", decoded)
+        self.assertIn("setShowCompleted(toggle.checked)", decoded)
+        # Each control must trigger refresh() so the queue re-renders
+        # after a preference change.
+        self.assertIn("refresh()", decoded)
+        # Empty-state classifier kinds — these stable strings are what
+        # CSS / future tests / future operators may branch on, and they
+        # gate which action buttons surface.
+        for kind in (
+            '"no-plans"',
+            '"no-search-results"',
+            '"no-filter-matches"',
+            '"completed-hidden"',
+            '"no-actionable"',
+        ):
+            self.assertIn(
+                kind, decoded, msg=f"missing empty-state kind: {kind}"
+            )
+        # Empty-state actions wiring: clear search, show completed, and
+        # reset filter must each reach the corresponding setter so the
+        # operator can recover from a dead-end queue view.
+        self.assertIn("wb-empty-clear-search", decoded)
+        self.assertIn("wb-empty-show-completed", decoded)
+        self.assertIn("wb-empty-reset-filter", decoded)
+        # Search input must NOT pre-normalize its value before calling
+        # setSearchText — the model already lowercases + collapses
+        # whitespace + trims, and pre-normalizing would race the IME
+        # composition path on some browsers.
+        import re as _re
+
+        self.assertIsNone(
+            _re.search(
+                r"input\.value\.toLowerCase\(\)\s*\.replace",
+                decoded,
+            ),
+            msg="search input must defer normalization to setSearchText",
+        )
+        # Privacy regression alongside sessions 2 and 4: the new
+        # controls must not introduce a reply-text persistence path.
+        leak_patterns = (
+            r"sessionStorage\.setItem\([^)]*reply",
+            r"localStorage\.setItem\([^)]*reply",
+            r"setItem\([^)]*wb\.reply",
+        )
+        for pattern in leak_patterns:
+            self.assertIsNone(
+                _re.search(pattern, decoded),
+                msg=f"reply text persisted via {pattern!r}",
+            )
+
+
+    def test_app_js_row_actions_dispatch_through_handleRowAction(self) -> None:
+        # Session 6 contract: the queue row "action" button must route the
+        # operator to the detail view via the existing navigation path with
+        # an optional focus hint, never issue mutating POSTs inline. The
+        # ROW_ACTION_FOCUS map covers every RecommendedAction value, and
+        # DETAIL_FOCUS_TARGETS resolves each focus key to elements that
+        # exist in the rendered shell.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(
+            self._base_url(server) + "/static/app.js"
+        )
+        decoded = body.decode("utf-8")
+        # Dispatcher + maps are defined.
+        self.assertIn("function handleRowAction(plan, event)", decoded)
+        self.assertIn("ROW_ACTION_FOCUS", decoded)
+        self.assertIn("DETAIL_FOCUS_TARGETS", decoded)
+        # Row template wiring uses handleRowAction (not a raw
+        # navigateToDetail call) and exposes the action kind for CSS /
+        # operator inspection.
+        self.assertIn(
+            "action.onclick = (event) => handleRowAction(plan, event)",
+            decoded,
+        )
+        self.assertIn('data-action-kind', decoded)
+        # ROW_ACTION_FOCUS must cover every RecommendedAction enum.
+        for action_kind in (
+            '"reply"',
+            '"inspect-failure"',
+            '"unlock"',
+            '"watch"',
+            '"run"',
+            '"view"',
+            '"repair-plan"',
+        ):
+            self.assertIn(
+                action_kind,
+                decoded,
+                msg=f"ROW_ACTION_FOCUS missing kind {action_kind}",
+            )
+        # DETAIL_FOCUS_TARGETS keys must include the four focus hints used
+        # by the action map ("reply", "events", "active", "launch",
+        # "unlock") and the scroll targets must reference DOM ids that
+        # exist in the HTML shell.
+        index_path = workbench_server.STATIC_DIR / "index.html"
+        html = index_path.read_text(encoding="utf-8")
+        for dom_id in (
+            "wb-reply-panel",
+            "wb-reply-text",
+            "wb-detail-events",
+            "wb-detail-active",
+            "wb-controls",
+            "wb-control-launch",
+            "wb-control-unlock",
+        ):
+            self.assertIn(
+                f'id="{dom_id}"',
+                html,
+                msg=f"DETAIL_FOCUS_TARGETS references missing id {dom_id}",
+            )
+        # parseHashRoute must accept (and validate) the focus query param so
+        # row-action navigation can carry a focus hint into the detail view.
+        self.assertIn("parseHashRoute", decoded)
+        self.assertIn('params.get("focus")', decoded)
+        # Row button must NOT call mutating endpoints inline. The
+        # confirm-before-mutate gates already in handleControlLaunch /
+        # handleControlUnlock must keep their teeth.
+        import re as _re
+
+        row_segment_match = _re.search(
+            r"action\.setAttribute\(\"data-action-kind\".*?populateArtifacts",
+            decoded,
+            flags=_re.DOTALL,
+        )
+        self.assertIsNotNone(
+            row_segment_match,
+            msg="could not locate row action wiring segment",
+        )
+        row_segment = row_segment_match.group(0)
+        for endpoint in ("/api/unlock", "/api/launch", "/api/reply"):
+            self.assertNotIn(
+                endpoint,
+                row_segment,
+                msg=(
+                    f"row action wiring must not POST to {endpoint}; "
+                    "navigate to detail and gate the POST there instead"
+                ),
+            )
+
+    def test_app_js_preserves_focus_scroll_and_search_debounce(self) -> None:
+        # Session 6 contract: refresh polling must not yank the operator's
+        # viewport, focused row, or in-progress reply draft. Capture +
+        # restore helpers exist for both panes, applyDetailFocus runs once
+        # after the first detail render, and the search input debounces
+        # before triggering a fetch so fast typing does not pile up
+        # /api/queue requests.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(
+            self._base_url(server) + "/static/app.js"
+        )
+        decoded = body.decode("utf-8")
+        for helper in (
+            "captureQueueScroll",
+            "restoreQueueScroll",
+            "captureDetailScroll",
+            "restoreDetailScroll",
+            "applyDetailFocus",
+            "scheduleSearchRefresh",
+        ):
+            self.assertIn(
+                helper, decoded, msg=f"missing preservation helper: {helper}"
+            )
+        # Debounce constant must be defined and the search listener must
+        # route through scheduleSearchRefresh rather than the bare
+        # refresh() call so typing storms collapse to one fetch.
+        self.assertIn("SEARCH_DEBOUNCE_MS", decoded)
+        self.assertIn("scheduleSearchRefresh()", decoded)
+        # renderQueue + refreshDetail must capture before render and
+        # restore afterwards.
+        self.assertIn("captureQueueScroll();", decoded)
+        self.assertIn("restoreQueueScroll(", decoded)
+        self.assertIn("captureDetailScroll();", decoded)
+        # Either restoreDetailScroll runs in finally OR applyDetailFocus
+        # runs (one-shot focus path) — both must be present in
+        # refreshDetail's finally block.
+        import re as _re
+
+        # Locate the finally block in refreshDetail; both the
+        # one-shot focus path and the scroll-restore fallback must be
+        # wired so polling never strands the operator's viewport.
+        refresh_block_match = _re.search(
+            r"async function refreshDetail\(\).*?\n  \}\n",
+            decoded,
+            flags=_re.DOTALL,
+        )
+        self.assertIsNotNone(
+            refresh_block_match,
+            msg="refreshDetail body not found",
+        )
+        refresh_block = refresh_block_match.group(0)
+        finally_idx = refresh_block.rfind("} finally {")
+        self.assertNotEqual(
+            -1,
+            finally_idx,
+            msg="refreshDetail finally block missing or restructured",
+        )
+        finally_body = refresh_block[finally_idx:]
+        self.assertIn("applyDetailFocus", finally_body)
+        self.assertIn("restoreDetailScroll", finally_body)
+        # applyDetailFocus must clear state.route.focus so subsequent
+        # polls do not keep re-scrolling.
+        focus_func_match = _re.search(
+            r"function applyDetailFocus\(\)\s*\{.*?\n  \}",
+            decoded,
+            flags=_re.DOTALL,
+        )
+        self.assertIsNotNone(focus_func_match)
+        self.assertIn("state.route.focus = null", focus_func_match.group(0))
+
+    def test_app_js_reply_draft_survives_refresh_polls(self) -> None:
+        # Session 6 privacy + UX contract: an in-progress reply textarea
+        # must never be overwritten or cleared by the periodic detail
+        # refresh. The only places allowed to mutate
+        # ``#wb-reply-text.value`` are the explicit clear button and the
+        # successful submit path.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(
+            self._base_url(server) + "/static/app.js"
+        )
+        decoded = body.decode("utf-8")
+        import re as _re
+
+        # Every assignment to a wb-reply-text textarea value must be inside
+        # an explicit clear or submit-success path — never inside a render
+        # / load / refresh helper.
+        textarea_assign_pattern = _re.compile(
+            r"document\.getElementById\(\"wb-reply-text\"\)[^;]*?\.value\s*="
+        )
+        self.assertIsNone(
+            textarea_assign_pattern.search(decoded),
+            msg="reply textarea value assigned via direct DOM lookup; "
+            "use clearReplyTextarea() so the call site is explicit",
+        )
+        # textarea.value = "" must appear ONCE in clearReplyTextarea and
+        # nowhere inside loadAndRenderReply / refreshDetail.
+        load_match = _re.search(
+            r"async function loadAndRenderReply\(planDir\)\s*\{.*?\n  \}",
+            decoded,
+            flags=_re.DOTALL,
+        )
+        self.assertIsNotNone(load_match)
+        load_body = load_match.group(0)
+        self.assertNotIn("wb-reply-text", load_body)
+        refresh_match = _re.search(
+            r"async function refreshDetail\(\)\s*\{.*?\n  \}",
+            decoded,
+            flags=_re.DOTALL,
+        )
+        self.assertIsNotNone(refresh_match)
+        self.assertNotIn("wb-reply-text", refresh_match.group(0))
+        # Reply submit path remains confirmation-gated and clears the
+        # textarea only on success.
+        submit_match = _re.search(
+            r"async function handleReplySubmit\(event\)\s*\{.*?\n  \}",
+            decoded,
+            flags=_re.DOTALL,
+        )
+        self.assertIsNotNone(submit_match)
+        submit_body = submit_match.group(0)
+        self.assertIn("window.confirm(", submit_body)
+        self.assertIn("clearReplyTextarea()", submit_body)
+        # The privacy regression from earlier sessions must still hold:
+        # reply text is never persisted to sessionStorage / localStorage.
+        for pattern in (
+            r"sessionStorage\.setItem\([^)]*reply",
+            r"localStorage\.setItem\([^)]*reply",
+            r"setItem\([^)]*wb\.reply",
+        ):
+            self.assertIsNone(
+                _re.search(pattern, decoded),
+                msg=f"reply text persisted via {pattern!r}",
+            )
+
+    def test_app_js_vocabulary_mirrors_python_constants(self) -> None:
+        # Session 8 regression: the JS frontend hard-codes string
+        # vocabularies (activity source labels, recommended action
+        # kinds) that mirror Python constants in
+        # agent_session_loop/workbench.py. Drift between the two sides
+        # would silently break preview badges and row-action dispatch.
+        # Source the expected values from the Python module so a new
+        # entry on either side fails this regression instead of
+        # shipping a mismatched UI.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(
+            self._base_url(server) + "/static/app.js"
+        )
+        decoded = body.decode("utf-8")
+        # ACTIVITY_SOURCE_LABELS keys must cover every Python
+        # LAST_ACTIVITY_SOURCES value so the preview badge falls back
+        # to a friendly label rather than the raw enum value.
+        for source in workbench.LAST_ACTIVITY_SOURCES:
+            self.assertIn(
+                f'"{source}"',
+                decoded,
+                msg=(
+                    f"app.js missing last_activity_source enum {source!r}; "
+                    "ACTIVITY_SOURCE_LABELS is out of sync with "
+                    "workbench.LAST_ACTIVITY_SOURCES"
+                ),
+            )
+        # ROW_ACTION_FOCUS must cover every RecommendedAction; the
+        # session-6 test already checks the dispatcher exists, but
+        # this test sources the enum from the Python module so a new
+        # action added to workbench.py without a JS mapping fails here.
+        for action in workbench.RECOMMENDED_ACTIONS:
+            self.assertIn(
+                f'"{action}"',
+                decoded,
+                msg=(
+                    f"app.js missing recommended_action {action!r}; "
+                    "ROW_ACTION_FOCUS / handleRowAction is out of sync "
+                    "with workbench.RECOMMENDED_ACTIONS"
+                ),
+            )
+        # The JS still branches on the "complete" urgency_group string
+        # via matchesCompletedVisibility; the rest of URGENCY_GROUPS
+        # is server-side only and intentionally not asserted here.
+        self.assertIn('"complete"', decoded)
+
 
 class WorkbenchHardeningTests(unittest.TestCase):
     """Disappearing-file, concurrency, caching, and shutdown hardening."""
@@ -23634,6 +25164,227 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             "no integer-loop or\n  `parseInt(next_pending_session_id)` inference",
             docs,
         )
+
+    def test_docs_reply_payload_uses_reply_text(self) -> None:
+        # The server requires `reply_text` (workbench_server._handle_reply),
+        # so the docs example must match. The stale `{"reply": "..."}`
+        # example must not appear in the /api/reply bullet.
+        docs = self._read("docs/agent-session-loop.md")
+        self.assertIn(
+            '`{"plan_dir": "...", "reply_text": "..."}`', docs
+        )
+        self.assertNotIn(
+            '`{"plan_dir": "...", "reply": "..."}`', docs
+        )
+
+    def test_docs_describe_triage_queue_payload_fields(self) -> None:
+        # Session 1 added additive triage fields to /api/queue and
+        # /api/plan. The docs must enumerate every field plus the
+        # urgency rank constants so external consumers know what to
+        # branch on.
+        docs = self._read("docs/agent-session-loop.md")
+        self.assertIn("### Triage queue payload", docs)
+        for field in (
+            "`urgency_rank`",
+            "`urgency_group`",
+            "`activity_label`",
+            "`concise_reason`",
+            "`last_activity_at`",
+            "`last_activity_source`",
+            "`searchable_text`",
+        ):
+            self.assertIn(
+                field, docs, msg=f"missing triage field: {field}"
+            )
+        # Urgency groups vocabulary (mirrors workbench.URGENCY_GROUPS).
+        for group in (
+            "`needs-action`",
+            "`in-progress`",
+            "`ready`",
+            "`complete`",
+        ):
+            self.assertIn(
+                group, docs, msg=f"missing urgency group: {group}"
+            )
+        # Last-activity source vocabulary (mirrors
+        # workbench.LAST_ACTIVITY_SOURCES).
+        for source in (
+            "`active-verification`",
+            "`active-turn`",
+            "`run-finished`",
+            "`run-started`",
+            "`lock-created`",
+            "`progress-journal`",
+        ):
+            self.assertIn(
+                source, docs, msg=f"missing activity source: {source}"
+            )
+        # Urgency rank constants (paused-for-reply 10 .. complete 90).
+        # These are documented in a table so the literal numerals appear
+        # in the same lines as the primary-state names.
+        for state, rank in (
+            ("paused-for-reply", "10"),
+            ("failed", "20"),
+            ("stale", "30"),
+            ("invalid", "40"),
+            ("verifying", "50"),
+            ("running", "60"),
+            ("recent", "70"),
+            ("ready", "80"),
+            ("complete", "90"),
+        ):
+            self.assertIn(
+                state, docs, msg=f"missing primary state: {state}"
+            )
+            self.assertIn(
+                rank, docs, msg=f"missing urgency rank: {rank}"
+            )
+        # Exported Python constants are the source of truth — the docs
+        # must reference them so downstream callers can grep their way
+        # back to workbench.py.
+        for constant in (
+            "`workbench.URGENCY_GROUPS`",
+            "`workbench.LAST_ACTIVITY_SOURCES`",
+            "`workbench.URGENCY_RANK_BY_STATE`",
+            "`workbench.URGENCY_GROUP_BY_STATE`",
+            "`workbench.ACTIVITY_LABEL_BY_STATE`",
+        ):
+            self.assertIn(
+                constant, docs, msg=f"missing exported constant: {constant}"
+            )
+
+    def test_docs_describe_triage_inbox_default_behavior(self) -> None:
+        # Default triage view hides completed plans and sorts by
+        # urgency_rank. The docs must say so explicitly.
+        docs = self._read("docs/agent-session-loop.md")
+        self.assertIn("triage inbox", docs)
+        self.assertIn("sort ascending by\n  `urgency_rank`", docs)
+        self.assertIn('"show completed" toggle', docs)
+        # Search/sort/completed control bar with the four supported
+        # sort modes.
+        self.assertIn("control bar", docs)
+        self.assertIn("matches against\n  `searchable_text`", docs)
+        for sort_mode in ("`urgency`", "`recent`", "`label`", "`path`"):
+            self.assertIn(
+                sort_mode, docs, msg=f"missing sort mode: {sort_mode}"
+            )
+        self.assertIn("debounces at 150 ms", docs)
+        # Empty-state kinds (data-state values).
+        for kind in (
+            "`loading`",
+            "`no-plans`",
+            "`no-search-results`",
+            "`no-filter-matches`",
+            "`completed-hidden`",
+            "`no-actionable`",
+        ):
+            self.assertIn(
+                kind, docs, msg=f"missing empty-state kind: {kind}"
+            )
+
+    def test_docs_describe_two_pane_shell_and_preview(self) -> None:
+        # Sessions 3 + 4 introduced the two-pane shell at the 960 px
+        # breakpoint plus the plan preview panel. Document both surfaces.
+        docs = self._read("docs/agent-session-loop.md")
+        self.assertIn("960 px", docs)
+        self.assertIn("two-pane shell", docs)
+        self.assertIn("preview panel", docs)
+        self.assertIn("(no extra fetch)", docs)
+        # Shell data attributes the CSS branches on.
+        for attribute in (
+            '`data-route="queue|detail"`',
+            '`data-viewport="mobile|desktop"`',
+            '`data-preview="empty|active"`',
+        ):
+            self.assertIn(
+                attribute, docs, msg=f"missing shell attribute: {attribute}"
+            )
+
+    def test_docs_describe_row_action_focus_contract(self) -> None:
+        # Session 6 introduced #plan?dir=…&focus=<key>; document the
+        # valid keys, the data-action-kind attribute, and the one-shot
+        # focus semantics.
+        docs = self._read("docs/agent-session-loop.md")
+        self.assertIn("`#plan?dir=<encoded>[&focus=<key>]`", docs)
+        self.assertIn("`DETAIL_FOCUS_TARGETS`", docs)
+        for key in ("`reply`", "`events`", "`active`", "`launch`", "`unlock`"):
+            self.assertIn(
+                key, docs, msg=f"missing focus key: {key}"
+            )
+        self.assertIn(
+            "`data-action-kind=\"<RecommendedAction>\"`", docs
+        )
+        for action in (
+            "`watch`",
+            "`reply`",
+            "`inspect-failure`",
+            "`unlock`",
+            "`view`",
+            "`run`",
+            "`repair-plan`",
+        ):
+            self.assertIn(
+                action, docs, msg=f"missing recommended action: {action}"
+            )
+        # Row buttons must remain navigation-only — no inline mutations.
+        self.assertIn("navigation-only", docs)
+        # Focus is one-shot so polling does not re-snap the viewport.
+        self.assertIn("one-shot", docs)
+
+    def test_docs_describe_session_storage_preferences(self) -> None:
+        # Sessions 2 + 6 persist preferences under wb.* keys and
+        # explicitly exclude the reply textarea. Document both the
+        # persisted keys and the privacy invariant.
+        docs = self._read("docs/agent-session-loop.md")
+        for key in (
+            "`wb.token`",
+            "`wb.filter`",
+            "`wb.search`",
+            "`wb.sort`",
+            "`wb.completed`",
+            "`wb.selected`",
+        ):
+            self.assertIn(
+                key, docs, msg=f"missing sessionStorage key: {key}"
+            )
+        # Reply textarea privacy regression.
+        self.assertIn("reply textarea is intentionally **not** persisted", docs)
+        self.assertIn("`wb.reply`", docs)
+
+    def test_docs_smoke_checklist_covers_triage_inbox(self) -> None:
+        # The Workbench browser smoke checklist must include operator-
+        # verifiable cases for the new triage behavior: default sort +
+        # completed hidden, search/sort/completed persistence, two-pane
+        # layout, focus-hint navigation, and the reply draft survival
+        # invariant.
+        docs = self._read("docs/agent-session-loop.md")
+        self.assertIn('`urgency_rank`', docs)
+        self.assertIn('"show completed" toggle', docs)
+        self.assertIn('`data-state="no-search-results"`', docs)
+        self.assertIn("150 ms search debounce", docs)
+        self.assertIn("survive via sessionStorage", docs)
+        self.assertIn("two-pane shell", docs)
+        self.assertIn("`#plan?dir=…&focus=reply`", docs)
+        self.assertIn("reply draft", docs)
+
+    def test_docs_urgency_table_lists_activity_labels(self) -> None:
+        # Session 7 deferred the per-state activity_label column to
+        # session 8 QA. Each ACTIVITY_LABEL_BY_STATE string must appear
+        # in the docs urgency table so external readers can predict the
+        # exact UI badge text without consulting workbench.py, and a
+        # drift between the runtime constant and the table would fail
+        # this regression.
+        docs = self._read("docs/agent-session-loop.md")
+        self.assertIn("activity_label", docs)
+        for primary_state, label in workbench.ACTIVITY_LABEL_BY_STATE.items():
+            self.assertIn(
+                label,
+                docs,
+                msg=(
+                    f"docs urgency table missing activity_label "
+                    f"{label!r} for state {primary_state!r}"
+                ),
+            )
 
 
 if __name__ == "__main__":
