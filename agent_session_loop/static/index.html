@@ -174,6 +174,115 @@
         </div>
       </div>
 
+      <section
+        class="wb-panel wb-recovery"
+        id="wb-recovery-panel"
+        data-severity="none"
+      >
+        <div class="wb-recovery__head">
+          <div class="wb-recovery__head-text">
+            <h2 class="wb-panel__title">Recovery Center</h2>
+            <p class="wb-recovery__title" id="wb-recovery-title">loading</p>
+          </div>
+          <span
+            class="wb-recovery__kind"
+            id="wb-recovery-kind"
+            data-kind="none"
+          >
+            none
+          </span>
+        </div>
+        <p class="wb-recovery__summary" id="wb-recovery-summary">
+          loading recovery diagnosis…
+        </p>
+        <div
+          class="wb-recovery__actions"
+          id="wb-recovery-primary-action"
+          hidden
+        ></div>
+        <div
+          class="wb-recovery__group wb-recovery__reply wb-reply"
+          id="wb-reply-panel"
+          hidden
+        >
+          <h3 class="wb-recovery__group-title">Reply</h3>
+          <p class="wb-reply__hint">
+            The runner is paused waiting on a clarifying answer. Submit returns
+            the answer verbatim to <code>asl run --reply</code>; the draft is
+            never persisted to disk or browser storage.
+          </p>
+          <details class="wb-reply__context">
+            <summary>resolver prompt</summary>
+            <pre id="wb-reply-prompt" class="wb-reply__prompt"></pre>
+          </details>
+          <details class="wb-reply__context">
+            <summary>last message</summary>
+            <pre id="wb-reply-last-message" class="wb-reply__last"></pre>
+          </details>
+          <form id="wb-reply-form" class="wb-reply__form" autocomplete="off">
+            <label for="wb-reply-text" class="wb-reply__label">
+              answer <abbr title="required">*</abbr>
+            </label>
+            <textarea
+              id="wb-reply-text"
+              name="reply_text"
+              rows="6"
+              required
+              aria-required="true"
+              autocomplete="off"
+              spellcheck="true"
+            ></textarea>
+            <p
+              id="wb-reply-form-errors"
+              class="wb-form__errors"
+              role="alert"
+              hidden
+            ></p>
+            <div class="wb-reply__actions">
+              <button
+                class="wb-button wb-button--primary"
+                type="submit"
+                data-action="reply-submit"
+              >
+                submit reply
+              </button>
+              <button
+                class="wb-button wb-button--ghost"
+                id="wb-reply-clear"
+                type="button"
+                data-action="reply-clear"
+              >
+                clear
+              </button>
+            </div>
+          </form>
+        </div>
+        <div
+          class="wb-recovery__group"
+          id="wb-recovery-evidence-section"
+          hidden
+        >
+          <h3 class="wb-recovery__group-title">Evidence</h3>
+          <ul class="wb-recovery__evidence" id="wb-recovery-evidence"></ul>
+        </div>
+        <div
+          class="wb-recovery__group"
+          id="wb-recovery-commands-section"
+          hidden
+        >
+          <h3 class="wb-recovery__group-title">Commands</h3>
+          <ul class="wb-recovery__commands" id="wb-recovery-commands"></ul>
+        </div>
+        <div
+          class="wb-recovery__group"
+          id="wb-recovery-artifacts-section"
+          hidden
+        >
+          <h3 class="wb-recovery__group-title">Related artifacts</h3>
+          <ul class="wb-recovery__artifacts" id="wb-recovery-artifacts"></ul>
+        </div>
+      </section>
+
       <section class="wb-panel">
         <h2 class="wb-panel__title">Controls</h2>
         <div id="wb-controls-feedback" class="wb-controls__feedback" hidden></div>
@@ -347,60 +456,6 @@
               data-action="unpin"
             >
               unpin
-            </button>
-          </div>
-        </form>
-      </section>
-
-      <section class="wb-panel" id="wb-reply-panel" hidden>
-        <h2 class="wb-panel__title">Reply</h2>
-        <p class="wb-reply__hint">
-          The runner is paused waiting on a clarifying answer. Submit returns
-          the answer verbatim to <code>asl run --reply</code>; the draft is
-          never persisted to disk or browser storage.
-        </p>
-        <details class="wb-reply__context">
-          <summary>resolver prompt</summary>
-          <pre id="wb-reply-prompt" class="wb-reply__prompt"></pre>
-        </details>
-        <details class="wb-reply__context">
-          <summary>last message</summary>
-          <pre id="wb-reply-last-message" class="wb-reply__last"></pre>
-        </details>
-        <form id="wb-reply-form" class="wb-reply__form" autocomplete="off">
-          <label for="wb-reply-text" class="wb-reply__label">
-            answer <abbr title="required">*</abbr>
-          </label>
-          <textarea
-            id="wb-reply-text"
-            name="reply_text"
-            rows="6"
-            required
-            aria-required="true"
-            autocomplete="off"
-            spellcheck="true"
-          ></textarea>
-          <p
-            id="wb-reply-form-errors"
-            class="wb-form__errors"
-            role="alert"
-            hidden
-          ></p>
-          <div class="wb-reply__actions">
-            <button
-              class="wb-button wb-button--primary"
-              type="submit"
-              data-action="reply-submit"
-            >
-              submit reply
-            </button>
-            <button
-              class="wb-button wb-button--ghost"
-              id="wb-reply-clear"
-              type="button"
-              data-action="reply-clear"
-            >
-              clear
             </button>
           </div>
         </form>

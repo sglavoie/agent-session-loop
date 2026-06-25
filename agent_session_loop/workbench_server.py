@@ -21,6 +21,7 @@ GET  ``/static/<path>``                  - bundled vanilla assets (CSS, JS).
 GET  ``/api/health``                     - liveness probe.
 GET  ``/api/queue``                      - Workbench queue summaries.
 GET  ``/api/plan?plan_dir=<path>``       - one plan detail summary.
+GET  ``/api/recovery?plan_dir=<path>``   - recovery diagnosis for one plan.
 GET  ``/api/registry``                   - registry payload.
 GET  ``/api/artifacts?plan_dir=<path>``  - artifact paths and metadata.
 GET  ``/api/state?plan_dir=<path>``      - latest runner state payload.
@@ -227,6 +228,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             ("GET", "/api/health"): self._handle_health,
             ("GET", "/api/queue"): self._handle_queue,
             ("GET", "/api/plan"): self._handle_plan,
+            ("GET", "/api/recovery"): self._handle_recovery,
             ("GET", "/api/registry"): self._handle_registry,
             ("GET", "/api/artifacts"): self._handle_artifacts,
             ("GET", "/api/state"): self._handle_state,
@@ -551,6 +553,54 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             discovered, state_dir=config.state_dir
         )
         self._send_success(reason="ok", plan=summary.to_payload())
+
+    def _handle_recovery(self, *, query: Mapping[str, list[str]]) -> None:
+        plan_dir = self._require_query_value(query, "plan_dir")
+        config = self._server().config
+        try:
+            canonical = plans.canonicalize_path(plan_dir)
+        except (OSError, ValueError) as error:
+            self._send_error(
+                400,
+                "invalid-plan",
+                f"invalid plan_dir: {error}",
+                details={"plan_dir": plan_dir},
+            )
+            return
+        if not canonical.is_dir():
+            self._send_error(
+                400,
+                "invalid-plan",
+                f"plan directory does not exist: {canonical}",
+                details={"plan_dir": str(canonical)},
+            )
+            return
+        try:
+            snapshot = plans.inspect_plan(canonical)
+        except plans.PlanError as error:
+            self._send_error(
+                500,
+                "malformed-plan",
+                str(error),
+                details={"plan_dir": str(canonical)},
+            )
+            return
+        discovered = workbench.DiscoveredPlan(
+            plan_dir=snapshot.plan_dir, exists=True
+        )
+        recovery = workbench.build_workbench_recovery(
+            discovered, state_dir=config.state_dir
+        )
+        self._send_success(
+            reason="ok",
+            plan_dir=str(snapshot.plan_dir),
+            recovery=recovery.to_payload(),
+            artifacts=[artifact.to_payload() for artifact in recovery.artifacts],
+            run_id=recovery.run_id,
+            session_id=recovery.session_id,
+            turn_index=recovery.turn_index,
+            commit_index=recovery.commit_index,
+        )
 
     def _handle_registry(self, *, query: Mapping[str, list[str]]) -> None:
         del query

@@ -7094,6 +7094,8 @@ class CommandAndConfigTests(unittest.TestCase):
             self.assertIn(runner.REVIEW_SESSION_MARKER, body)
             self.assertIn("claude", body)
             self.assertIn(runner.FINAL_REVIEW_FILENAME, body)
+            self.assertIn("three distinct source, documentation, or test", body)
+            self.assertIn("review-oriented section heading", body)
             self.assertIn("Do not modify", body)
             self.assertIn("- **Status**: pending", body)
 
@@ -7103,6 +7105,7 @@ class CommandAndConfigTests(unittest.TestCase):
             self.assertEqual(1, len(contract.verify.checks))
             check = contract.verify.checks[0]
             self.assertIsInstance(check, contracts.CommandCheck)
+            self.assertEqual("final-review-output-evidence-based", check.name)
             self.assertEqual("python3", check.argv[0])
             self.assertEqual(
                 str(plans.canonicalize_path(plan_dir)), check.cwd
@@ -7235,7 +7238,16 @@ class CommandAndConfigTests(unittest.TestCase):
                 plan_dir, review_harness="claude"
             )
             (plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
-                "Critical review findings.\n", encoding="utf-8"
+                (
+                    "## Findings\n"
+                    "- Reviewed agent_session_loop/runner.py for generated review "
+                    "contracts.\n"
+                    "- Checked tests/test_agent_session_loop.py for lifecycle "
+                    "coverage.\n"
+                    "- Compared docs/agent-session-loop.md for operator-facing "
+                    "documentation impact.\n"
+                ),
+                encoding="utf-8",
             )
 
             contract = contracts.read_completion_contract(
@@ -7257,6 +7269,27 @@ class CommandAndConfigTests(unittest.TestCase):
             )
             (plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
                 "   \n\n  \t\n", encoding="utf-8"
+            )
+
+            contract = contracts.read_completion_contract(
+                plan_dir, session_file.session_id
+            )
+            self.assertIsNotNone(contract)
+            result = verification.run_verification(contract, repo_root=plan_dir)
+            self.assertFalse(result.passed)
+
+    def test_ensure_generated_review_session_contract_fails_low_effort_output(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            write_plan(plan_dir, ("complete",))
+
+            session_file, _ = runner.ensure_generated_review_session(
+                plan_dir, review_harness="claude"
+            )
+            (plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
+                "Looks good overall.\nNo issues found.\n", encoding="utf-8"
             )
 
             contract = contracts.read_completion_contract(
@@ -17464,8 +17497,18 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
     def _precreate_final_review(self) -> Path:
         """Stamp final-review.md so the generated contract passes for fake harnesses."""
         path = self.plan_dir / runner.FINAL_REVIEW_FILENAME
-        path.write_text("synthetic final review content\n", encoding="utf-8")
+        path.write_text(self._valid_final_review_body(), encoding="utf-8")
         return path
+
+    def _valid_final_review_body(self) -> str:
+        return (
+            "## Findings\n"
+            "- Reviewed agent_session_loop/runner.py for generated review "
+            "contract behavior.\n"
+            "- Checked tests/test_agent_session_loop.py for lifecycle coverage.\n"
+            "- Compared docs/agent-session-loop.md for operator-facing "
+            "documentation impact.\n"
+        )
 
     def _write_pending_review_session(self) -> plans.SessionFile:
         return runner.ensure_generated_review_session(
@@ -17595,7 +17638,13 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                     "    target.write_text(text, encoding='utf-8')",
                     "",
                     "(plan_dir / 'final-review.md').write_text(",
-                    "    'synthetic review\\n', encoding='utf-8',",
+                    "    (",
+                    "        '## Findings\\n'",
+                    "        '- Reviewed agent_session_loop/runner.py for mutation guard behavior.\\n'",
+                    "        '- Checked tests/test_agent_session_loop.py for review lifecycle coverage.\\n'",
+                    "        '- Compared docs/agent-session-loop.md for operator documentation impact.\\n'",
+                    "    ),",
+                    "    encoding='utf-8',",
                     ")",
                     "",
                     "if last_message is not None:",
@@ -18057,6 +18106,30 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual("verify-failed", payload["pause_reason"])
         self.assertFalse(payload["review_completed"])
 
+    def test_review_low_effort_final_review_file_pauses_run(self) -> None:
+        self._write_plan(("complete",), readiness=None)
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        self._write_pending_review_session()
+        sha = plans.stable_readiness_sha256(self.plan_dir)
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=sha,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        (self.plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
+            "Looks good overall.\nNo issues found.\n", encoding="utf-8"
+        )
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("verify-failed", payload["pause_reason"])
+        self.assertFalse(payload["review_completed"])
+
     def test_text_output_prints_review_path(self) -> None:
         self._write_plan(("pending",), readiness="loop-ready")
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
@@ -18147,7 +18220,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         )
         self.assertTrue(review_path.is_file())
         self.assertEqual(
-            "fake review findings\n",
+            self._valid_final_review_body(),
             review_path.read_text(encoding="utf-8"),
         )
 
@@ -19838,6 +19911,18 @@ def _write_state_payload(
     return state_path
 
 
+def _write_raw_state_payload(
+    plan_dir: Path,
+    state_root: Path,
+    payload: str,
+) -> Path:
+    plan_state = state.plan_state_dir(plan_dir, state_root)
+    plan_state.mkdir(parents=True, exist_ok=True)
+    state_path = plan_state / events.STATE_FILE_NAME
+    state_path.write_text(payload, encoding="utf-8")
+    return state_path
+
+
 def _write_lock_file(
     plan_dir: Path,
     state_root: Path,
@@ -20727,6 +20812,1323 @@ class WorkbenchSummaryTests(unittest.TestCase):
             self.assertEqual(
                 summary.searchable_text, payload["searchable_text"]
             )
+            self.assertEqual(summary.recovery, payload["recovery"])
+            self.assertEqual("none", payload["recovery"]["kind"])
+
+
+class WorkbenchRecoveryTests(unittest.TestCase):
+    def _recovery_for_payload(
+        self,
+        tmp_path: Path,
+        payload: dict[str, object] | None,
+        *,
+        plan_name: str,
+        lock_pid: int | None = None,
+        pid_running=None,
+    ) -> workbench.WorkbenchRecovery:
+        plan_dir = _make_workbench_plan(tmp_path, plan_name)
+        state_root = tmp_path / "state"
+        if payload is not None:
+            _write_state_payload(plan_dir, state_root, payload)
+        if lock_pid is not None:
+            _write_lock_file(plan_dir, state_root, pid=lock_pid)
+        discovered = _discovered(plan_dir)
+        if pid_running is None:
+            return workbench.build_workbench_recovery(
+                discovered, state_dir=state_root
+            )
+        with mock.patch.object(state, "is_pid_running", side_effect=pid_running):
+            return workbench.build_workbench_recovery(
+                discovered, state_dir=state_root
+            )
+
+    def test_ready_plan_has_no_recovery_needed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+
+            recovery = workbench.build_workbench_recovery(
+                _discovered(plan_dir), state_dir=tmp_path / "state"
+            )
+
+            self.assertEqual("none", recovery.kind)
+            self.assertFalse(recovery.recoverable)
+            payload = recovery.to_payload()
+            self.assertEqual("none", payload["compact"]["kind"])
+
+    def test_state_read_warning_details_cover_stable_codes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cases = (
+                (
+                    "state-malformed-json",
+                    lambda path: path.write_text("{", encoding="utf-8"),
+                    "state.json unreadable:",
+                ),
+                (
+                    "state-unreadable",
+                    lambda path: path.mkdir(),
+                    "state.json unreadable:",
+                ),
+                (
+                    "state-invalid-json-shape",
+                    lambda path: path.write_text("[]", encoding="utf-8"),
+                    "state.json did not contain a JSON object",
+                ),
+            )
+
+            for expected_code, write_state, expected_prefix in cases:
+                with self.subTest(code=expected_code):
+                    plan_dir = _make_workbench_plan(
+                        tmp_path, name=f"warning-{expected_code}"
+                    )
+                    state_root = tmp_path / "state"
+                    state_path = (
+                        state.plan_state_dir(plan_dir, state_root)
+                        / events.STATE_FILE_NAME
+                    )
+                    state_path.parent.mkdir(parents=True, exist_ok=True)
+                    write_state(state_path)
+
+                    recovery = workbench.build_workbench_recovery(
+                        _discovered(plan_dir), state_dir=state_root
+                    )
+                    payload = recovery.to_payload()
+
+                    self.assertEqual(1, len(recovery.warnings))
+                    self.assertTrue(recovery.warnings[0].startswith(expected_prefix))
+                    self.assertEqual(list(recovery.warnings), payload["warnings"])
+                    self.assertEqual(1, len(recovery.warning_details))
+                    self.assertEqual(1, len(payload["warning_details"]))
+                    self.assertEqual(expected_code, recovery.warning_details[0].code)
+                    self.assertEqual(
+                        recovery.warnings[0], recovery.warning_details[0].message
+                    )
+                    self.assertEqual("warning", recovery.warning_details[0].severity)
+                    self.assertEqual(
+                        {
+                            "code": expected_code,
+                            "message": recovery.warnings[0],
+                            "severity": "warning",
+                        },
+                        payload["warning_details"][0],
+                    )
+                    self.assertEqual(1, payload["compact"]["warning_count"])
+                    self.assertNotIn("warning_details", payload["compact"])
+
+    def test_state_missing_race_warning_detail_has_stable_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            state_path = (
+                state.plan_state_dir(plan_dir, state_root) / events.STATE_FILE_NAME
+            )
+            original_exists = Path.exists
+            original_read_text = Path.read_text
+
+            def exists_with_state_race(path: Path) -> bool:
+                if path == state_path:
+                    return True
+                return original_exists(path)
+
+            def read_text_with_state_race(path: Path, *args, **kwargs) -> str:
+                if path == state_path:
+                    raise FileNotFoundError(state_path)
+                return original_read_text(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "exists", new=exists_with_state_race):
+                with mock.patch.object(
+                    Path, "read_text", new=read_text_with_state_race
+                ):
+                    recovery = workbench.build_workbench_recovery(
+                        _discovered(plan_dir), state_dir=state_root
+                    )
+
+            payload = recovery.to_payload()
+
+            self.assertEqual(
+                ("state.json disappeared before it could be read",),
+                recovery.warnings,
+            )
+            self.assertEqual(
+                [
+                    {
+                        "code": "state-missing-race",
+                        "message": recovery.warnings[0],
+                        "severity": "warning",
+                    }
+                ],
+                payload["warning_details"],
+            )
+
+    def test_seeded_state_fixtures_cover_every_recovery_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cases: tuple[tuple[str, dict[str, object] | None, dict], ...] = (
+                ("none", None, {}),
+                (
+                    "reply-needed",
+                    {
+                        "ok": False,
+                        "paused": True,
+                        "reason": "agent-question",
+                        "pause_reason": "agent-question",
+                        "pause_message": "Need an operator decision",
+                        "turns": [
+                            {
+                                "session_id": "1",
+                                "turn_index": 1,
+                                "last_message_path": str(
+                                    tmp_path / "reply" / "last-message.txt"
+                                ),
+                            }
+                        ],
+                        "run_id": "run-reply",
+                    },
+                    {},
+                ),
+                (
+                    "not-loop-ready",
+                    {
+                        "ok": False,
+                        "paused": True,
+                        "reason": "not-loop-ready",
+                        "pause_reason": "not-loop-ready",
+                        "pause_message": "preflight failed",
+                        "pause_details": {"readiness_state": "reviewed"},
+                        "run_id": "run-ready",
+                    },
+                    {},
+                ),
+                (
+                    "verify-failed",
+                    {
+                        "ok": False,
+                        "paused": True,
+                        "reason": "verify-failed",
+                        "pause_reason": "verify-failed",
+                        "pause_message": "verification failed",
+                        "pause_details": {
+                            "failures": [
+                                {"name": "unit", "failure_reason": "command-failed"}
+                            ]
+                        },
+                        "turns": [
+                            {
+                                "session_id": "1",
+                                "turn_index": 2,
+                                "verification": {
+                                    "reason": "verify-failed",
+                                    "passed": False,
+                                    "checks": [
+                                        {
+                                            "name": "unit",
+                                            "status": "fail",
+                                            "failure_reason": "command-failed",
+                                        }
+                                    ],
+                                },
+                            }
+                        ],
+                        "run_id": "run-verify",
+                    },
+                    {},
+                ),
+                (
+                    "no-contract",
+                    {
+                        "ok": False,
+                        "paused": True,
+                        "reason": "no-contract",
+                        "pause_reason": "no-contract",
+                        "pause_message": "session has no Completion Contract",
+                        "pause_details": {"session_id": "1"},
+                        "turns": [
+                            {
+                                "session_id": "1",
+                                "turn_index": 3,
+                                "verification": {
+                                    "reason": "no-contract",
+                                    "passed": False,
+                                    "checks": [],
+                                },
+                            }
+                        ],
+                        "run_id": "run-no-contract",
+                    },
+                    {},
+                ),
+                (
+                    "malformed-contract",
+                    {
+                        "ok": False,
+                        "paused": True,
+                        "reason": "malformed-contract",
+                        "pause_reason": "malformed-contract",
+                        "pause_message": "Completion Contract JSON is invalid",
+                        "pause_details": {"session_id": "1"},
+                        "turns": [
+                            {
+                                "session_id": "1",
+                                "turn_index": 4,
+                                "verification": {
+                                    "reason": "malformed-contract",
+                                    "passed": False,
+                                    "checks": [],
+                                },
+                            }
+                        ],
+                        "run_id": "run-malformed-contract",
+                    },
+                    {},
+                ),
+                (
+                    "stale-lock",
+                    None,
+                    {
+                        "lock_pid": _WORKBENCH_DEAD_PID,
+                        "pid_running": lambda pid: pid == os.getpid(),
+                    },
+                ),
+                (
+                    "stale-state",
+                    {
+                        "ok": True,
+                        "paused": False,
+                        "run_id": "run-orphan",
+                        "run_started_at": "2026-06-19T12:00:00+00:00",
+                        "run_finished_at": None,
+                        "active_turn": None,
+                        "active_verification": None,
+                    },
+                    {},
+                ),
+                (
+                    "commit-preflight",
+                    {
+                        "ok": False,
+                        "paused": True,
+                        "reason": "commit-preflight",
+                        "pause_reason": "commit-preflight",
+                        "pause_message": "worktree is dirty",
+                        "run_id": "run-commit-preflight",
+                    },
+                    {},
+                ),
+                (
+                    "commit-failed",
+                    {
+                        "ok": False,
+                        "paused": True,
+                        "reason": "commit-failed",
+                        "pause_reason": "commit-failed",
+                        "pause_message": "commit failed",
+                        "pause_details": {
+                            "commit": {
+                                "session_id": "1",
+                                "commit_index": 1,
+                                "success": False,
+                                "status_result": "nonzero-exit",
+                            }
+                        },
+                        "run_id": "run-commit-failed",
+                    },
+                    {},
+                ),
+                (
+                    "generic",
+                    {
+                        "ok": False,
+                        "paused": False,
+                        "reason": "nonzero-exit",
+                        "run_id": "run-generic",
+                        "run_started_at": "2026-06-19T12:00:00+00:00",
+                        "run_finished_at": "2026-06-19T12:05:00+00:00",
+                        "turns": [
+                            {
+                                "session_id": "1",
+                                "turn_index": 1,
+                                "returncode": 2,
+                            }
+                        ],
+                    },
+                    {},
+                ),
+            )
+            observed: set[str] = set()
+            for expected_kind, payload, options in cases:
+                with self.subTest(kind=expected_kind):
+                    recovery = self._recovery_for_payload(
+                        tmp_path,
+                        payload,
+                        plan_name=f"kind-{expected_kind}",
+                        **options,
+                    )
+                    self.assertEqual(expected_kind, recovery.kind)
+                    observed.add(recovery.kind)
+
+            self.assertEqual(set(workbench.RECOVERY_KINDS), observed)
+
+    def test_registered_pause_reasons_have_explicit_recovery_mapping(self) -> None:
+        mapped_reasons = set(workbench.PAUSE_REASON_RECOVERY_KIND_BY_REASON)
+        generic_reasons = set(workbench.GENERIC_RECOVERY_PAUSE_REASONS)
+        registered_reasons = set(events.PAUSE_REASONS)
+
+        self.assertFalse(mapped_reasons & generic_reasons)
+        self.assertEqual(registered_reasons, mapped_reasons | generic_reasons)
+        self.assertNotIn(
+            "generic", set(workbench.PAUSE_REASON_RECOVERY_KIND_BY_REASON.values())
+        )
+        self.assertLessEqual(
+            set(workbench.PAUSE_REASON_RECOVERY_KIND_BY_REASON.values()),
+            set(workbench.RECOVERY_KINDS) - {"generic"},
+        )
+
+    def test_generic_pause_reason_allowlist_uses_generic_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            artifact_dir = tmp_path / "runs" / "run-exit" / "turn-0001"
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "nonzero-exit",
+                    "pause_reason": "nonzero-exit",
+                    "pause_message": "harness exited with status 2",
+                    "turns": [
+                        {
+                            "session_id": "1",
+                            "turn_index": 1,
+                            "returncode": 2,
+                            "result_path": str(artifact_dir / "result.json"),
+                        }
+                    ],
+                    "run_id": "run-exit",
+                },
+            )
+
+            recovery = workbench.build_workbench_recovery(
+                _discovered(plan_dir), state_dir=state_root
+            )
+
+            self.assertEqual("generic", recovery.kind)
+            action_targets = {action.target for action in recovery.actions}
+            self.assertNotIn("reply", action_targets)
+
+    def test_unknown_pause_reason_falls_back_by_runner_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state_root = tmp_path / "state"
+            unknown_reason = "new-runner-reason"
+            cases = (
+                (
+                    "paused",
+                    "reply-needed",
+                    {
+                        "ok": False,
+                        "paused": True,
+                        "reason": unknown_reason,
+                        "pause_reason": unknown_reason,
+                        "pause_message": "operator input required",
+                        "turns": [
+                            {
+                                "session_id": "1",
+                                "turn_index": 2,
+                                "last_message_path": str(
+                                    tmp_path
+                                    / "runs"
+                                    / "run-paused"
+                                    / "turn-0002"
+                                    / "last-message.txt"
+                                ),
+                            }
+                        ],
+                        "run_id": "run-paused",
+                    },
+                    "reply",
+                ),
+                (
+                    "finished",
+                    "generic",
+                    {
+                        "ok": False,
+                        "paused": False,
+                        "reason": unknown_reason,
+                        "pause_message": "runner stopped with a new reason",
+                        "run_id": "run-finished",
+                        "run_started_at": "2026-06-19T12:00:00+00:00",
+                        "run_finished_at": "2026-06-19T12:05:00+00:00",
+                        "turns": [
+                            {
+                                "session_id": "1",
+                                "turn_index": 2,
+                                "returncode": 2,
+                                "result_path": str(
+                                    tmp_path
+                                    / "runs"
+                                    / "run-finished"
+                                    / "turn-0002"
+                                    / "result.json"
+                                ),
+                            }
+                        ],
+                    },
+                    "launch",
+                ),
+            )
+
+            for name, expected_kind, payload, expected_target in cases:
+                with self.subTest(lifecycle=name):
+                    plan_dir = _make_workbench_plan(tmp_path, name=f"unknown-{name}")
+                    _write_state_payload(plan_dir, state_root, payload)
+
+                    recovery = workbench.build_workbench_recovery(
+                        _discovered(plan_dir), state_dir=state_root
+                    )
+
+                    self.assertEqual(expected_kind, recovery.kind)
+                    self.assertEqual("1", recovery.session_id)
+                    self.assertEqual(2, recovery.turn_index)
+                    action_targets = {action.target for action in recovery.actions}
+                    self.assertIn(expected_target, action_targets)
+                    if expected_kind == "generic":
+                        self.assertNotIn("reply", action_targets)
+
+    def test_not_loop_ready_recovery_surfaces_gate_and_repair_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            gate = {
+                "ok": False,
+                "readiness_state": "reviewed",
+                "expected_readiness_sha256": "e" * 64,
+                "recorded_readiness_sha256": "r" * 64,
+                "findings_by_severity": {"red": 1, "yellow": 0, "green": 0},
+                "findings": [
+                    {
+                        "severity": "red",
+                        "category": "manifest-readiness",
+                        "message": "readiness state is reviewed",
+                    }
+                ],
+            }
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "not-loop-ready",
+                    "pause_reason": "not-loop-ready",
+                    "pause_message": "preflight failed: 1 red finding(s)",
+                    "pause_details": gate,
+                    "readiness_gate": gate,
+                    "run_id": "run-ready",
+                },
+            )
+
+            recovery = workbench.build_workbench_recovery(
+                _discovered(plan_dir), state_dir=state_root
+            )
+
+            self.assertEqual("not-loop-ready", recovery.kind)
+            self.assertTrue(recovery.recoverable)
+            self.assertGreaterEqual(len(recovery.commands), 2)
+            self.assertIn("--mark-loop-ready", recovery.commands[0].command)
+            self.assertTrue(
+                any(
+                    "plan-preflight-iterate" in command.command
+                    for command in recovery.commands
+                )
+            )
+            action_payload = [action.to_payload() for action in recovery.actions]
+            self.assertTrue(
+                any(
+                    action["endpoint"] == "/api/launch"
+                    and action["target"] == "launch"
+                    for action in action_payload
+                )
+            )
+            evidence_payload = [row.to_payload() for row in recovery.evidence]
+            self.assertTrue(
+                any(row["value"] == "manifest-readiness" for row in evidence_payload)
+            )
+
+    def test_reply_needed_recovery_uses_latest_paused_turn_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            older_artifact = tmp_path / "runs" / "run-reply" / "turn-0001"
+            latest_artifact = tmp_path / "runs" / "run-reply" / "turn-0002"
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "agent-question",
+                    "pause_reason": "agent-question",
+                    "pause_message": "Need a decision",
+                    "turns": [
+                        {
+                            "session_id": "1",
+                            "turn_index": 1,
+                            "last_message_path": str(
+                                older_artifact / "last-message.txt"
+                            ),
+                            "result_path": str(older_artifact / "result.json"),
+                        },
+                        {
+                            "session_id": "2",
+                            "turn_index": 2,
+                            "last_message_path": str(
+                                latest_artifact / "last-message.txt"
+                            ),
+                            "result_path": str(latest_artifact / "result.json"),
+                        },
+                    ],
+                    "run_id": "run-reply",
+                },
+            )
+
+            recovery = workbench.build_workbench_recovery(
+                _discovered(plan_dir), state_dir=state_root
+            )
+
+            self.assertEqual("reply-needed", recovery.kind)
+            self.assertEqual("2", recovery.session_id)
+            self.assertEqual(2, recovery.turn_index)
+            artifact_payload = [artifact.to_payload() for artifact in recovery.artifacts]
+            self.assertTrue(
+                any(
+                    artifact["source"] == "paused-turn"
+                    and artifact["path"] == str(latest_artifact / "result.json")
+                    for artifact in artifact_payload
+                )
+            )
+            self.assertFalse(
+                any(
+                    artifact["source"] == "paused-turn"
+                    and artifact["path"] == str(older_artifact / "result.json")
+                    for artifact in artifact_payload
+                )
+            )
+            action_payload = [action.to_payload() for action in recovery.actions]
+            self.assertTrue(
+                any(
+                    action["endpoint"] == "/api/reply"
+                    and action["target"] == "reply"
+                    for action in action_payload
+                )
+            )
+
+    def test_stale_lock_recovery_unlocks_through_existing_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            _write_lock_file(plan_dir, state_root, pid=_WORKBENCH_DEAD_PID)
+
+            with mock.patch.object(
+                state,
+                "is_pid_running",
+                side_effect=lambda pid: pid == os.getpid(),
+            ):
+                recovery = workbench.build_workbench_recovery(
+                    _discovered(plan_dir), state_dir=state_root
+                )
+
+            self.assertEqual("stale-lock", recovery.kind)
+            action_payload = [action.to_payload() for action in recovery.actions]
+            self.assertTrue(
+                any(
+                    action["endpoint"] == "/api/unlock"
+                    and action["target"] == "unlock"
+                    for action in action_payload
+                )
+            )
+
+    def test_stale_state_recovery_unlocks_orphaned_runner_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": True,
+                    "paused": False,
+                    "run_id": "run-orphan",
+                    "run_started_at": "2026-06-19T12:00:00+00:00",
+                    "run_finished_at": None,
+                    "active_turn": None,
+                    "active_verification": None,
+                },
+            )
+
+            recovery = workbench.build_workbench_recovery(
+                _discovered(plan_dir), state_dir=state_root
+            )
+
+            self.assertEqual("stale-state", recovery.kind)
+            self.assertIn("no lock file", recovery.summary)
+            action_payload = [action.to_payload() for action in recovery.actions]
+            self.assertTrue(
+                any(
+                    action["endpoint"] == "/api/unlock"
+                    and action["target"] == "unlock"
+                    for action in action_payload
+                )
+            )
+
+    def test_stale_state_precedes_stale_lock_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": True,
+                    "paused": False,
+                    "run_id": "run-orphan",
+                    "run_started_at": "2026-06-19T12:00:00+00:00",
+                    "run_finished_at": None,
+                    "active_turn": None,
+                    "active_verification": None,
+                },
+            )
+            _write_lock_file(plan_dir, state_root, pid=_WORKBENCH_DEAD_PID)
+
+            with mock.patch.object(
+                state,
+                "is_pid_running",
+                side_effect=lambda pid: pid == os.getpid(),
+            ):
+                recovery = workbench.build_workbench_recovery(
+                    _discovered(plan_dir), state_dir=state_root
+                )
+
+            self.assertEqual("stale-state", recovery.kind)
+            self.assertIn("lock is stale", recovery.summary)
+            action_payload = [action.to_payload() for action in recovery.actions]
+            self.assertTrue(
+                any(
+                    action["endpoint"] == "/api/unlock"
+                    and action["target"] == "unlock"
+                    for action in action_payload
+                )
+            )
+
+    def test_active_run_precedes_paused_recovery_classification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            artifact_dir = tmp_path / "runs" / "run-active" / "turn-0002"
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "verify-failed",
+                    "pause_reason": "verify-failed",
+                    "pause_message": "verification failed",
+                    "run_id": "run-active",
+                    "run_started_at": "2026-06-19T12:00:00+00:00",
+                    "run_finished_at": None,
+                    "active_turn": {
+                        "session_id": "1",
+                        "turn_index": 2,
+                        "result_path": str(artifact_dir / "result.json"),
+                    },
+                    "active_verification": None,
+                },
+            )
+            _write_lock_file(plan_dir, state_root, pid=os.getpid())
+
+            recovery = workbench.build_workbench_recovery(
+                _discovered(plan_dir), state_dir=state_root
+            )
+
+            self.assertEqual("none", recovery.kind)
+            self.assertEqual("Run in progress", recovery.title)
+            self.assertFalse(recovery.recoverable)
+            self.assertEqual("1", recovery.session_id)
+            self.assertEqual(2, recovery.turn_index)
+            artifact_payload = [artifact.to_payload() for artifact in recovery.artifacts]
+            self.assertTrue(
+                any(
+                    artifact["source"] == "active-turn"
+                    and artifact["path"] == str(artifact_dir / "result.json")
+                    for artifact in artifact_payload
+                )
+            )
+
+    def test_verify_failed_recovery_uses_runtime_hint_and_failed_turn_artifacts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            artifact_dir = tmp_path / "runs" / "run-verify" / "turn-0001"
+            result_path = artifact_dir / "result.json"
+            turn = {
+                "run_id": "run-verify",
+                "session_id": "1",
+                "turn_index": 1,
+                "artifact_dir": str(artifact_dir),
+                "stdout_path": str(artifact_dir / "stdout.log"),
+                "stderr_path": str(artifact_dir / "stderr.log"),
+                "last_message_path": str(artifact_dir / "last-message.txt"),
+                "result_path": str(result_path),
+                "verification": {
+                    "session": "1",
+                    "reason": "verify-failed",
+                    "passed": False,
+                    "checks": [
+                        {
+                            "name": "missing-file",
+                            "status": "fail",
+                            "failure_reason": "file-missing",
+                        }
+                    ],
+                },
+            }
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "verify-failed",
+                    "pause_reason": "verify-failed",
+                    "pause_message": "verification failed for session 1",
+                    "pause_details": {
+                        "failures": [
+                            {
+                                "name": "missing-file",
+                                "failure_reason": "file-missing",
+                            }
+                        ]
+                    },
+                    "turns": [turn],
+                    "run_id": "run-verify",
+                },
+            )
+
+            recovery = workbench.build_workbench_recovery(
+                _discovered(plan_dir), state_dir=state_root
+            )
+
+            self.assertEqual("verify-failed", recovery.kind)
+            self.assertEqual("1", recovery.session_id)
+            self.assertEqual(1, recovery.turn_index)
+            command_payload = [command.to_payload() for command in recovery.commands]
+            self.assertTrue(
+                any("asl verify" in command["command"] for command in command_payload)
+            )
+            self.assertTrue(
+                any("asl preflight" in command["command"] for command in command_payload)
+            )
+            evidence_values = [row.value for row in recovery.evidence]
+            self.assertIn("file-missing", evidence_values)
+            self.assertTrue(
+                any(
+                    row.value and "Create the expected artifact" in row.value
+                    for row in recovery.evidence
+                )
+            )
+            artifact_payload = [artifact.to_payload() for artifact in recovery.artifacts]
+            self.assertTrue(
+                any(
+                    artifact["source"] == "failed-turn"
+                    and artifact["path"] == str(result_path)
+                    for artifact in artifact_payload
+                )
+            )
+            self.assertTrue(
+                any(
+                    row.label == "Failed check" and row.value == "missing-file"
+                    for row in recovery.evidence
+                )
+            )
+            action_payload = [action.to_payload() for action in recovery.actions]
+            self.assertTrue(
+                any(
+                    action["endpoint"] == "/api/launch"
+                    and action["target"] == "launch"
+                    for action in action_payload
+                )
+            )
+
+    def test_verify_failed_recovery_uses_latest_matching_turn_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            older_artifact = tmp_path / "runs" / "run-verify" / "turn-0001"
+            latest_artifact = tmp_path / "runs" / "run-verify" / "turn-0005"
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "verify-failed",
+                    "pause_reason": "verify-failed",
+                    "pause_message": "verification failed",
+                    "turns": [
+                        {
+                            "session_id": "1",
+                            "turn_index": 1,
+                            "result_path": str(older_artifact / "result.json"),
+                            "verification": {
+                                "reason": "verify-failed",
+                                "passed": False,
+                                "checks": [
+                                    {
+                                        "name": "old",
+                                        "status": "fail",
+                                        "failure_reason": "command-failed",
+                                    }
+                                ],
+                            },
+                        },
+                        {
+                            "session_id": "2",
+                            "turn_index": 5,
+                            "result_path": str(latest_artifact / "result.json"),
+                            "verification": {
+                                "reason": "verify-failed",
+                                "passed": False,
+                                "checks": [
+                                    {
+                                        "name": "new",
+                                        "status": "fail",
+                                        "failure_reason": "file-error",
+                                    }
+                                ],
+                            },
+                        },
+                    ],
+                    "run_id": "run-verify",
+                },
+            )
+
+            recovery = workbench.build_workbench_recovery(
+                _discovered(plan_dir), state_dir=state_root
+            )
+
+            self.assertEqual("verify-failed", recovery.kind)
+            self.assertEqual("2", recovery.session_id)
+            self.assertEqual(5, recovery.turn_index)
+            artifact_payload = [artifact.to_payload() for artifact in recovery.artifacts]
+            self.assertTrue(
+                any(
+                    artifact["source"] == "failed-turn"
+                    and artifact["path"] == str(latest_artifact / "result.json")
+                    for artifact in artifact_payload
+                )
+            )
+            self.assertFalse(
+                any(
+                    artifact["source"] == "failed-turn"
+                    and artifact["path"] == str(older_artifact / "result.json")
+                    for artifact in artifact_payload
+                )
+            )
+
+    def test_finished_verify_failed_uses_verification_failure_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            artifact_dir = tmp_path / "runs" / "run-verify" / "turn-0003"
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": False,
+                    "paused": False,
+                    "reason": "verify-failed",
+                    "pause_message": "verification failed after runner exit",
+                    "run_id": "run-verify",
+                    "run_started_at": "2026-06-19T12:00:00+00:00",
+                    "run_finished_at": "2026-06-19T12:05:00+00:00",
+                    "active_turn": None,
+                    "active_verification": None,
+                    "turns": [
+                        {
+                            "session_id": "2",
+                            "turn_index": 3,
+                            "result_path": str(artifact_dir / "result.json"),
+                            "verification": {
+                                "reason": "verify-failed",
+                                "passed": False,
+                                "checks": [
+                                    {
+                                        "name": "unit",
+                                        "status": "fail",
+                                        "failure_reason": "command-failed",
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                },
+            )
+
+            recovery = workbench.build_workbench_recovery(
+                _discovered(plan_dir), state_dir=state_root
+            )
+
+            self.assertEqual("verify-failed", recovery.kind)
+            self.assertEqual("2", recovery.session_id)
+            self.assertEqual(3, recovery.turn_index)
+            command_payload = [command.to_payload() for command in recovery.commands]
+            self.assertTrue(
+                any("asl verify" in command["command"] for command in command_payload)
+            )
+            action_targets = {action.target for action in recovery.actions}
+            self.assertIn("artifacts", action_targets)
+            self.assertIn("launch", action_targets)
+            artifact_payload = [artifact.to_payload() for artifact in recovery.artifacts]
+            self.assertTrue(
+                any(
+                    artifact["source"] == "failed-turn"
+                    and artifact["path"] == str(artifact_dir / "result.json")
+                    for artifact in artifact_payload
+                )
+            )
+
+    def test_verify_failed_recovery_maps_every_failure_reason_to_runtime_hint(
+        self,
+    ) -> None:
+        failure_reasons = (
+            "command-failed",
+            "command-timeout",
+            "command-not-found",
+            "command-error",
+            "file-missing",
+            "file-error",
+            "regex-not-matched",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            for failure_reason in failure_reasons:
+                with self.subTest(failure_reason=failure_reason):
+                    recovery = self._recovery_for_payload(
+                        tmp_path,
+                        {
+                            "ok": False,
+                            "paused": True,
+                            "reason": "verify-failed",
+                            "pause_reason": "verify-failed",
+                            "pause_message": "verification failed",
+                            "pause_details": {
+                                "failures": [
+                                    {
+                                        "name": "check",
+                                        "failure_reason": failure_reason,
+                                    }
+                                ]
+                            },
+                            "turns": [
+                                {
+                                    "session_id": "1",
+                                    "turn_index": 1,
+                                    "verification": {
+                                        "reason": "verify-failed",
+                                        "passed": False,
+                                        "checks": [
+                                            {
+                                                "name": "check",
+                                                "status": "fail",
+                                                "failure_reason": failure_reason,
+                                            }
+                                        ],
+                                    },
+                                }
+                            ],
+                            "run_id": f"run-{failure_reason}",
+                        },
+                        plan_name=f"hint-{failure_reason}",
+                    )
+                    hint = preflight.runtime_repair_hint(
+                        "verify-failed", failure_reason=failure_reason
+                    )
+                    self.assertIsNotNone(hint)
+                    assert hint is not None
+                    self.assertTrue(
+                        any(
+                            row.label == "Repair hint"
+                            and row.detail == hint.check_id
+                            and row.value == hint.message
+                            for row in recovery.evidence
+                        )
+                    )
+
+    def test_generic_recovery_uses_latest_nonzero_turn_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            older_artifact = tmp_path / "runs" / "run-exit" / "turn-0001"
+            latest_artifact = tmp_path / "runs" / "run-exit" / "turn-0004"
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": False,
+                    "paused": False,
+                    "reason": "nonzero-exit",
+                    "pause_message": "harness exited with return code 7",
+                    "run_id": "run-exit",
+                    "run_started_at": "2026-06-19T12:00:00+00:00",
+                    "run_finished_at": "2026-06-19T12:05:00+00:00",
+                    "turns": [
+                        {
+                            "session_id": "1",
+                            "turn_index": 1,
+                            "returncode": 2,
+                            "result_path": str(older_artifact / "result.json"),
+                        },
+                        {
+                            "session_id": "2",
+                            "turn_index": 2,
+                            "returncode": 0,
+                            "result_path": str(
+                                tmp_path / "runs" / "run-exit" / "turn-0002"
+                            ),
+                        },
+                        {
+                            "session_id": "3",
+                            "turn_index": 4,
+                            "returncode": 7,
+                            "result_path": str(latest_artifact / "result.json"),
+                        },
+                    ],
+                },
+            )
+
+            recovery = workbench.build_workbench_recovery(
+                _discovered(plan_dir), state_dir=state_root
+            )
+
+            self.assertEqual("generic", recovery.kind)
+            self.assertEqual("3", recovery.session_id)
+            self.assertEqual(4, recovery.turn_index)
+            artifact_payload = [artifact.to_payload() for artifact in recovery.artifacts]
+            self.assertTrue(
+                any(
+                    artifact["source"] == "failed-turn"
+                    and artifact["path"] == str(latest_artifact / "result.json")
+                    for artifact in artifact_payload
+                )
+            )
+            self.assertFalse(
+                any(
+                    artifact["source"] == "failed-turn"
+                    and artifact["path"] == str(older_artifact / "result.json")
+                    for artifact in artifact_payload
+                )
+            )
+
+    def test_commit_failed_recovery_prefers_failed_commit_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            active_artifact = tmp_path / "runs" / "run-commit" / "turn-0001"
+            commit_artifact = tmp_path / "runs" / "run-commit" / "commit-0001-1"
+            commit = {
+                "run_id": "run-commit",
+                "commit_index": 1,
+                "scope": "session",
+                "session_id": "1",
+                "artifact_dir": str(commit_artifact),
+                "stdout_path": str(commit_artifact / "stdout.log"),
+                "stderr_path": str(commit_artifact / "stderr.log"),
+                "result_path": str(commit_artifact / "result.json"),
+                "success": False,
+                "status_result": "nonzero-exit",
+                "returncode": 23,
+            }
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "commit-failed",
+                    "pause_reason": "commit-failed",
+                    "pause_message": "auto-commit failed after session 1",
+                    "pause_details": {"commit": commit},
+                    "active_turn": {
+                        "run_id": "run-commit",
+                        "session_id": "1",
+                        "turn_index": 1,
+                        "artifact_dir": str(active_artifact),
+                        "result_path": str(active_artifact / "result.json"),
+                    },
+                    "commits": [commit],
+                    "run_id": "run-commit",
+                },
+            )
+
+            recovery = workbench.build_workbench_recovery(
+                _discovered(plan_dir), state_dir=state_root
+            )
+
+            self.assertEqual("commit-failed", recovery.kind)
+            self.assertEqual(1, recovery.commit_index)
+            artifact_payload = [artifact.to_payload() for artifact in recovery.artifacts]
+            self.assertTrue(
+                any(
+                    artifact["source"] == "failed-commit"
+                    and artifact["path"] == str(commit_artifact / "result.json")
+                    for artifact in artifact_payload
+                )
+            )
+            self.assertFalse(
+                any(
+                    artifact["source"] == "active-turn"
+                    for artifact in artifact_payload
+                )
+            )
+            action_payload = [action.to_payload() for action in recovery.actions]
+            self.assertTrue(
+                any(action["target"] == "launch" for action in action_payload)
+            )
+            self.assertTrue(
+                any(action["target"] == "profile" for action in action_payload)
+            )
+
+    def test_commit_failed_recovery_matches_paused_and_finished_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state_root = tmp_path / "state"
+            cases = (
+                ("paused", True, None),
+                ("finished", False, "2026-06-19T12:05:00+00:00"),
+            )
+
+            for name, paused, finished_at in cases:
+                with self.subTest(lifecycle=name):
+                    plan_dir = _make_workbench_plan(tmp_path, name=f"commit-{name}")
+                    commit_artifact = (
+                        tmp_path / "runs" / f"run-commit-{name}" / "commit-0002-1"
+                    )
+                    commit = {
+                        "run_id": f"run-commit-{name}",
+                        "commit_index": 1,
+                        "scope": "session",
+                        "session_id": "2",
+                        "artifact_dir": str(commit_artifact),
+                        "stdout_path": str(commit_artifact / "stdout.log"),
+                        "stderr_path": str(commit_artifact / "stderr.log"),
+                        "result_path": str(commit_artifact / "result.json"),
+                        "success": False,
+                        "status_result": "nonzero-exit",
+                        "returncode": 23,
+                    }
+                    _write_state_payload(
+                        plan_dir,
+                        state_root,
+                        {
+                            "ok": False,
+                            "paused": paused,
+                            "reason": "commit-failed",
+                            "pause_reason": "commit-failed" if paused else None,
+                            "pause_message": "auto-commit failed after session 2",
+                            "pause_details": {"commit": commit},
+                            "run_id": f"run-commit-{name}",
+                            "run_started_at": "2026-06-19T12:00:00+00:00",
+                            "run_finished_at": finished_at,
+                            "active_turn": None,
+                            "active_verification": None,
+                            "commits": [commit],
+                        },
+                    )
+
+                    recovery = workbench.build_workbench_recovery(
+                        _discovered(plan_dir), state_dir=state_root
+                    )
+
+                    self.assertEqual("commit-failed", recovery.kind)
+                    self.assertEqual("2", recovery.session_id)
+                    self.assertEqual(1, recovery.commit_index)
+                    action_targets = {action.target for action in recovery.actions}
+                    self.assertIn("artifacts", action_targets)
+                    self.assertIn("launch", action_targets)
+                    self.assertIn("profile", action_targets)
+                    artifact_payload = [
+                        artifact.to_payload() for artifact in recovery.artifacts
+                    ]
+                    self.assertTrue(
+                        any(
+                            artifact["source"] == "failed-commit"
+                            and artifact["path"]
+                            == str(commit_artifact / "result.json")
+                            for artifact in artifact_payload
+                        )
+                    )
+
+    def test_harness_unavailable_recovery_guides_to_profile_and_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            config_path = tmp_path / "harnesses.json"
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "harness-unavailable",
+                    "pause_reason": "harness-unavailable",
+                    "pause_message": "claude executable not found",
+                    "pause_details": {
+                        "session_id": "1",
+                        "requested_harness": "claude",
+                        "config_path": str(config_path),
+                        "error": "claude executable not found on PATH",
+                    },
+                    "run_id": "run-harness",
+                },
+            )
+
+            recovery = workbench.build_workbench_recovery(
+                _discovered(plan_dir), state_dir=state_root
+            )
+
+            self.assertEqual("generic", recovery.kind)
+            self.assertIn("Harness", recovery.title)
+            action_payload = [action.to_payload() for action in recovery.actions]
+            self.assertTrue(
+                any(action["target"] == "profile" for action in action_payload)
+            )
+            artifact_payload = [artifact.to_payload() for artifact in recovery.artifacts]
+            self.assertTrue(
+                any(
+                    artifact["kind"] == "config"
+                    and artifact["path"] == str(config_path)
+                    for artifact in artifact_payload
+                )
+            )
 
 
 class _FakePopen:
@@ -21386,6 +22788,59 @@ class WorkbenchServerTests(unittest.TestCase):
             plan_payload["urgency_group"], workbench.URGENCY_GROUPS
         )
 
+    def test_queue_and_plan_expose_compact_recovery_payload(self) -> None:
+        _write_state_payload(
+            self.canonical_plan_dir,
+            self.state_dir,
+            {
+                "ok": False,
+                "paused": True,
+                "reason": "not-loop-ready",
+                "pause_reason": "not-loop-ready",
+                "pause_message": "preflight failed",
+                "pause_details": {"readiness_state": "reviewed"},
+                "run_id": "run-recovery-summary",
+            },
+        )
+        registry = workbench.load_registry(self.registry_path)
+        registry = workbench.upsert_pin(
+            registry,
+            self.canonical_plan_dir,
+            label="Alpha plan",
+        )
+        workbench.save_registry(registry, self.registry_path)
+
+        server = self._start_server()
+        status, queue_body, _ = _http_request(
+            f"{self._base_url(server)}/api/queue"
+        )
+
+        self.assertEqual(200, status)
+        queue_recovery = queue_body["plans"][0]["recovery"]
+        for key in (
+            "kind",
+            "title",
+            "summary",
+            "severity",
+            "recoverable",
+            "primary_action",
+            "artifact_count",
+            "command_count",
+            "warning_count",
+        ):
+            self.assertIn(key, queue_recovery)
+        self.assertEqual("not-loop-ready", queue_recovery["kind"])
+        self.assertEqual("launch", queue_recovery["primary_action"]["target"])
+        self.assertGreater(queue_recovery["command_count"], 0)
+
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
+        status, plan_body, _ = _http_request(
+            f"{self._base_url(server)}/api/plan?{query}"
+        )
+        self.assertEqual(200, status)
+        plan_recovery = plan_body["plan"]["recovery"]
+        self.assertEqual(queue_recovery, plan_recovery)
+
     def test_queue_payload_preserves_legacy_fields_alongside_triage(
         self,
     ) -> None:
@@ -21442,6 +22897,7 @@ class WorkbenchServerTests(unittest.TestCase):
             "last_activity_source",
             "searchable_text",
         )
+        recovery_keys = ("recovery",)
 
         server = self._start_server()
         status, queue_body, _ = _http_request(
@@ -21451,7 +22907,7 @@ class WorkbenchServerTests(unittest.TestCase):
         plans_payload = queue_body["plans"]
         self.assertEqual(1, len(plans_payload))
         queue_plan = plans_payload[0]
-        for key in legacy_keys + triage_keys:
+        for key in legacy_keys + triage_keys + recovery_keys:
             self.assertIn(
                 key,
                 queue_plan,
@@ -21460,6 +22916,7 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertEqual("Alpha plan", queue_plan["label"])
         self.assertEqual("codex", queue_plan["profile"]["harness"])
         self.assertEqual(str(self.canonical_plan_dir), queue_plan["plan_dir"])
+        self.assertEqual("none", queue_plan["recovery"]["kind"])
 
         query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
         status, plan_body, _ = _http_request(
@@ -21467,12 +22924,13 @@ class WorkbenchServerTests(unittest.TestCase):
         )
         self.assertEqual(200, status)
         plan_payload = plan_body["plan"]
-        for key in legacy_keys + triage_keys:
+        for key in legacy_keys + triage_keys + recovery_keys:
             self.assertIn(
                 key,
                 plan_payload,
                 msg=f"plan payload missing key: {key}",
             )
+        self.assertEqual("none", plan_payload["recovery"]["kind"])
 
     def test_queue_payload_urgency_rank_sorts_across_primary_states(
         self,
@@ -21661,6 +23119,151 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertEqual(400, status)
         self.assertFalse(body["ok"])
         self.assertEqual("invalid-request", body["reason"])
+
+    def test_recovery_endpoint_returns_detail_payload_without_token(self) -> None:
+        _write_state_payload(
+            self.canonical_plan_dir,
+            self.state_dir,
+            {
+                "ok": False,
+                "paused": True,
+                "reason": "not-loop-ready",
+                "pause_reason": "not-loop-ready",
+                "pause_message": "preflight failed",
+                "pause_details": {"readiness_state": "reviewed"},
+                "run_id": "run-recovery",
+            },
+        )
+        server = self._start_server(token="read-token-not-required")
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
+
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/recovery?{query}"
+        )
+
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+        self.assertEqual(str(self.canonical_plan_dir), body["plan_dir"])
+        self.assertEqual("not-loop-ready", body["recovery"]["kind"])
+        self.assertEqual("not-loop-ready", body["recovery"]["compact"]["kind"])
+        self.assertEqual("run-recovery", body["run_id"])
+        self.assertTrue(
+            any(command["command"].endswith("--mark-loop-ready")
+                for command in body["recovery"]["commands"])
+        )
+        self.assertTrue(
+            any(artifact["kind"] == "state" for artifact in body["artifacts"])
+        )
+
+    def test_recovery_endpoint_includes_warning_details_additively(self) -> None:
+        _write_raw_state_payload(self.canonical_plan_dir, self.state_dir, "[]")
+        server = self._start_server(token="warning-token-not-required")
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
+
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/recovery?{query}"
+        )
+
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+        recovery = body["recovery"]
+        self.assertEqual(
+            ["state.json did not contain a JSON object"], recovery["warnings"]
+        )
+        self.assertEqual(
+            [
+                {
+                    "code": "state-invalid-json-shape",
+                    "message": "state.json did not contain a JSON object",
+                    "severity": "warning",
+                }
+            ],
+            recovery["warning_details"],
+        )
+        self.assertEqual(1, recovery["compact"]["warning_count"])
+
+    def test_warning_details_remain_full_recovery_only(self) -> None:
+        _write_raw_state_payload(self.canonical_plan_dir, self.state_dir, "[]")
+        registry = workbench.load_registry(self.registry_path)
+        registry = workbench.upsert_pin(
+            registry,
+            self.canonical_plan_dir,
+            label="Alpha plan",
+        )
+        workbench.save_registry(registry, self.registry_path)
+
+        server = self._start_server(token="warning-boundary-token")
+        status, queue_body, _ = _http_request(
+            f"{self._base_url(server)}/api/queue"
+        )
+
+        self.assertEqual(200, status)
+        queue_recovery = queue_body["plans"][0]["recovery"]
+        self.assertEqual(1, queue_recovery["warning_count"])
+        self.assertNotIn("warnings", queue_recovery)
+        self.assertNotIn("warning_details", queue_recovery)
+
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
+        status, plan_body, _ = _http_request(
+            f"{self._base_url(server)}/api/plan?{query}"
+        )
+        self.assertEqual(200, status)
+        plan_recovery = plan_body["plan"]["recovery"]
+        self.assertEqual(queue_recovery, plan_recovery)
+        self.assertNotIn("warnings", plan_recovery)
+        self.assertNotIn("warning_details", plan_recovery)
+
+        status, recovery_body, _ = _http_request(
+            f"{self._base_url(server)}/api/recovery?{query}"
+        )
+        self.assertEqual(200, status)
+        full_recovery = recovery_body["recovery"]
+        self.assertEqual(
+            ["state.json did not contain a JSON object"],
+            full_recovery["warnings"],
+        )
+        self.assertEqual(
+            "state-invalid-json-shape",
+            full_recovery["warning_details"][0]["code"],
+        )
+        self.assertEqual(1, full_recovery["compact"]["warning_count"])
+        self.assertNotIn("warnings", full_recovery["compact"])
+        self.assertNotIn("warning_details", full_recovery["compact"])
+
+    def test_recovery_endpoint_rejects_malformed_plan(self) -> None:
+        malformed = self.tmp_path / "plans" / "malformed"
+        malformed.mkdir(parents=True)
+        (malformed / "context.md").write_text("# Context\n", encoding="utf-8")
+        server = self._start_server()
+        query = urllib.parse.urlencode({"plan_dir": str(malformed)})
+
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/recovery?{query}"
+        )
+
+        self.assertEqual(500, status)
+        self.assertFalse(body["ok"])
+        self.assertEqual("malformed-plan", body["reason"])
+
+    def test_recovery_endpoint_rejects_invalid_requests(self) -> None:
+        server = self._start_server()
+
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/recovery")
+
+        self.assertEqual(400, status)
+        self.assertFalse(body["ok"])
+        self.assertEqual("invalid-request", body["reason"])
+
+        query = urllib.parse.urlencode(
+            {"plan_dir": str(self.tmp_path / "plans" / "missing")}
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/recovery?{query}"
+        )
+
+        self.assertEqual(400, status)
+        self.assertFalse(body["ok"])
+        self.assertEqual("invalid-plan", body["reason"])
 
     def test_registry_get_returns_empty_when_unset(self) -> None:
         server = self._start_server()
@@ -23232,15 +24835,16 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         self.assertIn('id="wb-queue"', decoded)
 
     def test_root_html_bundles_detail_view_shell(self) -> None:
-        # The detail view markup, controls, profile form, reply panel, and
-        # row templates must ship in index.html so the SPA can render the
-        # per-plan route without additional fetches.
+        # The detail view markup, controls, profile form, embedded reply
+        # flow, and row templates must ship in index.html so the SPA can
+        # render the per-plan route without additional fetches.
         server = self._start_server()
         _, body, _ = _http_request_raw(self._base_url(server) + "/")
         decoded = body.decode("utf-8")
         required_ids = (
             'id="wb-detail"',
             'id="wb-detail-back"',
+            'id="wb-recovery-panel"',
             'id="wb-controls"',
             'id="wb-control-launch"',
             'id="wb-control-stop"',
@@ -23264,6 +24868,50 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         )
         for marker in required_ids:
             self.assertIn(marker, decoded, msg=f"missing marker: {marker}")
+        recovery_idx = decoded.find('id="wb-recovery-panel"')
+        reply_idx = decoded.find('id="wb-reply-panel"')
+        controls_idx = decoded.find('id="wb-controls"')
+        self.assertLess(recovery_idx, reply_idx)
+        self.assertLess(reply_idx, controls_idx)
+        self.assertNotIn('<section class="wb-panel" id="wb-reply-panel"', decoded)
+
+    def test_root_html_bundles_recovery_center_sections(self) -> None:
+        # The Recovery Center is the first actionable detail panel and must
+        # ship all hosts the JS renderer updates on each detail refresh.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/")
+        decoded = body.decode("utf-8")
+        required_markers = (
+            'class="wb-panel wb-recovery"',
+            'id="wb-recovery-panel"',
+            'data-severity="none"',
+            'id="wb-recovery-title"',
+            'id="wb-recovery-kind"',
+            'id="wb-recovery-summary"',
+            'id="wb-recovery-primary-action"',
+            'id="wb-recovery-evidence-section"',
+            'id="wb-recovery-evidence"',
+            'id="wb-recovery-commands-section"',
+            'id="wb-recovery-commands"',
+            'id="wb-recovery-artifacts-section"',
+            'id="wb-recovery-artifacts"',
+        )
+        for marker in required_markers:
+            self.assertIn(marker, decoded, msg=f"missing marker: {marker}")
+        for text in (
+            "Recovery Center",
+            "loading recovery diagnosis",
+            "Evidence",
+            "Commands",
+            "Related artifacts",
+            "asl run --reply",
+            "never persisted to disk or browser storage",
+        ):
+            self.assertIn(text, decoded, msg=f"missing recovery text: {text}")
+        recovery_idx = decoded.find('id="wb-recovery-panel"')
+        controls_idx = decoded.find('id="wb-controls"')
+        self.assertNotEqual(-1, recovery_idx)
+        self.assertLess(recovery_idx, controls_idx)
 
     def test_app_js_enforces_safe_control_confirmations(self) -> None:
         # The detail view must confirm destructive or sensitive actions
@@ -23277,6 +24925,23 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         self.assertIn("refreshDetail", decoded)
         self.assertIn("validateLaunchPayload", decoded)
         self.assertIn("clearReplyTextarea", decoded)
+        self.assertIn('reply: { scroll: "wb-recovery-panel"', decoded)
+        self.assertIn('renderedRecovery.kind === "reply-needed"', decoded)
+        self.assertIn("renderRecoveryActions", decoded)
+        self.assertIn("RECOVERY_ACTION_TARGETS_BY_ID", decoded)
+        self.assertIn("handleRecoveryAction", decoded)
+        self.assertIn('endpoint === "/api/unlock"', decoded)
+        self.assertIn('endpoint === "/api/launch"', decoded)
+        self.assertIn("await handleUnlockClick()", decoded)
+        self.assertIn("await handleLaunchClick()", decoded)
+        self.assertIn("renderReplyContextError", decoded)
+        self.assertNotIn("tasks.push(loadAndRenderReply", decoded)
+        for reason in (
+            "no-paused-run",
+            "missing-question-context",
+            "reply-context-mismatch",
+        ):
+            self.assertIn(reason, decoded)
         # Confirmation prompts for dangerous actions.
         self.assertIn("--unsafe-bypass", decoded)
         self.assertIn("Force-unlock this plan?", decoded)
@@ -23284,6 +24949,95 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # Privacy guard: the reply text must never be persisted.
         # Search for any sessionStorage/localStorage write touching the
         # reply field; a positive match would mean the draft leaks.
+        import re as _re
+
+        leak_patterns = (
+            r"sessionStorage\.setItem\([^)]*reply",
+            r"localStorage\.setItem\([^)]*reply",
+            r"setItem\([^)]*wb\.reply",
+        )
+        for pattern in leak_patterns:
+            self.assertIsNone(
+                _re.search(pattern, decoded),
+                msg=f"reply text persisted via {pattern!r}",
+            )
+
+    def test_app_js_recovery_center_refresh_focus_and_privacy_contract(
+        self,
+    ) -> None:
+        # Recovery Center rendering must update from compact queue/plan data
+        # first, then replace it with /api/recovery details during every
+        # detail refresh. Actions may focus existing panels or delegate to
+        # launch/unlock handlers, but reply text still never reaches storage.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
+        decoded = body.decode("utf-8")
+        for section in (
+            "Recovery Center loading",
+            "Recovery Center panel rendering",
+            "Recovery Center actions",
+            "Recovery Center evidence",
+            "Recovery Center commands",
+            "Recovery Center artifacts",
+            "Recovery Center target resolution",
+            "Recovery Center dispatch",
+            "Recovery Center copy UX",
+        ):
+            self.assertIn(section, decoded, msg=f"missing section: {section}")
+        for helper in (
+            "loadAndRenderRecovery",
+            "renderRecoveryPanel",
+            "renderRecoveryActions",
+            "createRecoveryActionCard",
+            "renderRecoveryEvidence",
+            "renderRecoveryCommands",
+            "renderRecoveryArtifacts",
+            "copyRecoveryCommand",
+            "focusDetailKey",
+            "normalizeRecoveryActionTarget",
+            "hasExplicitRecoveryActionTarget",
+            "legacyRecoveryActionTarget",
+        ):
+            self.assertIn(helper, decoded, msg=f"missing helper: {helper}")
+        self.assertIn(
+            "loadAndRenderRecovery(planDir, state.detailPlan)", decoded
+        )
+        self.assertIn('"/api/recovery?plan_dir="', decoded)
+        self.assertIn("renderRecoveryPanel(compact)", decoded)
+        self.assertIn("renderRecoveryPanel(body.recovery)", decoded)
+        self.assertIn('renderedRecovery.kind === "reply-needed"', decoded)
+        self.assertIn("await loadAndRenderReply(planDir)", decoded)
+        self.assertIn("hideReplyPanel()", decoded)
+        self.assertIn("RECOVERY_ACTION_TARGETS", decoded)
+        self.assertIn("RECOVERY_ACTION_TARGETS_BY_ID", decoded)
+        self.assertIn("isRecoveryActionTarget(value)", decoded)
+        self.assertIn("return legacyRecoveryActionTarget(action);", decoded)
+        self.assertIn(
+            "if (hasExplicitRecoveryActionTarget(action)) return null;",
+            decoded,
+        )
+        for action_id in (
+            "reply",
+            "unlock",
+            "retry-run",
+            "inspect-artifacts",
+            "review-profile",
+        ):
+            self.assertIn(f'"{action_id}"', decoded)
+        self.assertIn('endpoint === "/api/unlock"', decoded)
+        self.assertIn('endpoint === "/api/launch"', decoded)
+        self.assertIn("await handleUnlockClick()", decoded)
+        self.assertIn("await handleLaunchClick()", decoded)
+        self.assertIn("focusDetailKey(target)", decoded)
+        self.assertIn('button.textContent = "copy"', decoded)
+        self.assertIn("copyRecoveryCommand(button, command.command || \"\")", decoded)
+        for text in (
+            "Recovery unavailable",
+            "recovery diagnosis unavailable",
+            "No recovery diagnosis is available.",
+            "Recovery details failed to load:",
+        ):
+            self.assertIn(text, decoded, msg=f"missing recovery text: {text}")
         import re as _re
 
         leak_patterns = (
@@ -23596,6 +25350,34 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         self.assertIn(
             '.wb-shell[data-viewport="desktop"][data-route="queue"]', decoded
         )
+
+    def test_static_css_recovery_center_wraps_long_content_on_mobile(
+        self,
+    ) -> None:
+        # Long plan paths, copied repair commands, and failed-check evidence
+        # must wrap inside the Recovery Center instead of widening the detail
+        # pane or overlapping action buttons. Mobile layout collapses the
+        # same rows into one column.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(
+            self._base_url(server) + "/static/styles.css"
+        )
+        decoded = body.decode("utf-8")
+        for selector in (
+            ".wb-recovery__evidence-row",
+            ".wb-recovery__command-row",
+            ".wb-recovery__artifact-row",
+            ".wb-recovery__value",
+            ".wb-recovery__command",
+            ".wb-recovery__artifact-path",
+        ):
+            self.assertIn(selector, decoded, msg=f"missing selector: {selector}")
+        self.assertIn("minmax(0, 1fr)", decoded)
+        self.assertIn("min-width: 0;", decoded)
+        self.assertIn("word-break: break-word;", decoded)
+        self.assertIn("white-space: pre-wrap;", decoded)
+        self.assertIn("@media (max-width: 720px)", decoded)
+        self.assertIn("grid-template-columns: 1fr;", decoded)
 
     def test_app_js_two_pane_shell_keeps_queue_visible_on_desktop(self) -> None:
         # Session 3 contract: applyRoute delegates pane visibility to a
@@ -24305,6 +26087,27 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # via matchesCompletedVisibility; the rest of URGENCY_GROUPS
         # is server-side only and intentionally not asserted here.
         self.assertIn('"complete"', decoded)
+
+    def test_app_js_recovery_action_targets_mirror_python_constants(self) -> None:
+        from typing import get_args
+        import re as _re
+
+        server = self._start_server()
+        _, body, _ = _http_request_raw(
+            self._base_url(server) + "/static/app.js"
+        )
+        decoded = body.decode("utf-8")
+        targets_match = _re.search(
+            r"const RECOVERY_ACTION_TARGETS = \[(.*?)\];",
+            decoded,
+            flags=_re.DOTALL,
+        )
+        self.assertIsNotNone(targets_match)
+        assert targets_match is not None
+        js_targets = tuple(_re.findall(r'"([^"]+)"', targets_match.group(1)))
+
+        self.assertEqual(tuple(get_args(workbench.RecoveryActionTarget)), js_targets)
+        self.assertEqual(workbench.RECOVERY_ACTION_TARGETS, js_targets)
 
 
 class WorkbenchHardeningTests(unittest.TestCase):
@@ -25071,9 +26874,9 @@ class WorkbenchCliHandlerTests(unittest.TestCase):
 
 
 class WorkbenchDocsRegressionTests(unittest.TestCase):
-    """Lock the documentation against regressing the four review findings.
+    """Lock the documentation against regressing Workbench review findings.
 
-    The review called out four concrete gaps the docs/README must reflect:
+    Early reviews called out four concrete gaps the docs/README must reflect:
 
     1. The Workbench CLI surface (`asl workbench [serve]`, `pin`, `unpin`,
        `registry --json`) — including the bare-`workbench` default to
@@ -25106,6 +26909,10 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
         )
         # Reflects the dotted session API/frontend rendering.
         self.assertIn("dotted session IDs", readme)
+        # Reflects the Recovery Center docs and read-only API.
+        self.assertIn("Recovery Center", readme)
+        self.assertIn("`/api/recovery` diagnostics", readme)
+        self.assertIn("copy-only repair commands", readme)
 
     def test_docs_describe_workbench_cli_pin_unpin_registry(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
@@ -25196,6 +27003,16 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             self.assertIn(
                 field, docs, msg=f"missing triage field: {field}"
             )
+        for field in (
+            "`recovery`",
+            "`primary_action`",
+            "`artifact_count`",
+            "`command_count`",
+            "`warning_count`",
+        ):
+            self.assertIn(
+                field, docs, msg=f"missing compact recovery field: {field}"
+            )
         # Urgency groups vocabulary (mirrors workbench.URGENCY_GROUPS).
         for group in (
             "`needs-action`",
@@ -25252,6 +27069,138 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             self.assertIn(
                 constant, docs, msg=f"missing exported constant: {constant}"
             )
+
+    def test_docs_describe_recovery_center_api_and_payload(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        self.assertIn("### Recovery Center payload", docs)
+        self.assertIn("### Recovery payload examples", docs)
+        self.assertIn("`GET /api/recovery?plan_dir=<path>`", docs)
+        self.assertIn("`WorkbenchRecovery.compact_payload()`", docs)
+        self.assertIn("`workbench.RECOVERY_KINDS`", docs)
+        example_start = docs.index("### Recovery payload examples")
+        example_end = docs.index("Representative mappings:", example_start)
+        examples = docs[example_start:example_end]
+        for kind in workbench.RECOVERY_KINDS:
+            self.assertIn(
+                f"`{kind}`",
+                docs,
+                msg=f"missing recovery kind: {kind}",
+            )
+            self.assertIn(
+                f'"kind": "{kind}"',
+                examples,
+                msg=f"missing recovery example for kind: {kind}",
+            )
+        for field in (
+            "`plan_dir`",
+            "`kind`",
+            "`title`",
+            "`summary`",
+            "`severity`",
+            "`recoverable`",
+            "`run_id`",
+            "`session_id`",
+            "`turn_index`",
+            "`commit_index`",
+            "`evidence`",
+            "`actions`",
+            "`commands`",
+            "`artifacts`",
+            "`warnings`",
+            "`warning_details`",
+            "`compact`",
+        ):
+            self.assertIn(
+                field, docs, msg=f"missing recovery payload field: {field}"
+            )
+        for warning_field in ("`code`", "`message`", "`severity`"):
+            self.assertIn(
+                warning_field,
+                docs,
+                msg=f"missing warning_details field: {warning_field}",
+            )
+        for warning_code in (
+            "`state-missing-race`",
+            "`state-unreadable`",
+            "`state-malformed-json`",
+            "`state-invalid-json-shape`",
+        ):
+            self.assertIn(
+                warning_code,
+                docs,
+                msg=f"missing warning_details code: {warning_code}",
+            )
+        self.assertIn("`RECOVERY_ACTION_TARGETS`", docs)
+        self.assertIn("`RECOVERY_ACTION_TARGETS_BY_ID`", docs)
+        for target in workbench.RECOVERY_ACTION_TARGETS:
+            self.assertIn(
+                f"`{target}`",
+                docs,
+                msg=f"missing recovery action target: {target}",
+            )
+            self.assertIn(
+                f'"target": "{target}"',
+                examples,
+                msg=f"missing recovery example target: {target}",
+            )
+        self.assertIn("explicit but unsupported target", docs)
+        self.assertIn(
+            "`evidence`, `commands`, and `artifacts` are uncapped",
+            docs,
+        )
+        self.assertIn("Artifact paths are best-effort pointers", docs)
+        self.assertIn(
+            "Compact payloads intentionally\n  expose only `warning_count`",
+            docs,
+        )
+
+    def test_docs_describe_recovery_center_security_boundaries(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        self.assertIn(
+            "The Recovery Center is a read-only diagnosis layer", docs
+        )
+        self.assertIn("copyable repair commands", docs)
+        self.assertIn("Workbench never executes those\n  commands", docs)
+        for endpoint in (
+            "`/api/reply`",
+            "`/api/launch`",
+            "`/api/unlock`",
+        ):
+            self.assertIn(
+                endpoint, docs, msg=f"missing existing endpoint: {endpoint}"
+            )
+        for command in (
+            "`asl preflight <plan-dir> --mark-loop-ready`",
+            "`$plan-preflight-iterate <plan-dir>/`",
+            "`asl verify <plan-dir>\n  --session <id> --json`",
+            "`asl preflight <plan-dir> --json`",
+        ):
+            self.assertIn(
+                command, docs, msg=f"missing copy-only command: {command}"
+            )
+
+    def test_docs_describe_recovery_center_frontend_behavior(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        self.assertIn("The Recovery Center appears near the top", docs)
+        self.assertIn("renders compact queue/detail `plan.recovery`", docs)
+        self.assertIn("full `/api/recovery` evidence", docs)
+        self.assertIn("Recovery unavailable", docs)
+        self.assertIn("Reply-needed recoveries", docs)
+        self.assertIn("`/api/questions`", docs)
+        self.assertIn("`/api/reply`", docs)
+        self.assertIn("`/api/launch`", docs)
+        self.assertIn("`/api/unlock`", docs)
+        self.assertIn("inspect and navigate actions scroll/focus", docs)
+
+    def test_docs_troubleshooting_covers_recovery_center_examples(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        for text in (
+            "Recovery Center reports `not-loop-ready`",
+            "Recovery Center reports `verify-failed`, `no-contract`, or\n  `malformed-contract`",
+            "Recovery Center reports `commit-failed` or `commit-preflight`",
+            "Recovery Center reports `stale-lock` or `stale-state`",
+        ):
+            self.assertIn(text, docs)
 
     def test_docs_describe_triage_inbox_default_behavior(self) -> None:
         # Default triage view hides completed plans and sorts by
@@ -25366,6 +27315,23 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
         self.assertIn("two-pane shell", docs)
         self.assertIn("`#plan?dir=…&focus=reply`", docs)
         self.assertIn("reply draft", docs)
+        for recovery_case in (
+            "ready (`kind: none`)",
+            "running (`kind: none` with active lock)",
+            "reply-needed",
+            "not-loop-ready",
+            "verify-failed",
+            "stale-lock or\n  stale-state",
+            "commit-failed",
+            "complete (`kind: none`)",
+        ):
+            self.assertIn(
+                recovery_case,
+                docs,
+                msg=f"missing Recovery Center smoke case: {recovery_case}",
+            )
+        self.assertIn("without executing arbitrary repair commands", docs)
+
 
     def test_docs_urgency_table_lists_activity_labels(self) -> None:
         # Session 7 deferred the per-state activity_label column to

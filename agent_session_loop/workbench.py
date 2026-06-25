@@ -22,12 +22,13 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
 from typing import Any, Literal
 
-from . import config, events, harnesses, plans, qna, responses, state
+from . import config, events, harnesses, plans, preflight, qna, responses, state
 
 
 FINAL_REVIEW_FILE_NAME = "final-review.md"
@@ -985,6 +986,7 @@ class WorkbenchSummary:
     activity_label: str = ""
     concise_reason: str = ""
     searchable_text: str = ""
+    recovery: dict[str, Any] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
 
     def to_payload(self) -> dict[str, Any]:
@@ -1006,6 +1008,7 @@ class WorkbenchSummary:
             "last_activity_at": self.last_activity_at,
             "last_activity_source": self.last_activity_source,
             "searchable_text": self.searchable_text,
+            "recovery": dict(self.recovery),
             "detail": self.detail,
             "next_pending_session_id": self.next_pending_session_id,
             "next_pending_session_path": (
@@ -1038,6 +1041,286 @@ class WorkbenchSummary:
             "last_message_preview": self.last_message_preview,
             "warnings": list(self.warnings),
         }
+
+
+RecoveryKind = Literal[
+    "none",
+    "reply-needed",
+    "not-loop-ready",
+    "verify-failed",
+    "no-contract",
+    "malformed-contract",
+    "stale-lock",
+    "stale-state",
+    "commit-preflight",
+    "commit-failed",
+    "generic",
+]
+RECOVERY_KINDS: tuple[RecoveryKind, ...] = (
+    "none",
+    "reply-needed",
+    "not-loop-ready",
+    "verify-failed",
+    "no-contract",
+    "malformed-contract",
+    "stale-lock",
+    "stale-state",
+    "commit-preflight",
+    "commit-failed",
+    "generic",
+)
+
+
+PAUSE_REASON_RECOVERY_KIND_BY_REASON: dict[str, RecoveryKind] = {
+    "blocked": "reply-needed",
+    "commit-failed": "commit-failed",
+    "commit-preflight": "commit-preflight",
+    "dependent": "reply-needed",
+    "malformed-contract": "malformed-contract",
+    "no-contract": "no-contract",
+    "not-loop-ready": "not-loop-ready",
+    "runner-pause": "reply-needed",
+    "unresolved-prerequisite": "reply-needed",
+    "verify-failed": "verify-failed",
+}
+
+
+GENERIC_RECOVERY_PAUSE_REASONS: tuple[str, ...] = (
+    "nonzero-exit",
+    "timeout",
+    "no-status-change",
+    "multiple-status-changes",
+    "malformed-plan",
+    "unknown-status",
+    "lock-contention",
+    "unexpected-status-change",
+    "no-pending-but-incomplete",
+    "harness-unavailable",
+    "unsafe",
+    "interrupted",
+    "review-harness-required",
+    "review-mutated-worktree",
+)
+
+
+RecoverySeverity = Literal["none", "info", "warning", "error"]
+RecoveryEvidenceSeverity = Literal["info", "warning", "error"]
+RecoveryWarningSeverity = Literal["info", "warning", "error"]
+RecoveryWarningCode = Literal[
+    "state-missing-race",
+    "state-unreadable",
+    "state-malformed-json",
+    "state-invalid-json-shape",
+]
+RecoveryActionKind = Literal["endpoint", "inspect", "navigate"]
+RecoveryActionTarget = Literal[
+    "reply",
+    "events",
+    "active",
+    "verification",
+    "progress",
+    "artifacts",
+    "stdout",
+    "stderr",
+    "profile",
+    "launch",
+    "unlock",
+]
+RECOVERY_ACTION_TARGETS: tuple[RecoveryActionTarget, ...] = (
+    "reply",
+    "events",
+    "active",
+    "verification",
+    "progress",
+    "artifacts",
+    "stdout",
+    "stderr",
+    "profile",
+    "launch",
+    "unlock",
+)
+
+
+@dataclass(frozen=True)
+class RecoveryWarning:
+    """Structured warning metadata paired with legacy warning strings."""
+
+    code: RecoveryWarningCode
+    message: str
+    severity: RecoveryWarningSeverity = "warning"
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "severity": self.severity,
+        }
+
+
+@dataclass(frozen=True)
+class RecoveryEvidenceRow:
+    """Small diagnosis row suitable for a compact recovery card."""
+
+    label: str
+    value: str | None
+    detail: str | None = None
+    severity: RecoveryEvidenceSeverity = "info"
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "label": self.label,
+            "value": self.value,
+            "detail": self.detail,
+            "severity": self.severity,
+        }
+
+
+@dataclass(frozen=True)
+class RecoveryArtifactReference:
+    """Reference to an existing ASL state, log, result, or artifact path."""
+
+    label: str
+    path: Path
+    kind: str
+    source: str
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "label": self.label,
+            "path": str(self.path),
+            "kind": self.kind,
+            "source": self.source,
+        }
+
+
+@dataclass(frozen=True)
+class RecoveryCopyCommand:
+    """Command text for the operator to copy; Workbench never executes it."""
+
+    label: str
+    command: str
+    description: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "label": self.label,
+            "command": self.command,
+            "description": self.description,
+        }
+
+
+@dataclass(frozen=True)
+class RecoveryActionCard:
+    """UI action backed only by existing Workbench affordances."""
+
+    id: str
+    label: str
+    description: str
+    kind: RecoveryActionKind
+    target: RecoveryActionTarget | None = None
+    endpoint: str | None = None
+    method: str | None = None
+    payload: Mapping[str, Any] | None = None
+    disabled: bool = False
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "label": self.label,
+            "description": self.description,
+            "kind": self.kind,
+            "target": self.target,
+            "endpoint": self.endpoint,
+            "method": self.method,
+            "payload": dict(self.payload) if self.payload is not None else None,
+            "disabled": self.disabled,
+        }
+
+
+@dataclass(frozen=True)
+class WorkbenchRecovery:
+    """Read-only recovery diagnosis for the Workbench detail view."""
+
+    plan_dir: Path
+    kind: RecoveryKind
+    title: str
+    summary: str
+    severity: RecoverySeverity
+    recoverable: bool
+    evidence: tuple[RecoveryEvidenceRow, ...] = ()
+    actions: tuple[RecoveryActionCard, ...] = ()
+    commands: tuple[RecoveryCopyCommand, ...] = ()
+    artifacts: tuple[RecoveryArtifactReference, ...] = ()
+    run_id: str | None = None
+    session_id: str | None = None
+    turn_index: int | None = None
+    commit_index: int | None = None
+    warnings: tuple[str, ...] = ()
+    warning_details: tuple[RecoveryWarning, ...] = ()
+
+    def compact_payload(self) -> dict[str, Any]:
+        primary_action = self.actions[0] if self.actions else None
+        return {
+            "kind": self.kind,
+            "title": self.title,
+            "summary": self.summary,
+            "severity": self.severity,
+            "recoverable": self.recoverable,
+            "primary_action": (
+                primary_action.to_payload()
+                if primary_action is not None
+                else None
+            ),
+            "artifact_count": len(self.artifacts),
+            "command_count": len(self.commands),
+            "warning_count": len(self.warnings),
+        }
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "plan_dir": str(self.plan_dir),
+            "kind": self.kind,
+            "title": self.title,
+            "summary": self.summary,
+            "severity": self.severity,
+            "recoverable": self.recoverable,
+            "run_id": self.run_id,
+            "session_id": self.session_id,
+            "turn_index": self.turn_index,
+            "commit_index": self.commit_index,
+            "evidence": [row.to_payload() for row in self.evidence],
+            "actions": [action.to_payload() for action in self.actions],
+            "commands": [command.to_payload() for command in self.commands],
+            "artifacts": [artifact.to_payload() for artifact in self.artifacts],
+            "warnings": list(self.warnings),
+            "warning_details": [
+                warning.to_payload() for warning in self.warning_details
+            ],
+            "compact": self.compact_payload(),
+        }
+
+
+@dataclass(frozen=True)
+class _RecoveryBuildContext:
+    """State gathered once for one recovery payload build."""
+
+    snapshot: plans.PlanSnapshot
+    state_path: Path
+    events_path: Path
+    progress_path: Path
+    lock_path: Path
+    lock_info: state.LockInfo | None
+    runner_state: Mapping[str, Any]
+    raw_state: Mapping[str, Any]
+    pause_reason: str | None
+    pause_details: Mapping[str, Any]
+    pause_message: str
+    base_artifacts: tuple[RecoveryArtifactReference, ...]
+    plan_dir_payload: Mapping[str, Any]
+    stale_unfinished: bool
+    stale_reason: str | None
+    warnings: tuple[str, ...]
+    warning_details: tuple[RecoveryWarning, ...]
 
 
 def _coerce_path_value(value: Any) -> Path | None:
@@ -1169,12 +1452,1470 @@ def _searchable_text(
     return " ".join(joined.lower().split())
 
 
+def _payload_str(payload: Mapping[str, Any], key: str) -> str | None:
+    value = payload.get(key)
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _payload_int(payload: Mapping[str, Any], key: str) -> int | None:
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _payload_mapping(payload: Mapping[str, Any], key: str) -> Mapping[str, Any] | None:
+    value = payload.get(key)
+    if isinstance(value, Mapping):
+        return value
+    return None
+
+
+def _payload_mappings(payload: Mapping[str, Any], key: str) -> tuple[Mapping[str, Any], ...]:
+    value = payload.get(key)
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in value if isinstance(item, Mapping))
+
+
+def _read_recovery_state_payload(
+    state_path: Path,
+) -> tuple[dict[str, Any], tuple[str, ...], tuple[RecoveryWarning, ...]]:
+    if not state_path.exists():
+        return {}, (), ()
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        message = "state.json disappeared before it could be read"
+        warning = RecoveryWarning(code="state-missing-race", message=message)
+        return {}, (message,), (warning,)
+    except json.JSONDecodeError as error:
+        message = f"state.json unreadable: {error}"
+        warning = RecoveryWarning(code="state-malformed-json", message=message)
+        return {}, (message,), (warning,)
+    except OSError as error:
+        message = f"state.json unreadable: {error}"
+        warning = RecoveryWarning(code="state-unreadable", message=message)
+        return {}, (message,), (warning,)
+    if not isinstance(payload, dict):
+        message = "state.json did not contain a JSON object"
+        warning = RecoveryWarning(code="state-invalid-json-shape", message=message)
+        return {}, (message,), (warning,)
+    return payload, (), ()
+
+
+def _recovery_base_artifacts(
+    *,
+    state_path: Path,
+    events_path: Path,
+    progress_path: Path,
+) -> tuple[RecoveryArtifactReference, ...]:
+    return (
+        RecoveryArtifactReference(
+            label="Runner state",
+            path=state_path,
+            kind="state",
+            source="plan-state",
+        ),
+        RecoveryArtifactReference(
+            label="Runner events",
+            path=events_path,
+            kind="events",
+            source="plan-state",
+        ),
+        RecoveryArtifactReference(
+            label="Progress journal",
+            path=progress_path,
+            kind="progress",
+            source="plan",
+        ),
+    )
+
+
+def _build_recovery_context(
+    snapshot: plans.PlanSnapshot,
+    state_dir: str | Path | None,
+) -> _RecoveryBuildContext:
+    state_path, events_path, progress_path = _summary_base_paths(
+        snapshot.plan_dir, state_dir
+    )
+    lock_path = state.lock_path_for_plan(snapshot.plan_dir, state_dir)
+    lock_info = state._read_lock_path(lock_path, snapshot.plan_dir)
+    runner_state = state._runner_state_payload(state_path)
+    raw_state, warnings, warning_details = _read_recovery_state_payload(state_path)
+    stale_unfinished, stale_reason = state._stale_runner_state(
+        runner_state, lock_info
+    )
+    base_artifacts = _recovery_base_artifacts(
+        state_path=state_path,
+        events_path=events_path,
+        progress_path=progress_path,
+    )
+    reason = _pause_reason(raw_state, runner_state)
+    return _RecoveryBuildContext(
+        snapshot=snapshot,
+        state_path=state_path,
+        events_path=events_path,
+        progress_path=progress_path,
+        lock_path=lock_path,
+        lock_info=lock_info,
+        runner_state=runner_state,
+        raw_state=raw_state,
+        pause_reason=reason,
+        pause_details=_pause_details(raw_state),
+        pause_message=_pause_message(raw_state) or reason or "Paused",
+        base_artifacts=base_artifacts,
+        plan_dir_payload={"plan_dir": str(snapshot.plan_dir)},
+        stale_unfinished=stale_unfinished,
+        stale_reason=stale_reason,
+        warnings=warnings,
+        warning_details=warning_details,
+    )
+
+
+_RECOVERY_ARTIFACT_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("artifact_dir", "artifact-dir", "Artifact directory"),
+    ("stdout_path", "stdout", "Stdout"),
+    ("stderr_path", "stderr", "Stderr"),
+    ("last_message_path", "last-message", "Last message"),
+    ("result_path", "result", "Result JSON"),
+)
+
+
+def _artifact_references_from_payload(
+    payload: Mapping[str, Any] | None,
+    *,
+    source: str,
+    label_prefix: str,
+) -> tuple[RecoveryArtifactReference, ...]:
+    if payload is None:
+        return ()
+    refs: list[RecoveryArtifactReference] = []
+    for key, kind, label in _RECOVERY_ARTIFACT_FIELDS:
+        path = _coerce_path_value(payload.get(key))
+        if path is None:
+            continue
+        refs.append(
+            RecoveryArtifactReference(
+                label=f"{label_prefix} {label}".strip(),
+                path=path,
+                kind=kind,
+                source=source,
+            )
+        )
+    return tuple(refs)
+
+
+def _latest_turn_matching(
+    raw_state: Mapping[str, Any],
+    predicate: Callable[[Mapping[str, Any]], bool],
+) -> Mapping[str, Any] | None:
+    active_turn = _payload_mapping(raw_state, "active_turn")
+    if active_turn is not None and predicate(active_turn):
+        return active_turn
+    for turn in reversed(_payload_mappings(raw_state, "turns")):
+        if predicate(turn):
+            return turn
+    return None
+
+
+def _turn_has_verification_reason(
+    turn: Mapping[str, Any],
+    reason: str,
+) -> bool:
+    verification = _payload_mapping(turn, "verification")
+    return verification is not None and verification.get("reason") == reason
+
+
+def _turn_failed(turn: Mapping[str, Any]) -> bool:
+    if _payload_mapping(turn, "verification") is not None:
+        verification = _payload_mapping(turn, "verification")
+        if verification is not None and verification.get("passed") is False:
+            return True
+    status_result = _payload_str(turn, "status_result")
+    if status_result and status_result not in {"complete", "unknown"}:
+        return True
+    return (
+        turn.get("timed_out") is True
+        or turn.get("interrupted") is True
+        or _payload_int(turn, "returncode") not in {None, 0}
+        or _payload_str(turn, "plan_error") is not None
+    )
+
+
+def _turn_paused(turn: Mapping[str, Any]) -> bool:
+    return (
+        _payload_str(turn, "runner_pause") is not None
+        or _payload_str(turn, "action_required") is not None
+        or _payload_str(turn, "last_message_path") is not None
+    )
+
+
+def _latest_failed_commit(raw_state: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    pause_details = _pause_details(raw_state)
+    commit = _payload_mapping(pause_details, "commit")
+    if commit is not None and commit.get("success") is False:
+        return commit
+    for candidate in reversed(_payload_mappings(raw_state, "commits")):
+        if candidate.get("success") is False:
+            return candidate
+    return None
+
+
+def _latest_relevant_turn(
+    raw_state: Mapping[str, Any],
+    *,
+    kind: RecoveryKind,
+    reason: str | None,
+) -> Mapping[str, Any] | None:
+    if kind in {"verify-failed", "no-contract", "malformed-contract"}:
+        if reason:
+            turn = _latest_turn_matching(
+                raw_state,
+                lambda candidate: _turn_has_verification_reason(candidate, reason),
+            )
+            if turn is not None:
+                return turn
+        turn = _latest_turn_matching(
+            raw_state,
+            lambda candidate: _payload_mapping(candidate, "verification")
+            is not None,
+        )
+        if turn is not None:
+            return turn
+    if kind == "reply-needed":
+        turn = _latest_turn_matching(raw_state, _turn_paused)
+        if turn is not None:
+            return turn
+    if kind == "generic":
+        active_turn = _payload_mapping(raw_state, "active_turn")
+        if active_turn is not None:
+            return active_turn
+    return _latest_turn_matching(raw_state, _turn_failed)
+
+
+def _pause_reason(
+    raw_state: Mapping[str, Any],
+    runner_state: Mapping[str, Any],
+) -> str | None:
+    for payload in (raw_state, runner_state):
+        for key in ("pause_reason", "reason"):
+            value = _payload_str(payload, key)
+            if value is not None:
+                return value
+    return None
+
+
+def _pause_reason_recovery_kind(reason: str | None) -> RecoveryKind | None:
+    if reason is None:
+        return None
+    kind = PAUSE_REASON_RECOVERY_KIND_BY_REASON.get(reason)
+    if kind is not None:
+        return kind
+    if reason in GENERIC_RECOVERY_PAUSE_REASONS:
+        return "generic"
+    return None
+
+
+def _pause_message(raw_state: Mapping[str, Any]) -> str | None:
+    return _payload_str(raw_state, "pause_message")
+
+
+def _pause_details(raw_state: Mapping[str, Any]) -> Mapping[str, Any]:
+    details = _payload_mapping(raw_state, "pause_details")
+    if details is not None:
+        return details
+    details = _payload_mapping(raw_state, "details")
+    if details is not None:
+        return details
+    return {}
+
+
+def _runtime_failure_reason(
+    *,
+    details: Mapping[str, Any],
+    verification: Mapping[str, Any] | None,
+) -> str | None:
+    for failure in _payload_mappings(details, "failures"):
+        failure_reason = _payload_str(failure, "failure_reason")
+        if failure_reason is not None:
+            return failure_reason
+    if verification is not None:
+        for check in _payload_mappings(verification, "checks"):
+            status = _payload_str(check, "status")
+            failure_reason = _payload_str(check, "failure_reason")
+            if failure_reason is not None and status != "pass":
+                return failure_reason
+        for check in _payload_mappings(verification, "checks"):
+            failure_reason = _payload_str(check, "failure_reason")
+            if failure_reason is not None:
+                return failure_reason
+    return None
+
+
+def _hint_evidence_row(hint: preflight.RepairHint | None) -> RecoveryEvidenceRow | None:
+    if hint is None:
+        return None
+    severity: RecoveryEvidenceSeverity
+    if hint.severity_hint == "red":
+        severity = "error"
+    elif hint.severity_hint == "yellow":
+        severity = "warning"
+    else:
+        severity = "info"
+    return RecoveryEvidenceRow(
+        label="Repair hint",
+        value=hint.message,
+        detail=hint.check_id,
+        severity=severity,
+    )
+
+
+def _evidence_severity(value: Any) -> RecoveryEvidenceSeverity:
+    if value == "red":
+        return "error"
+    if value == "yellow":
+        return "warning"
+    return "info"
+
+
+def _readiness_gate_evidence(
+    gate: Mapping[str, Any],
+) -> tuple[RecoveryEvidenceRow, ...]:
+    rows: list[RecoveryEvidenceRow] = [
+        RecoveryEvidenceRow(
+            label="Readiness state",
+            value=(
+                str(gate.get("readiness_state"))
+                if gate.get("readiness_state") is not None
+                else None
+            ),
+            severity="warning",
+        )
+    ]
+    expected = _payload_str(gate, "expected_readiness_sha256")
+    recorded = _payload_str(gate, "recorded_readiness_sha256")
+    if expected is not None or recorded is not None:
+        rows.append(
+            RecoveryEvidenceRow(
+                label="Readiness SHA",
+                value=recorded,
+                detail=f"expected {expected}" if expected else None,
+                severity="warning" if expected != recorded else "info",
+            )
+        )
+    counts = _payload_mapping(gate, "findings_by_severity")
+    if counts is not None:
+        rows.append(
+            RecoveryEvidenceRow(
+                label="Findings",
+                value=(
+                    f"red {counts.get('red', 0)}, "
+                    f"yellow {counts.get('yellow', 0)}, "
+                    f"green {counts.get('green', 0)}"
+                ),
+                severity=(
+                    "error"
+                    if counts.get("red")
+                    else "warning"
+                    if counts.get("yellow")
+                    else "info"
+                ),
+            )
+        )
+    findings = _payload_mappings(gate, "findings")
+    for finding in findings[:5]:
+        category = _payload_str(finding, "category") or "finding"
+        message = _payload_str(finding, "message")
+        severity_value = _payload_str(finding, "severity")
+        rows.append(
+            RecoveryEvidenceRow(
+                label=f"{severity_value or 'info'} finding",
+                value=category,
+                detail=message,
+                severity=_evidence_severity(severity_value),
+            )
+        )
+    if len(findings) > 5:
+        rows.append(
+            RecoveryEvidenceRow(
+                label="Additional findings",
+                value=str(len(findings) - 5),
+                severity="warning",
+            )
+        )
+    return tuple(rows)
+
+
+def _endpoint_action(
+    *,
+    action_id: str,
+    label: str,
+    description: str,
+    endpoint: str,
+    payload: Mapping[str, Any],
+    target: RecoveryActionTarget | None = None,
+) -> RecoveryActionCard:
+    return RecoveryActionCard(
+        id=action_id,
+        label=label,
+        description=description,
+        kind="endpoint",
+        target=target,
+        endpoint=endpoint,
+        method="POST",
+        payload=payload,
+    )
+
+
+def _inspect_action(
+    description: str,
+    *,
+    target: RecoveryActionTarget = "artifacts",
+) -> RecoveryActionCard:
+    return RecoveryActionCard(
+        id="inspect-artifacts",
+        label="Inspect artifacts",
+        description=description,
+        kind="inspect",
+        target=target,
+    )
+
+
+def _navigate_action(
+    *,
+    action_id: str,
+    label: str,
+    description: str,
+    target: RecoveryActionTarget,
+) -> RecoveryActionCard:
+    return RecoveryActionCard(
+        id=action_id,
+        label=label,
+        description=description,
+        kind="navigate",
+        target=target,
+    )
+
+
+def _retry_run_action(plan_dir_payload: Mapping[str, Any]) -> RecoveryActionCard:
+    return _endpoint_action(
+        action_id="retry-run",
+        label="Retry run",
+        description=(
+            "Launch the existing runner flow after applying the recovery "
+            "guidance."
+        ),
+        endpoint="/api/launch",
+        payload=plan_dir_payload,
+        target="launch",
+    )
+
+
+def _profile_action(description: str) -> RecoveryActionCard:
+    return _navigate_action(
+        action_id="review-profile",
+        label="Review profile",
+        description=description,
+        target="profile",
+    )
+
+
+def _quote_command_path(path: Path | str) -> str:
+    return shlex.quote(str(path))
+
+
+def _preflight_repair_commands(plan_dir: Path) -> tuple[RecoveryCopyCommand, ...]:
+    quoted_plan = _quote_command_path(plan_dir)
+    quoted_skill_plan = _quote_command_path(str(plan_dir) + os.sep)
+    return (
+        RecoveryCopyCommand(
+            label="Repair readiness",
+            command=f"asl preflight {quoted_plan} --mark-loop-ready",
+            description=(
+                "Copy this into a shell after repairing plan-readiness "
+                "findings."
+            ),
+        ),
+        RecoveryCopyCommand(
+            label="Iterate preflight",
+            command=f"$plan-preflight-iterate {quoted_skill_plan}",
+            description=(
+                "Copy this into the harness when preflight findings need an "
+                "interactive repair pass."
+            ),
+        ),
+    )
+
+
+def _verification_repair_commands(
+    plan_dir: Path,
+    *,
+    session_id: str | None,
+) -> tuple[RecoveryCopyCommand, ...]:
+    quoted_plan = _quote_command_path(plan_dir)
+    commands = [
+        RecoveryCopyCommand(
+            label="Run preflight",
+            command=f"asl preflight {quoted_plan} --json",
+            description=(
+                "Copy this into a shell to inspect current contract and "
+                "readiness findings."
+            ),
+        )
+    ]
+    if session_id:
+        commands.insert(
+            0,
+            RecoveryCopyCommand(
+                label="Re-run verification",
+                command=(
+                    "asl verify "
+                    f"{quoted_plan} --session {shlex.quote(session_id)} --json"
+                ),
+                description=(
+                    "Copy this into a shell after repairing the session or "
+                    "its Completion Contract."
+                ),
+            ),
+        )
+    return tuple(commands)
+
+
+def _session_file_path(plan_dir: Path, session_id: str | None) -> Path | None:
+    if not session_id:
+        return None
+    try:
+        return plan_dir / plans.session_id_to_filename(session_id)
+    except ValueError:
+        return None
+
+
+def _session_reference_evidence(
+    plan_dir: Path,
+    *,
+    session_id: str | None,
+) -> tuple[RecoveryEvidenceRow, ...]:
+    rows: list[RecoveryEvidenceRow] = []
+    if session_id:
+        rows.append(
+            RecoveryEvidenceRow(
+                label="Session",
+                value=session_id,
+                severity="error",
+            )
+        )
+    session_path = _session_file_path(plan_dir, session_id)
+    if session_path is not None:
+        rows.append(
+            RecoveryEvidenceRow(
+                label="Session file",
+                value=str(session_path),
+                severity="error",
+            )
+        )
+    return tuple(rows)
+
+
+def _verification_check_evidence(
+    verification: Mapping[str, Any] | None,
+) -> tuple[RecoveryEvidenceRow, ...]:
+    if verification is None:
+        return ()
+    rows: list[RecoveryEvidenceRow] = []
+    failed_checks = [
+        check
+        for check in _payload_mappings(verification, "checks")
+        if check.get("status") != "pass" or _payload_str(check, "failure_reason")
+    ]
+    for check in failed_checks[:5]:
+        name = _payload_str(check, "name") or "check"
+        failure_reason = _payload_str(check, "failure_reason")
+        rows.append(
+            RecoveryEvidenceRow(
+                label="Failed check",
+                value=name,
+                detail=failure_reason,
+                severity="error",
+            )
+        )
+    if len(failed_checks) > 5:
+        rows.append(
+            RecoveryEvidenceRow(
+                label="Additional failed checks",
+                value=str(len(failed_checks) - 5),
+                severity="error",
+            )
+        )
+    return tuple(rows)
+
+
+def _harness_config_artifacts(
+    details: Mapping[str, Any],
+) -> tuple[RecoveryArtifactReference, ...]:
+    config_path = _coerce_path_value(details.get("config_path"))
+    if config_path is None:
+        return ()
+    return (
+        RecoveryArtifactReference(
+            label="Harness config",
+            path=config_path,
+            kind="config",
+            source="pause-details",
+        ),
+    )
+
+
+def _harness_config_evidence(
+    *,
+    reason: str | None,
+    message: str,
+    details: Mapping[str, Any],
+) -> tuple[RecoveryEvidenceRow, ...]:
+    rows = [
+        RecoveryEvidenceRow(
+            label="Pause reason",
+            value=reason,
+            severity="error",
+        ),
+        RecoveryEvidenceRow(
+            label="Pause message",
+            value=message,
+            severity="error",
+        ),
+    ]
+    requested_harness = _payload_str(details, "requested_harness")
+    if requested_harness is not None:
+        rows.append(
+            RecoveryEvidenceRow(
+                label="Requested harness",
+                value=requested_harness,
+                severity="error",
+            )
+        )
+    config_path = _payload_str(details, "config_path")
+    if config_path is not None:
+        rows.append(
+            RecoveryEvidenceRow(
+                label="Harness config",
+                value=config_path,
+                severity="warning",
+            )
+        )
+    error = _payload_str(details, "error")
+    if error is not None:
+        rows.append(
+            RecoveryEvidenceRow(
+                label="Harness error",
+                value=error,
+                severity="error",
+            )
+        )
+    return tuple(rows)
+
+
+def _recovery_common_context(
+    *,
+    raw_state: Mapping[str, Any],
+    runner_state: Mapping[str, Any],
+    selected_turn: Mapping[str, Any] | None,
+    selected_commit: Mapping[str, Any] | None = None,
+) -> tuple[str | None, str | None, int | None, int | None]:
+    run_id = (
+        _payload_str(raw_state, "run_id")
+        or _payload_str(runner_state, "run_id")
+        or (
+            _payload_str(selected_turn, "run_id")
+            if selected_turn is not None
+            else None
+        )
+        or (
+            _payload_str(selected_commit, "run_id")
+            if selected_commit is not None
+            else None
+        )
+    )
+    session_id = None
+    if selected_turn is not None:
+        session_id = _session_identifier_from_payload(selected_turn)
+    if session_id is None and selected_commit is not None:
+        session_id = _session_identifier_from_payload(selected_commit)
+    if session_id is None:
+        details = _pause_details(raw_state)
+        session_id = _session_identifier_from_payload(details)
+    turn_index = (
+        _payload_int(selected_turn, "turn_index")
+        if selected_turn is not None
+        else None
+    )
+    commit_index = (
+        _payload_int(selected_commit, "commit_index")
+        if selected_commit is not None
+        else None
+    )
+    return run_id, session_id, turn_index, commit_index
+
+
+def _runtime_recovery_evidence(
+    *,
+    reason: str,
+    details: Mapping[str, Any],
+    verification: Mapping[str, Any] | None,
+) -> tuple[RecoveryEvidenceRow, ...]:
+    rows = [
+        RecoveryEvidenceRow(label="Pause reason", value=reason, severity="error")
+    ]
+    failure_reason = _runtime_failure_reason(
+        details=details, verification=verification
+    )
+    if failure_reason is not None:
+        rows.append(
+            RecoveryEvidenceRow(
+                label="Failure reason",
+                value=failure_reason,
+                severity="error",
+            )
+        )
+    hint = preflight.runtime_repair_hint(
+        reason,
+        failure_reason=failure_reason,
+    )
+    hint_row = _hint_evidence_row(hint)
+    if hint_row is not None:
+        rows.append(hint_row)
+    if verification is not None:
+        passed = verification.get("passed")
+        if isinstance(passed, bool):
+            rows.append(
+                RecoveryEvidenceRow(
+                    label="Verification passed",
+                    value=str(passed).lower(),
+                    severity="info" if passed else "error",
+                )
+            )
+    return tuple(rows)
+
+
+def _verification_recovery_evidence(
+    *,
+    plan_dir: Path,
+    reason: str,
+    details: Mapping[str, Any],
+    verification: Mapping[str, Any] | None,
+    session_id: str | None,
+) -> tuple[RecoveryEvidenceRow, ...]:
+    return (
+        _runtime_recovery_evidence(
+            reason=reason,
+            details=details,
+            verification=verification,
+        )
+        + _session_reference_evidence(plan_dir, session_id=session_id)
+        + _verification_check_evidence(verification)
+    )
+
+
+_VERIFICATION_RECOVERY_TITLES: dict[str, str] = {
+    "verify-failed": "Verification failed",
+    "no-contract": "Completion contract missing",
+    "malformed-contract": "Completion contract malformed",
+}
+
+
+def _verification_recovery_title(reason: str) -> str:
+    return _VERIFICATION_RECOVERY_TITLES[reason]
+
+
+def _selected_verification_context(
+    raw_state: Mapping[str, Any],
+    details: Mapping[str, Any],
+    *,
+    reason: str,
+) -> tuple[Mapping[str, Any] | None, Mapping[str, Any] | None, str | None]:
+    selected_turn = _latest_relevant_turn(
+        raw_state,
+        kind=reason,  # type: ignore[arg-type]
+        reason=reason,
+    )
+    verification = (
+        _payload_mapping(selected_turn, "verification")
+        if selected_turn is not None
+        else None
+    )
+    selected_session_id = (
+        _session_identifier_from_payload(selected_turn)
+        if selected_turn is not None
+        else _session_identifier_from_payload(details)
+    )
+    return selected_turn, verification, selected_session_id
+
+
+def _commit_failed_evidence(
+    failed_commit: Mapping[str, Any] | None,
+) -> tuple[RecoveryEvidenceRow, ...]:
+    status_result = (
+        _payload_str(failed_commit, "status_result")
+        if failed_commit is not None
+        else None
+    )
+    returncode = (
+        _payload_int(failed_commit, "returncode")
+        if failed_commit is not None
+        else None
+    )
+    return (
+        RecoveryEvidenceRow(
+            label="Pause reason",
+            value="commit-failed",
+            severity="error",
+        ),
+        RecoveryEvidenceRow(
+            label="Commit status",
+            value=status_result,
+            detail=(
+                f"return code {returncode}"
+                if returncode is not None
+                else None
+            ),
+            severity="error",
+        ),
+    )
+
+
+def _build_recovery_payload(
+    *,
+    plan_dir: Path,
+    kind: RecoveryKind,
+    title: str,
+    summary: str,
+    severity: RecoverySeverity,
+    recoverable: bool,
+    raw_state: Mapping[str, Any],
+    runner_state: Mapping[str, Any],
+    artifacts: tuple[RecoveryArtifactReference, ...],
+    evidence: tuple[RecoveryEvidenceRow, ...] = (),
+    actions: tuple[RecoveryActionCard, ...] = (),
+    commands: tuple[RecoveryCopyCommand, ...] = (),
+    selected_turn: Mapping[str, Any] | None = None,
+    selected_commit: Mapping[str, Any] | None = None,
+    warnings: tuple[str, ...] = (),
+    warning_details: tuple[RecoveryWarning, ...] = (),
+) -> WorkbenchRecovery:
+    run_id, session_id, turn_index, commit_index = _recovery_common_context(
+        raw_state=raw_state,
+        runner_state=runner_state,
+        selected_turn=selected_turn,
+        selected_commit=selected_commit,
+    )
+    return WorkbenchRecovery(
+        plan_dir=plan_dir,
+        kind=kind,
+        title=title,
+        summary=summary,
+        severity=severity,
+        recoverable=recoverable,
+        evidence=evidence,
+        actions=actions,
+        commands=commands,
+        artifacts=artifacts,
+        run_id=run_id,
+        session_id=session_id,
+        turn_index=turn_index,
+        commit_index=commit_index,
+        warnings=warnings,
+        warning_details=warning_details,
+    )
+
+
+_VERIFICATION_FAILURE_REASONS = frozenset(
+    {"verify-failed", "no-contract", "malformed-contract"}
+)
+
+
+def _build_context_recovery_payload(
+    context: _RecoveryBuildContext,
+    *,
+    kind: RecoveryKind,
+    title: str,
+    summary: str,
+    severity: RecoverySeverity,
+    recoverable: bool,
+    artifacts: tuple[RecoveryArtifactReference, ...],
+    evidence: tuple[RecoveryEvidenceRow, ...] = (),
+    actions: tuple[RecoveryActionCard, ...] = (),
+    commands: tuple[RecoveryCopyCommand, ...] = (),
+    selected_turn: Mapping[str, Any] | None = None,
+    selected_commit: Mapping[str, Any] | None = None,
+) -> WorkbenchRecovery:
+    return _build_recovery_payload(
+        plan_dir=context.snapshot.plan_dir,
+        kind=kind,
+        title=title,
+        summary=summary,
+        severity=severity,
+        recoverable=recoverable,
+        raw_state=context.raw_state,
+        runner_state=context.runner_state,
+        artifacts=artifacts,
+        evidence=evidence,
+        actions=actions,
+        commands=commands,
+        selected_turn=selected_turn,
+        selected_commit=selected_commit,
+        warnings=context.warnings,
+        warning_details=context.warning_details,
+    )
+
+
+def _build_active_run_recovery(
+    context: _RecoveryBuildContext,
+    *,
+    selected_turn: Mapping[str, Any] | None,
+) -> WorkbenchRecovery:
+    artifacts = context.base_artifacts + _artifact_references_from_payload(
+        selected_turn,
+        source="active-turn",
+        label_prefix="Active turn",
+    )
+    lock_info = context.lock_info
+    return _build_context_recovery_payload(
+        context,
+        kind="none",
+        title="Run in progress",
+        summary="No recovery action is required while the runner is active.",
+        severity="none",
+        recoverable=False,
+        selected_turn=selected_turn,
+        artifacts=artifacts,
+        evidence=(
+            RecoveryEvidenceRow(
+                label="Runner lock",
+                value="active",
+                detail=lock_info.reason if lock_info is not None else None,
+                severity="info",
+            ),
+        ),
+    )
+
+
+def _build_not_loop_ready_recovery(
+    context: _RecoveryBuildContext,
+) -> WorkbenchRecovery:
+    gate = (
+        _payload_mapping(context.raw_state, "readiness_gate")
+        or context.pause_details
+    )
+    evidence = (
+        (
+            RecoveryEvidenceRow(
+                label="Pause message",
+                value=context.pause_message,
+                severity="warning",
+            ),
+        )
+        + _readiness_gate_evidence(gate)
+    )
+    return _build_context_recovery_payload(
+        context,
+        kind="not-loop-ready",
+        title="Plan is not loop-ready",
+        summary=context.pause_message,
+        severity="warning",
+        recoverable=True,
+        artifacts=context.base_artifacts,
+        evidence=evidence,
+        actions=(
+            _retry_run_action(context.plan_dir_payload),
+        ),
+        commands=_preflight_repair_commands(context.snapshot.plan_dir),
+    )
+
+
+def _build_verification_failure_recovery(
+    context: _RecoveryBuildContext,
+    *,
+    reason: str,
+) -> WorkbenchRecovery:
+    selected_turn, verification, selected_session_id = (
+        _selected_verification_context(
+            context.raw_state,
+            context.pause_details,
+            reason=reason,
+        )
+    )
+    artifacts = context.base_artifacts + _artifact_references_from_payload(
+        selected_turn,
+        source="failed-turn",
+        label_prefix="Failed turn",
+    )
+    return _build_context_recovery_payload(
+        context,
+        kind=reason,  # type: ignore[arg-type]
+        title=_verification_recovery_title(reason),
+        summary=context.pause_message,
+        severity="error",
+        recoverable=True,
+        selected_turn=selected_turn,
+        artifacts=artifacts,
+        evidence=_verification_recovery_evidence(
+            plan_dir=context.snapshot.plan_dir,
+            reason=reason,
+            details=context.pause_details,
+            verification=verification,
+            session_id=selected_session_id,
+        ),
+        actions=(
+            _inspect_action("Open the failed turn logs and result JSON."),
+            _retry_run_action(context.plan_dir_payload),
+        ),
+        commands=_verification_repair_commands(
+            context.snapshot.plan_dir,
+            session_id=selected_session_id,
+        ),
+    )
+
+
+def _build_commit_preflight_recovery(
+    context: _RecoveryBuildContext,
+) -> WorkbenchRecovery:
+    return _build_context_recovery_payload(
+        context,
+        kind="commit-preflight",
+        title="Commit preflight failed",
+        summary=context.pause_message,
+        severity="error",
+        recoverable=True,
+        artifacts=context.base_artifacts,
+        evidence=(
+            RecoveryEvidenceRow(
+                label="Pause reason",
+                value="commit-preflight",
+                severity="error",
+            ),
+            RecoveryEvidenceRow(
+                label="Pause message",
+                value=context.pause_message,
+                severity="error",
+            ),
+        ),
+        actions=(
+            _retry_run_action(context.plan_dir_payload),
+            _profile_action("Review launch and commit settings before retrying."),
+        ),
+        commands=(
+            RecoveryCopyCommand(
+                label="Inspect worktree",
+                command="git status --porcelain",
+                description=(
+                    "Copy this into the repository shell to inspect dirty files "
+                    "before retrying commit mode."
+                ),
+            ),
+        ),
+    )
+
+
+def _build_commit_failed_recovery(
+    context: _RecoveryBuildContext,
+) -> WorkbenchRecovery:
+    failed_commit = _latest_failed_commit(context.raw_state)
+    artifacts = context.base_artifacts + _artifact_references_from_payload(
+        failed_commit,
+        source="failed-commit",
+        label_prefix="Failed commit",
+    )
+    return _build_context_recovery_payload(
+        context,
+        kind="commit-failed",
+        title="Auto-commit failed",
+        summary=context.pause_message,
+        severity="error",
+        recoverable=True,
+        selected_commit=failed_commit,
+        artifacts=artifacts,
+        evidence=_commit_failed_evidence(failed_commit),
+        actions=(
+            _inspect_action("Open the failed commit logs and result JSON."),
+            _retry_run_action(context.plan_dir_payload),
+            _profile_action(
+                "Review commit mode and launch profile before retrying."
+            ),
+        ),
+    )
+
+
+def _is_harness_config_recovery(
+    *,
+    reason: str | None,
+    details: Mapping[str, Any],
+) -> bool:
+    return (
+        reason == "harness-unavailable"
+        or _payload_str(details, "requested_harness") is not None
+        or _payload_str(details, "config_path") is not None
+    )
+
+
+def _build_harness_config_recovery(
+    context: _RecoveryBuildContext,
+    *,
+    reason: str | None,
+) -> WorkbenchRecovery:
+    selected_turn = _latest_relevant_turn(
+        context.raw_state,
+        kind="generic",
+        reason=reason,
+    )
+    artifacts = (
+        context.base_artifacts
+        + _harness_config_artifacts(context.pause_details)
+        + _artifact_references_from_payload(
+            selected_turn,
+            source="failed-turn",
+            label_prefix="Failed turn",
+        )
+    )
+    return _build_context_recovery_payload(
+        context,
+        kind="generic",
+        title="Harness configuration needs attention",
+        summary=context.pause_message,
+        severity="error",
+        recoverable=True,
+        selected_turn=selected_turn,
+        artifacts=artifacts,
+        evidence=_harness_config_evidence(
+            reason=reason,
+            message=context.pause_message,
+            details=context.pause_details,
+        ),
+        actions=(
+            _profile_action("Review harness and profile fields before retrying."),
+            _inspect_action(
+                "Open runner state, events, and harness config artifacts."
+            ),
+            _retry_run_action(context.plan_dir_payload),
+        ),
+    )
+
+
+def _build_reply_needed_recovery(
+    context: _RecoveryBuildContext,
+    *,
+    reason: str | None,
+) -> WorkbenchRecovery:
+    selected_turn = _latest_relevant_turn(
+        context.raw_state,
+        kind="reply-needed",
+        reason=reason,
+    )
+    artifacts = context.base_artifacts + _artifact_references_from_payload(
+        selected_turn,
+        source="paused-turn",
+        label_prefix="Paused turn",
+    )
+    return _build_context_recovery_payload(
+        context,
+        kind="reply-needed",
+        title="Reply needed",
+        summary=context.pause_message,
+        severity="warning",
+        recoverable=True,
+        selected_turn=selected_turn,
+        artifacts=artifacts,
+        evidence=(
+            RecoveryEvidenceRow(
+                label="Pause reason",
+                value=reason,
+                severity="warning",
+            ),
+            RecoveryEvidenceRow(
+                label="Pause message",
+                value=context.pause_message,
+                severity="warning",
+            ),
+        ),
+        actions=(
+            _endpoint_action(
+                action_id="reply",
+                label="Reply",
+                description=(
+                    "Send an operator reply through the existing reply endpoint."
+                ),
+                endpoint="/api/reply",
+                payload=context.plan_dir_payload,
+                target="reply",
+            ),
+        ),
+    )
+
+
+def _build_stale_state_recovery(
+    context: _RecoveryBuildContext,
+) -> WorkbenchRecovery:
+    return _build_context_recovery_payload(
+        context,
+        kind="stale-state",
+        title="Runner state is stale",
+        summary=context.stale_reason or "Runner state is unfinished.",
+        severity="warning",
+        recoverable=True,
+        artifacts=context.base_artifacts,
+        evidence=(
+            RecoveryEvidenceRow(
+                label="Stale state",
+                value=context.stale_reason,
+                severity="warning",
+            ),
+        ),
+        actions=(
+            _endpoint_action(
+                action_id="unlock",
+                label="Unlock",
+                description=(
+                    "Clear stale runner state through the existing unlock endpoint."
+                ),
+                endpoint="/api/unlock",
+                payload=context.plan_dir_payload,
+                target="unlock",
+            ),
+        ),
+    )
+
+
+def _build_stale_lock_recovery(
+    context: _RecoveryBuildContext,
+) -> WorkbenchRecovery:
+    lock_info = context.lock_info
+    if lock_info is None:
+        return _build_clean_none_recovery(context)
+    return _build_context_recovery_payload(
+        context,
+        kind="stale-lock",
+        title="Runner lock is stale",
+        summary=lock_info.reason or "Runner lock is stale.",
+        severity="warning",
+        recoverable=True,
+        artifacts=context.base_artifacts
+        + (
+            RecoveryArtifactReference(
+                label="Runner lock",
+                path=lock_info.path,
+                kind="lock",
+                source="plan-state",
+            ),
+        ),
+        evidence=(
+            RecoveryEvidenceRow(
+                label="Lock reason",
+                value=lock_info.reason,
+                detail=(
+                    f"pid {lock_info.pid}" if lock_info.pid is not None else None
+                ),
+                severity="warning",
+            ),
+        ),
+        actions=(
+            _endpoint_action(
+                action_id="unlock",
+                label="Unlock",
+                description=(
+                    "Clear the stale lock through the existing unlock endpoint."
+                ),
+                endpoint="/api/unlock",
+                payload=context.plan_dir_payload,
+                target="unlock",
+            ),
+        ),
+    )
+
+
+def _build_failed_finished_recovery(
+    context: _RecoveryBuildContext,
+    *,
+    reason: str | None,
+) -> WorkbenchRecovery:
+    selected_turn = _latest_relevant_turn(
+        context.raw_state,
+        kind="generic",
+        reason=reason,
+    )
+    failed_commit = _latest_failed_commit(context.raw_state)
+    selected_commit = failed_commit if reason == "commit-failed" else None
+    artifacts = context.base_artifacts + _artifact_references_from_payload(
+        selected_commit or selected_turn,
+        source="failed-commit" if selected_commit is not None else "failed-turn",
+        label_prefix=(
+            "Failed commit" if selected_commit is not None else "Failed turn"
+        ),
+    )
+    return _build_context_recovery_payload(
+        context,
+        kind="generic",
+        title="Run failed",
+        summary=context.pause_message,
+        severity="error",
+        recoverable=True,
+        selected_turn=selected_turn,
+        selected_commit=selected_commit,
+        artifacts=artifacts,
+        evidence=(
+            RecoveryEvidenceRow(
+                label="Failure reason",
+                value=reason,
+                severity="error",
+            ),
+            RecoveryEvidenceRow(
+                label="Failure message",
+                value=context.pause_message,
+                severity="error",
+            ),
+        ),
+        actions=(
+            _inspect_action("Open the latest relevant logs and result JSON."),
+            _retry_run_action(context.plan_dir_payload),
+            _profile_action("Review launch profile fields before retrying."),
+        ),
+    )
+
+
+def _build_clean_none_recovery(
+    context: _RecoveryBuildContext,
+) -> WorkbenchRecovery:
+    return _build_context_recovery_payload(
+        context,
+        kind="none",
+        title="No recovery needed",
+        summary="The plan has no structured blocker.",
+        severity="none",
+        recoverable=False,
+        artifacts=context.base_artifacts,
+        evidence=(),
+    )
+
+
+def build_workbench_recovery(
+    plan: DiscoveredPlan,
+    *,
+    state_dir: str | Path | None = None,
+) -> WorkbenchRecovery:
+    """Build a deterministic, read-only recovery diagnosis for one plan."""
+    if not plan.exists:
+        return WorkbenchRecovery(
+            plan_dir=plan.plan_dir,
+            kind="generic",
+            title="Plan cannot be inspected",
+            summary=f"Plan directory does not exist: {plan.plan_dir}",
+            severity="error",
+            recoverable=True,
+            evidence=(
+                RecoveryEvidenceRow(
+                    label="Plan directory",
+                    value=str(plan.plan_dir),
+                    severity="error",
+                ),
+            ),
+        )
+
+    try:
+        snapshot = plans.inspect_plan(plan.plan_dir)
+    except plans.PlanError as error:
+        state_path, events_path, progress_path = _summary_base_paths(
+            plan.plan_dir, state_dir
+        )
+        return WorkbenchRecovery(
+            plan_dir=plan.plan_dir,
+            kind="generic",
+            title="Plan cannot be inspected",
+            summary=str(error),
+            severity="error",
+            recoverable=True,
+            evidence=(
+                RecoveryEvidenceRow(
+                    label="Plan error",
+                    value=str(error),
+                    severity="error",
+                ),
+            ),
+            artifacts=_recovery_base_artifacts(
+                state_path=state_path,
+                events_path=events_path,
+                progress_path=progress_path,
+            ),
+        )
+
+    context = _build_recovery_context(snapshot, state_dir)
+
+    active_turn = _payload_mapping(context.raw_state, "active_turn")
+    active_verification = _payload_mapping(context.raw_state, "active_verification")
+    lock_info = context.lock_info
+    if lock_info is not None and lock_info.active and (
+        active_turn is not None or active_verification is not None
+    ):
+        return _build_active_run_recovery(context, selected_turn=active_turn)
+
+    reason = context.pause_reason
+    details = context.pause_details
+    recovery_kind = _pause_reason_recovery_kind(reason)
+
+    if context.runner_state.get("paused") is True:
+        if recovery_kind == "not-loop-ready":
+            return _build_not_loop_ready_recovery(context)
+
+        if recovery_kind in _VERIFICATION_FAILURE_REASONS:
+            return _build_verification_failure_recovery(
+                context, reason=recovery_kind
+            )
+
+        if recovery_kind == "commit-preflight":
+            return _build_commit_preflight_recovery(context)
+
+        if recovery_kind == "commit-failed":
+            return _build_commit_failed_recovery(context)
+
+        if _is_harness_config_recovery(reason=reason, details=details):
+            return _build_harness_config_recovery(context, reason=reason)
+
+        if recovery_kind == "generic":
+            return _build_failed_finished_recovery(context, reason=reason)
+
+        return _build_reply_needed_recovery(context, reason=reason)
+
+    if context.stale_unfinished:
+        return _build_stale_state_recovery(context)
+
+    if lock_info is not None and lock_info.stale:
+        return _build_stale_lock_recovery(context)
+
+    if (
+        context.runner_state.get("present")
+        and context.runner_state.get("run_finished_at")
+        and context.runner_state.get("ok") is False
+    ):
+        if recovery_kind == "commit-failed":
+            return _build_commit_failed_recovery(context)
+
+        if recovery_kind in _VERIFICATION_FAILURE_REASONS:
+            return _build_verification_failure_recovery(
+                context, reason=recovery_kind
+            )
+
+        return _build_failed_finished_recovery(context, reason=reason)
+
+    return _build_clean_none_recovery(context)
+
+
 def _build_invalid_summary(
     plan: DiscoveredPlan,
     *,
     detail: str,
     exists: bool,
     state_paths: tuple[Path, Path, Path] | None = None,
+    state_dir: str | Path | None = None,
 ) -> WorkbenchSummary:
     if state_paths is not None:
         state_path, events_path, progress_path = state_paths
@@ -1203,6 +2944,9 @@ def _build_invalid_summary(
         harness=None,
         sources=plan.sources,
     )
+    recovery = build_workbench_recovery(
+        replace(plan, exists=exists), state_dir=state_dir
+    ).compact_payload()
     return WorkbenchSummary(
         plan_dir=plan.plan_dir,
         label=plan.label,
@@ -1237,6 +2981,7 @@ def _build_invalid_summary(
         activity_label=activity_label,
         concise_reason=concise_reason,
         searchable_text=searchable_text,
+        recovery=recovery,
         warnings=(),
     )
 
@@ -1267,6 +3012,7 @@ def build_workbench_summary(
             plan,
             detail=f"plan directory does not exist: {plan_dir}",
             exists=False,
+            state_dir=state_dir,
         )
 
     try:
@@ -1274,7 +3020,11 @@ def build_workbench_summary(
     except plans.PlanError as error:
         state_paths = _summary_base_paths(plan_dir, state_dir)
         return _build_invalid_summary(
-            plan, detail=str(error), exists=True, state_paths=state_paths
+            plan,
+            detail=str(error),
+            exists=True,
+            state_paths=state_paths,
+            state_dir=state_dir,
         )
 
     state_path, events_path, progress_path = _summary_base_paths(
@@ -1286,6 +3036,10 @@ def build_workbench_summary(
     stale_unfinished, stale_reason = state._stale_runner_state(
         runner_state, lock_info
     )
+    recovery = build_workbench_recovery(
+        replace(plan, plan_dir=snapshot.plan_dir, exists=True),
+        state_dir=state_dir,
+    ).compact_payload()
 
     counts = {"pending": 0, "complete": 0, "empty": 0, "unknown": 0}
     for session in snapshot.sessions:
@@ -1393,6 +3147,7 @@ def build_workbench_summary(
             activity_label=activity_label,
             concise_reason=resolved_reason,
             searchable_text=searchable_text,
+            recovery=recovery,
             warnings=warnings,
         )
 

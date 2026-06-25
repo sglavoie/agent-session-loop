@@ -291,7 +291,15 @@ def main() -> int:
             if "<!-- asl:generated-review-session -->" in body:
                 review_body = os.environ.get(
                     "FAKE_CODEX_REVIEW_BODY",
-                    "fake review findings\n",
+                    (
+                        "## Findings\n"
+                        "- Reviewed agent_session_loop/runner.py for generated "
+                        "review contract behavior.\n"
+                        "- Checked tests/test_agent_session_loop.py for lifecycle "
+                        "coverage.\n"
+                        "- Compared docs/agent-session-loop.md for operator-facing "
+                        "documentation impact.\n"
+                    ),
                 )
                 (plan_dir / "final-review.md").write_text(
                     review_body, encoding="utf-8"

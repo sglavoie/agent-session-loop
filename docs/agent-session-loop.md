@@ -1093,7 +1093,8 @@ after a restart.
   an `Authorization: Bearer <token>` header. The token is generated with
   `secrets.token_urlsafe(32)` at startup and compared with
   `secrets.compare_digest`.
-- Read endpoints (`GET /api/queue`, `/api/plan`, `/api/state`,
+- Read endpoints (`GET /api/queue`, `/api/plan`, `/api/recovery`,
+  `/api/state`,
   `/api/events`, `/api/logs`, `/api/last-message`, `/api/result`,
   `/api/verification`, `/api/commits`, `/api/progress`,
   `/api/final-review`, `/api/questions`, `/api/registry`, `/api/artifacts`)
@@ -1112,6 +1113,11 @@ after a restart.
 - Stop controls are checkpoint-only and never terminate an active
   harness subprocess. They are equivalent to typing `p`, `1`/`2`/`3`,
   etc. at a text TTY runner.
+- The Recovery Center is a read-only diagnosis layer. It may display
+  copyable repair commands, but the Workbench never executes those
+  commands. Action cards only route to existing affordances and
+  endpoints (`/api/reply`, `/api/launch`, `/api/unlock`, or local
+  detail-panel focus targets).
 - `--unsafe-bypass` is still the runner default. The Workbench launch
   form surfaces the choice and the UI confirms the launch before
   spawning a child with bypass mode set, but flipping the toggle does
@@ -1194,15 +1200,23 @@ Read endpoints (loopback-open, no token required):
 - `GET /api/health` — liveness probe.
 - `GET /api/queue` — every discovered plan summarized via
   `WorkbenchSummary` (counts, primary state, recommended action,
-  warnings, last-message preview, artifact paths) plus the resolved
-  `state_root` and `state_root_exists` fields used for that scan. Each
-  plan summary also carries the additive triage fields documented under
+  warnings, last-message preview, artifact paths, compact Recovery
+  Center summary) plus the resolved `state_root` and
+  `state_root_exists` fields used for that scan. Each plan summary also
+  carries the additive triage fields documented under
   [Triage queue payload](#triage-queue-payload) so the frontend can
   sort, group, and search without re-deriving status from raw counts.
 - `GET /api/plan?plan_dir=<path>` — single-plan detail. The payload
   carries the same additive triage fields as `/api/queue` (`urgency_rank`,
   `urgency_group`, `activity_label`, `concise_reason`, `last_activity_at`,
-  `last_activity_source`, `searchable_text`).
+  `last_activity_source`, `searchable_text`) plus the same compact
+  `recovery` summary used by queue rows and detail-panel fallbacks.
+- `GET /api/recovery?plan_dir=<path>` — full read-only Recovery Center
+  diagnosis for one plan. It returns the `plan_dir`, `recovery` payload,
+  mirrored top-level `artifacts`, and selected `run_id`, `session_id`,
+  `turn_index`, and `commit_index` context. Missing or invalid
+  `plan_dir` values return `invalid-request` or `invalid-plan`; split
+  plans that cannot be inspected return `malformed-plan`.
 - `GET /api/registry` — registry payload plus any loader warnings.
 - `GET /api/state?plan_dir=<path>` — latest runner `state.json` under
   `state`, plus three top-level keys derived from the plan's session
@@ -1302,6 +1316,12 @@ backwards-compatible — no existing key is renamed or removed.
   last_message_preview, run_id, harness, and discovery sources. The
   frontend's search input does a substring match against this field;
   callers should not re-normalize it.
+- `recovery` (object) — compact Recovery Center summary from
+  `WorkbenchRecovery.compact_payload()`. It includes `kind`, `title`,
+  `summary`, `severity`, `recoverable`, `primary_action`,
+  `artifact_count`, `command_count`, and `warning_count`. Queue/detail
+  clients can render the compact summary immediately, then fetch
+  `/api/recovery` for full evidence, commands, and artifacts.
 
 Urgency rank constants (lower = higher priority), mirrored from
 `workbench.URGENCY_RANK_BY_STATE`. The `activity_label` column shows
@@ -1326,6 +1346,308 @@ The exported Python constants (`workbench.URGENCY_GROUPS`,
 `workbench.URGENCY_GROUP_BY_STATE`, `workbench.ACTIVITY_LABEL_BY_STATE`)
 are the source of truth — keep any external code that branches on these
 strings in sync with that module.
+
+### Recovery Center payload
+
+The Recovery Center is deterministic. It recomputes a diagnosis from
+plan files, runner state, lock state, commit artifacts, verification
+payloads, and preflight repair hints on every refresh; no harness/model
+is called to summarize failures, and no recovery state is persisted.
+
+`workbench.RECOVERY_KINDS` is the source-of-truth vocabulary:
+`none`, `reply-needed`, `not-loop-ready`, `verify-failed`,
+`no-contract`, `malformed-contract`, `stale-lock`, `stale-state`,
+`commit-preflight`, `commit-failed`, and `generic`. V1 maps common
+structured blockers to concrete cards and falls back to `generic` for
+unknown failures.
+
+The full `/api/recovery` payload's `recovery` object contains:
+
+- `plan_dir`, `kind`, `title`, `summary`, `severity`, and `recoverable`.
+- `run_id`, `session_id`, `turn_index`, and `commit_index` when a
+  selected turn or failed commit can be identified.
+- `evidence` rows (`label`, `value`, `detail`, `severity`) for pause
+  reasons, readiness gates, failed checks, lock PIDs, stale-state
+  reasons, commit statuses, harness config paths, and warnings.
+- `actions` cards (`id`, `label`, `description`, `kind`, `target`,
+  `endpoint`, `method`, `payload`, `disabled`). Action cards only
+  target existing UI controls or existing endpoints; valid targets are
+  `reply`, `events`, `active`, `verification`, `progress`, `artifacts`,
+  `stdout`, `stderr`, `profile`, `launch`, and `unlock`.
+- `commands` (`label`, `command`, `description`) for copy-only shell or
+  harness repairs such as `asl preflight <plan-dir> --mark-loop-ready`,
+  `$plan-preflight-iterate <plan-dir>/`, `asl verify <plan-dir>
+  --session <id> --json`, and `asl preflight <plan-dir> --json`.
+- `artifacts` (`label`, `path`, `kind`, `source`) for existing
+  `state.json`, `events.jsonl`, `progress.md`, stdout/stderr,
+  `result.json`, failed commit files, and related config files.
+- `warnings` legacy strings plus `warning_details` structured entries
+  (`code`, `message`, `severity`). State-read warning codes are
+  `state-missing-race`, `state-unreadable`, `state-malformed-json`, and
+  `state-invalid-json-shape`.
+- A nested `compact` object matching the additive `recovery` summary
+  exposed on `/api/queue` and `/api/plan`. Compact payloads intentionally
+  expose only `warning_count`, not the full `warning_details` list.
+
+`evidence`, `commands`, and `artifacts` are uncapped, expected-small,
+best-effort arrays. Workbench does not impose a runtime item limit on
+them; clients should render whatever the diagnosis returns and tolerate
+empty lists. Artifact paths are best-effort pointers into state or
+artifact directories and can be missing by the time an operator inspects
+the card.
+
+Commands in `commands` are copy-only repair guidance. Workbench never
+executes those commands; mutating actions are limited to the existing
+`/api/reply`, `/api/launch`, and `/api/unlock` endpoints with their
+normal confirmation and validation flows.
+
+Action `target` values are UI focus keys from `RECOVERY_ACTION_TARGETS`.
+Supported targets scroll or focus the existing detail section named by
+the target. If `target` is absent, the frontend falls back to
+`RECOVERY_ACTION_TARGETS_BY_ID` and then legacy text heuristics for older
+payloads. If a payload supplies an explicit but unsupported target,
+Workbench does not run the action or infer a different target.
+
+### Recovery payload examples
+
+These minimized examples show the stable shape custom clients can branch
+on. Real `/api/recovery` responses include the full field set described
+above, plus nullable IDs such as `run_id`, `session_id`, `turn_index`, or
+`commit_index` when they are available.
+
+`none`:
+
+```json
+{
+  "kind": "none",
+  "severity": "none",
+  "recoverable": false,
+  "evidence": [],
+  "actions": [],
+  "commands": [],
+  "artifacts": [],
+  "warnings": [],
+  "warning_details": []
+}
+```
+
+`reply-needed`:
+
+```json
+{
+  "kind": "reply-needed",
+  "severity": "warning",
+  "recoverable": true,
+  "session_id": "7",
+  "actions": [
+    {
+      "id": "reply",
+      "kind": "endpoint",
+      "target": "reply",
+      "endpoint": "/api/reply",
+      "method": "POST"
+    }
+  ],
+  "commands": []
+}
+```
+
+`not-loop-ready`:
+
+```json
+{
+  "kind": "not-loop-ready",
+  "severity": "warning",
+  "recoverable": true,
+  "evidence": [
+    { "label": "Readiness", "value": "not-loop-ready" }
+  ],
+  "actions": [
+    { "id": "retry-run", "kind": "navigate", "target": "launch" }
+  ],
+  "commands": [
+    {
+      "label": "Repair readiness",
+      "command": "asl preflight <plan-dir> --mark-loop-ready"
+    }
+  ]
+}
+```
+
+`verify-failed`:
+
+```json
+{
+  "kind": "verify-failed",
+  "severity": "error",
+  "recoverable": true,
+  "session_id": "7",
+  "evidence": [
+    { "label": "Failed check", "value": "docs-regression" }
+  ],
+  "actions": [
+    { "id": "inspect-verification", "kind": "inspect", "target": "verification" }
+  ],
+  "commands": [
+    {
+      "label": "Rerun verification",
+      "command": "asl verify <plan-dir> --session 7 --json"
+    }
+  ],
+  "artifacts": [
+    { "label": "Result JSON", "path": ".../result.json", "kind": "json" }
+  ]
+}
+```
+
+`no-contract`:
+
+```json
+{
+  "kind": "no-contract",
+  "severity": "error",
+  "recoverable": true,
+  "session_id": "3",
+  "actions": [
+    { "id": "inspect-progress", "kind": "inspect", "target": "progress" }
+  ],
+  "commands": [
+    {
+      "label": "Check preflight",
+      "command": "asl preflight <plan-dir> --json"
+    }
+  ]
+}
+```
+
+`malformed-contract`:
+
+```json
+{
+  "kind": "malformed-contract",
+  "severity": "error",
+  "recoverable": true,
+  "session_id": "3",
+  "actions": [
+    { "id": "inspect-artifacts", "kind": "inspect", "target": "artifacts" }
+  ],
+  "artifacts": [
+    { "label": "Session file", "path": ".../session-3.md", "kind": "markdown" }
+  ]
+}
+```
+
+`stale-lock`:
+
+```json
+{
+  "kind": "stale-lock",
+  "severity": "warning",
+  "recoverable": true,
+  "evidence": [
+    { "label": "Lock PID", "value": "12345" }
+  ],
+  "actions": [
+    {
+      "id": "unlock",
+      "kind": "endpoint",
+      "target": "unlock",
+      "endpoint": "/api/unlock",
+      "method": "POST"
+    }
+  ]
+}
+```
+
+`stale-state`:
+
+```json
+{
+  "kind": "stale-state",
+  "severity": "warning",
+  "recoverable": true,
+  "evidence": [
+    { "label": "State", "value": "stale unfinished run" }
+  ],
+  "actions": [
+    { "id": "inspect-active", "kind": "inspect", "target": "active" }
+  ],
+  "warnings": ["state.json disappeared during recovery diagnosis"],
+  "warning_details": [
+    {
+      "code": "state-missing-race",
+      "message": "state.json disappeared during recovery diagnosis",
+      "severity": "warning"
+    }
+  ]
+}
+```
+
+`commit-preflight`:
+
+```json
+{
+  "kind": "commit-preflight",
+  "severity": "warning",
+  "recoverable": true,
+  "actions": [
+    { "id": "review-profile", "kind": "inspect", "target": "profile" }
+  ],
+  "commands": [
+    { "label": "Inspect readiness", "command": "asl preflight <plan-dir> --json" }
+  ]
+}
+```
+
+`commit-failed`:
+
+```json
+{
+  "kind": "commit-failed",
+  "severity": "error",
+  "recoverable": true,
+  "commit_index": 1,
+  "actions": [
+    { "id": "inspect-stdout", "kind": "inspect", "target": "stdout" },
+    { "id": "inspect-stderr", "kind": "inspect", "target": "stderr" }
+  ],
+  "artifacts": [
+    { "label": "Commit stderr", "path": ".../commit-stderr.log", "kind": "log" }
+  ]
+}
+```
+
+`generic`:
+
+```json
+{
+  "kind": "generic",
+  "severity": "warning",
+  "recoverable": true,
+  "evidence": [
+    { "label": "Reason", "value": "nonzero-exit" }
+  ],
+  "actions": [
+    { "id": "inspect-events", "kind": "inspect", "target": "events" }
+  ]
+}
+```
+
+Representative mappings:
+
+- `reply-needed` embeds the existing reply workflow and posts only to
+  `/api/reply`.
+- `not-loop-ready` shows readiness evidence, offers a retry through the
+  existing launch flow, and displays copy-only preflight repair
+  commands.
+- `verify-failed`, `no-contract`, and `malformed-contract` identify the
+  failed session when available, link failed-turn artifacts, and display
+  copy-only `asl verify`/`asl preflight` commands.
+- `stale-lock` and `stale-state` point at lock/state evidence and route
+  unlock actions through the existing `/api/unlock` confirmation path.
+- `commit-preflight` and `commit-failed` surface commit evidence,
+  failed commit artifacts when present, and profile/launch follow-up
+  actions.
 
 ### Frontend behavior
 
@@ -1382,20 +1704,35 @@ the Python package (no build tooling, no third-party JS). Pages:
   CSS can target the placeholder/preview swap without re-querying
   `matchMedia` on every render.
 - **Detail (`#plan?dir=<encoded>[&focus=<key>]`)** — per-plan view with
-  active turn, active verification, session table, recent events,
-  progress journal, artifacts, and operator controls (pin/unpin, edit
-  profile, launch, reply, stop-after-current, select harness, unlock).
-  Dangerous actions (unlock with an active lock, launch under
+  the Recovery Center, active turn, active verification, session table,
+  recent events, progress journal, artifacts, and operator controls
+  (pin/unpin, edit profile, launch, reply, stop-after-current, select
+  harness, unlock). The Recovery Center appears near the top of the
+  detail page so a paused/failed/stale plan shows the diagnosis,
+  evidence, copyable commands, related artifacts, and confirmed next
+  actions before the raw logs. Dangerous actions (unlock with an active
+  lock, launch under
   unsafe-bypass) prompt for in-page confirmation before the API call.
 
   The optional `focus=<key>` hash query parameter accepts the keys
-  registered in `DETAIL_FOCUS_TARGETS` (`reply`, `events`, `active`,
-  `launch`, `unlock`). The router validates the key against the map and
-  silently drops unknown values. `applyDetailFocus` is one-shot — it
+  registered in `DETAIL_FOCUS_TARGETS` (`recovery`, `reply`, `events`,
+  `active`, `launch`, `unlock`). The router validates the key against
+  the map and silently drops unknown values. `applyDetailFocus` is
+  one-shot — it
   scrolls and focuses the target element on the first render after
   navigation, then clears `state.route.focus` so subsequent 5 s polls
   do not keep snapping the viewport (the param itself stays in the URL,
   so a manual reload will re-focus once).
+
+  The Recovery Center renders compact queue/detail `plan.recovery`
+  immediately and then replaces it with full `/api/recovery` evidence
+  when that request succeeds. If the detail fetch fails, the compact
+  fallback remains visible when available; otherwise the panel renders a
+  deterministic "Recovery unavailable" card. Reply-needed recoveries
+  load the embedded reply form through `/api/questions` and submit only
+  through `/api/reply`. Launch and unlock action cards call the same
+  `/api/launch` and `/api/unlock` handlers as the ordinary controls;
+  inspect and navigate actions scroll/focus existing detail sections.
 
   The session table iterates `payload.sessions` from `/api/state` and
   renders the dotted `id` verbatim (e.g., `2.1`, `2.2`), the basename
@@ -1482,6 +1819,25 @@ a runner cleanup window should retry once before opening a bug.
   resume with `reason: no-paused-run`, `missing-question-context`, or
   `reply-context-mismatch` if the paused turn is stale; the response
   body carries the verbatim `reason`.
+- **Recovery Center reports `not-loop-ready`** — inspect the readiness
+  evidence first. Copy `asl preflight <plan-dir> --mark-loop-ready` only
+  after fixing non-derived preflight findings, or use the displayed
+  `$plan-preflight-iterate <plan-dir>/` command for an interactive
+  repair pass. The Workbench displays both commands but does not run
+  either one.
+- **Recovery Center reports `verify-failed`, `no-contract`, or
+  `malformed-contract`** — open the failed-turn artifacts from the card,
+  repair the session or its Completion Contract, then copy the displayed
+  `asl verify <plan-dir> --session <id> --json` command before retrying
+  the run through the existing launch action.
+- **Recovery Center reports `commit-failed` or `commit-preflight`** —
+  inspect failed commit artifacts and the repository worktree. Review
+  the launch profile's commit mode before retrying; recovery cards never
+  mutate git state directly.
+- **Recovery Center reports `stale-lock` or `stale-state`** — confirm
+  no runner is still active, then use the existing unlock confirmation
+  flow. Stale lock cards show lock evidence such as PID/reason when the
+  lock file can be read.
 
 ## Verification
 
@@ -1609,3 +1965,10 @@ Workbench browser workflow:
   in the textarea (the reply text must never be persisted to
   sessionStorage/localStorage and must never be overwritten by
   polling).
+- Seed representative Recovery Center plans in the Workbench state
+  root: ready (`kind: none`), running (`kind: none` with active lock),
+  reply-needed, not-loop-ready, verify-failed, stale-lock or
+  stale-state, commit-failed, and complete (`kind: none`). Open each
+  detail view and confirm the card kind, severity, evidence rows,
+  action-card targets, copy-only commands, and artifact links match the
+  seeded state without executing arbitrary repair commands.

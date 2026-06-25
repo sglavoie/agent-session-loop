@@ -124,10 +124,30 @@ def final_review_output_path(plan_dir: str | Path) -> Path:
     return Path(plan_dir) / FINAL_REVIEW_FILENAME
 
 
-_GENERATED_REVIEW_VERIFY_SOURCE = (
-    "import pathlib, sys; "
-    f"text = pathlib.Path({FINAL_REVIEW_FILENAME!r}).read_text(encoding='utf-8'); "
-    "sys.exit(0 if text.strip() else 1)"
+_GENERATED_REVIEW_VERIFY_SOURCE = "\n".join(
+    [
+        "import pathlib, re, sys",
+        f"text = pathlib.Path({FINAL_REVIEW_FILENAME!r}).read_text(encoding='utf-8')",
+        "if not text.strip(): sys.exit(1)",
+        (
+            "heading_re = re.compile("
+            "r'(?im)^\\s{0,3}#{1,6}\\s+"
+            r"(?:Findings?|Risks?|Concerns?|Assessment|Review|Summary)\b"
+            r"|^\s*(?:Findings?|Risks?|Concerns?|Assessment|Review|Summary)\s*:\s*$'"
+            ")"
+        ),
+        "if heading_re.search(text) is None: sys.exit(1)",
+        (
+            "path_re = re.compile("
+            r"r'(?<![\w./-])(?:[A-Za-z0-9_.-]+/)+(?:[A-Za-z0-9_.-]+)(?::\d+)?"
+            r"|(?<![\w./-])(?:[A-Za-z0-9_.-]+\."
+            r"(?:py|md|txt|json|toml|yaml|yml|js|ts|tsx|jsx|css|html|rst|sh|sql|ini|cfg|lock))"
+            r"(?:[:#][A-Za-z0-9_.-]+)?(?::\d+)?'"
+            ")"
+        ),
+        "refs = {match.group(0).rstrip('.,);]') for match in path_re.finditer(text)}",
+        "sys.exit(0 if len(refs) >= 3 else 1)",
+    ]
 )
 
 
@@ -139,7 +159,7 @@ def _generated_review_contract_payload(
         "checks": [
             {
                 "type": "command",
-                "name": "final-review-output-non-empty",
+                "name": "final-review-output-evidence-based",
                 "argv": ["python3", "-c", _GENERATED_REVIEW_VERIFY_SOURCE],
                 "cwd": str(plan_dir),
                 "timeout_seconds": 60,
@@ -180,6 +200,14 @@ def build_generated_review_session_body(
                 f"- Write review findings to `{FINAL_REVIEW_FILENAME}` inside "
                 "this plan directory."
             ),
+            (
+                "- Include at least three distinct source, documentation, or "
+                "test path-like references as evidence."
+            ),
+            (
+                "- Include at least one review-oriented section heading such "
+                "as Findings, Risks, Concerns, Assessment, Review, or Summary."
+            ),
             "- Do not modify any files in the repository under review.",
             (
                 "- Mark only this session's handoff complete; do not change any "
@@ -192,7 +220,9 @@ def build_generated_review_session_body(
             "",
             (
                 f"- `{FINAL_REVIEW_FILENAME}` exists in the plan directory and "
-                "contains non-whitespace text."
+                "contains non-whitespace text, at least three distinct "
+                "source/doc/test path-like references, and at least one "
+                "review-oriented section heading."
             ),
             "",
             "### Verify",

@@ -75,11 +75,56 @@
   // around the focused control); focus target is what receives keyboard
   // focus after the panel scrolls into view.
   const DETAIL_FOCUS_TARGETS = {
-    reply: { scroll: "wb-reply-panel", focus: "wb-reply-text" },
+    recovery: { scroll: "wb-recovery-panel", focus: null },
+    reply: { scroll: "wb-recovery-panel", focus: "wb-reply-text" },
     events: { scroll: "wb-detail-events", focus: null },
     active: { scroll: "wb-detail-active", focus: null },
+    verification: { scroll: "wb-detail-verification", focus: null },
+    progress: { scroll: "wb-detail-progress", focus: null },
+    artifacts: { scroll: "wb-detail-artifacts", focus: null },
+    stdout: { scroll: "wb-detail-stdout", focus: null },
+    stderr: { scroll: "wb-detail-stderr", focus: null },
+    profile: { scroll: "wb-profile-form", focus: null },
     launch: { scroll: "wb-controls", focus: "wb-control-launch" },
     unlock: { scroll: "wb-controls", focus: "wb-control-unlock" },
+  };
+  const RECOVERY_ACTION_TARGETS = [
+    "reply",
+    "events",
+    "active",
+    "verification",
+    "progress",
+    "artifacts",
+    "stdout",
+    "stderr",
+    "profile",
+    "launch",
+    "unlock",
+  ];
+  const RECOVERY_TARGET_LABELS = {
+    reply: "reply",
+    events: "events",
+    active: "active turn",
+    verification: "verification",
+    progress: "progress",
+    artifacts: "artifacts",
+    stdout: "stdout",
+    stderr: "stderr",
+    profile: "profile",
+    launch: "launch",
+    unlock: "unlock",
+  };
+  const RECOVERY_ACTION_TARGETS_BY_ID = {
+    reply: "reply",
+    unlock: "unlock",
+    "retry-run": "launch",
+    "inspect-artifacts": "artifacts",
+    "review-profile": "profile",
+  };
+  const REPLY_CONTEXT_ERROR_HINTS = {
+    "no-paused-run": "No paused run is waiting for an operator reply.",
+    "missing-question-context": "The paused turn no longer has readable question context.",
+    "reply-context-mismatch": "The paused session no longer matches the current pending session.",
   };
 
   const state = {
@@ -1682,6 +1727,7 @@
       renderDetailHeader(state.detailPlan);
       renderProfileForm(state.detailPlan, state.detailRegistry);
       const tasks = [
+        loadAndRenderRecovery(planDir, state.detailPlan),
         loadAndRenderState(planDir),
         loadAndRenderEvents(planDir),
         loadAndRenderProgress(planDir),
@@ -1689,11 +1735,6 @@
         loadAndRenderLog(planDir, "stderr"),
         loadAndRenderArtifacts(planDir),
       ];
-      if (state.detailPlan && state.detailPlan.primary_state === "paused-for-reply") {
-        tasks.push(loadAndRenderReply(planDir));
-      } else {
-        hideReplyPanel();
-      }
       await Promise.all(tasks);
       const ts = new Date().toLocaleTimeString();
       setRefreshStatus("idle", "updated " + ts);
@@ -1752,6 +1793,590 @@
         harnessSelect.value = plan.harness;
       }
     }
+  }
+
+  // ---------------------------------------------------------------------
+  // Recovery Center loading
+
+  async function loadAndRenderRecovery(planDir, plan) {
+    const compact = plan && plan.recovery ? plan.recovery : null;
+    let renderedRecovery = null;
+    if (compact) {
+      renderedRecovery = compact;
+      renderRecoveryPanel(compact);
+    }
+    try {
+      const body = await apiRequest(
+        "/api/recovery?plan_dir=" + encodeURIComponent(planDir)
+      );
+      if (body && body.ok === true && body.recovery) {
+        renderedRecovery = body.recovery;
+        renderRecoveryPanel(body.recovery);
+      } else if (!compact) {
+        renderRecoveryError(
+          (body && body.error) || "recovery diagnosis unavailable"
+        );
+        renderedRecovery = null;
+      }
+    } catch (err) {
+      if (compact) {
+        const fallback = Object.assign({}, compact, {
+          warnings: [
+            "Recovery details failed to load: " + describeError(err),
+          ],
+        });
+        renderedRecovery = fallback;
+        renderRecoveryPanel(fallback);
+      } else {
+        renderRecoveryError(describeError(err));
+        renderedRecovery = null;
+      }
+    }
+    if (renderedRecovery && renderedRecovery.kind === "reply-needed") {
+      await loadAndRenderReply(planDir);
+    } else {
+      hideReplyPanel();
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Recovery Center panel rendering
+
+  function renderRecoveryError(message) {
+    renderRecoveryPanel({
+      kind: "generic",
+      title: "Recovery unavailable",
+      summary: String(message || "recovery diagnosis unavailable"),
+      severity: "warning",
+      recoverable: false,
+      evidence: [],
+      actions: [],
+      commands: [],
+      artifacts: [],
+      warnings: [],
+    });
+  }
+
+  function renderRecoveryPanel(recovery) {
+    const panel = document.getElementById("wb-recovery-panel");
+    if (!panel || !recovery) return;
+    const kind = String(recovery.kind || "generic");
+    const severity = recoverySeverity(recovery.severity);
+    panel.setAttribute("data-severity", severity);
+
+    const titleEl = document.getElementById("wb-recovery-title");
+    if (titleEl) titleEl.textContent = recovery.title || "Recovery Center";
+    const kindEl = document.getElementById("wb-recovery-kind");
+    if (kindEl) {
+      kindEl.textContent = kind;
+      kindEl.setAttribute("data-kind", kind);
+    }
+    const summaryEl = document.getElementById("wb-recovery-summary");
+    if (summaryEl) {
+      summaryEl.textContent =
+        recovery.summary || "No recovery diagnosis is available.";
+    }
+
+    const actions = Array.isArray(recovery.actions) ? recovery.actions : [];
+    const primaryAction =
+      recovery.primary_action ||
+      (recovery.compact && recovery.compact.primary_action) ||
+      null;
+    renderRecoveryActions(
+      actions.length ? actions : primaryAction ? [primaryAction] : []
+    );
+
+    const evidence = Array.isArray(recovery.evidence)
+      ? recovery.evidence.slice()
+      : [];
+    if (Array.isArray(recovery.warnings)) {
+      recovery.warnings.forEach((warning) => {
+        evidence.push({
+          label: "Warning",
+          value: warning,
+          detail: null,
+          severity: "warning",
+        });
+      });
+    }
+    renderRecoveryEvidence(evidence);
+    renderRecoveryCommands(
+      Array.isArray(recovery.commands) ? recovery.commands : []
+    );
+    renderRecoveryArtifacts(
+      Array.isArray(recovery.artifacts) ? recovery.artifacts : []
+    );
+  }
+
+  function recoverySeverity(value) {
+    return ["none", "info", "warning", "error"].indexOf(value) === -1
+      ? "none"
+      : value;
+  }
+
+  // ---------------------------------------------------------------------
+  // Recovery Center actions
+
+  function renderRecoveryActions(actions) {
+    const host = document.getElementById("wb-recovery-primary-action");
+    if (!host) return;
+    const cards = actions.filter(Boolean);
+    host.innerHTML = "";
+    if (!cards.length) {
+      host.hidden = true;
+      return;
+    }
+    host.hidden = false;
+    cards.forEach((action, index) => {
+      host.appendChild(createRecoveryActionCard(action, index === 0));
+    });
+  }
+
+  function renderRecoveryPrimaryAction(action) {
+    renderRecoveryActions(action ? [action] : []);
+  }
+
+  function createRecoveryActionCard(action, primary) {
+    const card = document.createElement("div");
+    card.className = "wb-recovery__action-card";
+    if (primary) card.setAttribute("data-primary", "true");
+    if (action.disabled) card.setAttribute("data-disabled", "true");
+
+    const text = document.createElement("div");
+    const title = document.createElement("p");
+    title.className = "wb-recovery__action-title";
+    title.textContent = action.label || "Primary action";
+    text.appendChild(title);
+    if (action.description) {
+      const description = document.createElement("p");
+      description.className = "wb-recovery__action-description";
+      description.textContent = action.description;
+      text.appendChild(description);
+    }
+    card.appendChild(text);
+
+    const target = recoveryActionTarget(action);
+    const button = document.createElement("button");
+    button.className = "wb-button wb-button--primary";
+    button.type = "button";
+    button.textContent = recoveryActionButtonLabel(action, target);
+    button.disabled = Boolean(
+      action.disabled || !recoveryActionCanRun(action, target)
+    );
+    button.addEventListener("click", () => {
+      handleRecoveryAction(action);
+    });
+    card.appendChild(button);
+    return card;
+  }
+
+  function recoveryActionCanRun(action, target) {
+    if (!action) return false;
+    const endpoint = action.endpoint ? String(action.endpoint) : "";
+    const id = action.id ? String(action.id) : "";
+    if (endpoint === "/api/unlock" || id === "unlock") return true;
+    if (
+      endpoint === "/api/launch" ||
+      id === "retry-run" ||
+      id === "launch"
+    ) {
+      return true;
+    }
+    if (endpoint === "/api/reply" || id === "reply") return Boolean(target);
+    return Boolean(target);
+  }
+
+  function recoveryActionButtonLabel(action, target) {
+    const id = action && action.id ? String(action.id) : "";
+    if (id === "unlock" || target === "unlock") return "unlock";
+    if (id === "reply" || target === "reply") return "reply";
+    if (id === "review-profile" || target === "profile") return "profile";
+    if (id === "retry-run" || target === "launch") return "launch";
+    if (action && action.kind === "inspect") return "inspect";
+    return "open";
+  }
+
+  // ---------------------------------------------------------------------
+  // Recovery Center evidence
+
+  function renderRecoveryEvidence(rows) {
+    const section = document.getElementById("wb-recovery-evidence-section");
+    const list = document.getElementById("wb-recovery-evidence");
+    if (!section || !list) return;
+    list.innerHTML = "";
+    if (!rows.length) {
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+    rows.forEach((row) => {
+      const li = document.createElement("li");
+      li.className = "wb-recovery__evidence-row";
+      li.setAttribute("data-severity", recoveryEvidenceSeverity(row.severity));
+
+      const label = document.createElement("span");
+      label.className = "wb-recovery__label";
+      label.textContent = row.label || "Evidence";
+      li.appendChild(label);
+
+      const value = document.createElement("span");
+      value.className = "wb-recovery__value";
+      value.textContent =
+        row.value === null || row.value === undefined || row.value === ""
+          ? "-"
+          : String(row.value);
+      if (row.detail) {
+        const detail = document.createElement("span");
+        detail.className = "wb-recovery__detail";
+        detail.textContent = row.detail;
+        value.appendChild(detail);
+      }
+      li.appendChild(value);
+
+      const target = recoveryEvidenceTarget(row);
+      if (target) {
+        li.appendChild(createRecoveryLink(target));
+      }
+      list.appendChild(li);
+    });
+  }
+
+  function recoveryEvidenceSeverity(value) {
+    return ["info", "warning", "error"].indexOf(value) === -1
+      ? "info"
+      : value;
+  }
+
+  // ---------------------------------------------------------------------
+  // Recovery Center commands
+
+  function renderRecoveryCommands(commands) {
+    const section = document.getElementById("wb-recovery-commands-section");
+    const list = document.getElementById("wb-recovery-commands");
+    if (!section || !list) return;
+    list.innerHTML = "";
+    if (!commands.length) {
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+    commands.forEach((command) => {
+      const li = document.createElement("li");
+      li.className = "wb-recovery__command-row";
+
+      const label = document.createElement("span");
+      label.className = "wb-recovery__label";
+      label.textContent = command.label || "Command";
+      li.appendChild(label);
+
+      const body = document.createElement("span");
+      const code = document.createElement("code");
+      code.className = "wb-recovery__command";
+      code.textContent = command.command || "";
+      body.appendChild(code);
+      if (command.description) {
+        const description = document.createElement("span");
+        description.className = "wb-recovery__command-description";
+        description.textContent = command.description;
+        body.appendChild(description);
+      }
+      li.appendChild(body);
+
+      const button = document.createElement("button");
+      button.className = "wb-button";
+      button.type = "button";
+      button.textContent = "copy";
+      button.addEventListener("click", () => {
+        copyRecoveryCommand(button, command.command || "");
+      });
+      li.appendChild(button);
+
+      list.appendChild(li);
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Recovery Center artifacts
+
+  function renderRecoveryArtifacts(artifacts) {
+    const section = document.getElementById("wb-recovery-artifacts-section");
+    const list = document.getElementById("wb-recovery-artifacts");
+    if (!section || !list) return;
+    list.innerHTML = "";
+    if (!artifacts.length) {
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+    artifacts.forEach((artifact) => {
+      const li = document.createElement("li");
+      li.className = "wb-recovery__artifact-row";
+
+      const label = document.createElement("span");
+      label.className = "wb-recovery__label";
+      label.textContent = artifact.label || "Artifact";
+      li.appendChild(label);
+
+      const path = document.createElement("code");
+      path.className = "wb-recovery__artifact-path";
+      path.textContent = artifact.path || "";
+      li.appendChild(path);
+
+      const meta = document.createElement("span");
+      meta.className = "wb-recovery__artifact-meta";
+      meta.textContent = [artifact.kind, artifact.source]
+        .filter(Boolean)
+        .join(" · ");
+      const target = recoveryArtifactTarget(artifact);
+      if (target) {
+        if (meta.textContent) meta.appendChild(document.createTextNode(" "));
+        meta.appendChild(createRecoveryLink(target));
+      }
+      li.appendChild(meta);
+      list.appendChild(li);
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Recovery Center target resolution
+
+  function createRecoveryLink(target) {
+    const button = document.createElement("button");
+    button.className = "wb-recovery__link";
+    button.type = "button";
+    button.textContent = RECOVERY_TARGET_LABELS[target] || "view";
+    button.addEventListener("click", () => focusDetailKey(target));
+    return button;
+  }
+
+  function isRecoveryActionTarget(target) {
+    return RECOVERY_ACTION_TARGETS.indexOf(target) !== -1;
+  }
+
+  function normalizeRecoveryActionTarget(target) {
+    const value =
+      target === null || target === undefined ? "" : String(target).trim();
+    if (!value || !isRecoveryActionTarget(value)) return null;
+    return Object.prototype.hasOwnProperty.call(DETAIL_FOCUS_TARGETS, value)
+      ? value
+      : null;
+  }
+
+  function hasExplicitRecoveryActionTarget(action) {
+    return Boolean(
+      action &&
+        action.target !== null &&
+        action.target !== undefined &&
+        String(action.target).trim() !== ""
+    );
+  }
+
+  function mappedRecoveryActionTarget(action) {
+    if (!action || !action.id) return null;
+    return normalizeRecoveryActionTarget(
+      RECOVERY_ACTION_TARGETS_BY_ID[String(action.id)] || null
+    );
+  }
+
+  function legacyRecoveryActionTarget(action) {
+    const haystack = recoveryText([
+      action.id,
+      action.label,
+      action.description,
+      action.endpoint,
+    ]);
+    if (haystack.indexOf("reply") !== -1) return "reply";
+    if (haystack.indexOf("unlock") !== -1) return "unlock";
+    if (
+      haystack.indexOf("launch") !== -1 ||
+      haystack.indexOf("retry") !== -1
+    ) {
+      return "launch";
+    }
+    if (
+      haystack.indexOf("profile") !== -1 ||
+      haystack.indexOf("harness") !== -1 ||
+      haystack.indexOf("config") !== -1
+    ) {
+      return "profile";
+    }
+    if (
+      haystack.indexOf("verify") !== -1 ||
+      haystack.indexOf("contract") !== -1 ||
+      haystack.indexOf("check") !== -1
+    ) {
+      return "verification";
+    }
+    if (haystack.indexOf("stderr") !== -1) return "stderr";
+    if (haystack.indexOf("stdout") !== -1) return "stdout";
+    if (haystack.indexOf("log") !== -1) return "stderr";
+    if (
+      haystack.indexOf("artifact") !== -1 ||
+      haystack.indexOf("inspect") !== -1
+    ) {
+      return "artifacts";
+    }
+    return null;
+  }
+
+  function recoveryActionTarget(action) {
+    if (!action) return null;
+    const explicit = normalizeRecoveryActionTarget(action.target);
+    if (explicit) return explicit;
+    if (hasExplicitRecoveryActionTarget(action)) return null;
+    const mapped = mappedRecoveryActionTarget(action);
+    if (mapped) return mapped;
+    return legacyRecoveryActionTarget(action);
+  }
+
+  function recoveryEvidenceTarget(row) {
+    const haystack = recoveryText([row.label, row.value, row.detail]);
+    if (haystack.indexOf("reply") !== -1) return "reply";
+    if (haystack.indexOf("event") !== -1) return "events";
+    if (haystack.indexOf("stderr") !== -1) return "stderr";
+    if (haystack.indexOf("stdout") !== -1) return "stdout";
+    if (haystack.indexOf("log") !== -1) return "stderr";
+    if (
+      haystack.indexOf("result") !== -1 ||
+      haystack.indexOf("artifact") !== -1 ||
+      haystack.indexOf("state.json") !== -1 ||
+      haystack.indexOf("last-message") !== -1
+    ) {
+      return "artifacts";
+    }
+    if (
+      haystack.indexOf("verify") !== -1 ||
+      haystack.indexOf("verification") !== -1 ||
+      haystack.indexOf("contract") !== -1 ||
+      haystack.indexOf("check") !== -1
+    ) {
+      return "verification";
+    }
+    if (
+      haystack.indexOf("progress") !== -1 ||
+      haystack.indexOf("journal") !== -1
+    ) {
+      return "progress";
+    }
+    if (
+      haystack.indexOf("profile") !== -1 ||
+      haystack.indexOf("harness") !== -1 ||
+      haystack.indexOf("config") !== -1
+    ) {
+      return "profile";
+    }
+    if (haystack.indexOf("lock") !== -1) return "unlock";
+    if (haystack.indexOf("active") !== -1) return "active";
+    return null;
+  }
+
+  function recoveryArtifactTarget(artifact) {
+    const haystack = recoveryText([
+      artifact.label,
+      artifact.path,
+      artifact.kind,
+      artifact.source,
+    ]);
+    if (haystack.indexOf("events") !== -1) return "events";
+    if (haystack.indexOf("progress") !== -1) return "progress";
+    if (haystack.indexOf("stdout") !== -1) return "stdout";
+    if (haystack.indexOf("stderr") !== -1) return "stderr";
+    if (haystack.indexOf("result") !== -1) return "artifacts";
+    if (haystack.indexOf("state") !== -1) return "active";
+    return "artifacts";
+  }
+
+  function recoveryText(parts) {
+    return parts
+      .filter((part) => part !== null && part !== undefined)
+      .map((part) => String(part).toLowerCase())
+      .join(" ");
+  }
+
+  // ---------------------------------------------------------------------
+  // Recovery Center dispatch
+
+  async function handleRecoveryAction(action) {
+    if (!action || action.disabled) return;
+    const endpoint = action.endpoint ? String(action.endpoint) : "";
+    const id = action.id ? String(action.id) : "";
+    if (endpoint === "/api/unlock" || id === "unlock") {
+      await handleUnlockClick();
+      return;
+    }
+    if (
+      endpoint === "/api/launch" ||
+      id === "retry-run" ||
+      id === "launch"
+    ) {
+      await handleLaunchClick();
+      return;
+    }
+    const target = recoveryActionTarget(action);
+    if (target) focusDetailKey(target);
+  }
+
+  function focusDetailKey(focusKey) {
+    const target = DETAIL_FOCUS_TARGETS[focusKey];
+    if (!target) return;
+    const scrollEl = target.scroll
+      ? document.getElementById(target.scroll)
+      : null;
+    if (scrollEl && typeof scrollEl.scrollIntoView === "function") {
+      scrollEl.scrollIntoView({ block: "start", behavior: "smooth" });
+    }
+    if (target.focus) {
+      const focusEl = document.getElementById(target.focus);
+      if (focusEl && typeof focusEl.focus === "function") {
+        try {
+          focusEl.focus({ preventScroll: true });
+        } catch (err) {
+          focusEl.focus();
+        }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Recovery Center copy UX
+
+  async function copyRecoveryCommand(button, commandText) {
+    if (!commandText) return;
+    const original = button.textContent;
+    button.disabled = true;
+    try {
+      await copyText(commandText);
+      button.textContent = "copied";
+    } catch (err) {
+      button.textContent = "failed";
+    } finally {
+      window.setTimeout(() => {
+        button.textContent = original || "copy";
+        button.disabled = false;
+      }, 1200);
+    }
+  }
+
+  async function copyText(text) {
+    if (
+      window.navigator &&
+      window.navigator.clipboard &&
+      typeof window.navigator.clipboard.writeText === "function"
+    ) {
+      await window.navigator.clipboard.writeText(text);
+      return;
+    }
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-1000px";
+    textarea.style.top = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    document.body.removeChild(textarea);
+    if (!copied) throw new Error("copy failed");
   }
 
   function isPinned(planDir) {
@@ -2071,33 +2696,62 @@
   async function loadAndRenderReply(planDir) {
     const panel = document.getElementById("wb-reply-panel");
     if (panel) panel.hidden = false;
+    clearFormErrors("wb-reply-form-errors");
     try {
       const body = await apiRequest(
         "/api/questions?plan_dir=" + encodeURIComponent(planDir)
       );
       if (body && body.ok) {
         state.detailReplyContext = body;
+        setReplyFormDisabled(false);
         const promptEl = document.getElementById("wb-reply-prompt");
         if (promptEl) promptEl.textContent = body.rendered_prompt || "";
         const lastEl = document.getElementById("wb-reply-last-message");
         if (lastEl) lastEl.textContent = body.last_message || "";
       } else {
-        const promptEl = document.getElementById("wb-reply-prompt");
-        if (promptEl) {
-          promptEl.textContent =
-            (body && body.error) || "no paused-Q&A context available";
-        }
+        renderReplyContextError(body);
       }
     } catch (err) {
-      const promptEl = document.getElementById("wb-reply-prompt");
-      if (promptEl) promptEl.textContent = describeError(err);
+      renderReplyContextError({
+        reason: "request-failed",
+        error: describeError(err),
+      });
     }
+  }
+
+  function renderReplyContextError(payload) {
+    state.detailReplyContext = null;
+    setReplyFormDisabled(true);
+    const reason = payload && payload.reason ? String(payload.reason) : null;
+    const error =
+      payload && payload.error
+        ? String(payload.error)
+        : "no paused-Q&A context available";
+    const hint = reason ? REPLY_CONTEXT_ERROR_HINTS[reason] : null;
+    const message = reason
+      ? reason + ": " + (hint ? hint + " " + error : error)
+      : error;
+    const promptEl = document.getElementById("wb-reply-prompt");
+    if (promptEl) promptEl.textContent = message;
+    const lastEl = document.getElementById("wb-reply-last-message");
+    if (lastEl) lastEl.textContent = "";
+    showFormError("wb-reply-form-errors", message);
   }
 
   function hideReplyPanel() {
     const panel = document.getElementById("wb-reply-panel");
     if (panel) panel.hidden = true;
     state.detailReplyContext = null;
+    setReplyFormDisabled(false);
+  }
+
+  function setReplyFormDisabled(disabled) {
+    const form = document.getElementById("wb-reply-form");
+    if (!form) return;
+    const controls = form.querySelectorAll("textarea, button[type=\"submit\"]");
+    controls.forEach((control) => {
+      control.disabled = Boolean(disabled);
+    });
   }
 
   // ---------------------------------------------------------------------
