@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -58,6 +59,11 @@ COMMIT_MODES = (COMMIT_MODE_PER_SESSION, COMMIT_MODE_END)
 COMMIT_ARGV: tuple[str, ...] = ("spec", "commit", "--yes", "--no-verify")
 RUNNER_MANAGED_SESSION_ARG = "--runner-managed"
 FINAL_REVIEW_FILENAME = "final-review.md"
+REVIEW_STATUS_ALL_CLEAR = "Status: All clear, no findings"
+_REVIEW_STATUS_FINDINGS_RE = re.compile(
+    r"^Status: ([0-9]+) Findings "
+    r"\(([0-9]+) high, ([0-9]+) med, ([0-9]+) low\)$"
+)
 REVIEW_SESSION_MARKER = "<!-- asl:generated-review-session -->"
 SESSION_KIND_IMPLEMENTATION = "implementation"
 SESSION_KIND_REVIEW = "review"
@@ -124,6 +130,56 @@ def final_review_output_path(plan_dir: str | Path) -> Path:
     return Path(plan_dir) / FINAL_REVIEW_FILENAME
 
 
+class ReviewVerdictError(ValueError):
+    """Raised when ``final-review.md`` lacks a valid status verdict."""
+
+
+def parse_review_verdict(text: str) -> dict[str, Any]:
+    """Parse the required final review status line into a stable payload."""
+    nonempty_lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not nonempty_lines:
+        raise ReviewVerdictError(f"{FINAL_REVIEW_FILENAME} is empty")
+
+    status_lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip().startswith("Status:")
+    ]
+    if not status_lines:
+        raise ReviewVerdictError("missing required final Status line")
+    if len(status_lines) > 1:
+        raise ReviewVerdictError("expected exactly one Status line")
+
+    status_line = status_lines[0]
+    if status_line != nonempty_lines[-1]:
+        raise ReviewVerdictError("Status line must be the final non-empty line")
+
+    if status_line == REVIEW_STATUS_ALL_CLEAR:
+        return {
+            "status_line": status_line,
+            "outcome": "all-clear",
+            "total_findings": 0,
+            "findings_by_severity": {"high": 0, "med": 0, "low": 0},
+        }
+
+    match = _REVIEW_STATUS_FINDINGS_RE.fullmatch(status_line)
+    if match is None:
+        raise ReviewVerdictError("malformed Status line")
+
+    total, high, med, low = (int(value) for value in match.groups())
+    if total <= 0:
+        raise ReviewVerdictError("finding total must be greater than zero")
+    if high + med + low != total:
+        raise ReviewVerdictError("finding severity counts do not add up")
+
+    return {
+        "status_line": status_line,
+        "outcome": "findings",
+        "total_findings": total,
+        "findings_by_severity": {"high": high, "med": med, "low": low},
+    }
+
+
 _GENERATED_REVIEW_VERIFY_SOURCE = "\n".join(
     [
         "import pathlib, re, sys",
@@ -146,6 +202,20 @@ _GENERATED_REVIEW_VERIFY_SOURCE = "\n".join(
             ")"
         ),
         "refs = {match.group(0).rstrip('.,);]') for match in path_re.finditer(text)}",
+        "nonempty_lines = [line.strip() for line in text.splitlines() if line.strip()]",
+        "status_lines = [line.strip() for line in text.splitlines() if line.strip().startswith('Status:')]",
+        "if len(status_lines) != 1 or status_lines[0] != nonempty_lines[-1]: sys.exit(1)",
+        "status = status_lines[0]",
+        f"if status == {REVIEW_STATUS_ALL_CLEAR!r}: sys.exit(0 if len(refs) >= 3 else 1)",
+        (
+            "match = re.fullmatch("
+            "r'Status: ([0-9]+) Findings "
+            r"\(([0-9]+) high, ([0-9]+) med, ([0-9]+) low\)', "
+            "status)"
+        ),
+        "if match is None: sys.exit(1)",
+        "total, high, med, low = (int(value) for value in match.groups())",
+        "if total <= 0 or high + med + low != total: sys.exit(1)",
         "sys.exit(0 if len(refs) >= 3 else 1)",
     ]
 )
@@ -208,6 +278,12 @@ def build_generated_review_session_body(
                 "- Include at least one review-oriented section heading such "
                 "as Findings, Risks, Concerns, Assessment, Review, or Summary."
             ),
+            (
+                "- End the file with exactly one machine-readable status line: "
+                f"`{REVIEW_STATUS_ALL_CLEAR}` or "
+                "`Status: N Findings (H high, M med, L low)`, where "
+                "`H + M + L == N`."
+            ),
             "- Do not modify any files in the repository under review.",
             (
                 "- Mark only this session's handoff complete; do not change any "
@@ -222,7 +298,8 @@ def build_generated_review_session_body(
                 f"- `{FINAL_REVIEW_FILENAME}` exists in the plan directory and "
                 "contains non-whitespace text, at least three distinct "
                 "source/doc/test path-like references, and at least one "
-                "review-oriented section heading."
+                "review-oriented section heading, and ends with exactly one "
+                "valid `Status:` verdict line."
             ),
             "",
             "### Verify",
@@ -3540,6 +3617,81 @@ def _revert_session_status_to_pending(
     return path
 
 
+def _read_review_verdict(plan_dir: Path) -> dict[str, Any]:
+    review_path = final_review_output_path(plan_dir)
+    try:
+        text = review_path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ReviewVerdictError(
+            f"could not read {FINAL_REVIEW_FILENAME}: {error}"
+        ) from error
+    return parse_review_verdict(text)
+
+
+def _enforce_review_verdict(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    persistence: _RunPersistence,
+    before: plans.PlanSnapshot,
+    after: plans.PlanSnapshot,
+    session_id: str,
+    session_label: str,
+    session_details: dict[str, Any],
+    turn_payload: dict[str, Any],
+    paths: dict[str, Path],
+) -> bool:
+    """Validate and persist the final review verdict.
+
+    Returns ``True`` when the run should pause (the caller must ``break``).
+    """
+    review_path = final_review_output_path(before.plan_dir)
+    try:
+        verdict = _read_review_verdict(before.plan_dir)
+    except ReviewVerdictError as error:
+        failure_note = f"review verdict validation failed: {error}"
+        reverted = _revert_session_status_to_pending(
+            after, session_id, failure_note=failure_note
+        )
+        snapshot_after = _reinspect_after_revert(before.plan_dir, after, reverted)
+        details = {
+            **session_details,
+            "review_output_path": str(review_path),
+            "error": str(error),
+        }
+        with persistence.lock:
+            payload["final_snapshot"] = _snapshot_payload(snapshot_after)
+            payload["review_verdict"] = None
+            turn_payload["review_verdict"] = {
+                "passed": False,
+                "reason": "invalid-review-verdict",
+                "review_output_path": str(review_path),
+                "error": str(error),
+            }
+            _write_json_file(paths["result"], turn_payload)
+        _pause_run(
+            event_path,
+            payload,
+            reason="verify-failed",
+            message=(
+                f"review verdict validation failed for {session_label}: "
+                f"{error}"
+            ),
+            details=details,
+            persistence=persistence,
+        )
+        return True
+
+    with persistence.lock:
+        turn_payload["review_verdict"] = {
+            "passed": True,
+            "review_output_path": str(review_path),
+            **verdict,
+        }
+        _write_json_file(paths["result"], turn_payload)
+    return False
+
+
 def _enforce_session_verification(
     *,
     event_path: Path,
@@ -3917,6 +4069,7 @@ def _initial_payload(
         review_session_id=None,
         review_output_path=review_output_path,
         review_completed=False,
+        review_verdict=None,
         review_skipped_reason=None,
     )
 
@@ -5006,6 +5159,20 @@ def _run_locked(
             ):
                 break
 
+            if is_review_session and _enforce_review_verdict(
+                event_path=event_path,
+                payload=payload,
+                persistence=persistence,
+                before=before,
+                after=after,
+                session_id=session_id,
+                session_label=session_label,
+                session_details=session_details,
+                turn_payload=turn_payload,
+                paths=paths,
+            ):
+                break
+
             completed_at = _utc_iso_now()
             progress_error: str | None = None
             try:
@@ -5109,6 +5276,16 @@ def _run_locked(
                 payload.setdefault("completed_session_ids", []).append(session_id)
                 if is_review_session:
                     payload["review_completed"] = True
+                    review_verdict = turn_payload.get("review_verdict")
+                    if isinstance(review_verdict, dict):
+                        payload["review_verdict"] = {
+                            "status_line": review_verdict["status_line"],
+                            "outcome": review_verdict["outcome"],
+                            "total_findings": review_verdict["total_findings"],
+                            "findings_by_severity": review_verdict[
+                                "findings_by_severity"
+                            ],
+                        }
             if not is_review_session:
                 completed_count += 1
             snapshot = after
@@ -5236,6 +5413,7 @@ def _error_payload(
             str(final_review_output_path(plan_dir)) if review_requested else None
         ),
         review_completed=False,
+        review_verdict=None,
         review_skipped_reason=reason if review_requested else None,
     )
     payload.update(_selected_model_effort_payload(args))
@@ -5375,6 +5553,11 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
     review_output_path = payload.get("review_output_path")
     if payload.get("review_completed") and review_output_path:
         print(f"Review: {review_output_path}")
+        review_verdict = payload.get("review_verdict")
+        if isinstance(review_verdict, dict):
+            status_line = review_verdict.get("status_line")
+            if status_line:
+                print(status_line)
 
 
 def _emit_run_payload(args: argparse.Namespace, payload: dict[str, Any]) -> None:

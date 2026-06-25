@@ -342,10 +342,12 @@ forced (runtime harness switches via `1`/`2`/`3` do not override the review
 turn). The review session instructs the harness to write findings to
 `PLAN_DIR/final-review.md`, make no repo code changes, and mark only itself
 complete; `final-review.md` is overwritten by the latest successful review.
-Markdown findings inside `final-review.md` never fail the run. Only review
+The final non-empty line must be exactly `Status: All clear, no findings` or
+`Status: N Findings (H high, M med, L low)` with severity counts adding up to
+`N`; missing or malformed status lines fail review verification. Other review
 execution failures (nonzero exit, timeout, verification failure on missing or
-empty `final-review.md`) or repo mutations outside the plan directory fail the
-run. A git mutation guard fingerprints dirty, staged, and untracked content
+empty `final-review.md`) or repo mutations outside the plan directory also fail
+the run. A git mutation guard fingerprints dirty, staged, and untracked content
 outside `PLAN_DIR` before and after the review turn and pauses the run with
 `reason: review-mutated-worktree` if the fingerprint changes. Review turns are
 never auto-committed even under `--commit-per-session`. Review is skipped (with
@@ -356,7 +358,8 @@ complete at run start, `--review-harness` still creates and runs the review
 session. If a pending generated review session already exists in the plan and
 the run is started without `--review-harness`, the run pauses with
 `reason: review-harness-required`. After a successful review, text runs print
-`Review: PLAN_DIR/final-review.md` in the final summary.
+`Review: PLAN_DIR/final-review.md` followed by the `Status:` line as the final
+summary line.
 
 `preflight` inspects the plan without invoking a harness and reports every
 finding needed to clear the loop-ready gate: missing readiness lines, contract
@@ -731,6 +734,9 @@ canonical ID of the generated review session once it has been appended or
 resumed, otherwise `null`. `review_output_path` is the absolute path to
 `PLAN_DIR/final-review.md` whenever review was requested, otherwise `null`.
 `review_completed` is `true` only after the review turn finished successfully.
+`review_verdict` is `null` until a review completes successfully; then it
+contains `status_line`, `outcome` (`"all-clear"` or `"findings"`),
+`total_findings`, and `findings_by_severity` (`high`, `med`, `low`).
 `review_skipped_reason` is `null` for clean review completions and for
 implementation-only runs; for review-requested runs that did not complete it
 records the terminal reason (`max-sessions`, `stopped`, a pause reason, etc.).

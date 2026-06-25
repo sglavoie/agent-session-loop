@@ -299,6 +299,7 @@ def main() -> int:
                         "coverage.\n"
                         "- Compared docs/agent-session-loop.md for operator-facing "
                         "documentation impact.\n"
+                        "Status: All clear, no findings\n"
                     ),
                 )
                 (plan_dir / "final-review.md").write_text(

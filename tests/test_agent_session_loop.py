@@ -7048,6 +7048,79 @@ class CommandAndConfigTests(unittest.TestCase):
                 runner.final_review_output_path(plan_dir),
             )
 
+    def test_parse_review_verdict_accepts_all_clear_status(self) -> None:
+        verdict = runner.parse_review_verdict(
+            "## Findings\n"
+            "- Reviewed agent_session_loop/runner.py.\n"
+            "Status: All clear, no findings\n"
+        )
+
+        self.assertEqual("all-clear", verdict["outcome"])
+        self.assertEqual(0, verdict["total_findings"])
+        self.assertEqual(
+            {"high": 0, "med": 0, "low": 0},
+            verdict["findings_by_severity"],
+        )
+
+    def test_parse_review_verdict_accepts_counted_findings_status(self) -> None:
+        verdict = runner.parse_review_verdict(
+            "## Findings\n"
+            "- High issue in agent_session_loop/runner.py.\n"
+            "Status: 5 Findings (2 high, 2 med, 1 low)\n"
+        )
+
+        self.assertEqual("findings", verdict["outcome"])
+        self.assertEqual(5, verdict["total_findings"])
+        self.assertEqual(
+            {"high": 2, "med": 2, "low": 1},
+            verdict["findings_by_severity"],
+        )
+
+    def test_parse_review_verdict_rejects_missing_status(self) -> None:
+        with self.assertRaisesRegex(
+            runner.ReviewVerdictError, "missing required final Status line"
+        ):
+            runner.parse_review_verdict("## Findings\n- Nothing to report.\n")
+
+    def test_parse_review_verdict_rejects_multiple_status_lines(self) -> None:
+        with self.assertRaisesRegex(
+            runner.ReviewVerdictError, "expected exactly one Status line"
+        ):
+            runner.parse_review_verdict(
+                "Status: All clear, no findings\n"
+                "## Findings\n"
+                "Status: All clear, no findings\n"
+            )
+
+    def test_parse_review_verdict_rejects_non_final_status(self) -> None:
+        with self.assertRaisesRegex(
+            runner.ReviewVerdictError,
+            "Status line must be the final non-empty line",
+        ):
+            runner.parse_review_verdict(
+                "## Findings\n"
+                "Status: All clear, no findings\n"
+                "- trailing note\n"
+            )
+
+    def test_parse_review_verdict_rejects_malformed_status(self) -> None:
+        with self.assertRaisesRegex(
+            runner.ReviewVerdictError, "malformed Status line"
+        ):
+            runner.parse_review_verdict(
+                "## Findings\n"
+                "Status: 1 Finding (1 high, 0 med, 0 low)\n"
+            )
+
+    def test_parse_review_verdict_rejects_count_mismatch(self) -> None:
+        with self.assertRaisesRegex(
+            runner.ReviewVerdictError, "severity counts do not add up"
+        ):
+            runner.parse_review_verdict(
+                "## Findings\n"
+                "Status: 5 Findings (2 high, 2 med, 0 low)\n"
+            )
+
     def test_next_top_level_session_id_returns_one_for_empty_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp)
@@ -7096,6 +7169,7 @@ class CommandAndConfigTests(unittest.TestCase):
             self.assertIn(runner.FINAL_REVIEW_FILENAME, body)
             self.assertIn("three distinct source, documentation, or test", body)
             self.assertIn("review-oriented section heading", body)
+            self.assertIn("valid `Status:` verdict line", body)
             self.assertIn("Do not modify", body)
             self.assertIn("- **Status**: pending", body)
 
@@ -7246,6 +7320,7 @@ class CommandAndConfigTests(unittest.TestCase):
                     "coverage.\n"
                     "- Compared docs/agent-session-loop.md for operator-facing "
                     "documentation impact.\n"
+                    "Status: All clear, no findings\n"
                 ),
                 encoding="utf-8",
             )
@@ -7269,6 +7344,36 @@ class CommandAndConfigTests(unittest.TestCase):
             )
             (plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
                 "   \n\n  \t\n", encoding="utf-8"
+            )
+
+            contract = contracts.read_completion_contract(
+                plan_dir, session_file.session_id
+            )
+            self.assertIsNotNone(contract)
+            result = verification.run_verification(contract, repo_root=plan_dir)
+            self.assertFalse(result.passed)
+
+    def test_ensure_generated_review_session_contract_fails_without_status(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            write_plan(plan_dir, ("complete",))
+
+            session_file, _ = runner.ensure_generated_review_session(
+                plan_dir, review_harness="claude"
+            )
+            (plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
+                (
+                    "## Findings\n"
+                    "- Reviewed agent_session_loop/runner.py for generated review "
+                    "contracts.\n"
+                    "- Checked tests/test_agent_session_loop.py for lifecycle "
+                    "coverage.\n"
+                    "- Compared docs/agent-session-loop.md for operator-facing "
+                    "documentation impact.\n"
+                ),
+                encoding="utf-8",
             )
 
             contract = contracts.read_completion_contract(
@@ -17508,6 +17613,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             "- Checked tests/test_agent_session_loop.py for lifecycle coverage.\n"
             "- Compared docs/agent-session-loop.md for operator-facing "
             "documentation impact.\n"
+            "Status: All clear, no findings\n"
         )
 
     def _write_pending_review_session(self) -> plans.SessionFile:
@@ -17643,6 +17749,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                     "        '- Reviewed agent_session_loop/runner.py for mutation guard behavior.\\n'",
                     "        '- Checked tests/test_agent_session_loop.py for review lifecycle coverage.\\n'",
                     "        '- Compared docs/agent-session-loop.md for operator documentation impact.\\n'",
+                    "        'Status: All clear, no findings\\n'",
                     "    ),",
                     "    encoding='utf-8',",
                     ")",
@@ -18130,6 +18237,101 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual("verify-failed", payload["pause_reason"])
         self.assertFalse(payload["review_completed"])
 
+    def test_legacy_review_contract_still_requires_runner_verdict(self) -> None:
+        self._write_plan(("complete",), readiness=None)
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        review_id = plans.next_top_level_session_id(self.plan_dir)
+        legacy_contract = {
+            "session": review_id.value,
+            "checks": [
+                {
+                    "type": "command",
+                    "name": "legacy-final-review-output",
+                    "argv": [
+                        "python3",
+                        "-c",
+                        (
+                            "import pathlib, sys; "
+                            "text = pathlib.Path('final-review.md').read_text("
+                            "encoding='utf-8'); "
+                            "sys.exit(0 if text.strip() else 1)"
+                        ),
+                    ],
+                    "cwd": str(plans.canonicalize_path(self.plan_dir)),
+                    "timeout_seconds": 60,
+                }
+            ],
+        }
+        (self.plan_dir / review_id.filename).write_text(
+            "\n".join(
+                [
+                    f"# {review_id.display_label}: Final Review",
+                    "",
+                    runner.REVIEW_SESSION_MARKER,
+                    "",
+                    "## Instructions",
+                    "",
+                    "- Perform a critical review and write final-review.md.",
+                    "- Do not modify repository files.",
+                    "",
+                    "## Completion Contract",
+                    "",
+                    "### Done when",
+                    "",
+                    "- final-review.md exists and contains review findings.",
+                    "",
+                    "### Verify",
+                    "",
+                    "```json",
+                    json.dumps(legacy_contract, indent=2),
+                    "```",
+                    "",
+                    "## Handoff",
+                    "",
+                    "- **Status**: pending",
+                    "- **Files modified**: (none yet)",
+                    "- **Key decisions**: (none yet)",
+                    "- **Blockers for next session**: (none)",
+                    "- **Notes**:",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        sha = plans.stable_readiness_sha256(self.plan_dir)
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=sha,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        (self.plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
+            (
+                "## Findings\n"
+                "- Reviewed agent_session_loop/runner.py for generated review "
+                "contracts.\n"
+                "- Checked tests/test_agent_session_loop.py for lifecycle "
+                "coverage.\n"
+                "- Compared docs/agent-session-loop.md for operator-facing "
+                "documentation impact.\n"
+            ),
+            encoding="utf-8",
+        )
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("verify-failed", payload["pause_reason"])
+        self.assertFalse(payload["review_completed"])
+        self.assertIsNone(payload["review_verdict"])
+        review_text = (self.plan_dir / review_id.filename).read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("- **Status**: pending", review_text)
+
     def test_text_output_prints_review_path(self) -> None:
         self._write_plan(("pending",), readiness="loop-ready")
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
@@ -18144,6 +18346,10 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             plans.canonicalize_path(self.plan_dir)
         )
         self.assertIn(f"Review: {expected_path}", completed.stdout)
+        self.assertEqual(
+            "Status: All clear, no findings",
+            completed.stdout.splitlines()[-1],
+        )
         self.assertIn("session 1/1 started", completed.stderr)
         self.assertIn("review session started (2/2)", completed.stderr)
         self.assertNotIn("session 2/2 started", completed.stderr)
@@ -18215,6 +18421,15 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual("all-complete", payload["reason"])
         self.assertTrue(payload["review_completed"])
         self.assertEqual("claude", payload["review_harness"])
+        self.assertEqual(
+            {
+                "status_line": "Status: All clear, no findings",
+                "outcome": "all-clear",
+                "total_findings": 0,
+                "findings_by_severity": {"high": 0, "med": 0, "low": 0},
+            },
+            payload["review_verdict"],
+        )
         review_path = runner.final_review_output_path(
             plans.canonicalize_path(self.plan_dir)
         )
@@ -18222,6 +18437,35 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual(
             self._valid_final_review_body(),
             review_path.read_text(encoding="utf-8"),
+        )
+
+    def test_review_verdict_persisted_for_counted_findings(self) -> None:
+        self._write_plan(("pending",), readiness="loop-ready")
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        review_body = (
+            "## Findings\n"
+            "- High issue in agent_session_loop/runner.py.\n"
+            "- Medium issue in tests/test_agent_session_loop.py.\n"
+            "- Low issue in docs/agent-session-loop.md.\n"
+            "Status: 5 Findings (2 high, 2 med, 1 low)\n"
+        )
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            extra_env={"FAKE_CODEX_REVIEW_BODY": review_body},
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["review_completed"])
+        self.assertEqual(
+            {
+                "status_line": "Status: 5 Findings (2 high, 2 med, 1 low)",
+                "outcome": "findings",
+                "total_findings": 5,
+                "findings_by_severity": {"high": 2, "med": 2, "low": 1},
+            },
+            payload["review_verdict"],
         )
 
     def test_review_harness_ignores_quoted_runner_pause_in_stderr(self) -> None:
