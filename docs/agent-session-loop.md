@@ -300,8 +300,8 @@ without running the final `--commit-at-end` commit.
 ## Commands
 
 ```text
-asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--review-harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--allow-not-loop-ready] [--reply TEXT] [--json] [--dry-run]
-asl preflight PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--mark-loop-ready] [--json]
+asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--review-harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--max-pending-sessions N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--allow-not-loop-ready] [--reply TEXT] [--json] [--dry-run]
+asl preflight PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--max-pending-sessions N] [--mark-loop-ready] [--json]
 asl verify PLAN_DIR --session ID [--cwd REPO_ROOT] [--json]
 asl status PLAN_DIR [--state-dir DIR] [--json]
 asl questions PLAN_DIR [--state-dir DIR] [--json]
@@ -365,11 +365,15 @@ summary line.
 finding needed to clear the loop-ready gate: missing readiness lines, contract
 schema problems, manifest/session drift, environment prerequisites, and
 harness/commit-mode prerequisites when `--cwd`, `--harness`, or a commit-mode
-flag is supplied. JSON output carries a stable shape with `findings`,
-`findings_by_severity`, `repair_hints`, `readiness`,
-`expected_readiness_sha256`, `mark_loop_ready_requested`, and
-`marked_loop_ready` fields. JSON also always includes `auto_repairs`; it is an
-empty list unless `--mark-loop-ready` performed a derived repair.
+flag is supplied. The turn-budget check defaults to allowing 24 pending
+sessions; 25 or more pending sessions emits yellow `env-turn-budget`. Pass
+`--max-pending-sessions N` to `asl preflight` or `asl run` when a larger serial
+plan is intentional and should still pass the loop-ready gate. JSON output
+carries a stable shape with `findings`, `findings_by_severity`, `repair_hints`,
+`readiness`, `expected_readiness_sha256`, `max_pending_sessions`,
+`mark_loop_ready_requested`, and `marked_loop_ready` fields. JSON also always
+includes `auto_repairs`; it is an empty list unless `--mark-loop-ready`
+performed a derived repair.
 `--mark-loop-ready` force-backfills stale or missing `progress.md` when
 `progress-journal-missing` is the only non-readiness blocker, then flips
 `**Readiness**` to `loop-ready` and re-stamps the SHA and timestamp when the

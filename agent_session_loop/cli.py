@@ -206,6 +206,14 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         type=int,
         help="Maximum sessions to complete before stopping",
     )
+    run_parser.add_argument(
+        "--max-pending-sessions",
+        type=int,
+        help=(
+            "Override the preflight pending-session budget gate "
+            "(default: 24, which turns yellow at 25 pending sessions)"
+        ),
+    )
     commit_group = run_parser.add_mutually_exclusive_group()
     commit_group.add_argument(
         "--commit-per-session",
@@ -461,6 +469,14 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         "--state-dir",
         default=None,
         help="Override operational state directory",
+    )
+    preflight_parser.add_argument(
+        "--max-pending-sessions",
+        type=int,
+        help=(
+            "Override the pending-session count allowed before "
+            "env-turn-budget turns yellow (default: 24)"
+        ),
     )
     preflight_parser.add_argument(
         "--json",

@@ -108,6 +108,7 @@ CommitMode = Literal["per-session", "end"]
 COMMIT_MODES: tuple[CommitMode, ...] = ("per-session", "end")
 
 TURN_BUDGET_YELLOW_THRESHOLD = 25
+TURN_BUDGET_DEFAULT_MAX_PENDING_SESSIONS = TURN_BUDGET_YELLOW_THRESHOLD - 1
 TURNS_PER_SESSION_ESTIMATE = 3
 
 WORD_AMBIGUITY_SENTINELS: tuple[str, ...] = (
@@ -495,12 +496,14 @@ _CATEGORY_HINT_OVERRIDES: dict[str, RepairHint] = {
         check_id="env-turn-budget.split",
         severity_hint="yellow",
         message=(
-            "Split the plan further with `$session-resplit`, or limit the run "
-            "with `asl run --max-sessions N`."
+            "Split the plan further with `$session-resplit`, or rerun "
+            "preflight with `--max-pending-sessions N` when the larger "
+            "serial plan is intentional."
         ),
         question_template=(
             "Pending session count exceeds the turn-budget threshold "
-            "({message}). Resplit the plan or cap --max-sessions?"
+            "({message}). Resplit the plan, cap `asl run --max-sessions`, "
+            "or raise `--max-pending-sessions`?"
         ),
         fix_category="plan-edit",
     ),
@@ -1424,11 +1427,22 @@ def _check_env_amx() -> tuple[PreflightFinding, ...]:
     )
 
 
+def _turn_budget_max_pending_sessions(max_pending_sessions: int | None) -> int:
+    if max_pending_sessions is None:
+        return TURN_BUDGET_DEFAULT_MAX_PENDING_SESSIONS
+    if max_pending_sessions <= 0:
+        raise ValueError("max_pending_sessions must be a positive integer")
+    return max_pending_sessions
+
+
 def _check_env_turn_budget(
     snapshot: PlanSnapshot,
+    *,
+    max_pending_sessions: int | None = None,
 ) -> tuple[PreflightFinding, ...]:
     total = len(snapshot.sessions)
     pending = sum(1 for status in snapshot.sessions if status.status == "pending")
+    pending_limit = _turn_budget_max_pending_sessions(max_pending_sessions)
     if pending == 0:
         return (
             _finding(
@@ -1439,19 +1453,20 @@ def _check_env_turn_budget(
             ),
         )
     estimated_turns = pending * TURNS_PER_SESSION_ESTIMATE
-    if pending >= TURN_BUDGET_YELLOW_THRESHOLD:
+    if pending > pending_limit:
         return (
             _finding(
                 "yellow",
                 "env-turn-budget",
                 (
-                    f"{pending} pending sessions exceeds yellow threshold "
-                    f"{TURN_BUDGET_YELLOW_THRESHOLD}; consider chunking with "
-                    "--max-sessions"
+                    f"{pending} pending sessions exceeds max pending sessions "
+                    f"{pending_limit}; pass --max-pending-sessions to override "
+                    "or chunk the plan"
                 ),
                 detail=(
                     f"total sessions: {total}; rough turn budget "
-                    f"~{estimated_turns} ({TURNS_PER_SESSION_ESTIMATE} turns/session)"
+                    f"~{estimated_turns} ({TURNS_PER_SESSION_ESTIMATE} turns/session); "
+                    f"max pending sessions {pending_limit}"
                 ),
             ),
         )
@@ -1466,7 +1481,7 @@ def _check_env_turn_budget(
             detail=(
                 f"total sessions: {total}; "
                 f"{TURNS_PER_SESSION_ESTIMATE} turns/session estimate; "
-                f"yellow threshold {TURN_BUDGET_YELLOW_THRESHOLD} pending"
+                f"max pending sessions {pending_limit}"
             ),
         ),
     )
@@ -1480,6 +1495,7 @@ def _run_environment_checks(
     harness: str | None,
     commit_mode: CommitMode | None,
     state_dir: str | Path | None,
+    max_pending_sessions: int | None = None,
 ) -> tuple[PreflightFinding, ...]:
     findings: list[PreflightFinding] = []
 
@@ -1500,7 +1516,12 @@ def _run_environment_checks(
     findings.extend(_check_env_amx())
 
     if snapshot is not None:
-        findings.extend(_check_env_turn_budget(snapshot))
+        findings.extend(
+            _check_env_turn_budget(
+                snapshot,
+                max_pending_sessions=max_pending_sessions,
+            )
+        )
 
     return tuple(findings)
 
@@ -1512,6 +1533,7 @@ def run_environment_preflight(
     harness: str | None = None,
     commit_mode: CommitMode | None = None,
     state_dir: str | Path | None = None,
+    max_pending_sessions: int | None = None,
 ) -> PreflightReport:
     """Run only the environment preflight checks against a plan directory.
 
@@ -1537,6 +1559,7 @@ def run_environment_preflight(
         harness=harness,
         commit_mode=commit_mode,
         state_dir=state_dir,
+        max_pending_sessions=max_pending_sessions,
     )
     return PreflightReport(
         plan_dir=canonical_dir,
@@ -1552,6 +1575,7 @@ def run_preflight(
     harness: str | None = None,
     commit_mode: CommitMode | None = None,
     state_dir: str | Path | None = None,
+    max_pending_sessions: int | None = None,
 ) -> PreflightReport:
     """Aggregate core and environment preflight findings into one report.
 
@@ -1567,6 +1591,7 @@ def run_preflight(
         harness=harness,
         commit_mode=commit_mode,
         state_dir=state_dir,
+        max_pending_sessions=max_pending_sessions,
     )
     return PreflightReport(
         plan_dir=core_report.plan_dir,
@@ -1642,6 +1667,7 @@ def _preflight_payload_fields(
     harness: str | None,
     commit_mode: str | None,
     state_dir: str | None,
+    max_pending_sessions: int | None,
     mark_loop_ready: bool,
     marked: bool | None = None,
     mark_error: str | None = None,
@@ -1654,6 +1680,7 @@ def _preflight_payload_fields(
         "harness": harness,
         "commit_mode": commit_mode,
         "state_dir": state_dir,
+        "max_pending_sessions": max_pending_sessions,
         "ok": report.ok,
         "findings": [_finding_payload(finding) for finding in report.findings],
         "findings_by_severity": _counts_by_severity(report),
@@ -1688,6 +1715,7 @@ def _print_text_preflight(
     cwd: str | None,
     harness: str | None,
     commit_mode: str | None,
+    max_pending_sessions: int | None,
     marked: bool,
     mark_loop_ready: bool,
     mark_error: str | None,
@@ -1705,6 +1733,8 @@ def _print_text_preflight(
         print(f"Harness: {harness}")
     if commit_mode is not None:
         print(f"Commit mode: {commit_mode}")
+    if max_pending_sessions is not None:
+        print(f"Max pending sessions: {max_pending_sessions}")
     print(
         f"Findings: {len(report.findings)} "
         f"(red {counts['red']}, yellow {counts['yellow']}, green {counts['green']})"
@@ -1795,8 +1825,37 @@ def preflight_from_args(args: argparse.Namespace) -> int:
     harness_arg: str | None = args.harness
     commit_mode_arg: str | None = args.commit_mode
     state_dir_arg: str | None = args.state_dir
+    max_pending_sessions_arg: int | None = getattr(
+        args,
+        "max_pending_sessions",
+        None,
+    )
     want_json: bool = args.json
     mark_loop_ready: bool = args.mark_loop_ready
+
+    if (
+        max_pending_sessions_arg is not None
+        and max_pending_sessions_arg <= 0
+    ):
+        message = "--max-pending-sessions must be a positive integer"
+        if want_json:
+            responses.print_json(
+                responses.error_payload(
+                    "preflight",
+                    reason="input-error",
+                    error=message,
+                    paused=False,
+                    plan_dir=plan_dir_arg,
+                    cwd=cwd_arg,
+                    harness=harness_arg,
+                    commit_mode=commit_mode_arg,
+                    state_dir=state_dir_arg,
+                    max_pending_sessions=max_pending_sessions_arg,
+                )
+            )
+        else:
+            print(f"agent-session-loop preflight: {message}", file=sys.stderr)
+        return 1
 
     try:
         report = run_preflight(
@@ -1805,6 +1864,7 @@ def preflight_from_args(args: argparse.Namespace) -> int:
             harness=harness_arg,
             commit_mode=commit_mode_arg,
             state_dir=state_dir_arg,
+            max_pending_sessions=max_pending_sessions_arg,
         )
     except PlanError as error:
         if want_json:
@@ -1863,6 +1923,7 @@ def preflight_from_args(args: argparse.Namespace) -> int:
                         harness=harness_arg,
                         commit_mode=commit_mode_arg,
                         state_dir=state_dir_arg,
+                        max_pending_sessions=max_pending_sessions_arg,
                     )
                 except PlanError as error:
                     mark_error = str(error)
@@ -1883,6 +1944,7 @@ def preflight_from_args(args: argparse.Namespace) -> int:
                             harness=harness_arg,
                             commit_mode=commit_mode_arg,
                             state_dir=state_dir_arg,
+                            max_pending_sessions=max_pending_sessions_arg,
                         )
                     except PlanError as error:
                         mark_error = str(error)
@@ -1895,6 +1957,7 @@ def preflight_from_args(args: argparse.Namespace) -> int:
         harness=harness_arg,
         commit_mode=commit_mode_arg,
         state_dir=state_dir_arg,
+        max_pending_sessions=max_pending_sessions_arg,
         mark_loop_ready=mark_loop_ready,
         marked=marked,
         mark_error=mark_error,
@@ -1964,6 +2027,7 @@ def preflight_from_args(args: argparse.Namespace) -> int:
             cwd=cwd_arg,
             harness=harness_arg,
             commit_mode=commit_mode_arg,
+            max_pending_sessions=max_pending_sessions_arg,
             marked=marked,
             mark_loop_ready=mark_loop_ready,
             mark_error=mark_error,

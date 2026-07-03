@@ -1062,6 +1062,10 @@ def _validate_run_inputs(
     if max_sessions is not None and max_sessions <= 0:
         raise RunError("--max-sessions must be a positive integer")
 
+    max_pending_sessions = getattr(args, "max_pending_sessions", None)
+    if max_pending_sessions is not None and max_pending_sessions <= 0:
+        raise RunError("--max-pending-sessions must be a positive integer")
+
     review_harness = getattr(args, "review_harness", None)
     if review_harness is not None and review_harness == args.harness:
         raise RunError(
@@ -3347,6 +3351,7 @@ def _repair_readiness_gate(
     harness: str | None,
     commit_mode: str | None,
     state_dir: str | Path | None,
+    max_pending_sessions: int | None,
     event_path: Path,
     persistence: _RunPersistence,
     snapshot: plans.PlanSnapshot,
@@ -3381,6 +3386,7 @@ def _repair_readiness_gate(
                 harness=harness,
                 commit_mode=commit_mode,
                 state_dir=state_dir,
+                max_pending_sessions=max_pending_sessions,
             )
         except plans.PlanError:
             return None
@@ -4040,6 +4046,7 @@ def _initial_payload(
         action_required=None,
         approval_mode=_approval_mode(args),
         commit_mode=commit_mode,
+        max_pending_sessions=getattr(args, "max_pending_sessions", None),
         note=getattr(args, "note", None),
         plan_dir=str(snapshot.plan_dir),
         cwd=str(cwd),
@@ -4245,6 +4252,7 @@ def _run_locked(
             "effort_source": payload["effort_source"],
             "dry_run": args.dry_run,
             "max_sessions": max_sessions,
+            "max_pending_sessions": getattr(args, "max_pending_sessions", None),
             "commit_mode": commit_mode,
             "note": payload.get("note"),
             "run_id": run_id,
@@ -4339,6 +4347,7 @@ def _run_locked(
         harness=args.harness,
         commit_mode=commit_mode,
         state_dir=args.state_dir,
+        max_pending_sessions=getattr(args, "max_pending_sessions", None),
     )
     preflight_report = _strip_own_lock_findings(
         preflight_report, lock_info=lock_info
@@ -4368,6 +4377,7 @@ def _run_locked(
             harness=args.harness,
             commit_mode=commit_mode,
             state_dir=args.state_dir,
+            max_pending_sessions=getattr(args, "max_pending_sessions", None),
             event_path=event_path,
             persistence=persistence,
             snapshot=snapshot,

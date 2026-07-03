@@ -14722,6 +14722,34 @@ class PreflightEnvironmentTests(unittest.TestCase):
         self.assertEqual("yellow", budget_findings[0].severity)
         self.assertIn("exceeds", budget_findings[0].message)
 
+    def test_env_turn_budget_override_allows_large_pending_count(self) -> None:
+        many_plan = self.tmp_path / "many-plan-override"
+        pending_count = preflight.TURN_BUDGET_YELLOW_THRESHOLD + 5
+        _write_loop_ready_plan(
+            many_plan,
+            tuple(["pending"] * pending_count),
+        )
+
+        report = preflight.run_environment_preflight(
+            many_plan,
+            state_dir=self.xdg_state,
+            max_pending_sessions=pending_count,
+        )
+
+        budget_findings = [
+            f for f in report.findings if f.category == "env-turn-budget"
+        ]
+        self.assertEqual(1, len(budget_findings))
+        self.assertEqual("green", budget_findings[0].severity)
+        self.assertIn(
+            f"{pending_count} session(s) pending",
+            budget_findings[0].message,
+        )
+        self.assertIn(
+            f"max pending sessions {pending_count}",
+            budget_findings[0].detail,
+        )
+
     def test_env_turn_budget_complete_plan_is_green(self) -> None:
         complete_plan = self.tmp_path / "complete-plan"
         _write_loop_ready_plan(complete_plan, ("complete", "complete"))
@@ -14826,6 +14854,7 @@ class PreflightCliTests(unittest.TestCase):
         harness: str | None = None,
         commit_mode: str | None = None,
         mark_loop_ready: bool = False,
+        max_pending_sessions: int | None = None,
         path_value: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         argv = [
@@ -14845,6 +14874,8 @@ class PreflightCliTests(unittest.TestCase):
             argv.append("--commit-per-session")
         elif commit_mode == "end":
             argv.append("--commit-at-end")
+        if max_pending_sessions is not None:
+            argv.extend(["--max-pending-sessions", str(max_pending_sessions)])
         if json_output:
             argv.append("--json")
         if mark_loop_ready:
@@ -14897,6 +14928,39 @@ class PreflightCliTests(unittest.TestCase):
             payload["readiness"]["readiness_sha256"],
             payload["expected_readiness_sha256"],
         )
+
+    def test_mark_loop_ready_accepts_max_pending_sessions_override(self) -> None:
+        pending_count = preflight.TURN_BUDGET_YELLOW_THRESHOLD + 5
+        _write_loop_ready_plan(
+            self.plan_dir,
+            tuple(["pending"] * pending_count),
+            state="draft",
+        )
+
+        blocked = self._run_preflight(mark_loop_ready=True)
+        blocked_payload = json.loads(blocked.stdout)
+
+        self.assertEqual(1, blocked.returncode)
+        self.assertFalse(blocked_payload["marked_loop_ready"])
+        self.assertIn("env-turn-budget", blocked_payload["mark_error"])
+
+        completed = self._run_preflight(
+            mark_loop_ready=True,
+            max_pending_sessions=pending_count,
+        )
+        payload = json.loads(completed.stdout)
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["marked_loop_ready"])
+        self.assertEqual(pending_count, payload["max_pending_sessions"])
+        budget_findings = [
+            finding
+            for finding in payload["findings"]
+            if finding["category"] == "env-turn-budget"
+        ]
+        self.assertEqual(1, len(budget_findings))
+        self.assertEqual("green", budget_findings[0]["severity"])
 
     def test_preflight_json_red_when_readiness_breaks(self) -> None:
         # Break readiness sha to produce a red manifest-readiness finding.
@@ -15633,6 +15697,7 @@ class RunReadinessGateTests(unittest.TestCase):
         *,
         mode: str = "success",
         max_sessions: int | None = None,
+        max_pending_sessions: int | None = None,
         allow_not_loop_ready: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
         argv = [
@@ -15653,6 +15718,8 @@ class RunReadinessGateTests(unittest.TestCase):
             argv.append("--allow-not-loop-ready")
         if max_sessions is not None:
             argv.extend(["--max-sessions", str(max_sessions)])
+        if max_pending_sessions is not None:
+            argv.extend(["--max-pending-sessions", str(max_pending_sessions)])
         env = os.environ.copy()
         env.update(
             {
@@ -15849,6 +15916,31 @@ class RunReadinessGateTests(unittest.TestCase):
             plans.stable_readiness_sha256(self.plan_dir),
             metadata.readiness_sha256,
         )
+
+    def test_run_uses_max_pending_sessions_override_for_readiness_gate(
+        self,
+    ) -> None:
+        pending_count = preflight.TURN_BUDGET_YELLOW_THRESHOLD + 5
+        self._write_plan(tuple(["pending"] * pending_count), readiness="loop-ready")
+
+        completed, payload = self._run(
+            max_sessions=1,
+            max_pending_sessions=pending_count,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("max-sessions", payload["reason"])
+        self.assertEqual(pending_count, payload["max_pending_sessions"])
+        gate = payload["readiness_gate"]
+        self.assertTrue(gate["ok"])
+        budget_findings = [
+            finding
+            for finding in gate["findings"]
+            if finding["category"] == "env-turn-budget"
+        ]
+        self.assertEqual(1, len(budget_findings))
+        self.assertEqual("green", budget_findings[0]["severity"])
 
     def test_lifecycle_refreshes_running_sha_after_future_session_notes(
         self,

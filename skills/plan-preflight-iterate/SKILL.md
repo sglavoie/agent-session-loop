@@ -20,6 +20,7 @@ The user provides a plan directory path. Optional flags pass through to `asl pre
 - `--harness codex|claude|copilot` — harness to validate
 - `--commit-per-session` or `--commit-at-end` — validate commit-mode prerequisites
 - `--state-dir DIR` — override operational state directory
+- `--max-pending-sessions N` — override the turn-budget pending-session cap
 
 Determine `<skill-prefix>` once for the active harness and use it for every user-facing skill invocation you print:
 
@@ -37,9 +38,11 @@ Examples:
 $plan-preflight-iterate ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/
 $plan-preflight-iterate ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --cwd ~/code/myrepo --harness claude
 $plan-preflight-iterate ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --commit-per-session
+$plan-preflight-iterate ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --max-pending-sessions 40
 /plan-preflight-iterate ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/
 /plan-preflight-iterate ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --cwd ~/code/myrepo --harness claude
 /plan-preflight-iterate ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --commit-per-session
+/plan-preflight-iterate ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --max-pending-sessions 40
 ```
 
 Reject malformed inputs and stop without changes:
@@ -49,6 +52,7 @@ Reject malformed inputs and stop without changes:
 - More than one plan directory
 - `--harness` with a value outside `codex`, `claude`, `copilot`
 - Both `--commit-per-session` and `--commit-at-end` together
+- `--max-pending-sessions` missing a positive integer value
 
 ## Instructions
 
@@ -56,14 +60,14 @@ Reject malformed inputs and stop without changes:
 
 Parse the argument list. Verify the plan directory exists and contains `manifest.md`, `context.md`, and at least one canonical `session-<ID>.md` file. If the directory is missing or unreadable, print an error and stop — this skill repairs an existing split plan; it does not create one.
 
-Record the optional `--cwd`, `--harness`, `--commit-mode`, and `--state-dir` values. They will be forwarded verbatim to every `asl preflight` invocation so that the same set of checks runs on every iteration.
+Record the optional `--cwd`, `--harness`, `--commit-mode`, `--state-dir`, and `--max-pending-sessions` values. They will be forwarded verbatim to every `asl preflight` invocation so that the same set of checks runs on every iteration.
 
 ### Step 2: Baseline Preflight Run
 
 Run the baseline preflight using the Bash tool:
 
 ```text
-asl preflight <plan-dir> --json [--cwd <repo>] [--harness <name>] [--commit-per-session|--commit-at-end] [--state-dir <dir>]
+asl preflight <plan-dir> --json [--cwd <repo>] [--harness <name>] [--commit-per-session|--commit-at-end] [--state-dir <dir>] [--max-pending-sessions <n>]
 ```
 
 Capture stdout. Parse the JSON body. Expect the stable shape emitted by `agent_session_loop.preflight._preflight_payload_fields`:
@@ -73,6 +77,7 @@ Capture stdout. Parse the JSON body. Expect the stable shape emitted by `agent_s
 - `findings_by_severity` (counts: `red`, `yellow`, `green`)
 - `repair_hints` (array) — one entry per finding in the same order, each with `category`, `check_id`, `severity_hint`, `message`, `question_template`, `fix_category`
 - `readiness` (object | null), `expected_readiness_sha256` (string | null)
+- `max_pending_sessions` (int | null)
 - `mark_loop_ready_requested` (bool), `marked_loop_ready` (bool)
 
 If exit code is non-zero and the JSON body contains a `reason` of `plan-structure`, print the error and stop — the plan directory itself is malformed and must be repaired or recreated with `session-split` before this skill can help.
@@ -207,7 +212,7 @@ If five rounds complete without reaching green, stop the loop. Step 5 will refus
 When the most recent preflight returns `ok: true`, or when its only remaining red/yellow findings are `manifest-readiness` and/or `progress-journal-missing` findings, run:
 
 ```text
-asl preflight <plan-dir> --json --mark-loop-ready [--cwd <repo>] [--harness <name>] [--commit-per-session|--commit-at-end] [--state-dir <dir>]
+asl preflight <plan-dir> --json --mark-loop-ready [--cwd <repo>] [--harness <name>] [--commit-per-session|--commit-at-end] [--state-dir <dir>] [--max-pending-sessions <n>]
 ```
 
 Forward the same flags that the iteration used so the readiness check sees the same environment. `--mark-loop-ready` auto-backfills `progress.md` (force semantics) when the only non-readiness blockers are `progress-journal-missing` findings; any such repair appears in the JSON payload's `auto_repairs` array with `action: "rewrite"` and `category: "progress-journal-missing"`. Parse the response:
