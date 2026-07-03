@@ -1247,6 +1247,19 @@ original paths and restores pin/profile metadata when present. Restore
 fails with `409` and `reason: "restore-conflict"` if either destination
 that would be written already exists.
 
+The Archive view exposes a bulk-selection bar (`#wb-archive-bulk`) with
+`select all`, `restore selected`, `purge selected`, and `clear selection`
+controls. `select all` adds every loaded archive entry to the selection; the
+count reads `N of M entries selected` and `select all` disables once every
+loaded entry is already selected. `restore selected` runs a best-effort bulk
+restore: it copies the selected IDs, asks a plain `window.confirm` (not the
+typed-count prompt reserved for permanent purge), calls the single-entry `POST
+/api/archive/restore` endpoint once per selected ID, continues past per-entry
+failures, drops successfully restored IDs from the selection, and reports
+`restored X` or `restored X, Y failed` on partial failure. `purge selected`
+reuses the typed `confirm_count` purge flow below, and `clear selection` empties
+the current selection without restoring or purging any entry.
+
 Permanent purge only applies to archive entries, not live plans. `POST
 /api/archive/delete` accepts one or more `archive_ids` and requires a
 typed `confirm_count` equal to the selected count; a mismatch returns
@@ -2073,6 +2086,17 @@ Workbench browser workflow:
   `select candidates` and confirm only rows past the staleness threshold
   are selected. Exit cleanup mode and confirm `wb.completed` was not
   changed.
+- Open the Archive view with several archived plans. Press `select all` and
+  confirm every loaded entry is checked, the count reads `N of M entries
+  selected`, and `select all` disables once all loaded entries are selected.
+  Press `restore selected`, accept the plain confirm prompt, and confirm the
+  entries restore best-effort through `POST /api/archive/restore` (feedback
+  reads `restored X`, or `restored X, Y failed` on partial failure) with
+  successfully restored entries leaving the selection. Re-select entries, press
+  `purge selected`, type the exact count to confirm the typed-count purge, and
+  confirm a mismatched count is rejected without deleting anything. Press `clear
+  selection` and confirm the selection empties without restoring or purging any
+  entry.
 - On a viewport ≥ 960 px, click a row body (outside the label and
   action button) and confirm the right pane shows the selected plan
   preview (state badge, triage reason, last-message preview) without

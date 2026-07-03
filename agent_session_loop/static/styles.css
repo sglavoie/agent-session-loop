@@ -1547,12 +1547,17 @@ a:hover {
   color: var(--wb-danger);
 }
 
+.wb-archive__feedback[data-kind="warning"] {
+  color: var(--wb-warning);
+}
+
 .wb-archive__feedback[data-kind="info"] {
   color: var(--wb-success);
 }
 
 .wb-archive__bulk {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;

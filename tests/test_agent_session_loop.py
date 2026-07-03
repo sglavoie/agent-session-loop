@@ -27704,12 +27704,18 @@ class WorkbenchHardeningTests(unittest.TestCase):
             'id="wb-archive-entries"',
             'id="wb-archive-bulk"',
             'id="wb-archive-count"',
+            'id="wb-archive-select-all"',
+            'id="wb-archive-restore-selected"',
             'id="wb-archive-purge-selected"',
             'id="wb-archive-clear"',
             'id="wb-archive-row-template"',
         )
         for marker in required_ids:
             self.assertIn(marker, decoded, msg=f"missing marker: {marker}")
+        # The archive bulk bar ships select-all and restore-selected actions
+        # alongside the existing purge/clear controls.
+        self.assertIn('data-action="archive-select-all"', decoded)
+        self.assertIn('data-action="archive-restore-selected"', decoded)
         # Cleanup ships two distinct bulk-selection actions: a stale-threshold
         # "select candidates" button and a filtered "select visible" button.
         self.assertIn("select candidates", decoded)
@@ -27759,8 +27765,31 @@ class WorkbenchHardeningTests(unittest.TestCase):
             "handleArchivePurge",
             "handleRetentionSave",
             "handleArchiveClick",
+            "loadedArchiveIds",
+            "selectAllArchiveEntries",
+            "handleArchiveRestoreSelected",
+            "requestArchiveRestore",
         ):
             self.assertIn(helper, decoded, msg=f"missing helper: {helper}")
+        # Session 2: archive select-all plumbing derives loaded IDs, wires the
+        # select-all control, reports "N of M entries selected", and disables
+        # select-all once every loaded entry is already selected.
+        self.assertIn('selectAll.addEventListener("click", selectAllArchiveEntries)', decoded)
+        self.assertIn('count + " of " + loaded + " entries selected"', decoded)
+        self.assertIn("loaded === 0 || count >= loaded", decoded)
+        # Session 3: the restore-selected control wires the bulk restore handler,
+        # which restores each entry through the shared single-entry request and
+        # reports best-effort success/failure without typed confirmation.
+        self.assertIn(
+            'restoreSelected.addEventListener("click", handleArchiveRestoreSelected)',
+            decoded,
+        )
+        self.assertIn(
+            '"restored " + restored + (failed ? ", " + failed + " failed" : "")',
+            decoded,
+        )
+        # Both row-level and bulk restore keep posting the single-entry payload.
+        self.assertIn("archive_id: archiveId", decoded)
         # oldest-activity sort mode + comparator that treats missing
         # timestamps as oldest (sorts them first).
         self.assertIn(
@@ -27841,6 +27870,15 @@ class WorkbenchHardeningTests(unittest.TestCase):
             ".wb-archive-row__actions",
         ):
             self.assertIn(selector, decoded, msg=f"missing selector: {selector}")
+        # The archive bulk bar wraps on narrow screens so the added select-all
+        # and restore-selected controls do not overflow.
+        bulk_idx = decoded.find(".wb-archive__bulk {")
+        self.assertNotEqual(-1, bulk_idx, msg="missing .wb-archive__bulk rule")
+        bulk_block = decoded[bulk_idx : decoded.find("}", bulk_idx)]
+        self.assertIn("flex-wrap: wrap", bulk_block)
+        # Archive feedback ships warning styling for later partial-success
+        # restore/purge messages.
+        self.assertIn('.wb-archive__feedback[data-kind="warning"]', decoded)
 
     # -- Cache-Control / ETag ----------------------------------------------
 
@@ -28614,6 +28652,14 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             "`select candidates`",
             "`select visible`",
             "review finished work in place without flipping \"show",
+            # Session 4: archive bulk select-all and restore-selected workflow.
+            "`#wb-archive-bulk`",
+            "`select all`",
+            "`restore selected`",
+            "`clear selection`",
+            "best-effort bulk\nrestore",
+            "`N of M entries selected`",
+            "`restored X` or `restored X, Y failed`",
         )
         for marker in expected_markers:
             self.assertIn(marker, docs, msg=f"missing docs marker: {marker!r}")
@@ -29051,6 +29097,21 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             )
         self.assertIn("without executing arbitrary repair commands", docs)
 
+    def test_docs_smoke_checklist_covers_archive_bulk_selection(self) -> None:
+        # Session 4: the Workbench browser smoke checklist must include an
+        # operator-verifiable Archive view case covering select-all, bulk
+        # restore, typed-count purge, clear-selection, and partial-success
+        # feedback wording.
+        docs = self._read("docs/agent-session-loop.md")
+        self.assertIn("Open the Archive view with several archived plans", docs)
+        self.assertIn("`select all`", docs)
+        self.assertIn("`N of M entries\n  selected`", docs)
+        self.assertIn("`restore selected`", docs)
+        self.assertIn("restore best-effort through `POST /api/archive/restore`", docs)
+        self.assertIn("`restored X, Y failed` on partial failure", docs)
+        self.assertIn("`purge selected`", docs)
+        self.assertIn("type the exact count to confirm the typed-count purge", docs)
+        self.assertIn("`clear\n  selection`", docs)
 
     def test_docs_urgency_table_lists_activity_labels(self) -> None:
         # Session 7 deferred the per-state activity_label column to

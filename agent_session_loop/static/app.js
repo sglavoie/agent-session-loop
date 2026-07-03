@@ -2004,6 +2004,16 @@
     if (retentionSave) {
       retentionSave.addEventListener("click", handleRetentionSave);
     }
+    const selectAll = document.getElementById("wb-archive-select-all");
+    if (selectAll) {
+      selectAll.addEventListener("click", selectAllArchiveEntries);
+    }
+    const restoreSelected = document.getElementById(
+      "wb-archive-restore-selected"
+    );
+    if (restoreSelected) {
+      restoreSelected.addEventListener("click", handleArchiveRestoreSelected);
+    }
     const purgeSelected = document.getElementById("wb-archive-purge-selected");
     if (purgeSelected) {
       purgeSelected.addEventListener("click", () => {
@@ -2055,6 +2065,22 @@
     Array.from(state.archiveSelection).forEach((id) => {
       if (!present.has(id)) state.archiveSelection.delete(id);
     });
+  }
+
+  function loadedArchiveIds() {
+    // Valid archive IDs from the currently loaded entries, as strings so they
+    // match the row-checkbox keys stored in state.archiveSelection.
+    return state.archiveEntries
+      .map((entry) => (entry && entry.archive_id ? String(entry.archive_id) : ""))
+      .filter((id) => id !== "");
+  }
+
+  function selectAllArchiveEntries() {
+    // "select all" adds every loaded archive entry to the selection, then
+    // re-renders so row checkboxes sync and refreshes bulk control state.
+    loadedArchiveIds().forEach((id) => state.archiveSelection.add(id));
+    renderArchiveEntries(state.archiveEntries);
+    updateArchiveBulk();
   }
 
   function renderArchiveError(message) {
@@ -2190,25 +2216,35 @@
 
   function updateArchiveBulk() {
     const count = state.archiveSelection.size;
+    const loaded = loadedArchiveIds().length;
     const countEl = document.getElementById("wb-archive-count");
     if (countEl) {
-      countEl.textContent =
-        count === 1 ? "1 entry selected" : count + " entries selected";
+      countEl.textContent = count + " of " + loaded + " entries selected";
     }
+    const selectAllBtn = document.getElementById("wb-archive-select-all");
+    if (selectAllBtn) selectAllBtn.disabled = loaded === 0 || count >= loaded;
+    const restoreBtn = document.getElementById("wb-archive-restore-selected");
+    if (restoreBtn) restoreBtn.disabled = count === 0;
     const purgeBtn = document.getElementById("wb-archive-purge-selected");
     if (purgeBtn) purgeBtn.disabled = count === 0;
     const clearBtn = document.getElementById("wb-archive-clear");
     if (clearBtn) clearBtn.disabled = count === 0;
   }
 
+  function requestArchiveRestore(archiveId) {
+    // Shared single-entry restore request used by both row-level and bulk
+    // restore so the endpoint and payload shape stay aligned.
+    return apiRequest("/api/archive/restore", {
+      method: "POST",
+      body: { archive_id: archiveId },
+    });
+  }
+
   async function handleArchiveRestore(archiveId) {
     if (!archiveId) return;
     showArchiveFeedback("", "");
     try {
-      const body = await apiRequest("/api/archive/restore", {
-        method: "POST",
-        body: { archive_id: archiveId },
-      });
+      const body = await requestArchiveRestore(archiveId);
       if (body && body.ok) {
         showArchiveFeedback("info", "restored " + archiveId);
         loadArchiveView();
@@ -2218,6 +2254,40 @@
     } catch (err) {
       showArchiveFeedback("error", describeError(err));
     }
+  }
+
+  async function handleArchiveRestoreSelected() {
+    // Best-effort bulk restore: copy the selected IDs at click time, confirm
+    // with a plain count prompt (no typed confirmation — that is reserved for
+    // permanent purge), then restore each entry through the single-entry
+    // endpoint and continue past per-entry failures.
+    const ids = Array.from(state.archiveSelection).filter(Boolean);
+    if (ids.length === 0) return;
+    const confirmed = window.confirm(
+      "Restore " + ids.length + " selected archived plan(s)?"
+    );
+    if (!confirmed) return;
+    showArchiveFeedback("", "");
+    let restored = 0;
+    let failed = 0;
+    for (const id of ids) {
+      try {
+        const body = await requestArchiveRestore(id);
+        if (body && body.ok) {
+          restored += 1;
+          state.archiveSelection.delete(id);
+        } else {
+          failed += 1;
+        }
+      } catch (err) {
+        failed += 1;
+      }
+    }
+    showArchiveFeedback(
+      failed > 0 ? "warning" : "info",
+      "restored " + restored + (failed ? ", " + failed + " failed" : "")
+    );
+    loadArchiveView();
   }
 
   async function handleArchivePurge(archiveIds) {
