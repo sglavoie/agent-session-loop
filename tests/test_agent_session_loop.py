@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
+import dataclasses
 from datetime import datetime, timezone
 import errno
 import io
@@ -20857,6 +20858,96 @@ class WorkbenchSummaryTests(unittest.TestCase):
             self.assertIsNone(summary.next_pending_session_id)
             self.assertEqual(2, summary.counts["complete"])
 
+    def test_completed_at_from_progress_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = tmp_path / "done-progress"
+            write_plan(plan_dir, ("complete", "complete"))
+            canonical = plans.canonicalize_path(plan_dir)
+            plans.append_progress_entry(
+                canonical,
+                plans.ProgressEntry(
+                    session_id=plans.parse_session_id("2"),
+                    status="complete",
+                    completed_at="2026-06-19T14:22:00Z",
+                ),
+            )
+            discovered = _discovered(canonical)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=tmp_path / "state"
+            )
+
+            self.assertEqual("complete", summary.primary_state)
+            self.assertEqual("2026-06-19T14:22:00Z", summary.completed_at)
+            self.assertEqual("progress-journal", summary.last_activity_source)
+            self.assertEqual(
+                "2026-06-19T14:22:00Z", summary.to_payload()["completed_at"]
+            )
+
+    def test_completed_at_falls_back_to_run_finished(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = tmp_path / "done-runfinished"
+            write_plan(plan_dir, ("complete", "complete"))
+            canonical = plans.canonicalize_path(plan_dir)
+            state_root = tmp_path / "state"
+            _write_state_payload(
+                canonical,
+                state_root,
+                {
+                    "ok": True,
+                    "paused": False,
+                    "run_id": "20260619T120000Z-9",
+                    "harness": "claude",
+                    "run_started_at": "2026-06-19T12:00:00+00:00",
+                    "run_finished_at": "2026-06-19T12:45:00+00:00",
+                    "active_turn": None,
+                    "active_verification": None,
+                },
+            )
+            discovered = _discovered(canonical)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=state_root
+            )
+
+            self.assertEqual("complete", summary.primary_state)
+            self.assertEqual("2026-06-19T12:45:00+00:00", summary.completed_at)
+            self.assertEqual("run-finished", summary.last_activity_source)
+
+    def test_completed_at_missing_when_no_timestamp_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = tmp_path / "done-bare"
+            write_plan(plan_dir, ("complete", "complete"))
+            canonical = plans.canonicalize_path(plan_dir)
+            discovered = _discovered(canonical)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=tmp_path / "state"
+            )
+
+            self.assertEqual("complete", summary.primary_state)
+            self.assertIsNone(summary.completed_at)
+            self.assertIsNone(summary.to_payload()["completed_at"])
+
+    def test_completed_at_null_for_non_complete_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            discovered = _discovered(plan_dir)
+
+            summary = workbench.build_workbench_summary(
+                discovered, state_dir=tmp_path / "state"
+            )
+
+            self.assertEqual("ready", summary.primary_state)
+            self.assertIsNone(summary.completed_at)
+            payload = summary.to_payload()
+            self.assertIn("completed_at", payload)
+            self.assertIsNone(payload["completed_at"])
+
     def test_running_classification_with_active_turn(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -23584,6 +23675,7 @@ class WorkbenchServerTests(unittest.TestCase):
             "concise_reason",
             "last_activity_at",
             "last_activity_source",
+            "completed_at",
             "searchable_text",
         ):
             self.assertIn(key, plan_payload)
@@ -23609,6 +23701,7 @@ class WorkbenchServerTests(unittest.TestCase):
             "concise_reason",
             "last_activity_at",
             "last_activity_source",
+            "completed_at",
             "searchable_text",
         ):
             self.assertIn(key, plan_payload)
@@ -23723,6 +23816,7 @@ class WorkbenchServerTests(unittest.TestCase):
             "concise_reason",
             "last_activity_at",
             "last_activity_source",
+            "completed_at",
             "searchable_text",
         )
         recovery_keys = ("recovery",)
@@ -24621,6 +24715,63 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertEqual(200, status)
         ordered = [p["plan_dir"] for p in body["plans"]]
         self.assertEqual(str(self.canonical_plan_dir), ordered[0])
+
+    def test_oldest_sort_uses_completed_at_for_complete_plans(self) -> None:
+        # Build a real complete summary, then force completed_at and
+        # last_activity_at to diverge so the comparator must be reading
+        # completed_at (not last_activity_at) for complete plans. If the
+        # old last_activity_at path were still in force the ordering would
+        # invert and this assertion would fail.
+        done_dir = self.tmp_path / "plans" / "done"
+        write_plan(done_dir, ("complete",))
+        canonical = plans.canonicalize_path(done_dir)
+        base = workbench.build_workbench_summary(
+            _discovered(canonical), state_dir=self.state_dir
+        )
+        self.assertEqual("complete", base.primary_state)
+
+        older = dataclasses.replace(
+            base,
+            completed_at="2026-01-01T00:00:00Z",
+            last_activity_at="2026-12-31T00:00:00Z",
+        )
+        newer = dataclasses.replace(
+            base,
+            completed_at="2026-06-01T00:00:00Z",
+            last_activity_at="2026-01-01T00:00:00Z",
+        )
+
+        ordered = workbench_server._sort_summaries_oldest_first([newer, older])
+
+        self.assertEqual(
+            ["2026-01-01T00:00:00Z", "2026-06-01T00:00:00Z"],
+            [summary.completed_at for summary in ordered],
+        )
+
+    def test_oldest_sort_missing_completed_at_sorts_complete_plan_first(
+        self,
+    ) -> None:
+        # A complete plan with no completion timestamp must sort as the
+        # oldest, ahead of an active plan that does have activity.
+        done_dir = self.tmp_path / "plans" / "done-bare"
+        write_plan(done_dir, ("complete",))
+        complete = workbench.build_workbench_summary(
+            _discovered(plans.canonicalize_path(done_dir)),
+            state_dir=self.state_dir,
+        )
+        self.assertEqual("complete", complete.primary_state)
+        self.assertIsNone(complete.completed_at)
+
+        active = dataclasses.replace(
+            workbench.build_workbench_summary(
+                _discovered(self.canonical_plan_dir), state_dir=self.state_dir
+            ),
+            last_activity_at="2026-06-01T00:00:00Z",
+        )
+
+        ordered = workbench_server._sort_summaries_oldest_first([active, complete])
+
+        self.assertEqual("complete", ordered[0].primary_state)
 
     def test_queue_rejects_unknown_sort_mode(self) -> None:
         server = self._start_server()
@@ -26536,6 +26687,57 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
                 ),
             )
 
+    def test_root_html_ships_completed_facts_in_row_and_preview(self) -> None:
+        # Session 2 contract: both the queue row facts grid and the preview
+        # facts grid must ship a `completed` fact slot so the renderer can
+        # populate completion time without adding DOM lookups by ID.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/")
+        decoded = body.decode("utf-8")
+        # Exactly one completed slot per grid (row + preview) — two total.
+        self.assertEqual(
+            decoded.count('<dd data-field="completed">-</dd>'),
+            2,
+            msg="expected a completed fact in both the row and preview grids",
+        )
+        self.assertIn("<dt>completed</dt>", decoded)
+        # The preview completed fact must sit alongside the existing last
+        # activity fact so completion time reads next to recency.
+        activity_idx = decoded.find('data-field="activity"')
+        preview_completed_idx = decoded.find(
+            '<dd data-field="completed">-</dd>', activity_idx
+        )
+        self.assertGreater(preview_completed_idx, activity_idx)
+
+    def test_app_js_renders_completed_time_and_oldest_sort_uses_it(self) -> None:
+        # Session 2 contract: the row and preview render completion time via a
+        # dedicated formatter, and the oldest client comparator keys complete
+        # plans on completed_at while other states keep last_activity_at.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
+        decoded = body.decode("utf-8")
+        # Dedicated completion formatter with the documented empty states.
+        self.assertIn("function formatCompletedAt", decoded)
+        self.assertIn('return "not recorded";', decoded)
+        # Both the preview and row renderers must populate the completed slot.
+        self.assertIn('setField(facts, "completed", formatCompletedAt(plan));', decoded)
+        self.assertIn(
+            'row.querySelector(\'[data-field="completed"]\').textContent = '
+            "formatCompletedAt(plan);",
+            decoded,
+        )
+        # Oldest comparator selects completed_at for complete plans through a
+        # shared timestamp helper; other states stay on last_activity_at.
+        self.assertIn("oldestSortTimestampFor", decoded)
+        self.assertIn(
+            'if (plan && plan.primary_state === "complete") {', decoded
+        )
+        self.assertIn("parseActivityTimestamp(plan.completed_at)", decoded)
+        self.assertIn("compareByOldestActivity", decoded)
+        # Existing sort modes and other comparators remain untouched.
+        self.assertIn("compareByActivity", decoded)
+        self.assertIn("comparePlanRowsFor", decoded)
+
     def test_app_js_queue_visibility_hides_completed_by_default(self) -> None:
         # Needs-attention default: completed plans are filtered out
         # unless the operator toggles them on or explicitly picks the
@@ -27488,6 +27690,7 @@ class WorkbenchHardeningTests(unittest.TestCase):
             'id="wb-archive-open"',
             'id="wb-cleanup-bar"',
             'id="wb-cleanup-threshold"',
+            'id="wb-cleanup-select-candidates"',
             'id="wb-cleanup-select-visible"',
             'id="wb-cleanup-clear"',
             'id="wb-cleanup-review"',
@@ -27507,6 +27710,10 @@ class WorkbenchHardeningTests(unittest.TestCase):
         )
         for marker in required_ids:
             self.assertIn(marker, decoded, msg=f"missing marker: {marker}")
+        # Cleanup ships two distinct bulk-selection actions: a stale-threshold
+        # "select candidates" button and a filtered "select visible" button.
+        self.assertIn("select candidates", decoded)
+        self.assertIn("select visible", decoded)
         # Row template carries the cleanup checkbox cell (hidden until the
         # renderer toggles it in cleanup mode).
         self.assertIn('data-field="cleanup-select"', decoded)
@@ -27541,7 +27748,8 @@ class WorkbenchHardeningTests(unittest.TestCase):
             "setCleanupMode",
             "applyCleanupMode",
             "planIsArchivableCandidate",
-            "selectVisibleCandidates",
+            "selectCandidates",
+            "selectVisibleRows",
             "clearCleanupSelection",
             "handleBulkArchive",
             "compareByOldestActivity",
@@ -27583,6 +27791,19 @@ class WorkbenchHardeningTests(unittest.TestCase):
         self.assertIn(
             'CLEANUP_THRESHOLD_STORAGE_KEY = "wb.cleanupDays"', decoded
         )
+        # Cleanup mode reveals completed plans for review without mutating the
+        # persisted wb.completed preference: the visibility gate short-circuits
+        # on state.cleanupMode and the reveal path never writes the completed
+        # storage key.
+        self.assertIn("if (state.cleanupMode) return true;", decoded)
+        reveal_idx = decoded.find("if (state.cleanupMode) return true;")
+        window = decoded[reveal_idx : reveal_idx + 400]
+        self.assertNotIn("wb.completed", window)
+        self.assertNotIn("persistShowCompleted", window)
+        # "select visible" adds every visible archivable row; "select
+        # candidates" keeps the stale-threshold path. Both skip active-lock
+        # rows via the archivable guard.
+        self.assertIn("plan.archivable !== false", decoded)
         # Privacy regression: the cleanup/archive additions must not persist
         # reply text.
         import re as _re
@@ -28387,6 +28608,12 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             "confirmation-mismatch",
             "`archive_retention_days`, default 30 days",
             "auto-empties entries",
+            # Session 4: completed-plan cleanup workflow.
+            "`completed_at`",
+            "ages complete plans off their",
+            "`select candidates`",
+            "`select visible`",
+            "review finished work in place without flipping \"show",
         )
         for marker in expected_markers:
             self.assertIn(marker, docs, msg=f"missing docs marker: {marker!r}")
@@ -28469,6 +28696,8 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             "`concise_reason`",
             "`last_activity_at`",
             "`last_activity_source`",
+            # Session 4: additive completion timestamp.
+            "`completed_at`",
             "`searchable_text`",
         ):
             self.assertIn(
@@ -28680,11 +28909,17 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
         self.assertIn("triage inbox", docs)
         self.assertIn("sort ascending by\n  `urgency_rank`", docs)
         self.assertIn('"show completed" toggle', docs)
-        # Search/sort/completed control bar with the four supported
-        # sort modes.
+        # Search/sort/completed control bar with the five supported
+        # sort modes (session 4 added `oldest`).
         self.assertIn("control bar", docs)
         self.assertIn("matches against\n  `searchable_text`", docs)
-        for sort_mode in ("`urgency`", "`recent`", "`label`", "`path`"):
+        for sort_mode in (
+            "`urgency`",
+            "`recent`",
+            "`label`",
+            "`path`",
+            "`oldest`",
+        ):
             self.assertIn(
                 sort_mode, docs, msg=f"missing sort mode: {sort_mode}"
             )
@@ -28770,6 +29005,13 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
         # Reply textarea privacy regression.
         self.assertIn("reply textarea is intentionally **not** persisted", docs)
         self.assertIn("`wb.reply`", docs)
+        # Session 4: cleanup mode reveals completed plans without writing
+        # the persisted show-completed preference.
+        self.assertIn(
+            "Cleanup mode reveals\n  completed plans on its own gate and "
+            "never writes `wb.completed`",
+            docs,
+        )
 
     def test_docs_smoke_checklist_covers_triage_inbox(self) -> None:
         # The Workbench browser smoke checklist must include operator-
@@ -28786,6 +29028,12 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
         self.assertIn("two-pane shell", docs)
         self.assertIn("`#plan?dir=…&focus=reply`", docs)
         self.assertIn("reply draft", docs)
+        # Session 4: completed timestamp visibility and filtered bulk
+        # archive selection must be operator-verifiable.
+        self.assertIn("completion time", docs)
+        self.assertIn('"not recorded"', docs)
+        self.assertIn("`select visible`", docs)
+        self.assertIn("`select candidates`", docs)
         for recovery_case in (
             "ready (`kind: none`)",
             "running (`kind: none` with active lock)",

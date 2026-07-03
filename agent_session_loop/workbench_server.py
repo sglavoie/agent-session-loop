@@ -1643,10 +1643,18 @@ _ARCHIVE_BLOCKING_STATES = frozenset({"verifying", "running"})
 def _sort_summaries_oldest_first(
     summaries: Sequence[workbench.WorkbenchSummary],
 ) -> list[workbench.WorkbenchSummary]:
-    """Sort plans oldest-activity-first; plans with no activity sort oldest."""
+    """Sort plans oldest-activity-first; plans with no activity sort oldest.
+
+    Complete plans are ordered by ``completed_at`` so cleanup surfaces the
+    longest-finished plans first; every other state falls back to
+    ``last_activity_at``. Missing timestamps sort oldest either way.
+    """
 
     def sort_key(summary: workbench.WorkbenchSummary) -> tuple[int, str]:
-        activity = summary.last_activity_at
+        if summary.primary_state == "complete":
+            activity = summary.completed_at
+        else:
+            activity = summary.last_activity_at
         if not activity:
             # No recorded activity is treated as the oldest possible.
             return (0, "")

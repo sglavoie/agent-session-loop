@@ -136,10 +136,17 @@
       </label>
       <button
         class="wb-button wb-button--ghost"
-        id="wb-cleanup-select-visible"
+        id="wb-cleanup-select-candidates"
         type="button"
       >
         select candidates
+      </button>
+      <button
+        class="wb-button wb-button--ghost"
+        id="wb-cleanup-select-visible"
+        type="button"
+      >
+        select visible
       </button>
       <button
         class="wb-button wb-button--ghost"
@@ -639,6 +646,7 @@
           <div><dt>harness</dt><dd data-field="harness">-</dd></div>
           <div><dt>run id</dt><dd data-field="run">-</dd></div>
           <div><dt>last activity</dt><dd data-field="activity">-</dd></div>
+          <div><dt>completed</dt><dd data-field="completed">-</dd></div>
         </dl>
         <section class="wb-preview__pause" id="wb-preview-pause" hidden>
           <h3 class="wb-preview__subtitle">pause</h3>
@@ -804,6 +812,7 @@
             <dt>counts</dt>
             <dd data-field="counts">-</dd>
           </div>
+          <div><dt>completed</dt><dd data-field="completed">-</dd></div>
         </dl>
         <p class="wb-row__hint" data-field="hint"></p>
         <p class="wb-row__preview" data-field="preview" hidden></p>

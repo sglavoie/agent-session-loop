@@ -963,14 +963,22 @@
   }
 
   function compareByOldestActivity(a, b) {
-    // Oldest activity first; missing timestamps sort as oldest (first) so
-    // never-run plans surface at the top of the cleanup candidate list.
-    const tsA = parseActivityTimestamp(a && a.last_activity_at);
-    const tsB = parseActivityTimestamp(b && b.last_activity_at);
+    // Oldest first; missing timestamps sort as oldest (first) so never-run and
+    // completion-less plans surface at the top of the cleanup candidate list.
+    // Complete plans compare by completion time; all others by last activity.
+    const tsA = oldestSortTimestampFor(a);
+    const tsB = oldestSortTimestampFor(b);
     if (tsA === tsB) return 0;
     if (tsA === null) return -1;
     if (tsB === null) return 1;
     return tsA - tsB;
+  }
+
+  function oldestSortTimestampFor(plan) {
+    if (plan && plan.primary_state === "complete") {
+      return parseActivityTimestamp(plan.completed_at);
+    }
+    return parseActivityTimestamp(plan && plan.last_activity_at);
   }
 
   function compareLabels(a, b) {
@@ -1093,6 +1101,11 @@
     // The "needs attention" default hides completed plans unless the
     // operator either toggles them back on or explicitly picks the
     // "complete" chip.
+    //
+    // Cleanup mode reveals completed plans for review without mutating the
+    // persisted wb.completed preference, so stale completed plans surface in
+    // the cleanup list even when the queue default would hide them.
+    if (state.cleanupMode) return true;
     if (showCompleted) return true;
     if (activeFilter === "complete") return true;
     const group = plan && plan.urgency_group;
@@ -1277,6 +1290,7 @@
       setField(facts, "harness", plan.harness || null);
       setField(facts, "run", plan.run_id || null);
       setField(facts, "activity", formatLastActivity(plan.last_activity_at));
+      setField(facts, "completed", formatCompletedAt(plan));
     }
 
     const pauseSection = document.getElementById("wb-preview-pause");
@@ -1322,6 +1336,22 @@
 
   function formatLastActivity(value) {
     if (typeof value !== "string" || !value) return "no recent activity";
+    const parsed = Date.parse(value);
+    if (!Number.isFinite(parsed)) return value;
+    try {
+      return new Date(parsed).toLocaleString();
+    } catch (err) {
+      return value;
+    }
+  }
+
+  function formatCompletedAt(plan) {
+    // Completion time is only meaningful for complete plans. Non-complete
+    // plans show "-"; complete plans with no recorded timestamp show
+    // "not recorded" so the empty state is distinguishable from a real time.
+    if (!plan || plan.primary_state !== "complete") return "-";
+    const value = plan.completed_at;
+    if (typeof value !== "string" || !value) return "not recorded";
     const parsed = Date.parse(value);
     if (!Number.isFinite(parsed)) return value;
     try {
@@ -1548,6 +1578,7 @@
     row.querySelector('[data-field="idle"]').textContent = "-";
     row.querySelector('[data-field="run"]').textContent = plan.run_id || "-";
     row.querySelector('[data-field="counts"]').textContent = formatCounts(plan.counts);
+    row.querySelector('[data-field="completed"]').textContent = formatCompletedAt(plan);
 
     const hint = row.querySelector('[data-field="hint"]');
     hint.textContent = plan.next_action_hint || plan.detail || "";
@@ -1770,9 +1801,15 @@
         refresh();
       });
     }
+    const selectCandidatesBtn = document.getElementById(
+      "wb-cleanup-select-candidates"
+    );
+    if (selectCandidatesBtn) {
+      selectCandidatesBtn.addEventListener("click", selectCandidates);
+    }
     const selectVisible = document.getElementById("wb-cleanup-select-visible");
     if (selectVisible) {
-      selectVisible.addEventListener("click", selectVisibleCandidates);
+      selectVisible.addEventListener("click", selectVisibleRows);
     }
     const clear = document.getElementById("wb-cleanup-clear");
     if (clear) {
@@ -1824,19 +1861,38 @@
   }
 
   function planIsArchivableCandidate(plan) {
-    // Cleanup candidates are non-active plans whose last activity is older
-    // than the operator threshold; plans with no activity always qualify.
+    // Cleanup candidates are non-active plans whose stale age is older than
+    // the operator threshold; plans with no timestamp always qualify. Complete
+    // plans age off their completion time (completed_at) while everything else
+    // uses last activity, matching the completion-aware oldest sort.
     if (!plan || plan.archivable === false) return false;
-    const ts = parseActivityTimestamp(plan.last_activity_at);
+    const ts = oldestSortTimestampFor(plan);
     if (ts === null) return true;
     const ageDays = (Date.now() - ts) / DAY_MS;
     return ageDays >= state.cleanupThresholdDays;
   }
 
-  function selectVisibleCandidates() {
+  function selectCandidates() {
+    // "select candidates" keeps the stale-threshold behavior: from the
+    // currently visible rows, add only those older than the threshold.
     const visible = state.lastVisiblePlans || [];
     visible.forEach((plan) => {
       if (planIsArchivableCandidate(plan)) {
+        state.cleanupSelection.add(plan.plan_dir);
+      }
+    });
+    syncCleanupCheckboxes();
+    updateCleanupReview();
+  }
+
+  function selectVisibleRows() {
+    // "select visible" adds every currently visible archivable row after the
+    // active filter/search/sort/completed-visibility gates have run. Rows with
+    // an active lock (archivable === false) are skipped, preserving the same
+    // blocking the per-row checkbox enforces.
+    const visible = state.lastVisiblePlans || [];
+    visible.forEach((plan) => {
+      if (plan && plan.archivable !== false && plan.plan_dir) {
         state.cleanupSelection.add(plan.plan_dir);
       }
     });

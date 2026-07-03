@@ -1212,11 +1212,17 @@ do not reappear in the queue until they are restored.
 ### Cleanup and archive workflow
 
 Cleanup mode is a queue review mode for old, inactive work. It switches
-the queue to `sort=oldest`, treats plans with no `last_activity_at` as
-oldest, and uses the UI threshold control to select candidates older
-than the chosen number of days. Queue payloads include `archivable` and
-`archive_blocker`; active runner locks are not archivable and surface
-`archive_blocker: "active-lock"`.
+the queue to `sort=oldest`, which ages complete plans off their
+`completed_at` timestamp and every other plan off `last_activity_at`,
+treating a missing timestamp as oldest. Cleanup mode reveals completed
+plans on its own gate, so the operator can pick the `complete` filter
+chip and review finished work in place without flipping "show
+completed". The UI threshold control drives two bulk actions:
+`select candidates` adds only the visible rows older than the chosen
+number of days, while `select visible` adds every visible archivable row
+regardless of age. Both skip rows with an active lock. Queue payloads
+include `archivable` and `archive_blocker`; active runner locks are not
+archivable and surface `archive_blocker: "active-lock"`.
 
 Archiving moves the plan directory and the matching ASL state directory
 together into the Workbench state root, along with available pin/profile
@@ -1267,8 +1273,10 @@ Read endpoints (loopback-open, no token required):
   carries the additive triage fields documented under
   [Triage queue payload](#triage-queue-payload) so the frontend can
   sort, group, and search without re-deriving status from raw counts.
-  `GET /api/queue?sort=oldest` sorts by oldest `last_activity_at` first
-  and treats missing activity as oldest. Queue responses also include
+  `GET /api/queue?sort=oldest` sorts by oldest activity first: complete
+  plans sort on `completed_at` and every other plan on
+  `last_activity_at`, and a missing timestamp is treated as oldest.
+  Queue responses also include
   `archive_retention_days`, `archive_maintenance`, and per-plan
   `archivable` / `archive_blocker` fields used by Cleanup mode.
 - `GET /api/plan?plan_dir=<path>` — single-plan detail. The payload
@@ -1404,6 +1412,13 @@ backwards-compatible — no existing key is renamed or removed.
   timestamp. One of `active-verification`, `active-turn`,
   `run-finished`, `run-started`, `lock-created`, `progress-journal`.
   Mirrors `workbench.LAST_ACTIVITY_SOURCES`.
+- `completed_at` (ISO 8601 string or `null`) — when the plan reached
+  `primary_state === "complete"`, sourced from the latest `progress.md`
+  entry timestamp and falling back to the runner `run_finished_at`. It
+  is `null` for non-complete plans and for complete plans with no
+  recorded completion time. This additive field drives the completion
+  timestamp shown in the queue/preview and the `sort=oldest` ordering
+  for complete plans.
 - `searchable_text` (string) — pre-lowercased, whitespace-collapsed
   concatenation of label, plan_dir, primary_state, recommended_action,
   urgency_group, activity_label, concise_reason, next_action_hint,
@@ -1765,9 +1780,9 @@ the Python package (no build tooling, no third-party JS). Pages:
   is hidden unless the operator flips the "show completed" toggle or
   selects the `complete` chip. A control bar between the filter chips
   and the inbox shell hosts a search input (matches against
-  `searchable_text`), a sort `<select>` with the four supported modes
-  (`urgency`, `recent`, `label`, `path`), and the "show completed"
-  toggle. The search input debounces at 150 ms so a typing burst
+  `searchable_text`), a sort `<select>` with the five supported modes
+  (`urgency`, `recent`, `label`, `path`, `oldest`), and the "show
+  completed" toggle. The search input debounces at 150 ms so a typing burst
   collapses into one `/api/queue` fetch; the clear button bypasses the
   debounce. When zero rows match, the empty-state element writes a
   stable kind onto `data-state` (`loading`, `no-plans`,
@@ -1847,7 +1862,10 @@ Persistence and privacy:
   (active chip), `wb.search` (search text), `wb.sort` (sort mode),
   `wb.completed` (show-completed toggle), and `wb.selected` (selected
   plan_dir for the preview pane). Each refresh poll preserves these
-  preferences and the queue/detail scroll position.
+  preferences and the queue/detail scroll position. Cleanup mode reveals
+  completed plans on its own gate and never writes `wb.completed`, so the
+  persisted show-completed preference is left untouched when the operator
+  exits cleanup mode.
 - The reply textarea is intentionally **not** persisted: no
   sessionStorage or localStorage key under the `wb.reply` namespace is
   written, and no refresh path mutates `#wb-reply-text.value` outside
@@ -2039,11 +2057,22 @@ Workbench browser workflow:
   150 ms search debounce and that the empty-state element renders with
   `data-state="no-search-results"` (and a "clear search" recovery
   button) when the query matches nothing. Switch the sort `<select>`
-  through `urgency`, `recent`, `label`, and `path` and confirm the
-  order changes accordingly. Reload the page and confirm the search
+  through `urgency`, `recent`, `label`, `path`, and `oldest` and confirm
+  the order changes accordingly. Reload the page and confirm the search
   text, sort mode, completed-visibility toggle, active filter chip,
   and selected plan all survive via sessionStorage (`wb.search`,
   `wb.sort`, `wb.completed`, `wb.filter`, `wb.selected`).
+- Seed at least two complete plans and confirm the queue/preview show
+  each plan's completion time (or "not recorded" when no `completed_at`
+  was captured) and that non-complete rows show `-`. Enter cleanup mode,
+  filter to the `complete` chip, and confirm completed plans appear
+  without flipping "show completed". Sort `oldest` and confirm the
+  stalest completed plans (by `completed_at`) lead. Press
+  `select visible` and confirm every visible archivable completed row is
+  selected for bulk archive while active-lock rows stay unselected; press
+  `select candidates` and confirm only rows past the staleness threshold
+  are selected. Exit cleanup mode and confirm `wb.completed` was not
+  changed.
 - On a viewport ≥ 960 px, click a row body (outside the label and
   action button) and confirm the right pane shows the selected plan
   preview (state badge, triage reason, last-message preview) without

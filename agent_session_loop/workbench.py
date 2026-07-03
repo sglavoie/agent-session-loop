@@ -1982,6 +1982,7 @@ class WorkbenchSummary:
     urgency_group: UrgencyGroup = "needs-action"
     last_activity_at: str | None = None
     last_activity_source: LastActivitySource | None = None
+    completed_at: str | None = None
     activity_label: str = ""
     concise_reason: str = ""
     searchable_text: str = ""
@@ -2006,6 +2007,7 @@ class WorkbenchSummary:
             "concise_reason": self.concise_reason,
             "last_activity_at": self.last_activity_at,
             "last_activity_source": self.last_activity_source,
+            "completed_at": self.completed_at,
             "searchable_text": self.searchable_text,
             "recovery": dict(self.recovery),
             "detail": self.detail,
@@ -4084,6 +4086,7 @@ def build_workbench_summary(
         last_message_preview: str | None = None,
         last_activity_at: str | None = None,
         last_activity_source: LastActivitySource | None = None,
+        completed_at: str | None = None,
         concise_reason: str | None = None,
     ) -> WorkbenchSummary:
         urgency_group = URGENCY_GROUP_BY_STATE[primary_state]
@@ -4143,6 +4146,7 @@ def build_workbench_summary(
             urgency_group=urgency_group,
             last_activity_at=last_activity_at,
             last_activity_source=last_activity_source,
+            completed_at=completed_at,
             activity_label=activity_label,
             concise_reason=resolved_reason,
             searchable_text=searchable_text,
@@ -4339,6 +4343,7 @@ def build_workbench_summary(
             detail="No pending sessions remain",
             last_activity_at=complete_activity,
             last_activity_source=complete_source,
+            completed_at=complete_activity,
             concise_reason="No pending sessions remain",
         )
 
