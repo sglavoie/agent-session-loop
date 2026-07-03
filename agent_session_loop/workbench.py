@@ -22,6 +22,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import shutil
 import shlex
 import subprocess
 import sys
@@ -175,6 +176,16 @@ class WorkbenchError(Exception):
     """Raised when the Workbench registry cannot be used safely."""
 
 
+class PlanDeleteError(Exception):
+    """Raised when a Workbench plan deletion cannot be completed."""
+
+    def __init__(self, reason: str, message: str, *, status: int = 400) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.message = message
+        self.status = status
+
+
 @dataclass(frozen=True)
 class LaunchProfile:
     """Operator launch defaults for one pinned plan.
@@ -281,6 +292,28 @@ class DiscoveryResult:
         return {
             "plans": [plan.to_payload() for plan in self.plans],
             "warnings": list(self.warnings),
+        }
+
+
+@dataclass(frozen=True)
+class DeletePlanResult:
+    """Metadata returned after deleting a Workbench-managed plan."""
+
+    plan_dir: Path
+    plan_removed: bool
+    state_dir: Path
+    state_removed: bool
+    pin_removed: bool
+    registry_path: Path
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "plan_dir": str(self.plan_dir),
+            "plan_removed": self.plan_removed,
+            "state_dir": str(self.state_dir),
+            "state_removed": self.state_removed,
+            "pin_removed": self.pin_removed,
+            "registry_path": str(self.registry_path),
         }
 
 
@@ -940,6 +973,132 @@ def discover_plans(
         )
 
     return DiscoveryResult(plans=tuple(discovered), warnings=tuple(warnings))
+
+
+def _is_discovered_plan(
+    plan_dir: Path,
+    *,
+    registry: WorkbenchRegistry,
+    state_dir: str | Path | None,
+    plan_roots: Iterable[str | Path],
+    include_default_dirs: bool,
+) -> bool:
+    discovery = discover_plans(
+        state_root=state_dir,
+        registry=registry,
+        plan_roots=plan_roots,
+        include_default_dirs=include_default_dirs,
+    )
+    return any(discovered.plan_dir == plan_dir for discovered in discovery.plans)
+
+
+def delete_plan(
+    plan_dir: str | Path,
+    *,
+    state_dir: str | Path | None = None,
+    registry_path: str | Path | None = None,
+    plan_roots: Iterable[str | Path] = (),
+    include_default_dirs: bool = True,
+) -> DeletePlanResult:
+    """Permanently delete a Workbench-visible plan and its local metadata."""
+    try:
+        canonical = plans.canonicalize_path(plan_dir)
+    except (OSError, ValueError) as error:
+        raise PlanDeleteError(
+            "invalid-plan",
+            f"invalid plan directory {plan_dir!r}: {error}",
+        ) from error
+
+    try:
+        registry = load_registry(registry_path)
+    except WorkbenchError as error:
+        raise PlanDeleteError(
+            "registry-unreadable", str(error), status=500
+        ) from error
+
+    discovered = _is_discovered_plan(
+        canonical,
+        registry=registry,
+        state_dir=state_dir,
+        plan_roots=plan_roots,
+        include_default_dirs=include_default_dirs,
+    )
+    if not discovered and not _looks_like_plan_dir(canonical):
+        raise PlanDeleteError(
+            "invalid-plan",
+            f"refusing to delete non-plan path: {canonical}",
+        )
+
+    try:
+        lock_info = state.read_lock_info(canonical, state_dir)
+    except (OSError, ValueError) as error:
+        raise PlanDeleteError(
+            "state-error",
+            f"cannot inspect plan lock for {canonical}: {error}",
+        ) from error
+    if lock_info is not None and lock_info.active:
+        raise PlanDeleteError(
+            "active-lock",
+            f"active lock held by pid {lock_info.pid} at {lock_info.path}",
+            status=409,
+        )
+
+    if canonical.exists() and not canonical.is_dir():
+        raise PlanDeleteError(
+            "invalid-plan",
+            f"plan path is not a directory: {canonical}",
+        )
+
+    plan_state_dir = state.plan_state_dir(canonical, state_dir)
+    state_removed = False
+    try:
+        if plan_state_dir.is_dir():
+            shutil.rmtree(plan_state_dir)
+            state_removed = True
+        elif plan_state_dir.exists():
+            plan_state_dir.unlink()
+            state_removed = True
+    except OSError as error:
+        raise PlanDeleteError(
+            "os-error",
+            f"cannot delete plan state {plan_state_dir}: {error}",
+            status=500,
+        ) from error
+
+    plan_removed = False
+    if canonical.is_dir():
+        try:
+            shutil.rmtree(canonical)
+        except OSError as error:
+            raise PlanDeleteError(
+                "os-error",
+                f"cannot delete plan directory {canonical}: {error}",
+                status=500,
+            ) from error
+        plan_removed = True
+
+    pin_removed = False
+
+    def remove_matching_pin(current: WorkbenchRegistry) -> WorkbenchRegistry:
+        nonlocal pin_removed
+        pin_removed = any(pin.plan_dir == str(canonical) for pin in current.pins)
+        return remove_pin(current, canonical)
+
+    try:
+        _updated, written_path = mutate_registry(registry_path, remove_matching_pin)
+    except WorkbenchError as error:
+        raise PlanDeleteError(
+            "registry-unreadable", str(error), status=500
+        ) from error
+
+    return DeletePlanResult(
+        plan_dir=canonical,
+        plan_removed=plan_removed,
+        state_dir=plan_state_dir,
+        state_removed=state_removed,
+        pin_removed=pin_removed,
+        registry_path=written_path,
+    )
 
 
 @dataclass(frozen=True)

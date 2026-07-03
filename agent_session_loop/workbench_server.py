@@ -36,6 +36,7 @@ GET  ``/api/final-review?plan_dir=<path>`` - bounded final-review.md content.
 GET  ``/api/questions?plan_dir=<path>``  - paused-run resolver prompt and Q&A context.
 POST ``/api/registry/pin``               - upsert a registry pin.
 POST ``/api/registry/unpin``             - remove a registry pin.
+POST ``/api/plan/delete``                - permanently delete a plan.
 POST ``/api/launch``                     - spawn ``asl run`` for a plan.
 POST ``/api/reply``                      - resume a paused run with reply.
 POST ``/api/control/stop-after-current`` - enqueue stop-after-current.
@@ -243,6 +244,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             ("GET", "/api/questions"): self._handle_questions,
             ("POST", "/api/registry/pin"): self._handle_registry_pin,
             ("POST", "/api/registry/unpin"): self._handle_registry_unpin,
+            ("POST", "/api/plan/delete"): self._handle_plan_delete,
             ("POST", "/api/launch"): self._handle_launch,
             ("POST", "/api/reply"): self._handle_reply,
             ("POST", "/api/control/stop-after-current"): (
@@ -1062,6 +1064,55 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             registry_path=str(written_path),
             registry=updated.to_payload(),
         )
+
+    def _handle_plan_delete(self, *, query: Mapping[str, list[str]]) -> None:
+        del query
+        body = self._read_json_body()
+        plan_dir = _require_string(body, "plan_dir")
+        confirm_plan_dir = _require_string(body, "confirm_plan_dir")
+        try:
+            canonical = plans.canonicalize_path(plan_dir)
+            confirmed = plans.canonicalize_path(confirm_plan_dir)
+        except (OSError, ValueError) as error:
+            self._send_error(
+                400,
+                "invalid-plan",
+                f"invalid plan_dir: {error}",
+                details={
+                    "plan_dir": plan_dir,
+                    "confirm_plan_dir": confirm_plan_dir,
+                },
+            )
+            return
+        if canonical != confirmed:
+            self._send_error(
+                400,
+                "confirmation-mismatch",
+                "confirm_plan_dir must match plan_dir after canonicalization",
+                details={
+                    "plan_dir": str(canonical),
+                    "confirm_plan_dir": str(confirmed),
+                },
+            )
+            return
+        config = self._server().config
+        try:
+            result = workbench.delete_plan(
+                canonical,
+                state_dir=config.state_dir,
+                registry_path=config.registry_path,
+                plan_roots=config.plan_roots,
+                include_default_dirs=config.include_default_dirs,
+            )
+        except workbench.PlanDeleteError as error:
+            self._send_error(
+                error.status,
+                error.reason,
+                error.message,
+                details={"plan_dir": str(canonical)},
+            )
+            return
+        self._send_success(reason="ok", **result.to_payload())
 
     def _handle_launch(self, *, query: Mapping[str, list[str]]) -> None:
         del query

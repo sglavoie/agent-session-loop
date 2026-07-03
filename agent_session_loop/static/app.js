@@ -2994,6 +2994,10 @@
     if (unlock) {
       unlock.addEventListener("click", handleUnlockClick);
     }
+    const deletePlan = document.getElementById("wb-control-delete");
+    if (deletePlan) {
+      deletePlan.addEventListener("click", handleDeleteClick);
+    }
   }
 
   async function handleLaunchClick() {
@@ -3116,6 +3120,53 @@
         showControlsFeedback(
           "error",
           (body && body.error) || "unlock failed"
+        );
+      }
+    } catch (err) {
+      showControlsFeedback("error", describeError(err));
+    }
+  }
+
+  async function handleDeleteClick() {
+    const plan =
+      state.detailPlan && state.detailPlan.plan_dir ? state.detailPlan : null;
+    const planDir = (plan && plan.plan_dir) || state.route.planDir;
+    if (!planDir) return;
+    const typed = window.prompt(
+      "Permanently delete this plan? This removes the plan directory, Workbench pin, and ASL state. Type the full plan path to confirm:\n\n" +
+        planDir,
+      ""
+    );
+    if (typed === null) return;
+    const confirmPlanDir = (typed || "").trim();
+    if (!confirmPlanDir) {
+      showControlsFeedback("error", "delete confirmation required");
+      return;
+    }
+    if (confirmPlanDir !== planDir) {
+      showControlsFeedback("error", "confirmation must match the full plan path");
+      return;
+    }
+    showControlsFeedback("", "");
+    try {
+      const body = await apiRequest("/api/plan/delete", {
+        method: "POST",
+        body: {
+          plan_dir: planDir,
+          confirm_plan_dir: confirmPlanDir,
+        },
+      });
+      if (body && body.ok) {
+        state.detailPlan = null;
+        state.detailRegistry = null;
+        state.detailReplyContext = null;
+        clearSelectedPlan();
+        navigateToQueue();
+        refresh();
+      } else {
+        showControlsFeedback(
+          "error",
+          (body && body.error) || "delete failed"
         );
       }
     } catch (err) {

@@ -1094,8 +1094,10 @@ after a restart.
 
 - The default bind is `127.0.0.1`; the server never reaches outside the
   local host without an SSH tunnel or other operator-initiated forward.
-- Every mutating endpoint (`POST /api/registry/pin`, `POST /api/launch`,
-  `POST /api/reply`, `POST /api/control/...`, `POST /api/unlock`) requires
+- Every mutating endpoint (`POST /api/registry/pin`,
+  `POST /api/registry/unpin`, `POST /api/plan/delete`,
+  `POST /api/launch`, `POST /api/reply`, `POST /api/control/...`,
+  `POST /api/unlock`) requires
   an `Authorization: Bearer <token>` header. The token is generated with
   `secrets.token_urlsafe(32)` at startup and compared with
   `secrets.compare_digest`.
@@ -1259,6 +1261,13 @@ Mutating endpoints (bearer-token required):
 - `POST /api/registry/pin` — upsert a `RegistryPin`. Payload:
   `{"plan_dir": "...", "label": "...", "profile": {...}}`.
 - `POST /api/registry/unpin` — `{"plan_dir": "..."}`.
+- `POST /api/plan/delete` — permanently delete a plan directory from
+  disk, remove its Workbench pin, and remove its ASL state directory.
+  Payload: `{"plan_dir": "...", "confirm_plan_dir": "..."}`. The two
+  paths must canonicalize to the same full path, matching the UI's typed
+  full-path confirmation. The server refuses arbitrary non-plan paths
+  and returns `409` with `reason: "active-lock"` when an active runner
+  lock is present; stale locks and stale state are deleted with the plan.
 - `POST /api/launch` — spawn `asl run` for a plan. Payload:
   `{"plan_dir": "...", "profile": {...}}`. Returns `pid`, `argv`
   (with reply prompts redacted), `plan_dir`, `profile`, `reply_provided`,

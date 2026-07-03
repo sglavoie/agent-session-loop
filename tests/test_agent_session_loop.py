@@ -23595,6 +23595,148 @@ class WorkbenchServerTests(unittest.TestCase):
         reloaded = workbench.load_registry(self.registry_path)
         self.assertEqual((), reloaded.pins)
 
+    def test_plan_delete_removes_plan_state_and_pin(self) -> None:
+        seeded = workbench.upsert_pin(
+            workbench.load_registry(self.registry_path),
+            self.canonical_plan_dir,
+            label="seed",
+        )
+        workbench.save_registry(seeded, self.registry_path)
+        plan_state = state.plan_state_dir(self.canonical_plan_dir, self.state_dir)
+        plan_state.mkdir(parents=True, exist_ok=True)
+        (plan_state / events.STATE_FILE_NAME).write_text(
+            json.dumps({"plan_dir": str(self.canonical_plan_dir)}),
+            encoding="utf-8",
+        )
+        server = self._start_server()
+
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/plan/delete",
+            method="POST",
+            body={
+                "plan_dir": str(self.canonical_plan_dir),
+                "confirm_plan_dir": str(self.canonical_plan_dir),
+            },
+            headers=self._auth(server),
+        )
+
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["plan_removed"])
+        self.assertTrue(body["state_removed"])
+        self.assertTrue(body["pin_removed"])
+        self.assertEqual(str(self.canonical_plan_dir), body["plan_dir"])
+        self.assertFalse(self.canonical_plan_dir.exists())
+        self.assertFalse(plan_state.exists())
+        self.assertEqual((), workbench.load_registry(self.registry_path).pins)
+
+    def test_plan_delete_requires_matching_confirmation(self) -> None:
+        server = self._start_server()
+
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/plan/delete",
+            method="POST",
+            body={
+                "plan_dir": str(self.canonical_plan_dir),
+                "confirm_plan_dir": str(self.tmp_path / "plans" / "other"),
+            },
+            headers=self._auth(server),
+        )
+
+        self.assertEqual(400, status)
+        self.assertEqual("confirmation-mismatch", body["reason"])
+        self.assertTrue(self.canonical_plan_dir.exists())
+
+    def test_plan_delete_rejects_active_lock(self) -> None:
+        seeded = workbench.upsert_pin(
+            workbench.load_registry(self.registry_path),
+            self.canonical_plan_dir,
+            label="seed",
+        )
+        workbench.save_registry(seeded, self.registry_path)
+        plan_state = state.plan_state_dir(self.canonical_plan_dir, self.state_dir)
+        plan_state.mkdir(parents=True, exist_ok=True)
+        lock_path = plan_state / state.LOCK_FILE_NAME
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "plan_dir": str(self.canonical_plan_dir),
+                    "created_at": "2026-07-03T00:00:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        server = self._start_server()
+
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/plan/delete",
+            method="POST",
+            body={
+                "plan_dir": str(self.canonical_plan_dir),
+                "confirm_plan_dir": str(self.canonical_plan_dir),
+            },
+            headers=self._auth(server),
+        )
+
+        self.assertEqual(409, status)
+        self.assertEqual("active-lock", body["reason"])
+        self.assertTrue(self.canonical_plan_dir.exists())
+        self.assertTrue(lock_path.exists())
+        self.assertEqual(1, len(workbench.load_registry(self.registry_path).pins))
+
+    def test_plan_delete_rejects_arbitrary_non_plan_directory(self) -> None:
+        target = self.tmp_path / "not-a-plan"
+        target.mkdir()
+        server = self._start_server()
+
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/plan/delete",
+            method="POST",
+            body={
+                "plan_dir": str(target),
+                "confirm_plan_dir": str(target),
+            },
+            headers=self._auth(server),
+        )
+
+        self.assertEqual(400, status)
+        self.assertEqual("invalid-plan", body["reason"])
+        self.assertTrue(target.exists())
+
+    def test_plan_delete_cleans_missing_discovered_plan_state(self) -> None:
+        missing_plan = plans.canonicalize_path(self.tmp_path / "plans" / "missing")
+        seeded = workbench.upsert_pin(
+            workbench.load_registry(self.registry_path),
+            missing_plan,
+            label="stale",
+        )
+        workbench.save_registry(seeded, self.registry_path)
+        plan_state = state.plan_state_dir(missing_plan, self.state_dir)
+        plan_state.mkdir(parents=True, exist_ok=True)
+        (plan_state / events.STATE_FILE_NAME).write_text(
+            json.dumps({"plan_dir": str(missing_plan)}),
+            encoding="utf-8",
+        )
+        server = self._start_server()
+
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/plan/delete",
+            method="POST",
+            body={
+                "plan_dir": str(missing_plan),
+                "confirm_plan_dir": str(missing_plan),
+            },
+            headers=self._auth(server),
+        )
+
+        self.assertEqual(200, status)
+        self.assertFalse(body["plan_removed"])
+        self.assertTrue(body["state_removed"])
+        self.assertTrue(body["pin_removed"])
+        self.assertFalse(plan_state.exists())
+        self.assertEqual((), workbench.load_registry(self.registry_path).pins)
+
     def test_launch_endpoint_uses_workbench_helper(self) -> None:
         server = self._start_server()
         sentinel = workbench.LaunchResult(
@@ -25093,6 +25235,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
             'id="wb-control-launch"',
             'id="wb-control-stop"',
             'id="wb-control-unlock"',
+            'id="wb-control-delete"',
             'id="wb-profile-form"',
             'id="wb-profile-form-errors"',
             'id="wb-profile-unpin"',
@@ -25176,8 +25319,13 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         self.assertIn("handleRecoveryAction", decoded)
         self.assertIn('endpoint === "/api/unlock"', decoded)
         self.assertIn('endpoint === "/api/launch"', decoded)
+        self.assertIn('apiRequest("/api/plan/delete"', decoded)
         self.assertIn("await handleUnlockClick()", decoded)
         self.assertIn("await handleLaunchClick()", decoded)
+        self.assertIn("handleDeleteClick", decoded)
+        self.assertIn("confirm_plan_dir", decoded)
+        self.assertIn("clearSelectedPlan();", decoded)
+        self.assertIn("navigateToQueue();", decoded)
         self.assertIn("renderReplyContextError", decoded)
         self.assertNotIn("tasks.push(loadAndRenderReply", decoded)
         for reason in (
@@ -25189,6 +25337,8 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # Confirmation prompts for dangerous actions.
         self.assertIn("--unsafe-bypass", decoded)
         self.assertIn("Force-unlock this plan?", decoded)
+        self.assertIn("Permanently delete this plan?", decoded)
+        self.assertIn("Type the full plan path to confirm", decoded)
         self.assertIn("Submit this reply", decoded)
         # Privacy guard: the reply text must never be persisted.
         # Search for any sessionStorage/localStorage write touching the
@@ -27167,6 +27317,14 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
         self.assertIn("asl workbench pin /path/to/plan-dir", docs)
         self.assertIn("asl workbench unpin /path/to/plan-dir", docs)
         self.assertIn("asl workbench registry --json", docs)
+
+    def test_docs_describe_workbench_plan_delete(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        self.assertIn("`POST /api/plan/delete`", docs)
+        self.assertIn("permanently delete a plan directory", docs)
+        self.assertIn('"confirm_plan_dir"', docs)
+        self.assertIn("typed\n  full-path confirmation", docs)
+        self.assertIn('reason: "active-lock"', docs)
 
     def test_docs_describe_registry_plan_roots_discovery(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
