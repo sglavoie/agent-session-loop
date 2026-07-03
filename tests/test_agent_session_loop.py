@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from datetime import datetime, timezone
 import errno
 import io
 import json
@@ -19653,6 +19654,40 @@ def _write_plan_dir(plan_dir: Path) -> Path:
     return plan_dir
 
 
+def _seed_archivable_plan(
+    tmp_path: Path,
+    *,
+    with_pin: bool = True,
+    with_state: bool = True,
+    create_plan: bool = True,
+) -> tuple[Path, Path, Path]:
+    """Seed a plan (optionally pinned, with ASL state) ready to archive.
+
+    Returns ``(state_dir, registry_path, canonical_plan_dir)``.
+    """
+    state_dir = tmp_path / "state"
+    registry_path = tmp_path / workbench.REGISTRY_FILE_NAME
+    plan_dir = tmp_path / "plans" / "alpha"
+    if create_plan:
+        _write_plan_dir(plan_dir)
+    canonical = plans.canonicalize_path(plan_dir)
+    if with_pin:
+        seeded = workbench.upsert_pin(
+            workbench.load_registry(registry_path),
+            canonical,
+            label="Alpha",
+            profile=workbench.LaunchProfile(harness="codex"),
+        )
+        workbench.save_registry(seeded, registry_path)
+    if with_state:
+        plan_state = state.plan_state_dir(canonical, state_dir)
+        plan_state.mkdir(parents=True, exist_ok=True)
+        (plan_state / "state.json").write_text(
+            json.dumps({"plan_dir": str(canonical)}), encoding="utf-8"
+        )
+    return state_dir, registry_path, canonical
+
+
 class WorkbenchRegistryTests(unittest.TestCase):
     def test_default_registry_path_uses_xdg_config_home(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -19834,6 +19869,555 @@ class WorkbenchRegistryTests(unittest.TestCase):
             after_remove = workbench.remove_pin(updated, plan_dir)
             self.assertEqual(1, len(after_remove.pins))
             self.assertEqual(str(other_dir), after_remove.pins[0].plan_dir)
+
+
+class WorkbenchArchiveRetentionTests(unittest.TestCase):
+    def test_missing_retention_defaults_without_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / workbench.REGISTRY_FILE_NAME
+            registry_path.write_text(
+                json.dumps({"schema_version": 1, "pins": [], "plan_roots": []}),
+                encoding="utf-8",
+            )
+
+            registry = workbench.load_registry(registry_path)
+
+            self.assertEqual(
+                workbench.DEFAULT_ARCHIVE_RETENTION_DAYS,
+                registry.archive_retention_days,
+            )
+            self.assertEqual((), registry.warnings)
+
+    def test_invalid_retention_coerces_to_default_with_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / workbench.REGISTRY_FILE_NAME
+            registry_path.write_text(
+                json.dumps({"archive_retention_days": 0}), encoding="utf-8"
+            )
+
+            registry = workbench.load_registry(registry_path)
+
+            self.assertEqual(
+                workbench.DEFAULT_ARCHIVE_RETENTION_DAYS,
+                registry.archive_retention_days,
+            )
+            self.assertTrue(
+                any("archive_retention_days" in w for w in registry.warnings)
+            )
+
+    def test_retention_round_trips_through_save(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / workbench.REGISTRY_FILE_NAME
+            registry = workbench.load_registry(registry_path)
+            registry = workbench.set_archive_retention_days(registry, 7)
+
+            workbench.save_registry(registry, registry_path)
+            reloaded = workbench.load_registry(registry_path)
+
+            self.assertEqual(7, reloaded.archive_retention_days)
+            self.assertEqual((), reloaded.warnings)
+
+    def test_set_retention_rejects_non_positive(self) -> None:
+        registry = workbench.WorkbenchRegistry()
+        with self.assertRaises(workbench.WorkbenchError):
+            workbench.set_archive_retention_days(registry, 0)
+        with self.assertRaises(workbench.WorkbenchError):
+            workbench.set_archive_retention_days(registry, True)
+
+
+class WorkbenchArchiveStorageTests(unittest.TestCase):
+    def _metadata(self, tmp_path: Path, archive_id: str) -> workbench.ArchiveMetadata:
+        return workbench.ArchiveMetadata(
+            archive_id=archive_id,
+            original_plan_dir=str(tmp_path / "plans" / "alpha"),
+            archived_at="2026-07-03T12:00:00+00:00",
+            expires_at="2026-08-02T12:00:00+00:00",
+            summary="alpha plan snapshot",
+            pin=workbench.RegistryPin(
+                plan_dir=str(tmp_path / "plans" / "alpha"),
+                label="Alpha",
+                profile=workbench.LaunchProfile(harness="codex"),
+            ),
+            plan_archived=True,
+            state_archived=False,
+        )
+
+    def test_new_archive_id_is_valid_and_unique(self) -> None:
+        first = workbench.new_archive_id()
+        second = workbench.new_archive_id()
+        self.assertNotEqual(first, second)
+        self.assertNotIn("/", first)
+        self.assertTrue(first)
+
+    def test_archive_paths_live_under_state_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "state"
+            root = workbench.archive_root(state_root)
+            entry_dir = workbench.archive_entry_dir("abc123", state_root)
+
+            self.assertEqual(
+                state.state_root(state_root) / workbench.ARCHIVE_DIR_NAME, root
+            )
+            self.assertEqual(root / "abc123", entry_dir)
+            self.assertEqual(
+                entry_dir / workbench.ARCHIVE_PLAN_DIR_NAME,
+                workbench.archive_plan_path("abc123", state_root),
+            )
+
+    def test_invalid_archive_id_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "state"
+            for bad in ("", "..", "a/b", "a\\b"):
+                with self.assertRaises(workbench.WorkbenchError):
+                    workbench.archive_entry_dir(bad, state_root)
+
+    def test_save_and_load_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_root = tmp_path / "state"
+            metadata = self._metadata(tmp_path, "20260703T120000Z-abcdef123456")
+
+            meta_path = workbench.save_archive_metadata(metadata, state_root)
+            self.assertTrue(meta_path.is_file())
+
+            loaded = workbench.load_archive_metadata(metadata.archive_id, state_root)
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(metadata.archive_id, loaded.archive_id)
+            self.assertEqual(metadata.original_plan_dir, loaded.original_plan_dir)
+            self.assertTrue(loaded.plan_archived)
+            self.assertFalse(loaded.state_archived)
+            self.assertEqual("alpha plan snapshot", loaded.summary)
+            self.assertIsNotNone(loaded.pin)
+            assert loaded.pin is not None
+            self.assertEqual("Alpha", loaded.pin.label)
+            self.assertEqual(
+                workbench.archive_entry_dir(metadata.archive_id, state_root),
+                loaded.archive_dir,
+            )
+            self.assertEqual(
+                workbench.archive_plan_path(metadata.archive_id, state_root),
+                loaded.plan_path,
+            )
+            self.assertEqual((), loaded.warnings)
+
+    def test_load_missing_entry_returns_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "state"
+            self.assertIsNone(
+                workbench.load_archive_metadata("nope", state_root)
+            )
+
+    def test_list_skips_malformed_entry_with_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_root = tmp_path / "state"
+            good = self._metadata(tmp_path, "20260703T120000Z-goodgoodgood")
+            workbench.save_archive_metadata(good, state_root)
+
+            bad_dir = workbench.archive_root(state_root) / "20260703T130000Z-bad"
+            bad_dir.mkdir(parents=True)
+            (bad_dir / workbench.ARCHIVE_METADATA_FILE_NAME).write_text(
+                "{ not json", encoding="utf-8"
+            )
+
+            listing = workbench.list_archive_entries(state_root)
+
+            self.assertEqual(1, len(listing.entries))
+            self.assertEqual(good.archive_id, listing.entries[0].archive_id)
+            self.assertTrue(listing.warnings)
+
+    def test_list_missing_root_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "state"
+            listing = workbench.list_archive_entries(state_root)
+            self.assertEqual((), listing.entries)
+            self.assertEqual((), listing.warnings)
+
+    def test_remove_archive_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_root = tmp_path / "state"
+            metadata = self._metadata(tmp_path, "20260703T120000Z-removeme1234")
+            workbench.save_archive_metadata(metadata, state_root)
+
+            self.assertTrue(
+                workbench.remove_archive_entry(metadata.archive_id, state_root)
+            )
+            self.assertFalse(
+                workbench.archive_entry_dir(
+                    metadata.archive_id, state_root
+                ).exists()
+            )
+            self.assertFalse(
+                workbench.remove_archive_entry(metadata.archive_id, state_root)
+            )
+
+    def test_compute_expires_at_adds_retention_days(self) -> None:
+        expires = workbench.compute_expires_at(
+            "2026-07-03T12:00:00+00:00", 30
+        )
+        self.assertEqual("2026-08-02T12:00:00+00:00", expires)
+
+    def test_archived_entries_excluded_from_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_root = tmp_path / "state"
+            archive_id = "20260703T120000Z-hiddenplan12"
+            archived_plan = workbench.archive_plan_path(archive_id, state_root)
+            _write_plan_dir(archived_plan)
+            metadata = self._metadata(tmp_path, archive_id)
+            workbench.save_archive_metadata(metadata, state_root)
+
+            with patched_env(AGENT_PLANS_DIR=None):
+                result = workbench.discover_plans(
+                    state_root=state_root,
+                    include_default_dirs=False,
+                )
+
+            self.assertEqual((), result.plans)
+
+
+class WorkbenchArchivePlanTests(unittest.TestCase):
+    def test_archive_moves_plan_state_and_captures_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir, registry_path, canonical = _seed_archivable_plan(tmp_path)
+            plan_state = state.plan_state_dir(canonical, state_dir)
+
+            result = workbench.archive_plan(
+                canonical,
+                state_dir=state_dir,
+                registry_path=registry_path,
+                include_default_dirs=False,
+            )
+
+            self.assertTrue(result.plan_archived)
+            self.assertTrue(result.state_archived)
+            self.assertTrue(result.pin_archived)
+            self.assertFalse(canonical.exists())
+            self.assertFalse(plan_state.exists())
+
+            entry = workbench.archive_entry_dir(result.archive_id, state_dir)
+            self.assertTrue(
+                workbench.archive_plan_path(result.archive_id, state_dir).is_dir()
+            )
+            self.assertTrue(
+                workbench.archive_state_path(result.archive_id, state_dir).is_dir()
+            )
+            self.assertTrue(
+                (entry / workbench.ARCHIVE_METADATA_FILE_NAME).is_file()
+            )
+            self.assertIsNotNone(result.metadata.pin)
+            assert result.metadata.pin is not None
+            self.assertEqual("Alpha", result.metadata.pin.label)
+            self.assertEqual((), workbench.load_registry(registry_path).pins)
+
+    def test_archive_sets_expiry_from_retention(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir, registry_path, canonical = _seed_archivable_plan(
+                tmp_path, with_pin=False
+            )
+            registry = workbench.set_archive_retention_days(
+                workbench.load_registry(registry_path), 7
+            )
+            workbench.save_registry(registry, registry_path)
+
+            result = workbench.archive_plan(
+                canonical,
+                state_dir=state_dir,
+                registry_path=registry_path,
+                include_default_dirs=False,
+            )
+
+            self.assertEqual(
+                workbench.compute_expires_at(result.metadata.archived_at, 7),
+                result.metadata.expires_at,
+            )
+
+    def test_archive_rejects_active_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir, registry_path, canonical = _seed_archivable_plan(tmp_path)
+            plan_state = state.plan_state_dir(canonical, state_dir)
+            (plan_state / state.LOCK_FILE_NAME).write_text(
+                json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "plan_dir": str(canonical),
+                        "created_at": "2026-07-03T00:00:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(workbench.ArchiveError) as ctx:
+                workbench.archive_plan(
+                    canonical,
+                    state_dir=state_dir,
+                    registry_path=registry_path,
+                    include_default_dirs=False,
+                )
+
+            self.assertEqual("active-lock", ctx.exception.reason)
+            self.assertEqual(409, ctx.exception.status)
+            self.assertTrue(canonical.exists())
+            self.assertEqual(
+                1, len(workbench.load_registry(registry_path).pins)
+            )
+
+    def test_archive_rejects_non_plan_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir = tmp_path / "state"
+            registry_path = tmp_path / workbench.REGISTRY_FILE_NAME
+            target = tmp_path / "not-a-plan"
+            target.mkdir()
+
+            with self.assertRaises(workbench.ArchiveError) as ctx:
+                workbench.archive_plan(
+                    target,
+                    state_dir=state_dir,
+                    registry_path=registry_path,
+                    include_default_dirs=False,
+                )
+
+            self.assertEqual("invalid-plan", ctx.exception.reason)
+            self.assertTrue(target.exists())
+
+    def test_archive_missing_plan_dir_archives_state_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir, registry_path, canonical = _seed_archivable_plan(
+                tmp_path, create_plan=False
+            )
+            plan_state = state.plan_state_dir(canonical, state_dir)
+
+            result = workbench.archive_plan(
+                canonical,
+                state_dir=state_dir,
+                registry_path=registry_path,
+                include_default_dirs=False,
+            )
+
+            self.assertFalse(result.plan_archived)
+            self.assertTrue(result.state_archived)
+            self.assertTrue(result.pin_archived)
+            self.assertFalse(plan_state.exists())
+            self.assertFalse(
+                workbench.archive_plan_path(result.archive_id, state_dir).exists()
+            )
+            self.assertTrue(
+                workbench.archive_state_path(result.archive_id, state_dir).is_dir()
+            )
+            self.assertEqual((), workbench.load_registry(registry_path).pins)
+
+
+class WorkbenchRestoreArchiveTests(unittest.TestCase):
+    def _archive(self, tmp_path: Path) -> tuple[Path, Path, Path, str]:
+        state_dir, registry_path, canonical = _seed_archivable_plan(tmp_path)
+        result = workbench.archive_plan(
+            canonical,
+            state_dir=state_dir,
+            registry_path=registry_path,
+            include_default_dirs=False,
+        )
+        return state_dir, registry_path, canonical, result.archive_id
+
+    def test_restore_returns_plan_state_and_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir, registry_path, canonical, archive_id = self._archive(
+                tmp_path
+            )
+            plan_state = state.plan_state_dir(canonical, state_dir)
+
+            result = workbench.restore_archive(
+                archive_id, state_dir=state_dir, registry_path=registry_path
+            )
+
+            self.assertTrue(result.plan_restored)
+            self.assertTrue(result.state_restored)
+            self.assertTrue(result.pin_restored)
+            self.assertTrue(canonical.is_dir())
+            self.assertTrue((canonical / "manifest.md").is_file())
+            self.assertTrue(plan_state.is_dir())
+            self.assertFalse(
+                workbench.archive_entry_dir(archive_id, state_dir).exists()
+            )
+            pins = workbench.load_registry(registry_path).pins
+            self.assertEqual(1, len(pins))
+            self.assertEqual("Alpha", pins[0].label)
+            self.assertEqual("codex", pins[0].profile.harness)
+
+    def test_restore_missing_entry_raises_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir = tmp_path / "state"
+            with self.assertRaises(workbench.ArchiveError) as ctx:
+                workbench.restore_archive(
+                    "20260703T120000Z-doesnotexist", state_dir=state_dir
+                )
+            self.assertEqual("not-found", ctx.exception.reason)
+            self.assertEqual(404, ctx.exception.status)
+
+    def test_restore_conflict_on_existing_plan_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir, registry_path, canonical, archive_id = self._archive(
+                tmp_path
+            )
+            _write_plan_dir(canonical)
+
+            with self.assertRaises(workbench.ArchiveError) as ctx:
+                workbench.restore_archive(
+                    archive_id, state_dir=state_dir, registry_path=registry_path
+                )
+
+            self.assertEqual("restore-conflict", ctx.exception.reason)
+            self.assertEqual(409, ctx.exception.status)
+            self.assertTrue(
+                workbench.archive_entry_dir(archive_id, state_dir).exists()
+            )
+
+    def test_restore_conflict_on_existing_state_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir, registry_path, canonical, archive_id = self._archive(
+                tmp_path
+            )
+            plan_state = state.plan_state_dir(canonical, state_dir)
+            plan_state.mkdir(parents=True, exist_ok=True)
+
+            with self.assertRaises(workbench.ArchiveError) as ctx:
+                workbench.restore_archive(
+                    archive_id, state_dir=state_dir, registry_path=registry_path
+                )
+
+            self.assertEqual("restore-conflict", ctx.exception.reason)
+            self.assertFalse(canonical.exists())
+            self.assertTrue(
+                workbench.archive_entry_dir(archive_id, state_dir).exists()
+            )
+
+
+class WorkbenchPurgeArchiveTests(unittest.TestCase):
+    def _metadata(
+        self, tmp_path: Path, archive_id: str, archived_at: str
+    ) -> workbench.ArchiveMetadata:
+        return workbench.ArchiveMetadata(
+            archive_id=archive_id,
+            original_plan_dir=str(tmp_path / "plans" / archive_id),
+            archived_at=archived_at,
+            expires_at=workbench.compute_expires_at(archived_at, 30),
+            summary=None,
+            pin=None,
+            plan_archived=False,
+            state_archived=False,
+        )
+
+    def test_purge_single_and_missing_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir = tmp_path / "state"
+            archive_id = "20260703T120000Z-purgeme12345"
+            workbench.save_archive_metadata(
+                self._metadata(tmp_path, archive_id, "2026-07-03T12:00:00+00:00"),
+                state_dir,
+            )
+
+            result = workbench.purge_archive_entries([archive_id], state_dir=state_dir)
+            self.assertEqual(1, result.removed_count)
+            self.assertEqual(0, result.failed_count)
+            self.assertTrue(result.outcomes[0].removed)
+            self.assertFalse(
+                workbench.archive_entry_dir(archive_id, state_dir).exists()
+            )
+
+            again = workbench.purge_archive_entries([archive_id], state_dir=state_dir)
+            self.assertFalse(again.outcomes[0].removed)
+            self.assertIsNone(again.outcomes[0].error)
+
+    def test_purge_bulk_reports_per_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir = tmp_path / "state"
+            good_a = "20260703T120000Z-aaaaaaaaaaaa"
+            good_b = "20260703T130000Z-bbbbbbbbbbbb"
+            for archive_id in (good_a, good_b):
+                workbench.save_archive_metadata(
+                    self._metadata(
+                        tmp_path, archive_id, "2026-07-03T12:00:00+00:00"
+                    ),
+                    state_dir,
+                )
+
+            result = workbench.purge_archive_entries(
+                [good_a, "../escape", good_b], state_dir=state_dir
+            )
+
+            by_id = {o.archive_id: o for o in result.outcomes}
+            self.assertTrue(by_id[good_a].removed)
+            self.assertTrue(by_id[good_b].removed)
+            self.assertIsNotNone(by_id["../escape"].error)
+            self.assertEqual(2, result.removed_count)
+            self.assertEqual(1, result.failed_count)
+
+    def test_maintain_purges_expired_and_keeps_recent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir = tmp_path / "state"
+            registry_path = tmp_path / workbench.REGISTRY_FILE_NAME
+            old_id = "20260524T120000Z-oldoldold123"
+            new_id = "20260701T120000Z-newnewnew123"
+            workbench.save_archive_metadata(
+                self._metadata(tmp_path, old_id, "2026-05-24T12:00:00+00:00"),
+                state_dir,
+            )
+            workbench.save_archive_metadata(
+                self._metadata(tmp_path, new_id, "2026-07-01T12:00:00+00:00"),
+                state_dir,
+            )
+            now = datetime(2026, 7, 3, 12, 0, 0, tzinfo=timezone.utc)
+
+            result = workbench.maintain_archive(
+                state_dir=state_dir, registry_path=registry_path, now=now
+            )
+
+            self.assertEqual(1, result.removed_count)
+            self.assertEqual(old_id, result.outcomes[0].archive_id)
+            self.assertFalse(
+                workbench.archive_entry_dir(old_id, state_dir).exists()
+            )
+            self.assertTrue(
+                workbench.archive_entry_dir(new_id, state_dir).exists()
+            )
+
+    def test_maintain_respects_shortened_retention(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir = tmp_path / "state"
+            registry_path = tmp_path / workbench.REGISTRY_FILE_NAME
+            registry = workbench.set_archive_retention_days(
+                workbench.load_registry(registry_path), 1
+            )
+            workbench.save_registry(registry, registry_path)
+            archive_id = "20260701T120000Z-shortretain1"
+            workbench.save_archive_metadata(
+                self._metadata(tmp_path, archive_id, "2026-07-01T12:00:00+00:00"),
+                state_dir,
+            )
+            now = datetime(2026, 7, 3, 12, 0, 0, tzinfo=timezone.utc)
+
+            result = workbench.maintain_archive(
+                state_dir=state_dir, registry_path=registry_path, now=now
+            )
+
+            self.assertEqual(1, result.removed_count)
+            self.assertFalse(
+                workbench.archive_entry_dir(archive_id, state_dir).exists()
+            )
 
 
 class WorkbenchDiscoveryTests(unittest.TestCase):
@@ -23595,7 +24179,10 @@ class WorkbenchServerTests(unittest.TestCase):
         reloaded = workbench.load_registry(self.registry_path)
         self.assertEqual((), reloaded.pins)
 
-    def test_plan_delete_removes_plan_state_and_pin(self) -> None:
+    def test_plan_delete_alias_archives_plan_state_and_pin(self) -> None:
+        # ``/api/plan/delete`` is now a backward-compatible archive alias: it
+        # keeps the confirmation contract but moves the plan into the archive
+        # instead of permanently removing it.
         seeded = workbench.upsert_pin(
             workbench.load_registry(self.registry_path),
             self.canonical_plan_dir,
@@ -23622,13 +24209,22 @@ class WorkbenchServerTests(unittest.TestCase):
 
         self.assertEqual(200, status)
         self.assertTrue(body["ok"])
-        self.assertTrue(body["plan_removed"])
-        self.assertTrue(body["state_removed"])
-        self.assertTrue(body["pin_removed"])
+        self.assertTrue(body["plan_archived"])
+        self.assertTrue(body["state_archived"])
+        self.assertTrue(body["pin_archived"])
         self.assertEqual(str(self.canonical_plan_dir), body["plan_dir"])
+        # The live plan and state are gone from their original locations...
         self.assertFalse(self.canonical_plan_dir.exists())
         self.assertFalse(plan_state.exists())
         self.assertEqual((), workbench.load_registry(self.registry_path).pins)
+        # ...but the plan is preserved under a fresh archive entry.
+        listing = workbench.list_archive_entries(self.state_dir)
+        self.assertEqual(1, len(listing.entries))
+        self.assertEqual(body["archive_id"], listing.entries[0].archive_id)
+        self.assertEqual(
+            str(self.canonical_plan_dir),
+            listing.entries[0].original_plan_dir,
+        )
 
     def test_plan_delete_requires_matching_confirmation(self) -> None:
         server = self._start_server()
@@ -23704,7 +24300,7 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertEqual("invalid-plan", body["reason"])
         self.assertTrue(target.exists())
 
-    def test_plan_delete_cleans_missing_discovered_plan_state(self) -> None:
+    def test_plan_delete_alias_archives_missing_discovered_plan_state(self) -> None:
         missing_plan = plans.canonicalize_path(self.tmp_path / "plans" / "missing")
         seeded = workbench.upsert_pin(
             workbench.load_registry(self.registry_path),
@@ -23731,11 +24327,308 @@ class WorkbenchServerTests(unittest.TestCase):
         )
 
         self.assertEqual(200, status)
-        self.assertFalse(body["plan_removed"])
-        self.assertTrue(body["state_removed"])
-        self.assertTrue(body["pin_removed"])
+        # A stale discovered pin archives only the available state and pin.
+        self.assertFalse(body["plan_archived"])
+        self.assertTrue(body["state_archived"])
+        self.assertTrue(body["pin_archived"])
         self.assertFalse(plan_state.exists())
         self.assertEqual((), workbench.load_registry(self.registry_path).pins)
+        listing = workbench.list_archive_entries(self.state_dir)
+        self.assertEqual(1, len(listing.entries))
+        self.assertTrue(listing.entries[0].state_archived)
+        self.assertFalse(listing.entries[0].plan_archived)
+
+    def test_plan_archive_endpoint_archives_with_confirmation(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/plan/archive",
+            method="POST",
+            body={
+                "plan_dir": str(self.canonical_plan_dir),
+                "confirm_plan_dir": str(self.canonical_plan_dir),
+            },
+            headers=self._auth(server),
+        )
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["plan_archived"])
+        self.assertIn("archive_id", body)
+        self.assertFalse(self.canonical_plan_dir.exists())
+        listing = workbench.list_archive_entries(self.state_dir)
+        self.assertEqual([body["archive_id"]], [e.archive_id for e in listing.entries])
+
+    def test_plan_archive_rejects_confirmation_mismatch(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/plan/archive",
+            method="POST",
+            body={
+                "plan_dir": str(self.canonical_plan_dir),
+                "confirm_plan_dir": str(self.tmp_path / "plans" / "other"),
+            },
+            headers=self._auth(server),
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("confirmation-mismatch", body["reason"])
+        self.assertTrue(self.canonical_plan_dir.exists())
+
+    def test_plan_archive_rejects_active_lock_with_409(self) -> None:
+        plan_state = state.plan_state_dir(self.canonical_plan_dir, self.state_dir)
+        plan_state.mkdir(parents=True, exist_ok=True)
+        lock_path = plan_state / state.LOCK_FILE_NAME
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "plan_dir": str(self.canonical_plan_dir),
+                    "created_at": "2026-07-03T00:00:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/plan/archive",
+            method="POST",
+            body={
+                "plan_dir": str(self.canonical_plan_dir),
+                "confirm_plan_dir": str(self.canonical_plan_dir),
+            },
+            headers=self._auth(server),
+        )
+        self.assertEqual(409, status)
+        self.assertEqual("active-lock", body["reason"])
+        self.assertTrue(self.canonical_plan_dir.exists())
+
+    def test_plans_archive_bulk_returns_per_entry_results(self) -> None:
+        second_plan = self.tmp_path / "plans" / "beta"
+        write_plan(second_plan, ("pending",))
+        canonical_second = plans.canonicalize_path(second_plan)
+        bogus = self.tmp_path / "not-a-plan"
+        bogus.mkdir()
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/plans/archive",
+            method="POST",
+            body={
+                "plan_dirs": [
+                    str(self.canonical_plan_dir),
+                    str(canonical_second),
+                    str(bogus),
+                ]
+            },
+            headers=self._auth(server),
+        )
+        self.assertEqual(200, status)
+        self.assertEqual(2, body["archived_count"])
+        self.assertEqual(1, body["failed_count"])
+        by_dir = {row["plan_dir"]: row for row in body["results"]}
+        self.assertTrue(by_dir[str(self.canonical_plan_dir)]["archived"])
+        self.assertTrue(by_dir[str(canonical_second)]["archived"])
+        self.assertFalse(by_dir[str(bogus)]["archived"])
+        self.assertEqual("invalid-plan", by_dir[str(bogus)]["reason"])
+        # One blocked entry never prevents the others from being archived.
+        self.assertFalse(self.canonical_plan_dir.exists())
+        self.assertFalse(canonical_second.exists())
+        self.assertTrue(bogus.exists())
+
+    def test_plans_archive_requires_non_empty_list(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/plans/archive",
+            method="POST",
+            body={"plan_dirs": []},
+            headers=self._auth(server),
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("invalid-request", body["reason"])
+
+    def test_archive_list_returns_entries_and_retention(self) -> None:
+        result = workbench.archive_plan(
+            self.canonical_plan_dir,
+            state_dir=self.state_dir,
+            registry_path=self.registry_path,
+            include_default_dirs=False,
+        )
+        server = self._start_server()
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/archive")
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+        self.assertEqual(30, body["archive_retention_days"])
+        self.assertEqual(
+            [result.archive_id], [e["archive_id"] for e in body["entries"]]
+        )
+        self.assertIn("archive_maintenance", body)
+        self.assertEqual(0, body["archive_maintenance"]["removed_count"])
+
+    def test_archive_list_auto_empties_expired_entries(self) -> None:
+        result = workbench.archive_plan(
+            self.canonical_plan_dir,
+            state_dir=self.state_dir,
+            registry_path=self.registry_path,
+            include_default_dirs=False,
+        )
+        # Backdate the archived_at so the entry is well past the 30-day window.
+        meta_path = (
+            workbench.archive_entry_dir(result.archive_id, self.state_dir)
+            / workbench.ARCHIVE_METADATA_FILE_NAME
+        )
+        raw = json.loads(meta_path.read_text(encoding="utf-8"))
+        raw["archived_at"] = "2000-01-01T00:00:00+00:00"
+        meta_path.write_text(json.dumps(raw), encoding="utf-8")
+        server = self._start_server()
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/archive")
+        self.assertEqual(200, status)
+        self.assertEqual(1, body["archive_maintenance"]["removed_count"])
+        self.assertEqual([], body["entries"])
+
+    def test_archive_restore_moves_plan_back(self) -> None:
+        result = workbench.archive_plan(
+            self.canonical_plan_dir,
+            state_dir=self.state_dir,
+            registry_path=self.registry_path,
+            include_default_dirs=False,
+        )
+        self.assertFalse(self.canonical_plan_dir.exists())
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/archive/restore",
+            method="POST",
+            body={"archive_id": result.archive_id},
+            headers=self._auth(server),
+        )
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["plan_restored"])
+        self.assertTrue(self.canonical_plan_dir.exists())
+        self.assertEqual((), workbench.list_archive_entries(self.state_dir).entries)
+
+    def test_archive_restore_missing_entry_returns_404(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/archive/restore",
+            method="POST",
+            body={"archive_id": "20000101T000000Z-deadbeefcafe"},
+            headers=self._auth(server),
+        )
+        self.assertEqual(404, status)
+        self.assertEqual("not-found", body["reason"])
+
+    def test_archive_delete_purges_with_matching_confirmation(self) -> None:
+        result = workbench.archive_plan(
+            self.canonical_plan_dir,
+            state_dir=self.state_dir,
+            registry_path=self.registry_path,
+            include_default_dirs=False,
+        )
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/archive/delete",
+            method="POST",
+            body={"archive_ids": [result.archive_id], "confirm_count": 1},
+            headers=self._auth(server),
+        )
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+        self.assertEqual(1, body["removed_count"])
+        self.assertEqual(0, body["failed_count"])
+        self.assertEqual((), workbench.list_archive_entries(self.state_dir).entries)
+
+    def test_archive_delete_rejects_count_mismatch(self) -> None:
+        result = workbench.archive_plan(
+            self.canonical_plan_dir,
+            state_dir=self.state_dir,
+            registry_path=self.registry_path,
+            include_default_dirs=False,
+        )
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/archive/delete",
+            method="POST",
+            body={"archive_ids": [result.archive_id], "confirm_count": 2},
+            headers=self._auth(server),
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("confirmation-mismatch", body["reason"])
+        # Nothing is purged when confirmation does not match.
+        self.assertEqual(1, len(workbench.list_archive_entries(self.state_dir).entries))
+
+    def test_archive_settings_updates_retention_days(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/archive/settings",
+            method="POST",
+            body={"archive_retention_days": 7},
+            headers=self._auth(server),
+        )
+        self.assertEqual(200, status)
+        self.assertEqual(7, body["archive_retention_days"])
+        reloaded = workbench.load_registry(self.registry_path)
+        self.assertEqual(7, reloaded.archive_retention_days)
+
+    def test_archive_settings_rejects_non_positive(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/archive/settings",
+            method="POST",
+            body={"archive_retention_days": 0},
+            headers=self._auth(server),
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("invalid-request", body["reason"])
+
+    def test_queue_exposes_archivable_and_maintenance_fields(self) -> None:
+        server = self._start_server(
+            plan_roots=(str(self.tmp_path / "plans"),)
+        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/queue")
+        self.assertEqual(200, status)
+        self.assertIn("archive_retention_days", body)
+        self.assertIn("archive_maintenance", body)
+        plan_payload = body["plans"][0]
+        self.assertIn("archivable", plan_payload)
+        self.assertIn("archive_blocker", plan_payload)
+        # A ready plan with no active lock is archivable.
+        self.assertTrue(plan_payload["archivable"])
+        self.assertIsNone(plan_payload["archive_blocker"])
+
+    def test_queue_oldest_sort_orders_missing_activity_first(self) -> None:
+        # Second plan carries a finished runner state so it has activity; the
+        # first plan has none and must sort oldest-first.
+        second_plan = self.tmp_path / "plans" / "beta"
+        write_plan(second_plan, ("pending",))
+        canonical_second = plans.canonicalize_path(second_plan)
+        second_state = state.plan_state_dir(canonical_second, self.state_dir)
+        second_state.mkdir(parents=True, exist_ok=True)
+        (second_state / events.STATE_FILE_NAME).write_text(
+            json.dumps(
+                {
+                    "plan_dir": str(canonical_second),
+                    "run_finished_at": "2026-07-03T12:00:00+00:00",
+                    "active_turn": {
+                        "last_activity_at": "2026-07-03T12:00:00+00:00"
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        server = self._start_server(
+            plan_roots=(str(self.tmp_path / "plans"),)
+        )
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/queue?sort=oldest"
+        )
+        self.assertEqual(200, status)
+        ordered = [p["plan_dir"] for p in body["plans"]]
+        self.assertEqual(str(self.canonical_plan_dir), ordered[0])
+
+    def test_queue_rejects_unknown_sort_mode(self) -> None:
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/queue?sort=bogus"
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("invalid-request", body["reason"])
 
     def test_launch_endpoint_uses_workbench_helper(self) -> None:
         server = self._start_server()
@@ -25235,7 +26128,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
             'id="wb-control-launch"',
             'id="wb-control-stop"',
             'id="wb-control-unlock"',
-            'id="wb-control-delete"',
+            'id="wb-control-archive"',
             'id="wb-profile-form"',
             'id="wb-profile-form-errors"',
             'id="wb-profile-unpin"',
@@ -25319,10 +26212,10 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         self.assertIn("handleRecoveryAction", decoded)
         self.assertIn('endpoint === "/api/unlock"', decoded)
         self.assertIn('endpoint === "/api/launch"', decoded)
-        self.assertIn('apiRequest("/api/plan/delete"', decoded)
+        self.assertIn('apiRequest("/api/plan/archive"', decoded)
         self.assertIn("await handleUnlockClick()", decoded)
         self.assertIn("await handleLaunchClick()", decoded)
-        self.assertIn("handleDeleteClick", decoded)
+        self.assertIn("handleArchiveClick", decoded)
         self.assertIn("confirm_plan_dir", decoded)
         self.assertIn("clearSelectedPlan();", decoded)
         self.assertIn("navigateToQueue();", decoded)
@@ -25337,7 +26230,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # Confirmation prompts for dangerous actions.
         self.assertIn("--unsafe-bypass", decoded)
         self.assertIn("Force-unlock this plan?", decoded)
-        self.assertIn("Permanently delete this plan?", decoded)
+        self.assertIn("Archive this plan?", decoded)
         self.assertIn("Type the full plan path to confirm", decoded)
         self.assertIn("Submit this reply", decoded)
         # Privacy guard: the reply text must never be persisted.
@@ -25623,7 +26516,8 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         self.assertIn("compareByActivity", decoded)
         self.assertIn("comparePlanRowsFor", decoded)
         self.assertIn(
-            'SORT_MODES = ["urgency", "recent", "label", "path"]', decoded
+            'SORT_MODES = ["urgency", "recent", "label", "path", "oldest"]',
+            decoded,
         )
         self.assertIn('DEFAULT_SORT_MODE = "urgency"', decoded)
         # The legacy stateOrder remains as a defensive fallback for
@@ -26153,7 +27047,8 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # SORT_MODES gains the "path" entry; the comparator branches on
         # it and uses plan_dir as the primary sort key for that mode.
         self.assertIn(
-            'SORT_MODES = ["urgency", "recent", "label", "path"]', decoded
+            'SORT_MODES = ["urgency", "recent", "label", "path", "oldest"]',
+            decoded,
         )
         self.assertIn('sortMode === "path"', decoded)
         self.assertIn("plan_dir", decoded)
@@ -26575,6 +27470,156 @@ class WorkbenchHardeningTests(unittest.TestCase):
             "active_verification": None,
         }
         state_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    # -- Cleanup mode + Archive view (session 4) ---------------------------
+
+    def test_root_html_ships_cleanup_and_archive_controls(self) -> None:
+        # Session 4 contract: the queue header gains a cleanup-mode toggle and
+        # an archive-view link; a hidden cleanup bar carries the threshold,
+        # select/clear controls, and the selected-count review bar; the row
+        # template carries a per-row cleanup checkbox; and a dedicated archive
+        # main ships the retention control, entries list, bulk-purge bar, and
+        # per-entry restore/purge row template.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/")
+        decoded = body.decode("utf-8")
+        required_ids = (
+            'id="wb-cleanup-toggle"',
+            'id="wb-archive-open"',
+            'id="wb-cleanup-bar"',
+            'id="wb-cleanup-threshold"',
+            'id="wb-cleanup-select-visible"',
+            'id="wb-cleanup-clear"',
+            'id="wb-cleanup-review"',
+            'id="wb-cleanup-count"',
+            'id="wb-cleanup-archive"',
+            'id="wb-archive"',
+            'id="wb-archive-back"',
+            'id="wb-archive-retention"',
+            'id="wb-archive-retention-save"',
+            'id="wb-archive-maintenance"',
+            'id="wb-archive-entries"',
+            'id="wb-archive-bulk"',
+            'id="wb-archive-count"',
+            'id="wb-archive-purge-selected"',
+            'id="wb-archive-clear"',
+            'id="wb-archive-row-template"',
+        )
+        for marker in required_ids:
+            self.assertIn(marker, decoded, msg=f"missing marker: {marker}")
+        # Row template carries the cleanup checkbox cell (hidden until the
+        # renderer toggles it in cleanup mode).
+        self.assertIn('data-field="cleanup-select"', decoded)
+        # Archive row template ships select + restore/purge actions plus the
+        # archived/expires fields the renderer fills.
+        self.assertIn('data-field="archive-select"', decoded)
+        self.assertIn('data-action="archive-restore"', decoded)
+        self.assertIn('data-action="archive-purge"', decoded)
+        self.assertIn('data-field="expires"', decoded)
+        # The archive-open link routes through the hash router, and the sort
+        # selector gains the oldest-activity option.
+        self.assertIn('href="#archive"', decoded)
+        self.assertIn('value="oldest"', decoded)
+        # The archive main is a top-level sibling of the inbox shell so it can
+        # take over the viewport on the #archive route.
+        shell_idx = decoded.find('id="wb-shell"')
+        archive_idx = decoded.find('id="wb-archive"')
+        self.assertNotEqual(-1, archive_idx)
+        self.assertLess(shell_idx, archive_idx)
+
+    def test_app_js_wires_cleanup_and_archive_flows(self) -> None:
+        # Session 4 contract: the cleanup and archive flows must call the
+        # session-3 endpoints with the documented payloads. Bulk archive posts
+        # a plan_dirs list; the archive view reads /api/archive and drives
+        # restore, typed-count purge, and retention settings. The detail
+        # "delete" control is renamed to an archive alias that keeps the
+        # full-path confirmation gate.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
+        decoded = body.decode("utf-8")
+        for helper in (
+            "setCleanupMode",
+            "applyCleanupMode",
+            "planIsArchivableCandidate",
+            "selectVisibleCandidates",
+            "clearCleanupSelection",
+            "handleBulkArchive",
+            "compareByOldestActivity",
+            "loadArchiveView",
+            "renderArchiveEntries",
+            "handleArchiveRestore",
+            "handleArchivePurge",
+            "handleRetentionSave",
+            "handleArchiveClick",
+        ):
+            self.assertIn(helper, decoded, msg=f"missing helper: {helper}")
+        # oldest-activity sort mode + comparator that treats missing
+        # timestamps as oldest (sorts them first).
+        self.assertIn(
+            'SORT_MODES = ["urgency", "recent", "label", "path", "oldest"]',
+            decoded,
+        )
+        self.assertIn('sortMode === "oldest"', decoded)
+        # Endpoints the flows consume (session 3 API surface).
+        for endpoint in (
+            '"/api/plans/archive"',
+            '"/api/archive"',
+            '"/api/archive/restore"',
+            '"/api/archive/delete"',
+            '"/api/archive/settings"',
+            '"/api/plan/archive"',
+        ):
+            self.assertIn(endpoint, decoded, msg=f"missing endpoint: {endpoint}")
+        # Bulk archive posts the selected plan directories.
+        self.assertIn("plan_dirs: planDirs", decoded)
+        # Permanent purge requires a typed confirm_count that must equal the
+        # number of selected entries.
+        self.assertIn("confirm_count: confirmCount", decoded)
+        self.assertIn("confirmation count must equal", decoded)
+        # Retention settings post a positive integer day count.
+        self.assertIn("archive_retention_days: days", decoded)
+        # Cleanup mode + threshold are session-scoped UI preferences.
+        self.assertIn('CLEANUP_MODE_STORAGE_KEY = "wb.cleanup"', decoded)
+        self.assertIn(
+            'CLEANUP_THRESHOLD_STORAGE_KEY = "wb.cleanupDays"', decoded
+        )
+        # Privacy regression: the cleanup/archive additions must not persist
+        # reply text.
+        import re as _re
+
+        leak_patterns = (
+            r"sessionStorage\.setItem\([^)]*reply",
+            r"localStorage\.setItem\([^)]*reply",
+            r"setItem\([^)]*wb\.reply",
+        )
+        for pattern in leak_patterns:
+            self.assertIsNone(
+                _re.search(pattern, decoded),
+                msg=f"reply text persisted via {pattern!r}",
+            )
+
+    def test_static_css_styles_cleanup_and_archive(self) -> None:
+        # Session 4 contract: the cleanup bar, per-row cleanup checkbox, and
+        # archive view ship layout primitives so they do not regress into an
+        # unstyled block.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(
+            self._base_url(server) + "/static/styles.css"
+        )
+        decoded = body.decode("utf-8")
+        for selector in (
+            ".wb-cleanup-bar",
+            ".wb-cleanup-bar__threshold",
+            ".wb-cleanup-bar__review",
+            ".wb-row__cleanup",
+            ".wb-archive",
+            ".wb-archive__retention",
+            ".wb-archive__bulk",
+            ".wb-archive-list",
+            ".wb-archive-row",
+            ".wb-archive-row__actions",
+        ):
+            self.assertIn(selector, decoded, msg=f"missing selector: {selector}")
 
     # -- Cache-Control / ETag ----------------------------------------------
 
@@ -27307,6 +28352,8 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
         self.assertIn("Recovery Center", readme)
         self.assertIn("`/api/recovery` diagnostics", readme)
         self.assertIn("copy-only repair commands", readme)
+        # Reflects Workbench cleanup/archive/retention surface.
+        self.assertIn("cleanup/archive/retention", readme)
 
     def test_docs_describe_workbench_cli_pin_unpin_registry(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
@@ -27318,13 +28365,35 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
         self.assertIn("asl workbench unpin /path/to/plan-dir", docs)
         self.assertIn("asl workbench registry --json", docs)
 
-    def test_docs_describe_workbench_plan_delete(self) -> None:
+    def test_docs_describe_workbench_cleanup_archive_workflow(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
-        self.assertIn("`POST /api/plan/delete`", docs)
-        self.assertIn("permanently delete a plan directory", docs)
-        self.assertIn('"confirm_plan_dir"', docs)
-        self.assertIn("typed\n  full-path confirmation", docs)
-        self.assertIn('reason: "active-lock"', docs)
+        expected_markers = (
+            "Cleanup mode",
+            "`sort=oldest`",
+            "`archive_blocker`",
+            "`POST /api/plan/archive`",
+            "`POST /api/plans/archive`",
+            "`POST /api/plan/delete`",
+            "backward-compatible archive alias",
+            '"confirm_plan_dir"',
+            "typed\nfull-path confirmation",
+            'reason: "active-lock"',
+            "`GET /api/archive`",
+            "`POST /api/archive/restore`",
+            "`POST /api/archive/delete`",
+            "`POST /api/archive/settings`",
+            "restore-conflict",
+            "`confirm_count`",
+            "confirmation-mismatch",
+            "`archive_retention_days`, default 30 days",
+            "auto-empties entries",
+        )
+        for marker in expected_markers:
+            self.assertIn(marker, docs, msg=f"missing docs marker: {marker!r}")
+        self.assertIn(
+            "It no longer permanently deletes a live\n  plan",
+            docs,
+        )
 
     def test_docs_describe_registry_plan_roots_discovery(self) -> None:
         docs = self._read("docs/agent-session-loop.md")

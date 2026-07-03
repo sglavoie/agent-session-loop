@@ -25,6 +25,10 @@
   const SORT_STORAGE_KEY = "wb.sort";
   const COMPLETED_STORAGE_KEY = "wb.completed";
   const SELECTED_STORAGE_KEY = "wb.selected";
+  const CLEANUP_MODE_STORAGE_KEY = "wb.cleanup";
+  const CLEANUP_THRESHOLD_STORAGE_KEY = "wb.cleanupDays";
+  const CLEANUP_DEFAULT_THRESHOLD_DAYS = 30;
+  const DAY_MS = 24 * 60 * 60 * 1000;
   const HARNESS_NAMES = ["codex", "claude", "copilot"];
   const COMMIT_MODES = ["per-session", "end"];
   const PRIMARY_STATES = [
@@ -48,12 +52,13 @@
     complete: ["complete"],
     recent: ["recent"],
   };
-  const SORT_MODES = ["urgency", "recent", "label", "path"];
+  const SORT_MODES = ["urgency", "recent", "label", "path", "oldest"];
   const SORT_MODE_LABELS = {
     urgency: "urgency",
     recent: "last activity",
     label: "label",
     path: "plan path",
+    oldest: "oldest activity",
   };
   const DEFAULT_SORT_MODE = "urgency";
 
@@ -134,6 +139,14 @@
     sortMode: DEFAULT_SORT_MODE,
     showCompleted: false,
     selectedPlan: null,
+    cleanupMode: false,
+    cleanupThresholdDays: CLEANUP_DEFAULT_THRESHOLD_DAYS,
+    cleanupSelection: new Set(),
+    archiveInFlight: false,
+    archiveEntries: [],
+    archiveSelection: new Set(),
+    archiveRetentionDays: null,
+    archiveMeta: null,
     previewPlan: null,
     lastVisiblePlans: [],
     rowsByPlan: new Map(),
@@ -160,6 +173,8 @@
     state.sortMode = restoreSortMode();
     state.showCompleted = restoreShowCompleted();
     state.selectedPlan = restoreSelectedPlan();
+    state.cleanupMode = restoreCleanupMode();
+    state.cleanupThresholdDays = restoreCleanupThreshold();
     state.shellMediaQuery =
       typeof window.matchMedia === "function"
         ? window.matchMedia(DESKTOP_SHELL_MEDIA_QUERY)
@@ -175,6 +190,8 @@
     wireSearchControl();
     wireSortControl();
     wireShowCompletedControl();
+    wireCleanupControls();
+    wireArchiveControls();
     wireEmptyStateActions();
     hydrateQueueControls();
     applyChipPressedState();
@@ -236,6 +253,21 @@
     const queueMetaEl = document.getElementById("wb-queue-meta");
     const placeholderEl = document.getElementById("wb-shell-placeholder");
     const previewEl = document.getElementById("wb-shell-preview");
+    const archiveEl = document.getElementById("wb-archive");
+    const cleanupBarEl = document.getElementById("wb-cleanup-bar");
+    if (route === "archive") {
+      if (archiveEl) archiveEl.hidden = false;
+      if (shell) shell.hidden = true;
+      if (filtersEl) filtersEl.hidden = true;
+      if (controlsEl) controlsEl.hidden = true;
+      if (cleanupBarEl) cleanupBarEl.hidden = true;
+      if (queueMetaEl) queueMetaEl.hidden = true;
+      if (warningsEl) warningsEl.hidden = true;
+      return;
+    }
+    if (archiveEl) archiveEl.hidden = true;
+    if (shell) shell.hidden = false;
+    if (cleanupBarEl) cleanupBarEl.hidden = !state.cleanupMode || route === "detail";
     if (route === "detail") {
       if (detailEl) detailEl.hidden = false;
       if (queueEl) queueEl.hidden = !desktop;
@@ -346,6 +378,9 @@
 
   function parseHashRoute() {
     const hash = window.location.hash || "";
+    if (hash === "#archive" || hash.startsWith("#archive?")) {
+      return { name: "archive", planDir: null, focus: null };
+    }
     if (!hash.startsWith("#plan")) {
       return { name: "queue", planDir: null, focus: null };
     }
@@ -368,6 +403,12 @@
     state.route = next;
     applyShellLayout();
     const desktop = isDesktopShell();
+    if (next.name === "archive") {
+      stopDetailTimer();
+      stopQueueTimer();
+      loadArchiveView();
+      return;
+    }
     if (next.name === "detail") {
       setSelectedPlan(next.planDir);
       syncSelectedPlanView();
@@ -614,6 +655,57 @@
     return setSelectedPlan(null);
   }
 
+  // Cleanup mode is a session-scoped UI preference (mode toggle + candidate
+  // threshold). The selected plan set is intentionally NOT persisted — a
+  // bulk archive is a deliberate, in-session action.
+
+  function restoreCleanupMode() {
+    try {
+      return window.sessionStorage.getItem(CLEANUP_MODE_STORAGE_KEY) === "true";
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function persistCleanupMode(value) {
+    try {
+      window.sessionStorage.setItem(
+        CLEANUP_MODE_STORAGE_KEY,
+        value ? "true" : "false"
+      );
+    } catch (err) {
+      // ignore
+    }
+  }
+
+  function restoreCleanupThreshold() {
+    try {
+      const raw = window.sessionStorage.getItem(CLEANUP_THRESHOLD_STORAGE_KEY);
+      return normalizeThresholdDays(raw);
+    } catch (err) {
+      return CLEANUP_DEFAULT_THRESHOLD_DAYS;
+    }
+  }
+
+  function persistCleanupThreshold(days) {
+    try {
+      window.sessionStorage.setItem(
+        CLEANUP_THRESHOLD_STORAGE_KEY,
+        String(normalizeThresholdDays(days))
+      );
+    } catch (err) {
+      // ignore
+    }
+  }
+
+  function normalizeThresholdDays(value) {
+    const parsed = parseInt(value, 10);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return CLEANUP_DEFAULT_THRESHOLD_DAYS;
+    }
+    return parsed;
+  }
+
   // ---------------------------------------------------------------------
   // Queue refresh loop
 
@@ -838,6 +930,13 @@
       if (rank !== 0) return rank;
       return compareLabels(a, b);
     }
+    if (sortMode === "oldest") {
+      const cmp = compareByOldestActivity(a, b);
+      if (cmp !== 0) return cmp;
+      const rank = compareByUrgencyRank(a, b);
+      if (rank !== 0) return rank;
+      return compareLabels(a, b);
+    }
     // Default: urgency tier first, freshest activity within tier, then label.
     const rank = compareByUrgencyRank(a, b);
     if (rank !== 0) return rank;
@@ -861,6 +960,17 @@
     if (tsA === null) return 1;
     if (tsB === null) return -1;
     return tsB - tsA;
+  }
+
+  function compareByOldestActivity(a, b) {
+    // Oldest activity first; missing timestamps sort as oldest (first) so
+    // never-run plans surface at the top of the cleanup candidate list.
+    const tsA = parseActivityTimestamp(a && a.last_activity_at);
+    const tsB = parseActivityTimestamp(b && b.last_activity_at);
+    if (tsA === tsB) return 0;
+    if (tsA === null) return -1;
+    if (tsB === null) return 1;
+    return tsA - tsB;
   }
 
   function compareLabels(a, b) {
@@ -1381,8 +1491,17 @@
       if (!target || typeof target.closest !== "function") return;
       if (target.closest('[data-field="label"]')) return;
       if (target.closest('[data-field="action"]')) return;
+      if (target.closest('[data-field="cleanup-select"]')) return;
       selectPlanFromRow(planDir);
     });
+    const cleanupBox = row.querySelector(
+      '[data-field="cleanup-select"] input'
+    );
+    if (cleanupBox) {
+      cleanupBox.addEventListener("change", () => {
+        setCleanupSelected(planDir, cleanupBox.checked);
+      });
+    }
     return row;
   }
 
@@ -1463,7 +1582,28 @@
     action.setAttribute("data-action-kind", plan.recommended_action || "view");
     action.onclick = (event) => handleRowAction(plan, event);
 
+    populateCleanupCell(row, plan);
     populateArtifacts(row, plan);
+  }
+
+  function populateCleanupCell(row, plan) {
+    const cell = row.querySelector('[data-field="cleanup-select"]');
+    if (!cell) return;
+    const box = cell.querySelector("input");
+    cell.hidden = !state.cleanupMode;
+    const archivable = plan.archivable !== false;
+    if (box) {
+      box.checked = state.cleanupSelection.has(plan.plan_dir);
+      box.disabled = !archivable;
+    }
+    if (archivable) {
+      cell.removeAttribute("title");
+      cell.removeAttribute("data-blocked");
+    } else {
+      cell.setAttribute("data-blocked", "true");
+      cell.title =
+        "not archivable: " + (plan.archive_blocker || "active-lock");
+    }
   }
 
   function displayName(planDir) {
@@ -1546,7 +1686,10 @@
     }
     const completedToggle = document.getElementById("wb-show-completed");
     if (completedToggle) completedToggle.checked = !!state.showCompleted;
+    const thresholdInput = document.getElementById("wb-cleanup-threshold");
+    if (thresholdInput) thresholdInput.value = String(state.cleanupThresholdDays);
     updateSearchClearVisibility();
+    applyCleanupMode();
   }
 
   function updateSearchClearVisibility() {
@@ -1605,6 +1748,509 @@
         refresh();
       }
     });
+  }
+
+  // ---------------------------------------------------------------------
+  // Cleanup mode — bulk review + archive of stale plans
+
+  function wireCleanupControls() {
+    const toggle = document.getElementById("wb-cleanup-toggle");
+    if (toggle) {
+      toggle.addEventListener("click", () => {
+        setCleanupMode(!state.cleanupMode);
+      });
+    }
+    const threshold = document.getElementById("wb-cleanup-threshold");
+    if (threshold) {
+      threshold.addEventListener("change", () => {
+        const days = normalizeThresholdDays(threshold.value);
+        state.cleanupThresholdDays = days;
+        threshold.value = String(days);
+        persistCleanupThreshold(days);
+        refresh();
+      });
+    }
+    const selectVisible = document.getElementById("wb-cleanup-select-visible");
+    if (selectVisible) {
+      selectVisible.addEventListener("click", selectVisibleCandidates);
+    }
+    const clear = document.getElementById("wb-cleanup-clear");
+    if (clear) {
+      clear.addEventListener("click", clearCleanupSelection);
+    }
+    const archiveBtn = document.getElementById("wb-cleanup-archive");
+    if (archiveBtn) {
+      archiveBtn.addEventListener("click", handleBulkArchive);
+    }
+  }
+
+  function setCleanupMode(enabled) {
+    const next = enabled === true;
+    if (state.cleanupMode === next) return;
+    state.cleanupMode = next;
+    persistCleanupMode(next);
+    if (next) {
+      // Cleanup defaults to the oldest-first ordering so the stalest plans
+      // (including never-run ones) sort to the top of the review list.
+      if (setSortMode("oldest")) {
+        const sortSelect = document.getElementById("wb-sort");
+        if (sortSelect) sortSelect.value = "oldest";
+      }
+    } else {
+      state.cleanupSelection.clear();
+    }
+    applyCleanupMode();
+    refresh();
+  }
+
+  function applyCleanupMode() {
+    const bar = document.getElementById("wb-cleanup-bar");
+    if (bar) {
+      bar.hidden = !state.cleanupMode || state.route.name !== "queue";
+    }
+    const toggle = document.getElementById("wb-cleanup-toggle");
+    if (toggle) {
+      toggle.setAttribute(
+        "aria-pressed",
+        state.cleanupMode ? "true" : "false"
+      );
+      toggle.textContent = state.cleanupMode ? "exit cleanup" : "cleanup";
+    }
+    const shell = document.getElementById("wb-shell");
+    if (shell) {
+      shell.setAttribute("data-cleanup", state.cleanupMode ? "active" : "off");
+    }
+    updateCleanupReview();
+  }
+
+  function planIsArchivableCandidate(plan) {
+    // Cleanup candidates are non-active plans whose last activity is older
+    // than the operator threshold; plans with no activity always qualify.
+    if (!plan || plan.archivable === false) return false;
+    const ts = parseActivityTimestamp(plan.last_activity_at);
+    if (ts === null) return true;
+    const ageDays = (Date.now() - ts) / DAY_MS;
+    return ageDays >= state.cleanupThresholdDays;
+  }
+
+  function selectVisibleCandidates() {
+    const visible = state.lastVisiblePlans || [];
+    visible.forEach((plan) => {
+      if (planIsArchivableCandidate(plan)) {
+        state.cleanupSelection.add(plan.plan_dir);
+      }
+    });
+    syncCleanupCheckboxes();
+    updateCleanupReview();
+  }
+
+  function clearCleanupSelection() {
+    if (state.cleanupSelection.size === 0) return;
+    state.cleanupSelection.clear();
+    syncCleanupCheckboxes();
+    updateCleanupReview();
+  }
+
+  function setCleanupSelected(planDir, selected) {
+    if (!planDir) return;
+    if (selected) {
+      state.cleanupSelection.add(planDir);
+    } else {
+      state.cleanupSelection.delete(planDir);
+    }
+    updateCleanupReview();
+  }
+
+  function syncCleanupCheckboxes() {
+    state.rowsByPlan.forEach((row, planDir) => {
+      const box = row.querySelector('[data-field="cleanup-select"] input');
+      if (box) box.checked = state.cleanupSelection.has(planDir);
+    });
+  }
+
+  function updateCleanupReview() {
+    const count = state.cleanupSelection.size;
+    const countEl = document.getElementById("wb-cleanup-count");
+    if (countEl) {
+      countEl.textContent =
+        count === 1 ? "1 plan selected" : count + " plans selected";
+    }
+    const archiveBtn = document.getElementById("wb-cleanup-archive");
+    if (archiveBtn) archiveBtn.disabled = count === 0;
+    const clearBtn = document.getElementById("wb-cleanup-clear");
+    if (clearBtn) clearBtn.disabled = count === 0;
+  }
+
+  async function handleBulkArchive() {
+    const planDirs = Array.from(state.cleanupSelection);
+    if (planDirs.length === 0) return;
+    const confirmed = window.confirm(
+      "Archive " +
+        planDirs.length +
+        " selected plan(s)? Archived plans move to the Workbench archive and can be restored until retention expires."
+    );
+    if (!confirmed) return;
+    showCleanupFeedback("", "");
+    try {
+      const body = await apiRequest("/api/plans/archive", {
+        method: "POST",
+        body: { plan_dirs: planDirs },
+      });
+      if (body && body.ok) {
+        const archived =
+          typeof body.archived_count === "number" ? body.archived_count : 0;
+        const failed =
+          typeof body.failed_count === "number" ? body.failed_count : 0;
+        state.cleanupSelection.clear();
+        updateCleanupReview();
+        showCleanupFeedback(
+          failed > 0 ? "warning" : "info",
+          "archived " + archived + (failed ? ", " + failed + " failed" : "")
+        );
+        refresh();
+      } else {
+        showCleanupFeedback(
+          "error",
+          (body && body.error) || "bulk archive failed"
+        );
+      }
+    } catch (err) {
+      showCleanupFeedback("error", describeError(err));
+    }
+  }
+
+  function showCleanupFeedback(kind, message) {
+    const el = document.getElementById("wb-cleanup-feedback");
+    if (!el) return;
+    if (!message) {
+      el.hidden = true;
+      el.textContent = "";
+      return;
+    }
+    el.hidden = false;
+    el.setAttribute("data-kind", kind);
+    el.textContent = message;
+  }
+
+  // ---------------------------------------------------------------------
+  // Archive view — restore, permanent purge, retention
+
+  function wireArchiveControls() {
+    const back = document.getElementById("wb-archive-back");
+    if (back) {
+      back.addEventListener("click", navigateToQueue);
+    }
+    const refreshBtn = document.getElementById("wb-archive-refresh");
+    if (refreshBtn) {
+      refreshBtn.addEventListener("click", loadArchiveView);
+    }
+    const retentionSave = document.getElementById("wb-archive-retention-save");
+    if (retentionSave) {
+      retentionSave.addEventListener("click", handleRetentionSave);
+    }
+    const purgeSelected = document.getElementById("wb-archive-purge-selected");
+    if (purgeSelected) {
+      purgeSelected.addEventListener("click", () => {
+        handleArchivePurge(Array.from(state.archiveSelection));
+      });
+    }
+    const clearSel = document.getElementById("wb-archive-clear");
+    if (clearSel) {
+      clearSel.addEventListener("click", () => {
+        state.archiveSelection.clear();
+        renderArchiveEntries(state.archiveEntries);
+        updateArchiveBulk();
+      });
+    }
+  }
+
+  async function loadArchiveView() {
+    if (state.archiveInFlight) return;
+    state.archiveInFlight = true;
+    setRefreshStatus("loading", "refreshing…");
+    try {
+      const body = await apiRequest("/api/archive");
+      if (!body || body.ok !== true) {
+        renderArchiveError((body && body.error) || "failed to load archive");
+        setRefreshStatus("error", "error: archive");
+        return;
+      }
+      state.archiveEntries = Array.isArray(body.entries) ? body.entries : [];
+      state.archiveRetentionDays =
+        typeof body.archive_retention_days === "number"
+          ? body.archive_retention_days
+          : null;
+      state.archiveMeta = body.archive_maintenance || null;
+      reconcileArchiveSelection();
+      renderArchiveView(body);
+      setRefreshStatus("idle", "updated " + new Date().toLocaleTimeString());
+    } catch (err) {
+      renderArchiveError(describeError(err));
+      setRefreshStatus("error", "error: " + describeError(err));
+    } finally {
+      state.archiveInFlight = false;
+    }
+  }
+
+  function reconcileArchiveSelection() {
+    const present = new Set(
+      state.archiveEntries.map((entry) => entry && entry.archive_id)
+    );
+    Array.from(state.archiveSelection).forEach((id) => {
+      if (!present.has(id)) state.archiveSelection.delete(id);
+    });
+  }
+
+  function renderArchiveError(message) {
+    const list = document.getElementById("wb-archive-entries");
+    if (!list) return;
+    list.innerHTML = "";
+    const li = document.createElement("li");
+    li.className = "wb-empty";
+    li.textContent = "archive unavailable: " + String(message);
+    list.appendChild(li);
+  }
+
+  function renderArchiveView(payload) {
+    const retentionInput = document.getElementById("wb-archive-retention");
+    if (retentionInput && typeof payload.archive_retention_days === "number") {
+      retentionInput.value = String(payload.archive_retention_days);
+    }
+    renderArchiveMaintenance(payload.archive_maintenance || null);
+    renderArchiveWarnings(payload.warnings || []);
+    renderArchiveEntries(state.archiveEntries);
+    updateArchiveBulk();
+  }
+
+  function renderArchiveMaintenance(maintenance) {
+    const el = document.getElementById("wb-archive-maintenance");
+    if (!el) return;
+    const removed =
+      maintenance && typeof maintenance.removed_count === "number"
+        ? maintenance.removed_count
+        : 0;
+    const failed =
+      maintenance && typeof maintenance.failed_count === "number"
+        ? maintenance.failed_count
+        : 0;
+    const warnings =
+      maintenance && Array.isArray(maintenance.warnings)
+        ? maintenance.warnings
+        : [];
+    if (removed === 0 && failed === 0 && warnings.length === 0) {
+      el.hidden = true;
+      el.textContent = "";
+      return;
+    }
+    el.hidden = false;
+    const parts = ["auto-empty: " + removed + " purged"];
+    if (failed) parts.push(failed + " failed");
+    if (warnings.length) parts.push(warnings.join("; "));
+    el.textContent = parts.join(" | ");
+  }
+
+  function renderArchiveWarnings(warnings) {
+    const el = document.getElementById("wb-archive-warnings");
+    if (!el) return;
+    const items = Array.isArray(warnings)
+      ? warnings.filter((w) => typeof w === "string" && w)
+      : [];
+    if (items.length === 0) {
+      el.hidden = true;
+      el.innerHTML = "";
+      return;
+    }
+    el.hidden = false;
+    el.innerHTML = "<ul></ul>";
+    const ul = el.querySelector("ul");
+    items.forEach((w) => {
+      const li = document.createElement("li");
+      li.textContent = w;
+      ul.appendChild(li);
+    });
+  }
+
+  function renderArchiveEntries(entries) {
+    const list = document.getElementById("wb-archive-entries");
+    if (!list) return;
+    list.innerHTML = "";
+    if (!Array.isArray(entries) || entries.length === 0) {
+      const li = document.createElement("li");
+      li.className = "wb-empty";
+      li.textContent = "no archived plans";
+      list.appendChild(li);
+      return;
+    }
+    const tmpl = document.getElementById("wb-archive-row-template");
+    entries.forEach((entry) => {
+      const fragment = tmpl.content.cloneNode(true);
+      const li = fragment.querySelector("li");
+      const archiveId =
+        entry && entry.archive_id ? String(entry.archive_id) : "";
+      li.setAttribute("data-archive-id", archiveId);
+      setField(
+        li,
+        "label",
+        entry.summary || displayName(entry.original_plan_dir)
+      );
+      setField(li, "path", entry.original_plan_dir || "");
+      setField(
+        li,
+        "archived",
+        "archived: " + formatLastActivity(entry.archived_at)
+      );
+      setField(
+        li,
+        "expires",
+        "expires: " + formatLastActivity(entry.expires_at)
+      );
+      const box = li.querySelector('[data-field="archive-select"] input');
+      if (box) {
+        box.checked = state.archiveSelection.has(archiveId);
+        box.addEventListener("change", () => {
+          if (box.checked) {
+            state.archiveSelection.add(archiveId);
+          } else {
+            state.archiveSelection.delete(archiveId);
+          }
+          updateArchiveBulk();
+        });
+      }
+      const restoreBtn = li.querySelector('[data-action="archive-restore"]');
+      if (restoreBtn) {
+        restoreBtn.addEventListener("click", () =>
+          handleArchiveRestore(archiveId)
+        );
+      }
+      const purgeBtn = li.querySelector('[data-action="archive-purge"]');
+      if (purgeBtn) {
+        purgeBtn.addEventListener("click", () =>
+          handleArchivePurge([archiveId])
+        );
+      }
+      list.appendChild(li);
+    });
+  }
+
+  function updateArchiveBulk() {
+    const count = state.archiveSelection.size;
+    const countEl = document.getElementById("wb-archive-count");
+    if (countEl) {
+      countEl.textContent =
+        count === 1 ? "1 entry selected" : count + " entries selected";
+    }
+    const purgeBtn = document.getElementById("wb-archive-purge-selected");
+    if (purgeBtn) purgeBtn.disabled = count === 0;
+    const clearBtn = document.getElementById("wb-archive-clear");
+    if (clearBtn) clearBtn.disabled = count === 0;
+  }
+
+  async function handleArchiveRestore(archiveId) {
+    if (!archiveId) return;
+    showArchiveFeedback("", "");
+    try {
+      const body = await apiRequest("/api/archive/restore", {
+        method: "POST",
+        body: { archive_id: archiveId },
+      });
+      if (body && body.ok) {
+        showArchiveFeedback("info", "restored " + archiveId);
+        loadArchiveView();
+      } else {
+        showArchiveFeedback("error", (body && body.error) || "restore failed");
+      }
+    } catch (err) {
+      showArchiveFeedback("error", describeError(err));
+    }
+  }
+
+  async function handleArchivePurge(archiveIds) {
+    const ids = Array.isArray(archiveIds) ? archiveIds.filter(Boolean) : [];
+    if (ids.length === 0) return;
+    const typed = window.prompt(
+      "Permanently purge " +
+        ids.length +
+        " archived plan(s)? This cannot be undone. Type the number of entries to confirm:",
+      ""
+    );
+    if (typed === null) return;
+    const confirmCount = parseInt((typed || "").trim(), 10);
+    if (!Number.isFinite(confirmCount) || confirmCount !== ids.length) {
+      showArchiveFeedback(
+        "error",
+        "confirmation count must equal " + ids.length
+      );
+      return;
+    }
+    showArchiveFeedback("", "");
+    try {
+      const body = await apiRequest("/api/archive/delete", {
+        method: "POST",
+        body: { archive_ids: ids, confirm_count: confirmCount },
+      });
+      if (body && body.ok) {
+        const removed =
+          typeof body.removed_count === "number" ? body.removed_count : 0;
+        ids.forEach((id) => state.archiveSelection.delete(id));
+        showArchiveFeedback("info", "purged " + removed);
+        loadArchiveView();
+      } else {
+        showArchiveFeedback("error", (body && body.error) || "purge failed");
+      }
+    } catch (err) {
+      showArchiveFeedback("error", describeError(err));
+    }
+  }
+
+  async function handleRetentionSave() {
+    const input = document.getElementById("wb-archive-retention");
+    if (!input) return;
+    const days = parseInt((input.value || "").trim(), 10);
+    if (!Number.isFinite(days) || days < 1) {
+      showArchiveFeedback(
+        "error",
+        "retention must be a positive number of days"
+      );
+      return;
+    }
+    showArchiveFeedback("", "");
+    try {
+      const body = await apiRequest("/api/archive/settings", {
+        method: "POST",
+        body: { archive_retention_days: days },
+      });
+      if (body && body.ok) {
+        state.archiveRetentionDays =
+          typeof body.archive_retention_days === "number"
+            ? body.archive_retention_days
+            : days;
+        showArchiveFeedback(
+          "info",
+          "retention set to " + state.archiveRetentionDays + " days"
+        );
+        loadArchiveView();
+      } else {
+        showArchiveFeedback(
+          "error",
+          (body && body.error) || "failed to update retention"
+        );
+      }
+    } catch (err) {
+      showArchiveFeedback("error", describeError(err));
+    }
+  }
+
+  function showArchiveFeedback(kind, message) {
+    const el = document.getElementById("wb-archive-feedback");
+    if (!el) return;
+    if (!message) {
+      el.hidden = true;
+      el.textContent = "";
+      return;
+    }
+    el.hidden = false;
+    el.setAttribute("data-kind", kind);
+    el.textContent = message;
   }
 
   function wireEmptyStateActions() {
@@ -2994,9 +3640,9 @@
     if (unlock) {
       unlock.addEventListener("click", handleUnlockClick);
     }
-    const deletePlan = document.getElementById("wb-control-delete");
-    if (deletePlan) {
-      deletePlan.addEventListener("click", handleDeleteClick);
+    const archivePlan = document.getElementById("wb-control-archive");
+    if (archivePlan) {
+      archivePlan.addEventListener("click", handleArchiveClick);
     }
   }
 
@@ -3127,20 +3773,20 @@
     }
   }
 
-  async function handleDeleteClick() {
+  async function handleArchiveClick() {
     const plan =
       state.detailPlan && state.detailPlan.plan_dir ? state.detailPlan : null;
     const planDir = (plan && plan.plan_dir) || state.route.planDir;
     if (!planDir) return;
     const typed = window.prompt(
-      "Permanently delete this plan? This removes the plan directory, Workbench pin, and ASL state. Type the full plan path to confirm:\n\n" +
+      "Archive this plan? This moves the plan directory, Workbench pin, and ASL state into the archive, where it can be restored until retention expires. Type the full plan path to confirm:\n\n" +
         planDir,
       ""
     );
     if (typed === null) return;
     const confirmPlanDir = (typed || "").trim();
     if (!confirmPlanDir) {
-      showControlsFeedback("error", "delete confirmation required");
+      showControlsFeedback("error", "archive confirmation required");
       return;
     }
     if (confirmPlanDir !== planDir) {
@@ -3149,7 +3795,7 @@
     }
     showControlsFeedback("", "");
     try {
-      const body = await apiRequest("/api/plan/delete", {
+      const body = await apiRequest("/api/plan/archive", {
         method: "POST",
         body: {
           plan_dir: planDir,
@@ -3166,7 +3812,7 @@
       } else {
         showControlsFeedback(
           "error",
-          (body && body.error) || "delete failed"
+          (body && body.error) || "archive failed"
         );
       }
     } catch (err) {

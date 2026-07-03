@@ -1033,8 +1033,8 @@ harness, consuming the paused state, or writing the preview payload to
 surfaces every plan ASL can see in one local browser UI. It is
 intentionally loopback, single-user software: there is no remote-access
 mode, no multi-tenant auth, and no scheduling logic beyond a thin
-renderer over the runner, registry, control queue, launch, and unlock
-helpers.
+renderer over the runner, registry, cleanup/archive storage, control
+queue, launch, and unlock helpers.
 
 ```bash
 asl workbench
@@ -1095,9 +1095,12 @@ after a restart.
 - The default bind is `127.0.0.1`; the server never reaches outside the
   local host without an SSH tunnel or other operator-initiated forward.
 - Every mutating endpoint (`POST /api/registry/pin`,
-  `POST /api/registry/unpin`, `POST /api/plan/delete`,
-  `POST /api/launch`, `POST /api/reply`, `POST /api/control/...`,
-  `POST /api/unlock`) requires
+  `POST /api/registry/unpin`, `POST /api/plan/archive`,
+  `POST /api/plans/archive`, `POST /api/plan/delete`,
+  `POST /api/archive/restore`, `POST /api/archive/delete`,
+  `POST /api/archive/settings`, `POST /api/launch`,
+  `POST /api/reply`, `POST /api/control/...`, `POST /api/unlock`)
+  requires
   an `Authorization: Bearer <token>` header. The token is generated with
   `secrets.token_urlsafe(32)` at startup and compared with
   `secrets.compare_digest`.
@@ -1105,8 +1108,9 @@ after a restart.
   `/api/state`,
   `/api/events`, `/api/logs`, `/api/last-message`, `/api/result`,
   `/api/verification`, `/api/commits`, `/api/progress`,
-  `/api/final-review`, `/api/questions`, `/api/registry`, `/api/artifacts`)
-  are **not** authenticated. They are loopback-only by construction. If
+  `/api/final-review`, `/api/questions`, `/api/registry`,
+  `/api/archive`, `/api/artifacts`) are **not** authenticated. They are
+  loopback-only by construction. If
   the Workbench is ever exposed beyond the local machine (e.g., SSH port
   forwarding, a reverse proxy), plan inventory and resolver prompts —
   including paused-Q&A `last-message` text — will leak. Treat the URL the
@@ -1177,6 +1181,11 @@ canonical `plan-root` discovery source label, so the queue surfaces
 plans from registry `plan_roots` even when the operator did not pass
 `--plan-root` on the command line.
 
+The registry also stores `archive_retention_days`, default 30 days.
+Invalid or missing values load as the default with a recoverable warning,
+and `POST /api/archive/settings` is the supported way for the UI to
+update the retention window.
+
 ### Plan discovery
 
 Discovery sources, in stable canonical order, are:
@@ -1196,6 +1205,50 @@ both `manifest.md` and `context.md`; nothing deeper is walked. Each
 discovered plan dedup-merges across sources and preserves the full list
 of sources that surfaced it.
 
+Archived entries live under `<state-root>/archive/<archive_id>/`.
+Archive storage is outside normal plan-root discovery, so archived plans
+do not reappear in the queue until they are restored.
+
+### Cleanup and archive workflow
+
+Cleanup mode is a queue review mode for old, inactive work. It switches
+the queue to `sort=oldest`, treats plans with no `last_activity_at` as
+oldest, and uses the UI threshold control to select candidates older
+than the chosen number of days. Queue payloads include `archivable` and
+`archive_blocker`; active runner locks are not archivable and surface
+`archive_blocker: "active-lock"`.
+
+Archiving moves the plan directory and the matching ASL state directory
+together into the Workbench state root, along with available pin/profile
+metadata and a summary snapshot. The detail action uses
+`POST /api/plan/archive`; `POST /api/plan/delete` remains as a
+backward-compatible archive alias for older clients. Both single-plan
+routes require the same typed
+full-path confirmation through `"confirm_plan_dir"`, refuse arbitrary
+non-plan paths, and return `409` with `reason: "active-lock"` when an
+active lock is present.
+
+Bulk cleanup uses `POST /api/plans/archive` with `plan_dirs`. The server
+archives each entry independently and returns per-entry results plus
+`archived_count` and `failed_count`, so one blocked or invalid plan does
+not prevent the rest from being archived.
+
+The Archive view reads `GET /api/archive`, which returns archived
+entries, `archive_retention_days`, each entry's `expires_at`, and recent
+auto-empty results under `archive_maintenance`. `POST
+/api/archive/restore` restores the archived plan and state back to their
+original paths and restores pin/profile metadata when present. Restore
+fails with `409` and `reason: "restore-conflict"` if either destination
+that would be written already exists.
+
+Permanent purge only applies to archive entries, not live plans. `POST
+/api/archive/delete` accepts one or more `archive_ids` and requires a
+typed `confirm_count` equal to the selected count; a mismatch returns
+`reason: "confirmation-mismatch"` and leaves every entry in place. Archive
+maintenance auto-empties entries whose age is at least
+`archive_retention_days`; it runs during queue and archive polls, so no
+separate daemon is required.
+
 ### HTTP API surface
 
 Read endpoints (loopback-open, no token required):
@@ -1214,6 +1267,10 @@ Read endpoints (loopback-open, no token required):
   carries the additive triage fields documented under
   [Triage queue payload](#triage-queue-payload) so the frontend can
   sort, group, and search without re-deriving status from raw counts.
+  `GET /api/queue?sort=oldest` sorts by oldest `last_activity_at` first
+  and treats missing activity as oldest. Queue responses also include
+  `archive_retention_days`, `archive_maintenance`, and per-plan
+  `archivable` / `archive_blocker` fields used by Cleanup mode.
 - `GET /api/plan?plan_dir=<path>` — single-plan detail. The payload
   carries the same additive triage fields as `/api/queue` (`urgency_rank`,
   `urgency_group`, `activity_label`, `concise_reason`, `last_activity_at`,
@@ -1255,19 +1312,42 @@ Read endpoints (loopback-open, no token required):
   context for the paused turn (mirrors `asl questions --json`).
 - `GET /api/artifacts?plan_dir=<path>` — artifact paths and metadata
   for the latest run.
+- `GET /api/archive` — archive entries plus the current
+  `archive_retention_days`, computed `expires_at` values, and the latest
+  archive-maintenance auto-empty result.
 
 Mutating endpoints (bearer-token required):
 
 - `POST /api/registry/pin` — upsert a `RegistryPin`. Payload:
   `{"plan_dir": "...", "label": "...", "profile": {...}}`.
 - `POST /api/registry/unpin` — `{"plan_dir": "..."}`.
-- `POST /api/plan/delete` — permanently delete a plan directory from
-  disk, remove its Workbench pin, and remove its ASL state directory.
-  Payload: `{"plan_dir": "...", "confirm_plan_dir": "..."}`. The two
-  paths must canonicalize to the same full path, matching the UI's typed
+- `POST /api/plan/archive` — archive one live or discovered plan by
+  moving the plan directory, matching ASL state directory, and pin/profile
+  metadata into the Workbench archive root. Payload:
+  `{"plan_dir": "...", "confirm_plan_dir": "..."}`. The two paths must
+  canonicalize to the same full path, matching the UI's typed
   full-path confirmation. The server refuses arbitrary non-plan paths
   and returns `409` with `reason: "active-lock"` when an active runner
-  lock is present; stale locks and stale state are deleted with the plan.
+  lock is present.
+- `POST /api/plans/archive` — bulk archive. Payload:
+  `{"plan_dirs": ["..."]}`. Returns per-entry `results` plus
+  `archived_count` and `failed_count`; failures are isolated to the
+  affected entries.
+- `POST /api/plan/delete` — backward-compatible archive alias for
+  `POST /api/plan/archive`. It no longer permanently deletes a live
+  plan; clients that need permanent removal should purge the resulting
+  archive entry through `POST /api/archive/delete`.
+- `POST /api/archive/restore` — restore one archive entry to its
+  original plan and state paths. Payload: `{"archive_id": "..."}`.
+  Returns `409` with `reason: "restore-conflict"` if a destination path
+  that would be written already exists.
+- `POST /api/archive/delete` — permanently purge one or many archive
+  entries. Payload: `{"archive_ids": ["..."], "confirm_count": N}`.
+  `confirm_count` must equal the number of selected IDs; otherwise the
+  request returns `reason: "confirmation-mismatch"` and removes nothing.
+- `POST /api/archive/settings` — update the global archive retention
+  window. Payload: `{"archive_retention_days": N}` with a positive
+  integer day count.
 - `POST /api/launch` — spawn `asl run` for a plan. Payload:
   `{"plan_dir": "...", "profile": {...}}`. Returns `pid`, `argv`
   (with reply prompts redacted), `plan_dir`, `profile`, `reply_provided`,

@@ -18,10 +18,12 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 import fcntl
 import json
 import os
 from pathlib import Path
+import secrets
 import shutil
 import shlex
 import subprocess
@@ -151,6 +153,15 @@ REGISTRY_FILE_NAME = "workbench.json"
 REGISTRY_SCHEMA_VERSION = 1
 DEFAULT_PLANS_DIR_NAME = "agent-plans"
 
+# Archive storage lives under the active Workbench state root so archived
+# plans and their ASL state travel together and stay outside normal plan
+# discovery. Layout: ``<state_root>/archive/<archive_id>/{archive.json,plan,state}``.
+DEFAULT_ARCHIVE_RETENTION_DAYS = 30
+ARCHIVE_DIR_NAME = "archive"
+ARCHIVE_METADATA_FILE_NAME = "archive.json"
+ARCHIVE_PLAN_DIR_NAME = "plan"
+ARCHIVE_STATE_DIR_NAME = "state"
+
 CommitMode = Literal["per-session", "end"]
 COMMIT_MODES: tuple[CommitMode, ...] = ("per-session", "end")
 
@@ -178,6 +189,25 @@ class WorkbenchError(Exception):
 
 class PlanDeleteError(Exception):
     """Raised when a Workbench plan deletion cannot be completed."""
+
+    def __init__(self, reason: str, message: str, *, status: int = 400) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.message = message
+        self.status = status
+
+
+class ArchiveError(Exception):
+    """Raised when an archive, restore, or purge operation cannot complete.
+
+    Carries a stable ``reason`` string and an HTTP-style ``status`` so the
+    Workbench API handlers (session 3) can translate helper failures into
+    response payloads without re-deriving classification logic. Archive
+    operations reuse the same safety-check reasons as :class:`PlanDeleteError`
+    (``invalid-plan``, ``registry-unreadable``, ``state-error``,
+    ``active-lock``, ``os-error``) plus archive-specific reasons
+    (``restore-conflict``, ``not-found``, ``invalid-archive``).
+    """
 
     def __init__(self, reason: str, message: str, *, status: int = 400) -> None:
         super().__init__(message)
@@ -243,6 +273,7 @@ class WorkbenchRegistry:
     schema_version: int = REGISTRY_SCHEMA_VERSION
     pins: tuple[RegistryPin, ...] = ()
     plan_roots: tuple[str, ...] = ()
+    archive_retention_days: int = DEFAULT_ARCHIVE_RETENTION_DAYS
     path: Path | None = None
     warnings: tuple[str, ...] = ()
 
@@ -251,6 +282,7 @@ class WorkbenchRegistry:
             "schema_version": self.schema_version,
             "pins": [pin.to_payload() for pin in self.pins],
             "plan_roots": list(self.plan_roots),
+            "archive_retention_days": self.archive_retention_days,
             "path": str(self.path) if self.path is not None else None,
             "warnings": list(self.warnings),
         }
@@ -314,6 +346,173 @@ class DeletePlanResult:
             "state_removed": self.state_removed,
             "pin_removed": self.pin_removed,
             "registry_path": str(self.registry_path),
+        }
+
+
+@dataclass(frozen=True)
+class ArchiveMetadata:
+    """One archived plan entry stored under the Workbench archive root.
+
+    Persisted fields (``archive.json``): ``archive_id``, ``original_plan_dir``,
+    ``archived_at``, ``expires_at``, ``summary``, ``pin`` (the archived
+    registry pin, if any), and the ``plan_archived`` / ``state_archived``
+    booleans recording whether the plan directory and its ASL state were
+    present at archive time. ``archive_dir`` / ``plan_path`` / ``state_path``
+    are derived from the entry's on-disk location when loaded and are surfaced
+    in API payloads; they are not part of the stored JSON.
+    """
+
+    archive_id: str
+    original_plan_dir: str
+    archived_at: str
+    expires_at: str
+    summary: str | None = None
+    pin: RegistryPin | None = None
+    plan_archived: bool = False
+    state_archived: bool = False
+    archive_dir: Path | None = None
+    plan_path: Path | None = None
+    state_path: Path | None = None
+    warnings: tuple[str, ...] = ()
+
+    def to_storage_payload(self) -> dict[str, Any]:
+        """Return the persisted JSON body (no derived paths or warnings)."""
+        return {
+            "archive_id": self.archive_id,
+            "original_plan_dir": self.original_plan_dir,
+            "archived_at": self.archived_at,
+            "expires_at": self.expires_at,
+            "summary": self.summary,
+            "pin": self.pin.to_payload() if self.pin is not None else None,
+            "plan_archived": self.plan_archived,
+            "state_archived": self.state_archived,
+        }
+
+    def to_payload(self) -> dict[str, Any]:
+        payload = self.to_storage_payload()
+        payload.update(
+            {
+                "archive_dir": (
+                    str(self.archive_dir) if self.archive_dir is not None else None
+                ),
+                "plan_path": (
+                    str(self.plan_path) if self.plan_path is not None else None
+                ),
+                "state_path": (
+                    str(self.state_path) if self.state_path is not None else None
+                ),
+                "warnings": list(self.warnings),
+            }
+        )
+        return payload
+
+
+@dataclass(frozen=True)
+class ArchiveListing:
+    """All readable archive entries plus recoverable warnings."""
+
+    entries: tuple[ArchiveMetadata, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "entries": [entry.to_payload() for entry in self.entries],
+            "warnings": list(self.warnings),
+        }
+
+
+@dataclass(frozen=True)
+class ArchivePlanResult:
+    """Metadata returned after archiving a Workbench-managed plan."""
+
+    archive_id: str
+    plan_dir: Path
+    metadata: ArchiveMetadata
+    plan_archived: bool
+    state_archived: bool
+    pin_archived: bool
+    registry_path: Path
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "archive_id": self.archive_id,
+            "plan_dir": str(self.plan_dir),
+            "metadata": self.metadata.to_payload(),
+            "plan_archived": self.plan_archived,
+            "state_archived": self.state_archived,
+            "pin_archived": self.pin_archived,
+            "registry_path": str(self.registry_path),
+        }
+
+
+@dataclass(frozen=True)
+class RestoreArchiveResult:
+    """Metadata returned after restoring an archived plan to its origin."""
+
+    archive_id: str
+    original_plan_dir: Path
+    plan_restored: bool
+    state_dir: Path
+    state_restored: bool
+    pin_restored: bool
+    registry_path: Path | None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "archive_id": self.archive_id,
+            "original_plan_dir": str(self.original_plan_dir),
+            "plan_restored": self.plan_restored,
+            "state_dir": str(self.state_dir),
+            "state_restored": self.state_restored,
+            "pin_restored": self.pin_restored,
+            "registry_path": (
+                str(self.registry_path) if self.registry_path is not None else None
+            ),
+        }
+
+
+@dataclass(frozen=True)
+class ArchivePurgeOutcome:
+    """Per-entry result of a permanent purge or auto-empty pass."""
+
+    archive_id: str
+    removed: bool
+    error: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "archive_id": self.archive_id,
+            "removed": self.removed,
+            "error": self.error,
+        }
+
+
+@dataclass(frozen=True)
+class ArchivePurgeResult:
+    """Aggregate result of purging one or many archive entries.
+
+    ``outcomes`` records one entry per requested (or expired) archive id so
+    callers can report partial success: one blocked entry never prevents the
+    others from being processed.
+    """
+
+    outcomes: tuple[ArchivePurgeOutcome, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def removed_count(self) -> int:
+        return sum(1 for outcome in self.outcomes if outcome.removed)
+
+    @property
+    def failed_count(self) -> int:
+        return sum(1 for outcome in self.outcomes if outcome.error is not None)
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "outcomes": [outcome.to_payload() for outcome in self.outcomes],
+            "removed_count": self.removed_count,
+            "failed_count": self.failed_count,
+            "warnings": list(self.warnings),
         }
 
 
@@ -483,6 +682,26 @@ def _coerce_schema_version(raw: Any, *, warnings: list[str]) -> int:
     return raw
 
 
+def _coerce_retention_days(raw: Any, *, warnings: list[str]) -> int:
+    if raw is None:
+        # Old schema-v1 registries predate archive support; default silently.
+        return DEFAULT_ARCHIVE_RETENTION_DAYS
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        warnings.append(
+            "archive_retention_days: expected positive integer, got "
+            f"{type(raw).__name__}; using default "
+            f"{DEFAULT_ARCHIVE_RETENTION_DAYS}"
+        )
+        return DEFAULT_ARCHIVE_RETENTION_DAYS
+    if raw < 1:
+        warnings.append(
+            f"archive_retention_days: invalid value {raw!r}; using default "
+            f"{DEFAULT_ARCHIVE_RETENTION_DAYS}"
+        )
+        return DEFAULT_ARCHIVE_RETENTION_DAYS
+    return raw
+
+
 def load_registry(path: str | Path | None = None) -> WorkbenchRegistry:
     """Load the Workbench registry, returning an empty one when absent.
 
@@ -540,11 +759,15 @@ def load_registry(path: str | Path | None = None) -> WorkbenchRegistry:
         pins.append(pin)
 
     plan_roots = _coerce_plan_roots(raw.get("plan_roots"), warnings=warnings)
+    archive_retention_days = _coerce_retention_days(
+        raw.get("archive_retention_days"), warnings=warnings
+    )
 
     return WorkbenchRegistry(
         schema_version=schema_version,
         pins=tuple(pins),
         plan_roots=plan_roots,
+        archive_retention_days=archive_retention_days,
         path=registry_path,
         warnings=tuple(warnings),
     )
@@ -562,6 +785,7 @@ def save_registry(
         "schema_version": REGISTRY_SCHEMA_VERSION,
         "pins": [pin.to_payload() for pin in registry.pins],
         "plan_roots": list(registry.plan_roots),
+        "archive_retention_days": registry.archive_retention_days,
     }
     serialized = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     fd, tmp_path = tempfile.mkstemp(
@@ -617,6 +841,17 @@ def remove_pin(
         raise WorkbenchError(f"invalid plan_dir for pin removal: {plan_dir!r}")
     remaining = tuple(pin for pin in registry.pins if pin.plan_dir != canonical)
     return replace(registry, pins=remaining)
+
+
+def set_archive_retention_days(
+    registry: WorkbenchRegistry, days: int
+) -> WorkbenchRegistry:
+    """Return a new registry with ``archive_retention_days`` set to ``days``."""
+    if isinstance(days, bool) or not isinstance(days, int) or days < 1:
+        raise WorkbenchError(
+            f"archive_retention_days must be a positive integer: {days!r}"
+        )
+    return replace(registry, archive_retention_days=days)
 
 
 @contextmanager
@@ -992,19 +1227,30 @@ def _is_discovered_plan(
     return any(discovered.plan_dir == plan_dir for discovered in discovery.plans)
 
 
-def delete_plan(
+def _validate_plan_for_mutation(
     plan_dir: str | Path,
     *,
-    state_dir: str | Path | None = None,
-    registry_path: str | Path | None = None,
-    plan_roots: Iterable[str | Path] = (),
-    include_default_dirs: bool = True,
-) -> DeletePlanResult:
-    """Permanently delete a Workbench-visible plan and its local metadata."""
+    verb: str,
+    error_cls: type[PlanDeleteError] | type[ArchiveError],
+    state_dir: str | Path | None,
+    registry_path: str | Path | None,
+    plan_roots: Iterable[str | Path],
+    include_default_dirs: bool,
+) -> tuple[Path, WorkbenchRegistry]:
+    """Run the shared delete/archive safety gate for a Workbench plan.
+
+    Both :func:`delete_plan` (permanent purge of a live plan) and
+    :func:`archive_plan` must reject the same unsafe inputs: uncanonicalizable
+    paths, unreadable registries, arbitrary non-plan directories, actively
+    locked plans, and plan paths that exist but are not directories. Raising a
+    caller-supplied ``error_cls`` (with reasons/status matching the original
+    ``delete_plan`` guards) keeps the two entry points from drifting apart.
+    Returns the canonical plan directory and the loaded registry.
+    """
     try:
         canonical = plans.canonicalize_path(plan_dir)
     except (OSError, ValueError) as error:
-        raise PlanDeleteError(
+        raise error_cls(
             "invalid-plan",
             f"invalid plan directory {plan_dir!r}: {error}",
         ) from error
@@ -1012,7 +1258,7 @@ def delete_plan(
     try:
         registry = load_registry(registry_path)
     except WorkbenchError as error:
-        raise PlanDeleteError(
+        raise error_cls(
             "registry-unreadable", str(error), status=500
         ) from error
 
@@ -1024,30 +1270,52 @@ def delete_plan(
         include_default_dirs=include_default_dirs,
     )
     if not discovered and not _looks_like_plan_dir(canonical):
-        raise PlanDeleteError(
+        raise error_cls(
             "invalid-plan",
-            f"refusing to delete non-plan path: {canonical}",
+            f"refusing to {verb} non-plan path: {canonical}",
         )
 
     try:
         lock_info = state.read_lock_info(canonical, state_dir)
     except (OSError, ValueError) as error:
-        raise PlanDeleteError(
+        raise error_cls(
             "state-error",
             f"cannot inspect plan lock for {canonical}: {error}",
         ) from error
     if lock_info is not None and lock_info.active:
-        raise PlanDeleteError(
+        raise error_cls(
             "active-lock",
             f"active lock held by pid {lock_info.pid} at {lock_info.path}",
             status=409,
         )
 
     if canonical.exists() and not canonical.is_dir():
-        raise PlanDeleteError(
+        raise error_cls(
             "invalid-plan",
             f"plan path is not a directory: {canonical}",
         )
+
+    return canonical, registry
+
+
+def delete_plan(
+    plan_dir: str | Path,
+    *,
+    state_dir: str | Path | None = None,
+    registry_path: str | Path | None = None,
+    plan_roots: Iterable[str | Path] = (),
+    include_default_dirs: bool = True,
+) -> DeletePlanResult:
+    """Permanently delete a Workbench-visible plan and its local metadata."""
+    canonical, _registry = _validate_plan_for_mutation(
+        plan_dir,
+        verb="delete",
+        error_cls=PlanDeleteError,
+        state_dir=state_dir,
+        registry_path=registry_path,
+        plan_roots=plan_roots,
+        include_default_dirs=include_default_dirs,
+    )
 
     plan_state_dir = state.plan_state_dir(canonical, state_dir)
     state_removed = False
@@ -1099,6 +1367,578 @@ def delete_plan(
         pin_removed=pin_removed,
         registry_path=written_path,
     )
+
+
+def archive_root(state_dir: str | Path | None = None) -> Path:
+    """Return the archive root directory under the active state root.
+
+    Archived entries live at ``<state_root>/archive/<archive_id>/``. This
+    directory is a sibling of the per-plan state directories, so the
+    one-level-deep state scan in :func:`_iter_state_plan_dirs` never surfaces
+    archived plans as active plan roots.
+    """
+    return state.state_root(state_dir) / ARCHIVE_DIR_NAME
+
+
+def _is_valid_archive_id(archive_id: str) -> bool:
+    """Reject empty ids or ids that would escape the archive root."""
+    if not isinstance(archive_id, str) or not archive_id.strip():
+        return False
+    if archive_id in (".", ".."):
+        return False
+    return "/" not in archive_id and "\\" not in archive_id and "\0" not in archive_id
+
+
+def new_archive_id() -> str:
+    """Return a sortable, collision-resistant archive id.
+
+    Combines a compact UTC timestamp prefix (so listings sort oldest-first by
+    name) with random hex so concurrent archives in the same second cannot
+    collide.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{stamp}-{secrets.token_hex(6)}"
+
+
+def archive_entry_dir(
+    archive_id: str, state_dir: str | Path | None = None
+) -> Path:
+    """Return the directory that holds one archive entry."""
+    if not _is_valid_archive_id(archive_id):
+        raise WorkbenchError(f"invalid archive id: {archive_id!r}")
+    return archive_root(state_dir) / archive_id
+
+
+def archive_metadata_path(
+    archive_id: str, state_dir: str | Path | None = None
+) -> Path:
+    return archive_entry_dir(archive_id, state_dir) / ARCHIVE_METADATA_FILE_NAME
+
+
+def archive_plan_path(
+    archive_id: str, state_dir: str | Path | None = None
+) -> Path:
+    return archive_entry_dir(archive_id, state_dir) / ARCHIVE_PLAN_DIR_NAME
+
+
+def archive_state_path(
+    archive_id: str, state_dir: str | Path | None = None
+) -> Path:
+    return archive_entry_dir(archive_id, state_dir) / ARCHIVE_STATE_DIR_NAME
+
+
+def compute_expires_at(archived_at: str, retention_days: int) -> str:
+    """Return the ISO expiry timestamp for an entry archived at ``archived_at``.
+
+    ``retention_days`` is clamped to a non-negative count; a value of ``0``
+    yields an expiry equal to the archive time (immediately purgeable).
+    """
+    try:
+        archived = datetime.fromisoformat(archived_at)
+    except (TypeError, ValueError) as error:
+        raise WorkbenchError(
+            f"invalid archived_at timestamp {archived_at!r}: {error}"
+        ) from error
+    days = max(0, int(retention_days))
+    return (archived + timedelta(days=days)).isoformat()
+
+
+def _coerce_archive_metadata(
+    raw: Any, *, entry_dir: Path, warnings: list[str], context: str
+) -> ArchiveMetadata | None:
+    if not isinstance(raw, Mapping):
+        warnings.append(f"{context}: metadata must be a JSON object; skipping")
+        return None
+    archive_id = _coerce_optional_str(raw.get("archive_id"))
+    if archive_id is None or not _is_valid_archive_id(archive_id):
+        warnings.append(f"{context}: missing or invalid archive_id; skipping")
+        return None
+    original_plan_dir = _coerce_optional_str(raw.get("original_plan_dir"))
+    if original_plan_dir is None:
+        warnings.append(f"{context}: missing original_plan_dir; skipping")
+        return None
+    archived_at = _coerce_optional_str(raw.get("archived_at"))
+    expires_at = _coerce_optional_str(raw.get("expires_at"))
+    if archived_at is None or expires_at is None:
+        warnings.append(f"{context}: missing archived_at/expires_at; skipping")
+        return None
+    summary = _coerce_optional_str(raw.get("summary"))
+    pin_raw = raw.get("pin")
+    pin = (
+        _coerce_pin(pin_raw, warnings=warnings, index=0)
+        if pin_raw is not None
+        else None
+    )
+    plan_archived = bool(raw.get("plan_archived", False))
+    state_archived = bool(raw.get("state_archived", False))
+    return ArchiveMetadata(
+        archive_id=archive_id,
+        original_plan_dir=original_plan_dir,
+        archived_at=archived_at,
+        expires_at=expires_at,
+        summary=summary,
+        pin=pin,
+        plan_archived=plan_archived,
+        state_archived=state_archived,
+        archive_dir=entry_dir,
+        plan_path=entry_dir / ARCHIVE_PLAN_DIR_NAME,
+        state_path=entry_dir / ARCHIVE_STATE_DIR_NAME,
+    )
+
+
+def save_archive_metadata(
+    metadata: ArchiveMetadata, state_dir: str | Path | None = None
+) -> Path:
+    """Write one archive entry's ``archive.json`` atomically."""
+    entry_dir = archive_entry_dir(metadata.archive_id, state_dir)
+    entry_dir.mkdir(parents=True, exist_ok=True)
+    meta_path = entry_dir / ARCHIVE_METADATA_FILE_NAME
+    serialized = (
+        json.dumps(metadata.to_storage_payload(), indent=2, sort_keys=True) + "\n"
+    )
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{ARCHIVE_METADATA_FILE_NAME}.",
+        dir=str(entry_dir),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(serialized)
+        os.replace(tmp_path, meta_path)
+    except OSError as error:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise WorkbenchError(
+            f"cannot write archive metadata {meta_path}: {error}"
+        ) from error
+    return meta_path
+
+
+def load_archive_metadata(
+    archive_id: str, state_dir: str | Path | None = None
+) -> ArchiveMetadata | None:
+    """Load one archive entry, returning ``None`` when it is absent.
+
+    Malformed JSON or an unreadable file raises :class:`WorkbenchError`.
+    Recoverable field-level problems are attached as ``warnings`` on the
+    returned metadata.
+    """
+    entry_dir = archive_entry_dir(archive_id, state_dir)
+    meta_path = entry_dir / ARCHIVE_METADATA_FILE_NAME
+    if not meta_path.exists():
+        return None
+    try:
+        raw_text = meta_path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise WorkbenchError(
+            f"cannot read archive metadata {meta_path}: {error}"
+        ) from error
+    try:
+        raw = json.loads(raw_text)
+    except json.JSONDecodeError as error:
+        raise WorkbenchError(
+            f"invalid JSON in archive metadata {meta_path}: {error}"
+        ) from error
+    warnings: list[str] = []
+    metadata = _coerce_archive_metadata(
+        raw, entry_dir=entry_dir, warnings=warnings, context=f"archive[{archive_id}]"
+    )
+    if metadata is None:
+        raise WorkbenchError(
+            f"archive metadata {meta_path} is malformed: "
+            + "; ".join(warnings)
+        )
+    return replace(metadata, warnings=tuple(warnings))
+
+
+def list_archive_entries(
+    state_dir: str | Path | None = None,
+) -> ArchiveListing:
+    """List every readable archive entry, sorted oldest-first by id.
+
+    Missing archive root, unreadable entries, and malformed metadata become
+    recoverable warnings rather than raising, so the Archive view can still
+    render the entries it can read.
+    """
+    root = archive_root(state_dir)
+    warnings: list[str] = []
+    if not root.exists():
+        return ArchiveListing()
+    try:
+        if not root.is_dir():
+            warnings.append(f"archive: {root} is not a directory; ignoring")
+            return ArchiveListing(warnings=tuple(warnings))
+        children = sorted(root.iterdir())
+    except OSError as error:
+        warnings.append(f"archive: could not scan {root}: {error}")
+        return ArchiveListing(warnings=tuple(warnings))
+
+    entries: list[ArchiveMetadata] = []
+    for child in children:
+        try:
+            if not child.is_dir():
+                continue
+        except OSError:
+            continue
+        context = f"archive[{child.name}]"
+        if not _is_valid_archive_id(child.name):
+            warnings.append(f"{context}: invalid archive id; skipping")
+            continue
+        meta_path = child / ARCHIVE_METADATA_FILE_NAME
+        if not meta_path.is_file():
+            warnings.append(f"{context}: missing {ARCHIVE_METADATA_FILE_NAME}; skipping")
+            continue
+        try:
+            raw = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            warnings.append(f"{context}: unreadable metadata: {error}; skipping")
+            continue
+        entry_warnings: list[str] = []
+        metadata = _coerce_archive_metadata(
+            raw, entry_dir=child, warnings=entry_warnings, context=context
+        )
+        warnings.extend(entry_warnings)
+        if metadata is None:
+            continue
+        entries.append(replace(metadata, warnings=tuple(entry_warnings)))
+
+    entries.sort(key=lambda entry: entry.archive_id)
+    return ArchiveListing(entries=tuple(entries), warnings=tuple(warnings))
+
+
+def remove_archive_entry(
+    archive_id: str, state_dir: str | Path | None = None
+) -> bool:
+    """Remove one archive entry directory, returning whether it existed."""
+    entry_dir = archive_entry_dir(archive_id, state_dir)
+    if not entry_dir.exists():
+        return False
+    try:
+        if entry_dir.is_dir():
+            shutil.rmtree(entry_dir)
+        else:
+            entry_dir.unlink()
+    except OSError as error:
+        raise WorkbenchError(
+            f"cannot remove archive entry {entry_dir}: {error}"
+        ) from error
+    return True
+
+
+def _parse_archive_timestamp(value: str) -> datetime | None:
+    """Parse an archive ISO timestamp, normalizing naive values to UTC."""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def archive_plan(
+    plan_dir: str | Path,
+    *,
+    state_dir: str | Path | None = None,
+    registry_path: str | Path | None = None,
+    plan_roots: Iterable[str | Path] = (),
+    include_default_dirs: bool = True,
+    summary: str | None = None,
+) -> ArchivePlanResult:
+    """Archive a Workbench-visible plan and its ASL state under the archive root.
+
+    Applies the same safety gate as :func:`delete_plan` (active-lock,
+    discovered/non-plan, non-directory) but, instead of permanently removing
+    the plan, moves the plan directory and its per-plan ASL state into a fresh
+    ``<state_root>/archive/<archive_id>/`` entry and records restore metadata
+    (original path, timestamps, summary snapshot, and the registry pin/profile
+    if one existed). A missing plan directory (a stale discovered pin) archives
+    only the available state and metadata. The registry pin is removed from the
+    live registry after its metadata is captured for restore.
+    """
+    canonical, registry = _validate_plan_for_mutation(
+        plan_dir,
+        verb="archive",
+        error_cls=ArchiveError,
+        state_dir=state_dir,
+        registry_path=registry_path,
+        plan_roots=plan_roots,
+        include_default_dirs=include_default_dirs,
+    )
+
+    matching_pin = next(
+        (pin for pin in registry.pins if pin.plan_dir == str(canonical)), None
+    )
+
+    archive_id = new_archive_id()
+    archived_at = datetime.now(timezone.utc).isoformat()
+    expires_at = compute_expires_at(archived_at, registry.archive_retention_days)
+    entry_dir = archive_entry_dir(archive_id, state_dir)
+    entry_dir.mkdir(parents=True, exist_ok=True)
+
+    plan_archived = False
+    if canonical.is_dir():
+        try:
+            shutil.move(
+                str(canonical), str(archive_plan_path(archive_id, state_dir))
+            )
+        except OSError as error:
+            raise ArchiveError(
+                "os-error",
+                f"cannot archive plan directory {canonical}: {error}",
+                status=500,
+            ) from error
+        plan_archived = True
+
+    plan_state = state.plan_state_dir(canonical, state_dir)
+    state_archived = False
+    if plan_state.is_dir():
+        try:
+            shutil.move(
+                str(plan_state), str(archive_state_path(archive_id, state_dir))
+            )
+        except OSError as error:
+            raise ArchiveError(
+                "os-error",
+                f"cannot archive plan state {plan_state}: {error}",
+                status=500,
+            ) from error
+        state_archived = True
+
+    metadata = ArchiveMetadata(
+        archive_id=archive_id,
+        original_plan_dir=str(canonical),
+        archived_at=archived_at,
+        expires_at=expires_at,
+        summary=summary,
+        pin=matching_pin,
+        plan_archived=plan_archived,
+        state_archived=state_archived,
+        archive_dir=entry_dir,
+        plan_path=archive_plan_path(archive_id, state_dir),
+        state_path=archive_state_path(archive_id, state_dir),
+    )
+    save_archive_metadata(metadata, state_dir)
+
+    pin_archived = False
+
+    def _remove_matching_pin(current: WorkbenchRegistry) -> WorkbenchRegistry:
+        nonlocal pin_archived
+        pin_archived = any(pin.plan_dir == str(canonical) for pin in current.pins)
+        return remove_pin(current, canonical)
+
+    try:
+        _updated, written_path = mutate_registry(registry_path, _remove_matching_pin)
+    except WorkbenchError as error:
+        raise ArchiveError(
+            "registry-unreadable", str(error), status=500
+        ) from error
+
+    return ArchivePlanResult(
+        archive_id=archive_id,
+        plan_dir=canonical,
+        metadata=metadata,
+        plan_archived=plan_archived,
+        state_archived=state_archived,
+        pin_archived=pin_archived,
+        registry_path=written_path,
+    )
+
+
+def restore_archive(
+    archive_id: str,
+    *,
+    state_dir: str | Path | None = None,
+    registry_path: str | Path | None = None,
+) -> RestoreArchiveResult:
+    """Restore an archived plan and its ASL state back to their origin.
+
+    Moves the archived plan directory and per-plan state back to the original
+    plan path and ASL state path recorded at archive time, restores the pin and
+    launch profile when one was captured, and removes the now-empty archive
+    entry. Raises :class:`ArchiveError` ``restore-conflict`` (HTTP 409) if
+    either destination already exists, so a restore never clobbers a live plan
+    or state directory.
+    """
+    if not _is_valid_archive_id(archive_id):
+        raise ArchiveError("invalid-archive", f"invalid archive id: {archive_id!r}")
+    try:
+        metadata = load_archive_metadata(archive_id, state_dir)
+    except WorkbenchError as error:
+        raise ArchiveError("invalid-archive", str(error), status=500) from error
+    if metadata is None:
+        raise ArchiveError(
+            "not-found", f"no archive entry {archive_id!r}", status=404
+        )
+
+    try:
+        original = plans.canonicalize_path(metadata.original_plan_dir)
+    except (OSError, ValueError) as error:
+        raise ArchiveError(
+            "invalid-archive",
+            f"invalid original_plan_dir {metadata.original_plan_dir!r}: {error}",
+        ) from error
+
+    dest_state = state.plan_state_dir(original, state_dir)
+    archived_plan = archive_plan_path(archive_id, state_dir)
+    archived_state = archive_state_path(archive_id, state_dir)
+
+    plan_present = metadata.plan_archived and archived_plan.exists()
+    state_present = metadata.state_archived and archived_state.exists()
+
+    if plan_present and original.exists():
+        raise ArchiveError(
+            "restore-conflict",
+            f"plan path already exists: {original}",
+            status=409,
+        )
+    if state_present and dest_state.exists():
+        raise ArchiveError(
+            "restore-conflict",
+            f"state path already exists: {dest_state}",
+            status=409,
+        )
+
+    plan_restored = False
+    if plan_present:
+        try:
+            original.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(archived_plan), str(original))
+        except OSError as error:
+            raise ArchiveError(
+                "os-error",
+                f"cannot restore plan directory {original}: {error}",
+                status=500,
+            ) from error
+        plan_restored = True
+
+    state_restored = False
+    if state_present:
+        try:
+            dest_state.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(archived_state), str(dest_state))
+        except OSError as error:
+            raise ArchiveError(
+                "os-error",
+                f"cannot restore plan state {dest_state}: {error}",
+                status=500,
+            ) from error
+        state_restored = True
+
+    pin_restored = False
+    written_path: Path | None = None
+    if metadata.pin is not None:
+        pin = metadata.pin
+
+        def _restore_pin(current: WorkbenchRegistry) -> WorkbenchRegistry:
+            nonlocal pin_restored
+            pin_restored = True
+            return upsert_pin(
+                current, original, label=pin.label, profile=pin.profile
+            )
+
+        try:
+            _updated, written_path = mutate_registry(registry_path, _restore_pin)
+        except WorkbenchError as error:
+            raise ArchiveError(
+                "registry-unreadable", str(error), status=500
+            ) from error
+
+    try:
+        remove_archive_entry(archive_id, state_dir)
+    except WorkbenchError as error:
+        raise ArchiveError("os-error", str(error), status=500) from error
+
+    return RestoreArchiveResult(
+        archive_id=archive_id,
+        original_plan_dir=original,
+        plan_restored=plan_restored,
+        state_dir=dest_state,
+        state_restored=state_restored,
+        pin_restored=pin_restored,
+        registry_path=written_path,
+    )
+
+
+def purge_archive_entries(
+    archive_ids: Iterable[str],
+    *,
+    state_dir: str | Path | None = None,
+) -> ArchivePurgeResult:
+    """Permanently purge one or many archive entries.
+
+    Returns a per-entry :class:`ArchivePurgeOutcome` so bulk callers can report
+    partial success: an invalid id or an unremovable entry is recorded as a
+    failed outcome without aborting the remaining ids.
+    """
+    outcomes: list[ArchivePurgeOutcome] = []
+    for archive_id in archive_ids:
+        if not _is_valid_archive_id(archive_id):
+            outcomes.append(
+                ArchivePurgeOutcome(
+                    str(archive_id), False, f"invalid archive id: {archive_id!r}"
+                )
+            )
+            continue
+        try:
+            removed = remove_archive_entry(archive_id, state_dir)
+        except WorkbenchError as error:
+            outcomes.append(ArchivePurgeOutcome(archive_id, False, str(error)))
+            continue
+        outcomes.append(ArchivePurgeOutcome(archive_id, removed))
+    return ArchivePurgeResult(outcomes=tuple(outcomes))
+
+
+def maintain_archive(
+    *,
+    state_dir: str | Path | None = None,
+    registry_path: str | Path | None = None,
+    now: datetime | None = None,
+) -> ArchivePurgeResult:
+    """Purge archive entries whose age meets the configured retention window.
+
+    Entries are removed when ``now - archived_at >= archive_retention_days``
+    (read from the Workbench registry, so a shortened retention takes effect on
+    the next maintenance pass). Malformed ``archived_at`` timestamps are
+    surfaced as warnings and left in place. Returns the same per-entry
+    :class:`ArchivePurgeResult` shape used by explicit purges so the Archive
+    view can report auto-empty counts and warnings.
+    """
+    try:
+        registry = load_registry(registry_path)
+    except WorkbenchError as error:
+        raise ArchiveError(
+            "registry-unreadable", str(error), status=500
+        ) from error
+    retention = timedelta(days=max(0, registry.archive_retention_days))
+
+    resolved_now = now if now is not None else datetime.now(timezone.utc)
+    if resolved_now.tzinfo is None:
+        resolved_now = resolved_now.replace(tzinfo=timezone.utc)
+
+    listing = list_archive_entries(state_dir)
+    warnings = list(listing.warnings)
+    outcomes: list[ArchivePurgeOutcome] = []
+    for entry in listing.entries:
+        archived = _parse_archive_timestamp(entry.archived_at)
+        if archived is None:
+            warnings.append(
+                f"archive[{entry.archive_id}]: invalid archived_at "
+                f"{entry.archived_at!r}; skipping"
+            )
+            continue
+        if resolved_now - archived < retention:
+            continue
+        try:
+            removed = remove_archive_entry(entry.archive_id, state_dir)
+        except WorkbenchError as error:
+            outcomes.append(
+                ArchivePurgeOutcome(entry.archive_id, False, str(error))
+            )
+            continue
+        outcomes.append(ArchivePurgeOutcome(entry.archive_id, removed))
+    return ArchivePurgeResult(outcomes=tuple(outcomes), warnings=tuple(warnings))
 
 
 @dataclass(frozen=True)

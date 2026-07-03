@@ -90,12 +90,81 @@
           <option value="recent">last activity</option>
           <option value="label">label</option>
           <option value="path">plan path</option>
+          <option value="oldest">oldest activity</option>
         </select>
       </label>
       <label class="wb-controls-bar__completed">
         <input type="checkbox" id="wb-show-completed" />
         <span>show completed</span>
       </label>
+      <button
+        class="wb-button wb-button--ghost"
+        id="wb-cleanup-toggle"
+        type="button"
+        aria-pressed="false"
+        title="Review and bulk-archive stale plans"
+      >
+        cleanup
+      </button>
+      <a
+        class="wb-button wb-button--ghost"
+        id="wb-archive-open"
+        href="#archive"
+        data-action="open-archive"
+        title="View archived plans"
+      >
+        archive
+      </a>
+    </div>
+
+    <div
+      class="wb-cleanup-bar"
+      id="wb-cleanup-bar"
+      role="group"
+      aria-label="Cleanup controls"
+      hidden
+    >
+      <label class="wb-cleanup-bar__threshold">
+        <span class="wb-controls-bar__label">stale after (days)</span>
+        <input
+          type="number"
+          id="wb-cleanup-threshold"
+          name="cleanup_threshold"
+          min="0"
+          value="30"
+        />
+      </label>
+      <button
+        class="wb-button wb-button--ghost"
+        id="wb-cleanup-select-visible"
+        type="button"
+      >
+        select candidates
+      </button>
+      <button
+        class="wb-button wb-button--ghost"
+        id="wb-cleanup-clear"
+        type="button"
+      >
+        clear selection
+      </button>
+      <div class="wb-cleanup-bar__review" id="wb-cleanup-review">
+        <span id="wb-cleanup-count">0 plans selected</span>
+        <button
+          class="wb-button wb-button--danger"
+          id="wb-cleanup-archive"
+          type="button"
+          data-action="bulk-archive"
+        >
+          archive selected
+        </button>
+      </div>
+      <div
+        id="wb-cleanup-feedback"
+        class="wb-cleanup-bar__feedback"
+        role="status"
+        hidden
+      ></div>
     </div>
 
     <section
@@ -339,12 +408,12 @@
           </button>
           <button
             class="wb-button wb-button--danger"
-            id="wb-control-delete"
+            id="wb-control-archive"
             type="button"
-            data-action="delete-plan"
-            title="Permanently deletes the plan directory. Confirms first."
+            data-action="archive-plan"
+            title="Archives the plan directory and ASL state. Restorable. Confirms first."
           >
-            delete plan
+            archive plan
           </button>
         </div>
       </section>
@@ -583,9 +652,133 @@
       </aside>
     </div>
 
+    <main class="wb-archive" id="wb-archive" hidden aria-label="Archived plans">
+      <div class="wb-archive__head">
+        <button
+          class="wb-button wb-button--ghost"
+          id="wb-archive-back"
+          type="button"
+        >
+          &larr; queue
+        </button>
+        <h1 class="wb-archive__title">Archive</h1>
+        <button
+          class="wb-button wb-button--ghost"
+          id="wb-archive-refresh"
+          type="button"
+        >
+          refresh
+        </button>
+      </div>
+
+      <section class="wb-panel wb-archive__settings">
+        <h2 class="wb-panel__title">Retention</h2>
+        <p class="wb-archive__hint">
+          Archived plans are permanently emptied once they are older than the
+          retention window. Auto-empty runs whenever the queue or archive is
+          polled.
+        </p>
+        <div class="wb-archive__retention">
+          <label>
+            <span class="wb-controls-bar__label">retention (days)</span>
+            <input
+              type="number"
+              id="wb-archive-retention"
+              name="archive_retention_days"
+              min="1"
+              value="30"
+            />
+          </label>
+          <button
+            class="wb-button wb-button--primary"
+            id="wb-archive-retention-save"
+            type="button"
+            data-action="archive-retention-save"
+          >
+            save retention
+          </button>
+        </div>
+        <p
+          id="wb-archive-maintenance"
+          class="wb-archive__maintenance"
+          hidden
+        ></p>
+        <div
+          id="wb-archive-feedback"
+          class="wb-archive__feedback"
+          role="status"
+          hidden
+        ></div>
+      </section>
+
+      <section
+        id="wb-archive-warnings"
+        class="wb-warnings wb-archive__warnings"
+        aria-live="polite"
+        hidden
+      ></section>
+
+      <section class="wb-panel">
+        <div class="wb-archive__bulk" id="wb-archive-bulk">
+          <span id="wb-archive-count">0 entries selected</span>
+          <button
+            class="wb-button wb-button--danger"
+            id="wb-archive-purge-selected"
+            type="button"
+            data-action="archive-purge-selected"
+          >
+            purge selected
+          </button>
+          <button
+            class="wb-button wb-button--ghost"
+            id="wb-archive-clear"
+            type="button"
+          >
+            clear selection
+          </button>
+        </div>
+        <ul class="wb-archive-list" id="wb-archive-entries">
+          <li class="wb-empty">no archived plans</li>
+        </ul>
+      </section>
+    </main>
+
+    <template id="wb-archive-row-template">
+      <li class="wb-archive-row" data-archive-id="">
+        <label class="wb-archive-row__select" data-field="archive-select">
+          <input type="checkbox" aria-label="select archive entry" />
+        </label>
+        <div class="wb-archive-row__body">
+          <span class="wb-archive-row__label" data-field="label"></span>
+          <code class="wb-archive-row__path" data-field="path"></code>
+          <span class="wb-archive-row__archived" data-field="archived"></span>
+          <span class="wb-archive-row__expires" data-field="expires"></span>
+        </div>
+        <div class="wb-archive-row__actions">
+          <button
+            class="wb-button wb-button--primary"
+            type="button"
+            data-action="archive-restore"
+          >
+            restore
+          </button>
+          <button
+            class="wb-button wb-button--danger"
+            type="button"
+            data-action="archive-purge"
+          >
+            purge
+          </button>
+        </div>
+      </li>
+    </template>
+
     <template id="wb-row-template">
       <article class="wb-row" data-plan-dir="">
         <header class="wb-row__head">
+          <label class="wb-row__cleanup" data-field="cleanup-select" hidden>
+            <input type="checkbox" aria-label="select plan for cleanup" />
+          </label>
           <div class="wb-row__title">
             <span class="wb-badge" data-field="state">unknown</span>
             <a class="wb-row__label" href="#" data-field="label">(no label)</a>
