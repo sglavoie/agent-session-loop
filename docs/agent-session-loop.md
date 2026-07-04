@@ -300,7 +300,7 @@ without running the final `--commit-at-end` commit.
 ## Commands
 
 ```text
-asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--review-harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--max-pending-sessions N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--allow-not-loop-ready] [--reply TEXT] [--json] [--dry-run]
+asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--review-harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--max-pending-sessions N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--allow-not-loop-ready] [--reply TEXT|--reply-stdin] [--json] [--dry-run]
 asl preflight PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--max-pending-sessions N] [--mark-loop-ready] [--json]
 asl verify PLAN_DIR --session ID [--cwd REPO_ROOT] [--json]
 asl status PLAN_DIR [--state-dir DIR] [--json]
@@ -506,6 +506,13 @@ the additional `Resolver prompt:` block above the regular `Prompt:` and
 `Argv:` blocks so operators can preview both surfaces without touching the
 harness, consuming the paused state, or writing the preview payload to
 `state.json`/`events.jsonl`.
+
+`asl run --reply-stdin` is the same resume as `--reply TEXT`, except the reply
+text is read from stdin instead of an argv value, so it never appears in the
+process listing. `--reply` and `--reply-stdin` are mutually exclusive. This is
+the channel the `$asl` autopilot skill drives when it resumes a paused run (see
+[Autopilot skill](#autopilot-skill-asl)); operators typically use `--reply TEXT`
+directly.
 
 ## Harness Commands
 
@@ -891,6 +898,104 @@ Common pause reasons:
   outside the plan directory; any change trips the guard. The implementation
   turns that ran before the review are preserved.
 - `interrupted`: the run was interrupted by Ctrl+C.
+
+## Autopilot Skill (`$asl`)
+
+The shared `asl` skill (`skills/asl/`, invoked as `$asl` under Codex or `/asl`
+under Claude/Copilot) supervises a single `asl run` invocation from start to
+finish without a human babysitting each turn. The operator hands the skill the
+exact `asl run ...` command they would otherwise type; the bundled helper
+(`skills/asl/scripts/asl-autopilot.py`) starts or attaches to the run, polls
+`asl status --json`, streams heartbeats to stderr, auto-retries recoverable
+pauses, and stops only when a run needs a human answer or has finished.
+
+### Install and sync
+
+The skill ships in the repository's top-level `skills/asl/` and is stowed into
+every harness skill directory the same way as the other shared skills. Run
+`just sync-skills` (or `just all`) to refresh the harness package links, then
+`just verify-asl-install` to confirm the active `asl` wrapper and the installed
+skill links resolve to this checkout. See [Shared AI Skills](../README.md#shared-ai-skills).
+
+### Safety model
+
+The helper is deterministic supervision only; all inferential reasoning stays
+with the harness agent driving the skill. It:
+
+- Parses the command itself and refuses shell operators, pipes, redirects,
+  `--dry-run`, and user-supplied `--reply` / `--reply-stdin`. It never runs the
+  command through a shell — argv is built directly, tilde paths are expanded,
+  and `--json` is guaranteed.
+- Leaves ASL authoritative for implementation, verification, session status,
+  progress journals, and review session execution. The skill does not patch
+  repository code directly.
+- Never persists reply text: resumes flow through `asl run --reply-stdin`, so
+  the reply appears only on the child's stdin, never in argv or helper output.
+
+### Attach behavior
+
+Each supervision cycle reads `asl status --json` first. A stale lock is treated
+as safe to start over (ASL clears stale locks before acquiring). An active lock
+for the same plan and state means **attach**: the helper polls the foreign run
+to completion instead of starting a second one. An active lock for a different
+plan directory, or an observably different harness than the operator requested,
+stops with `user_required` for a human to resolve. Self-relaunches (for
+`--max-sessions` capped chunks) and attach polls share one bounded budget so a
+wedged plan can never loop forever.
+
+### Reply behavior
+
+The helper auto-retries recoverable same-session pauses (`verify-failed`,
+`nonzero-exit`, `timeout`, `no-status-change`) up to twice per session and
+reason before escalating. When a pause genuinely needs an answer, the result
+carries `needs_agent_reply` with a `questions` block (resolver prompt, the
+paused agent's last message, pause metadata, artifact paths). The driving agent
+either infers a clearly defensible reply from the plan/repo/artifacts or relays
+the question to the operator, then resumes by streaming the reply on stdin:
+
+```text
+printf '%s' '<reply text>' | skills/asl/scripts/asl-autopilot.py --command '<same exact command>' --json --reply-stdin
+```
+
+### Review-fix loop behavior
+
+When the supervised command used `--review-harness`, a clean completion still
+carries the final-review verdict. An all-clear review returns `complete` with a
+`review` block whose `outcome` is `all-clear`. A review that reports findings
+returns `review_findings` with the `final-review.md` path, status line,
+severity counts, and a bounded summary excerpt. On findings the driving agent
+opens a bounded follow-up fix cycle — draft a fix plan, `session-split` and
+`session-expand` it, then rerun the helper against the generated plan directory.
+Automatic review-fix loops are capped at 2 generated follow-up plans; after
+that, remaining findings go to the operator instead of another auto-loop. This
+loop cap lives in skill prose because each helper invocation supervises exactly
+one command and there is no cross-invocation loop counter.
+
+### Final helper statuses
+
+The helper emits a single JSON result on stdout whose `reason` field is the
+terminal verdict (`ok` is `true` only for a clean completion):
+
+- `complete` (`ok: true`): every session finished. With `--review-harness`, an
+  all-clear review is attached under `review.outcome: all-clear`.
+- `needs_agent_reply` (`ok: false`): the run paused on a decision the helper
+  could not auto-resolve; a `questions` block carries the resolver context and
+  the driving agent must supply a reply.
+- `review_findings` (`ok: false`): the run completed but the final review
+  reported findings; a `review` block carries the verdict for a follow-up fix
+  cycle.
+- `user_required` (`ok: false`): an active `asl run` lock holds this plan/state
+  for a different run; a human must resolve the conflict before supervising.
+- `blocked` (`ok: false`): a chunk stopped without completing and without a
+  recoverable pause (the child's non-paused failure reason is attached).
+- `capped` (`ok: false`): the supervision budget (self-relaunch chunks or
+  attach polls) was exhausted with sessions still pending.
+- `status-error` / `run-error` (`ok: false`): `asl status --json` or `asl run`
+  itself failed to produce a usable payload.
+- `empty-reply` (`ok: false`): `--reply-stdin` was requested but stdin carried
+  no non-whitespace reply text.
+- A parse-stage failure (`ok: false`, `stage: parse`) with a specific reject
+  reason when the requested command is unsupported or malformed.
 
 ## Troubleshooting
 
