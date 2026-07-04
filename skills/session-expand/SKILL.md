@@ -320,7 +320,7 @@ Use the codebase root resolved in Step 1. If the codebase root is unknown, omit 
 - `marked_loop_ready` and the final `readiness.state`.
 - A short list of categories present in the red and yellow findings (e.g., `manifest-readiness`, `missing-contract`, `malformed-contract`, `ambiguity-sentinel`, `path-reference`).
 
-Gate the ready-to-run recommendation on this final preflight result. If the command exits non-zero, `marked_loop_ready` is false, or the final JSON `ok` is false, do **not** print `session-run` as the next command; instead print the blocking red/yellow categories and recommend `<skill-prefix>plan-preflight-iterate <plan-dir>` before execution. Green informational findings such as `env-amx` do not block. Skip this invocation in single-session mode, and mention that complete plan-level finding counts and auto-marking require directory-mode expansion.
+Gate the ready-to-run recommendation on this final preflight result. If the command exits non-zero, `marked_loop_ready` is false, or the final JSON `ok` is false, do **not** print the execution commands (`session-run` / `asl run`) as the next step; instead print the blocking red/yellow categories and recommend `<skill-prefix>plan-preflight-iterate <plan-dir>` before execution. Green informational findings such as `env-amx` do not block. Skip this invocation in single-session mode, and mention that complete plan-level finding counts and auto-marking require directory-mode expansion.
 
 Print a concise summary:
 
@@ -342,11 +342,16 @@ Print a concise summary:
 
 **If zero issues**:
 
-- Tell the user the plan is validated and can proceed to execution only if final preflight marked or confirmed loop-ready
+- Tell the user the plan is validated and can proceed to execution only if final preflight marked or confirmed loop-ready — either via `session-run` (one session at a time, in the current conversation) or the `asl` autopilot (autonomous end-to-end supervision)
 - Note they can optionally read the `.expand.md` files for concrete line numbers and patterns
 - When final preflight fails despite zero expansion issues, report the remaining preflight categories and recommend `<skill-prefix>plan-preflight-iterate <plan-dir>` before `session-run`.
 
-Only when final preflight succeeds with `ok: true` and readiness is `loop-ready`, end by printing the ready-to-paste `<skill-prefix>session-run <plan-directory>/` command so the user can proceed directly to execution without switching context. Otherwise, end with the ready-to-paste `<skill-prefix>plan-preflight-iterate <plan-directory>/` command. Note that `asl run <plan-directory>` self-heals stale/missing `progress.md` and recomputable `manifest.md` readiness metadata before pausing (surfaced via `readiness_gate_repair` in the run JSON), so the iterate skill is only required when a non-derived blocker (contracts, paths, locks, etc.) remains.
+Only when final preflight succeeds with `ok: true` and readiness is `loop-ready`, end by printing both ready-to-paste next-step commands so the user can proceed directly to execution without switching context:
+
+- `<skill-prefix>session-run <plan-directory>/` — run the next pending session in the current conversation, one session at a time (the default when the operator wants to stay in the loop between sessions).
+- `<skill-prefix>asl asl run <plan-directory>/` — hand the whole run to the `asl` autopilot, which supervises `asl run` end to end and pauses only for human decisions it cannot resolve.
+
+Otherwise, end with the ready-to-paste `<skill-prefix>plan-preflight-iterate <plan-directory>/` command. Note that `asl run <plan-directory>` self-heals stale/missing `progress.md` and recomputable `manifest.md` readiness metadata before pausing (surfaced via `readiness_gate_repair` in the run JSON), so the iterate skill is only required when a non-derived blocker (contracts, paths, locks, etc.) remains.
 
 ## Important Notes
 
