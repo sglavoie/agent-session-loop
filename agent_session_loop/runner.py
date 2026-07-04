@@ -940,6 +940,17 @@ def _extract_prefixed_line(text: str, prefix: str) -> str | None:
     return None
 
 
+def _is_noop_runner_pause(message: str) -> bool:
+    """Return True only for the exact no-op ``RUNNER_PAUSE: none`` marker.
+
+    Agents are documented never to emit ``RUNNER_PAUSE: none``, but a stray
+    placeholder must not fail closed into a real pause. The match is
+    case-insensitive on the trimmed detail and matches nothing else, so every
+    genuine pause reason keeps its fail-closed behavior.
+    """
+    return message.strip().casefold() == "none"
+
+
 def _runner_signal_lines(text: str) -> list[tuple[str, str]]:
     signals: list[tuple[str, str]] = []
     for line in text.splitlines():
@@ -953,12 +964,10 @@ def _runner_signal_lines(text: str) -> list[tuple[str, str]]:
                 )
                 break
             if candidate.startswith(events.RUNNER_PAUSE_PREFIX):
-                signals.append(
-                    (
-                        "pause",
-                        candidate[len(events.RUNNER_PAUSE_PREFIX) :].strip(),
-                    )
-                )
+                message = candidate[len(events.RUNNER_PAUSE_PREFIX) :].strip()
+                if _is_noop_runner_pause(message):
+                    break
+                signals.append(("pause", message))
                 break
     return signals
 
@@ -1011,7 +1020,7 @@ def _live_action_signal(
 ) -> dict[str, Any] | None:
     if stream_name != "stderr":
         pause = _extract_prefixed_line(text, events.RUNNER_PAUSE_PREFIX)
-        if pause is not None:
+        if pause is not None and not _is_noop_runner_pause(pause):
             return {
                 "reason": "runner-pause",
                 "message": pause,

@@ -1,6 +1,6 @@
 ---
 name: session-run
-description: Execute the next pending session from a split plan directory. Sequential by design — accepts only `<plan-dir>/` plus internal `--runner-managed`; explicit session targeting and parallel worker mode are not supported. Delegates authoritative status, readiness, and verification checks to `asl` scripts; `asl run` invokes this skill with `--runner-managed` so Python owns postflight enforcement. Companion to session-split and session-expand.
+description: Execute the next pending session from a split plan directory. Sequential by design - accepts only a plan directory path plus internal `--runner-managed`; explicit session targeting and parallel worker mode are not supported. Delegates authoritative status, readiness, and verification checks to `asl` scripts; `asl run` invokes this skill with `--runner-managed` so Python owns postflight enforcement. Companion to session-split and session-expand.
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 ---
 
@@ -286,7 +286,7 @@ For runner-friendly output, you may print one or more machine-readable lines imm
 - `Runner status: paused` when stopping without completing the selected session because user input, validation, plan repair, or another recoverable intervention is required.
 - `RUNNER_PAUSE: <reason> - <short detail>` to describe a pause in a stable, grep-friendly form. Prefer existing fail-closed vocabulary such as `malformed-plan`, `unknown-status`, `lock-contention`, `blocked`, `unsafe`, `verify-failed`, `no-contract`, or `malformed-contract` when it applies. Do not invent new reason strings; reuse the runner-side vocabulary so manual and loop output grep together.
 
-These runner-readable lines are optional for manual use and must not replace the final `Next command:` line when that line is part of the report. Never print a `RUNNER_PAUSE:` line after a successful session, and never print placeholder lines such as `RUNNER_PAUSE: none`; the Python runner treats any `RUNNER_PAUSE:` line as a real pause.
+These runner-readable lines are optional for manual use and must not replace the final `Next command:` line when that line is part of the report. Never print a `RUNNER_PAUSE:` line after a successful session, and never print placeholder lines such as `RUNNER_PAUSE: none`; the Python runner treats real `RUNNER_PAUSE:` lines as pauses, while exact `RUNNER_PAUSE: none` is tolerated only as a no-op robustness exception.
 
 In `runner_managed=true` mode, print `Runner status: complete` only after the selected handoff has been changed to `complete`. If you stop before making that handoff change, print `Runner status: paused` and a `RUNNER_PAUSE: <reason> - <detail>` line so the Python runner records a structured pause instead of `no-status-change`.
 

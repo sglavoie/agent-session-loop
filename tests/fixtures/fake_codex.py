@@ -273,6 +273,13 @@ def main() -> int:
         print("mutated plan after turn")
         return 0
 
+    if mode == "success-runner-pause-none":
+        if pending:
+            _mark_complete(pending[0])
+        _write_last_message("Runner status: complete\nRUNNER_PAUSE: none\n")
+        print("completed one session with a no-op pause marker")
+        return 0
+
     if mode == "success":
         if pending:
             _mark_complete(pending[0])

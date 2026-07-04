@@ -6710,6 +6710,72 @@ class CommandAndConfigTests(unittest.TestCase):
             )
         )
 
+    def test_runner_signals_ignore_noop_pause_when_final_status_complete(
+        self,
+    ) -> None:
+        result = harnesses.HarnessResult(
+            name="codex",
+            argv=["codex"],
+            returncode=0,
+            stdout="",
+            stderr="",
+            last_message="Runner status: complete\nRUNNER_PAUSE: none\n",
+        )
+
+        signals = runner._runner_signals(result)
+        self.assertEqual("complete", signals["runner_status"])
+        self.assertEqual("last_message", signals["runner_status_source"])
+        self.assertNotIn("runner_pause", signals)
+        self.assertNotIn("runner_pause_source", signals)
+        self.assertEqual(
+            "complete",
+            runner._turn_status_result(
+                result=result,
+                status_changes=(
+                    runner._session_status_change_payload(
+                        "9",
+                        before="pending",
+                        after="complete",
+                    ),
+                ),
+                pending_completed=("9",),
+                session_id="9",
+                runner_signals=signals,
+                plan_error=None,
+            ),
+        )
+
+    def test_runner_signals_preserve_real_pause_alongside_noop(self) -> None:
+        result = harnesses.HarnessResult(
+            name="codex",
+            argv=["codex"],
+            returncode=0,
+            stdout="",
+            stderr="",
+            last_message=(
+                "RUNNER_PAUSE: none\n"
+                "RUNNER_PAUSE: blocked - interactive decision gates\n"
+            ),
+        )
+
+        signals = runner._runner_signals(result)
+        self.assertEqual(
+            "blocked - interactive decision gates",
+            signals["runner_pause"],
+        )
+        self.assertEqual("last_message", signals["runner_pause_source"])
+
+    def test_live_action_signal_ignores_noop_runner_pause(self) -> None:
+        self.assertIsNone(
+            runner._live_action_signal("stdout", "RUNNER_PAUSE: none\n")
+        )
+        self.assertIsNotNone(
+            runner._live_action_signal(
+                "stdout",
+                "RUNNER_PAUSE: blocked - needs input\n",
+            )
+        )
+
     def test_custom_harness_config_accepts_supported_shapes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "harnesses.json"
@@ -12569,6 +12635,21 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertIn("plan readiness is not current", payload["pause_message"])
         self.assertIn(payload["pause_reason"], events.PAUSE_REASONS)
         self.assertEqual("unsafe", payload["turns"][0]["status_result"])
+
+    def test_noop_runner_pause_signal_completes_without_pausing(self) -> None:
+        completed, payload, _plan_dir, _state_dir, _fake_codex = self.run_loop(
+            mode="success-runner-pause-none",
+            statuses=("pending",),
+        )
+
+        self.assertEqual(0, completed.returncode)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual([1], payload["completed_sessions"])
+        turn = payload["turns"][0]
+        self.assertEqual("complete", turn["status_result"])
+        self.assertNotIn("runner_pause", turn)
 
     def test_malformed_after_turn_reports_malformed_plan_pause(self) -> None:
         completed, payload, _plan_dir, _state_dir, _fake_codex = self.run_loop(
