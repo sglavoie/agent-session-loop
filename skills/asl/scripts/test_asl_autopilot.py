@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import tempfile
 import textwrap
 import unittest
@@ -353,6 +354,22 @@ def _active_lock(plan_dir="/tmp/plan", *, stale=False):
     }
 
 
+def _attach_status(idle, *, session_id="tidy-db-writes", number=3, total=8):
+    """Attach-disposition status: active matching lock + a live running turn."""
+    status = _status_payload(1, lock=_active_lock())
+    status["runner_state"] = {
+        "paused": False,
+        "active_turn": {
+            "session_id": session_id,
+            "session_number": number,
+            "total_sessions": total,
+            "idle_seconds": idle,
+            "elapsed_seconds": 120,
+        },
+    }
+    return status
+
+
 class _StatusScript:
     """Return scripted status payloads in order, repeating the last one."""
 
@@ -580,6 +597,237 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         self.assertEqual(run.chunks, [1])
         self.assertEqual(result["retries"]["count"], 0)
         self.assertFalse(result["retries"]["exhausted"])
+
+    def test_default_run_invoker_forwards_status_probe_and_stall_threshold(self) -> None:
+        # With no injected run_invoker, the default closure must thread the
+        # status probe (reusing the status_invoker seam) and stall_threshold
+        # into `_invoke_run`.
+        calls = {"status": 0}
+
+        def status_invoker(parsed):
+            calls["status"] += 1
+            # First poll -> pending (start a chunk); afterwards -> complete.
+            return _status_payload(0) if calls["status"] > 1 else _status_payload(1)
+
+        captured: dict = {}
+
+        def fake_invoke_run(target, **kwargs):
+            captured["target"] = target
+            captured["kwargs"] = kwargs
+            return {"ok": True, "paused": False, "reason": "all-complete"}
+
+        original = autopilot._invoke_run
+        autopilot._invoke_run = fake_invoke_run
+        try:
+            result = autopilot.supervise_run(
+                {"plan_dir": "/tmp/plan", "argv": ["asl", "run", "/tmp/plan", "--json"]},
+                status_invoker=status_invoker,
+                clock=_counter_clock(),
+                sleep=lambda *_: None,
+                heartbeat=lambda *_: None,
+                stall_threshold=42.0,
+            )
+        finally:
+            autopilot._invoke_run = original
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["reason"], "complete")
+        kwargs = captured["kwargs"]
+        self.assertEqual(kwargs["stall_threshold"], 42.0)
+        self.assertTrue(callable(kwargs["status_probe"]))
+        # The probe reuses the status_invoker seam: calling it re-polls status.
+        before = calls["status"]
+        probe_payload = kwargs["status_probe"]()
+        self.assertEqual(calls["status"], before + 1)
+        self.assertTrue(probe_payload["ok"])
+
+
+class SuperviseRunAttachHeartbeatTest(unittest.TestCase):
+    """The attach-wait heartbeat surfaces live session/idle detail + stall WARN."""
+
+    def _supervise(self, status_invoker, **kwargs):
+        beats: list = []
+        result = autopilot.supervise_run(
+            {"plan_dir": "/tmp/plan", "argv": ["asl", "run", "/tmp/plan", "--json"]},
+            status_invoker=status_invoker,
+            run_invoker=_never_run,
+            clock=_counter_clock(),
+            sleep=lambda *_: None,
+            heartbeat=beats.append,
+            **kwargs,
+        )
+        return result, beats
+
+    def test_attach_heartbeat_carries_session_and_idle(self) -> None:
+        status = _StatusScript([_attach_status(34), _status_payload(0)])
+        result, beats = self._supervise(status)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "complete")
+        joined = "\n".join(beats)
+        self.assertIn("attached to active run", joined)
+        self.assertIn("session tidy-db-writes", joined)
+        self.assertIn("(3/8)", joined)
+        self.assertIn("idle 34s", joined)
+        self.assertNotIn("WARN", joined)
+
+    def test_attach_heartbeat_warns_on_high_idle(self) -> None:
+        status = _StatusScript([_attach_status(96), _status_payload(0)])
+        result, beats = self._supervise(status, stall_threshold=90.0)
+        self.assertTrue(result["ok"], result)
+        joined = "\n".join(beats)
+        self.assertIn("WARN possibly stalled", joined)
+        self.assertIn("idle 96s (no output)", joined)
+        # The pending/elapsed context is preserved alongside the warning.
+        self.assertIn("pending 1", joined)
+
+
+class FakeTimeoutPopen:
+    """Fake ``subprocess.Popen`` whose ``communicate`` times out N times.
+
+    Constructing the instance yields a callable that stands in for the ``popen``
+    factory: calling it (as ``_invoke_run`` does) records the argv and returns
+    ``self`` so the same object services the ``communicate()`` wait loop. The
+    first ``timeout_count`` ``communicate()`` calls raise
+    ``subprocess.TimeoutExpired`` (driving one heartbeat tick each), then the
+    final call returns the configured ``(stdout, stderr)``. Delivered ``input``
+    values are recorded so tests can assert the reply is streamed once. No real
+    subprocess is spawned.
+    """
+
+    def __init__(self, *, timeout_count, stdout, stderr="", returncode=0):
+        self._remaining_timeouts = timeout_count
+        self._stdout = stdout
+        self._stderr = stderr
+        self.returncode = returncode
+        self.inputs = []
+        self.communicate_calls = 0
+        self.argv = None
+        self.kwargs = None
+
+    def __call__(self, argv, **kwargs):
+        self.argv = argv
+        self.kwargs = kwargs
+        return self
+
+    def communicate(self, input=None, timeout=None):
+        self.communicate_calls += 1
+        self.inputs.append(input)
+        if self._remaining_timeouts > 0:
+            self._remaining_timeouts -= 1
+            raise subprocess.TimeoutExpired(cmd="asl run", timeout=timeout)
+        return self._stdout, self._stderr
+
+
+def _running_status(idle, *, session_id="tidy-db-writes", number=3, total=8):
+    """Status payload whose live turn is running with the given idle seconds."""
+    return {
+        "ok": True,
+        "runner_state": {
+            "paused": False,
+            "active_turn": {
+                "session_id": session_id,
+                "session_number": number,
+                "total_sessions": total,
+                "idle_seconds": idle,
+                "elapsed_seconds": 120,
+            },
+        },
+    }
+
+
+class InvokeRunHeartbeatTest(unittest.TestCase):
+    """Exercise the per-tick status probe / stall detection in `_invoke_run`."""
+
+    FINAL_JSON = '{"ok": true, "paused": false, "reason": "all-complete"}'
+
+    def _parsed(self) -> dict:
+        return {"argv": ["asl", "run", "/tmp/plan", "--json"], "plan_dir": "/tmp/plan"}
+
+    def _run(self, *, popen, status_probe=None, stall_threshold=None):
+        beats: list = []
+        kwargs = {}
+        if stall_threshold is not None:
+            kwargs["stall_threshold"] = stall_threshold
+        payload = autopilot._invoke_run(
+            self._parsed(),
+            chunk_index=1,
+            clock=_counter_clock(),
+            heartbeat=beats.append,
+            heartbeat_interval=0.01,
+            popen=popen,
+            status_probe=status_probe,
+            **kwargs,
+        )
+        return payload, beats
+
+    def test_enriched_running_line_has_session_label_and_idle(self) -> None:
+        popen = FakeTimeoutPopen(timeout_count=1, stdout=self.FINAL_JSON)
+        payload, beats = self._run(
+            popen=popen,
+            status_probe=lambda: _running_status(34),
+        )
+        self.assertEqual(payload["reason"], "all-complete")
+        # First beat is the "started" line; the tick beat is the enriched one.
+        tick = beats[1]
+        self.assertIn("session tidy-db-writes", tick)
+        self.assertIn("(3/8)", tick)
+        self.assertIn("idle 34s", tick)
+        self.assertNotIn("running, elapsed", tick)
+
+    def test_idle_over_threshold_emits_stall_warning(self) -> None:
+        popen = FakeTimeoutPopen(timeout_count=1, stdout=self.FINAL_JSON)
+        _payload, beats = self._run(
+            popen=popen,
+            status_probe=lambda: _running_status(96),
+            stall_threshold=90.0,
+        )
+        tick = beats[1]
+        self.assertIn("WARN possibly stalled", tick)
+        self.assertIn("idle 96s (no output)", tick)
+
+    def test_probe_that_raises_falls_back_to_plain_line(self) -> None:
+        def boom():
+            raise RuntimeError("status blew up")
+
+        popen = FakeTimeoutPopen(timeout_count=1, stdout=self.FINAL_JSON)
+        payload, beats = self._run(popen=popen, status_probe=boom)
+        # Run still returns its final payload despite the probe failure.
+        self.assertEqual(payload["reason"], "all-complete")
+        tick = beats[1]
+        self.assertIn("running, elapsed", tick)
+        self.assertNotIn("session", tick)
+
+    def test_status_error_payload_falls_back_to_plain_line(self) -> None:
+        error = {"ok": False, "stage": autopilot.RUN_STAGE, "reason": "status-error"}
+        popen = FakeTimeoutPopen(timeout_count=1, stdout=self.FINAL_JSON)
+        _payload, beats = self._run(popen=popen, status_probe=lambda: error)
+        tick = beats[1]
+        self.assertIn("running, elapsed", tick)
+        self.assertNotIn("session", tick)
+
+    def test_review_phase_snapshot_renders_verifying(self) -> None:
+        verifying = {
+            "ok": True,
+            "runner_state": {
+                "paused": False,
+                "active_turn": None,
+                "active_verification": {"session_id": "1", "phase": "verify"},
+            },
+        }
+        popen = FakeTimeoutPopen(timeout_count=1, stdout=self.FINAL_JSON)
+        _payload, beats = self._run(popen=popen, status_probe=lambda: verifying)
+        tick = beats[1]
+        self.assertIn("verifying", tick)
+        self.assertNotIn("session tidy-db-writes", tick)
+
+    def test_no_probe_reproduces_legacy_plain_line(self) -> None:
+        popen = FakeTimeoutPopen(timeout_count=1, stdout=self.FINAL_JSON)
+        payload, beats = self._run(popen=popen, status_probe=None)
+        self.assertEqual(payload["reason"], "all-complete")
+        tick = beats[1]
+        self.assertIn("running, elapsed", tick)
+        self.assertNotIn("session", tick)
+        self.assertNotIn("|", tick)
 
 
 _FAKE_ASL = textwrap.dedent(

@@ -61,6 +61,11 @@ Invoke the helper with the user's exact command:
 Pass `--json` so the helper emits a single machine-readable result on stdout;
 progress heartbeats go to stderr. Read the JSON result to decide what to report.
 
+Each stderr heartbeat carries live progress — the running session label,
+`(n/total)`, and `idle <n>s` since the child last emitted output — and escalates
+to a `WARN possibly stalled` line once idle time crosses the stall threshold, so
+you can tell a healthy-but-slow run from a genuinely stuck one and act on it.
+
 ### Step 3: Handle pauses
 
 The helper auto-retries recoverable same-session pauses (`verify-failed`,

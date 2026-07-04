@@ -73,6 +73,15 @@ DEFAULT_POLL_INTERVAL = 5.0
 DEFAULT_HEARTBEAT_INTERVAL = 30.0
 DEFAULT_MAX_CHUNKS = 50
 
+# Idle threshold (seconds) past which a heartbeat flags the child as possibly
+# stalled. `active_turn.idle_seconds` is the seconds since the child last wrote
+# stdout/stderr; the runner refreshes it on its own 30s internal heartbeat, so a
+# healthy-but-slow child normally shows idle well under 90s. 90.0 is ≈3× that
+# 30s cadence: high enough to avoid false positives from normal between-heartbeat
+# staleness, low enough to surface a genuinely wedged child promptly. Overridable
+# via the `stall_threshold` kwarg only — deliberately not a CLI flag.
+DEFAULT_STALL_IDLE_THRESHOLD = 90.0
+
 # Pause reasons the supervisor treats as transient and same-session
 # retryable. These mirror ASL's own stable pause vocabulary
 # (`agent_session_loop.runner`): `verify-failed`, `nonzero-exit`, `timeout`,
@@ -560,6 +569,108 @@ def _invoke_status(parsed: dict, *, runner=subprocess.run) -> dict:
     return payload
 
 
+def _status_snapshot(status: object) -> dict:
+    """Distill an ``asl status --json`` payload into a heartbeat snapshot.
+
+    Returns a small dict describing what the supervised run is doing right now:
+    its ``state`` (``running``/``verifying``/``paused``/``unknown``), the live
+    ``session_id``/``session_number``/``total_sessions`` labels, and the
+    ``idle_seconds``/``elapsed_seconds`` health signals. A missing, non-dict, or
+    ``ok: False`` payload — or one with no ``active_turn`` and no
+    ``active_verification`` — degrades to ``{"state": "unknown"}`` so callers can
+    fall back to the plain heartbeat without special-casing every failure mode.
+    A paused run yields ``{"state": "paused"}``, which :func:`_format_heartbeat`
+    also renders as the plain line.
+    """
+    if not isinstance(status, dict) or not status.get("ok"):
+        return {"state": "unknown"}
+
+    runner_state = status.get("runner_state") if isinstance(status.get("runner_state"), dict) else {}
+    if runner_state.get("paused") or status.get("paused"):
+        return {"state": "paused", "reason": runner_state.get("reason") or status.get("reason")}
+
+    active_turn = runner_state.get("active_turn") or status.get("active_turn")
+    if isinstance(active_turn, dict) and active_turn:
+        return {
+            "state": "running",
+            "session_id": active_turn.get("session_id"),
+            "session_number": active_turn.get("session_number"),
+            "total_sessions": active_turn.get("total_sessions"),
+            "idle_seconds": active_turn.get("idle_seconds"),
+            "elapsed_seconds": active_turn.get("elapsed_seconds"),
+        }
+
+    active_verification = runner_state.get("active_verification") or status.get("active_verification")
+    if isinstance(active_verification, dict) and active_verification:
+        return {"state": "verifying"}
+
+    return {"state": "unknown"}
+
+
+def _heartbeat_detail(snapshot: dict, stall_threshold: float):
+    """Distill a snapshot into a ``(is_stall, detail)`` pair for a heartbeat.
+
+    ``detail`` is the enrichment fragment shared by every heartbeat site so the
+    in-chunk and attach-wait lines render identically:
+
+    - ``running`` below ``stall_threshold``: ``(False, "session <id> (n/total) |
+      idle <n>s")`` — the ``(n/total)`` fragment is omitted when either number is
+      absent, and the ``idle`` fragment when ``idle_seconds`` is unavailable.
+    - ``running`` at or above ``stall_threshold``: ``(True, "idle <n>s (no
+      output)")`` so callers can render their own ``WARN possibly stalled`` line.
+    - ``verifying`` (review phase): ``(False, "verifying")``.
+    - any other snapshot (``paused``/``unknown``/errored): ``(False, None)`` so
+      callers fall back to their plain line, preserving pre-enrichment behavior.
+    """
+    state = snapshot.get("state")
+    if state == "running":
+        idle = snapshot.get("idle_seconds")
+        if isinstance(idle, (int, float)) and idle >= stall_threshold:
+            return True, f"idle {int(idle)}s (no output)"
+        label = f"session {snapshot.get('session_id')}"
+        number = snapshot.get("session_number")
+        total = snapshot.get("total_sessions")
+        if number is not None and total is not None:
+            label += f" ({number}/{total})"
+        idle_fragment = (
+            f" | idle {int(idle)}s" if isinstance(idle, (int, float)) else ""
+        )
+        return False, f"{label}{idle_fragment}"
+    if state == "verifying":
+        return False, "verifying"
+    return False, None
+
+
+def _format_heartbeat(
+    chunk_index: int,
+    elapsed: float,
+    snapshot: dict,
+    stall_threshold: float,
+) -> str:
+    """Render a per-tick heartbeat line from a :func:`_status_snapshot`.
+
+    - ``running`` with ``idle_seconds`` below ``stall_threshold``: an enriched
+      line carrying the session label, ``(n/total)`` (omitted when either number
+      is absent), and ``idle <n>s``.
+    - ``running`` with ``idle_seconds`` at or above ``stall_threshold``: a
+      ``WARN possibly stalled`` line naming the idle and elapsed seconds.
+    - ``verifying`` (review phase): the same running line with a ``verifying``
+      label instead of a session.
+    - any other snapshot (``paused``/``unknown``/errored): the legacy plain
+      ``running, elapsed Ns`` line, preserving pre-enrichment behavior.
+    """
+    plain = f"chunk {chunk_index}: running, elapsed {int(elapsed)}s"
+    is_stall, detail = _heartbeat_detail(snapshot, stall_threshold)
+    if detail is None:
+        return plain
+    if is_stall:
+        return (
+            f"chunk {chunk_index}: WARN possibly stalled — "
+            f"{detail}, elapsed {int(elapsed)}s"
+        )
+    return f"chunk {chunk_index}: running {int(elapsed)}s | {detail}"
+
+
 def _invoke_run(
     parsed: dict,
     *,
@@ -569,6 +680,8 @@ def _invoke_run(
     heartbeat=_emit_heartbeat,
     heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     popen=subprocess.Popen,
+    status_probe=None,
+    stall_threshold: float = DEFAULT_STALL_IDLE_THRESHOLD,
 ) -> dict:
     """Start one ``asl run`` chunk, wait with heartbeats, return its JSON.
 
@@ -577,6 +690,14 @@ def _invoke_run(
     concise heartbeat when the run starts and every ``heartbeat_interval``
     seconds it stays alive, keeping stdout clear for the parsed result. A child
     that crashes or prints non-JSON yields a synthetic ``run-error`` payload.
+
+    When ``status_probe`` is supplied it is called once per heartbeat tick (in a
+    ``try/except``) to fetch a live ``asl status`` payload; the resulting
+    snapshot enriches the tick with the session label, ``(n/total)``, and idle
+    seconds, and raises a ``WARN possibly stalled`` line once ``idle_seconds``
+    crosses ``stall_threshold``. A ``None`` probe, a probe that raises, or a
+    paused/unknown snapshot falls back to the legacy plain ``running, elapsed
+    Ns`` line. The initial started/resumed heartbeat is never probed.
 
     When ``reply_text`` is supplied this launches the resume path: ``asl run``
     is invoked with ``--reply-stdin`` appended and the reply is streamed on the
@@ -627,9 +748,19 @@ def _invoke_run(
             break
         except subprocess.TimeoutExpired:
             pending_input = None
-            heartbeat(
-                f"chunk {chunk_index}: running, elapsed {int(clock() - start)}s"
-            )
+            elapsed = clock() - start
+            message: Optional[str] = None
+            if status_probe is not None:
+                try:
+                    snapshot = _status_snapshot(status_probe())
+                except Exception:
+                    snapshot = {"state": "unknown"}
+                message = _format_heartbeat(
+                    chunk_index, elapsed, snapshot, stall_threshold
+                )
+            if message is None:
+                message = f"chunk {chunk_index}: running, elapsed {int(elapsed)}s"
+            heartbeat(message)
 
     stdout = "".join(stdout_parts).strip()
     stderr = "".join(stderr_parts).strip()
@@ -792,6 +923,7 @@ def supervise_run(
     heartbeat=_emit_heartbeat,
     poll_interval: float = DEFAULT_POLL_INTERVAL,
     heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
+    stall_threshold: float = DEFAULT_STALL_IDLE_THRESHOLD,
     max_chunks: int = DEFAULT_MAX_CHUNKS,
     max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> dict:
@@ -818,6 +950,13 @@ def supervise_run(
 
     ``max_chunks`` bounds both self-launched relaunches and attach polls so a
     wedged plan can never loop forever.
+
+    Both heartbeat sites carry live progress. Self-launched chunks probe
+    ``asl status`` each tick via the injected ``status_invoker`` seam
+    (``status_probe=lambda: status_invoker(parsed)``), and the attach-wait
+    heartbeat reuses the ``status`` payload already fetched this iteration to
+    surface the same session/idle detail and a ``WARN possibly stalled`` line
+    once ``idle_seconds`` crosses ``stall_threshold``.
     """
     if run_invoker is None:
 
@@ -832,6 +971,8 @@ def supervise_run(
                 clock=clock,
                 heartbeat=heartbeat,
                 heartbeat_interval=heartbeat_interval,
+                status_probe=lambda: status_invoker(parsed),
+                stall_threshold=stall_threshold,
             )
 
     chunks = 0
@@ -887,10 +1028,22 @@ def supervise_run(
             if attach_start is None:
                 attach_start = now
             if last_attach_beat is None or now - last_attach_beat >= heartbeat_interval:
-                heartbeat(
-                    f"attached to active run; waiting (pending {pending}, "
-                    f"elapsed {int(now - attach_start)}s)"
+                context = (
+                    f"(pending {pending}, elapsed {int(now - attach_start)}s)"
                 )
+                is_stall, detail = _heartbeat_detail(
+                    _status_snapshot(status), stall_threshold
+                )
+                if detail is None:
+                    message = f"attached to active run; waiting {context}"
+                elif is_stall:
+                    message = (
+                        f"attached to active run; WARN possibly stalled — "
+                        f"{detail} {context}"
+                    )
+                else:
+                    message = f"attached to active run; waiting {context} | {detail}"
+                heartbeat(message)
                 last_attach_beat = now
             sleep(poll_interval)
             continue
