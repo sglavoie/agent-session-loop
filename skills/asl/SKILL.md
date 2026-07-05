@@ -138,3 +138,7 @@ and any blocker that needs the user's attention.
   Keep the skill workflow thin.
 - Automatic review-fix cycles are bounded to 2 generated follow-up plans; after
   that, unresolved findings go to the user rather than another auto-loop.
+- The preflight/`asl run` readiness gate now rejects a plan whose completion-contract
+  `command` checks are not runnable (an unresolved `argv[0]`, or a non-importable
+  `python -m <module>`), so a paused run may cite a `command-not-runnable` finding —
+  surface it to the user rather than resuming.

@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, asdict
+import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -231,6 +233,135 @@ def _run_command_check(check: CommandCheck, *, repo_root: Path) -> CheckResult:
         stderr=completed.stderr,
         duration_seconds=duration,
     )
+
+
+CommandDiagnosticReason = Literal["executable-not-found", "module-not-importable"]
+
+_PYTHON_BASENAME_PATTERN = re.compile(r"python(\d+(\.\d+)?)?\Z")
+_MODULE_PROBE_TIMEOUT_SECONDS = 15.0
+
+
+@dataclass(frozen=True)
+class CommandDiagnostic:
+    """Why a completion-contract command check is not runnable in this env.
+
+    ``reason`` is a stable enum the preflight layer maps to a severity; ``detail``
+    is a human-readable one-liner. A ``None`` diagnostic (returned by
+    :func:`diagnose_command`) means "no problem positively determined" — the
+    helper is deliberately fail-open so environment quirks never manufacture a
+    false finding.
+    """
+
+    reason: CommandDiagnosticReason
+    detail: str
+
+
+def _has_path_separator(value: str) -> bool:
+    if os.sep in value:
+        return True
+    return os.altsep is not None and os.altsep in value
+
+
+def _is_module_invocation(argv: tuple[str, ...]) -> bool:
+    """True when ``argv`` looks like ``[<python>, "-m", <module>, ...]``."""
+    if len(argv) < 3 or argv[1] != "-m":
+        return False
+    basename = Path(argv[0]).name
+    return _PYTHON_BASENAME_PATTERN.fullmatch(basename) is not None
+
+
+def _default_module_probe(
+    interpreter: str, module: str, *, cwd: Path
+) -> bool | None:
+    """Bounded, read-only importability probe.
+
+    Returns ``True`` when the module is importable, ``False`` on an unambiguous
+    "missing" signal (exit 3 from ``find_spec`` returning ``None``, or an
+    ``ImportError``/``ModuleNotFoundError`` raised by ``find_spec`` when a parent
+    package on a dotted module path is missing), and ``None`` for any other
+    error, timeout, or non-decisive exit so callers can fail open. Models the
+    subprocess degradation shape of :func:`_run_command_check`.
+    """
+    source = (
+        "import importlib.util, sys\n"
+        "try:\n"
+        f"    found = importlib.util.find_spec({module!r}) is not None\n"
+        "except ImportError:\n"
+        "    found = False\n"
+        "except Exception:\n"
+        "    sys.exit(2)\n"
+        "sys.exit(0 if found else 3)"
+    )
+    try:
+        completed = subprocess.run(
+            [interpreter, "-c", source],
+            cwd=str(cwd),
+            timeout=_MODULE_PROBE_TIMEOUT_SECONDS,
+            capture_output=True,
+            text=True,
+            shell=False,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    if completed.returncode == 0:
+        return True
+    if completed.returncode == 3:
+        return False
+    return None
+
+
+def diagnose_command(
+    check: CommandCheck,
+    *,
+    repo_root: Path | None,
+    which: Callable[[str], str | None] = shutil.which,
+    module_probe: Callable[..., bool | None] = _default_module_probe,
+) -> CommandDiagnostic | None:
+    """Diagnose whether a command check is runnable, without running it.
+
+    Returns ``None`` unless a problem is positively determined:
+
+    - ``executable-not-found`` when ``argv[0]`` has no path separator and does
+      not resolve via ``which`` (a path-bearing ``argv[0]`` is skipped — it may
+      be a repo-relative binary the plan builds).
+    - ``module-not-importable`` when ``argv`` is ``[<python>, "-m", <module>, …]``,
+      the interpreter resolves, and ``module_probe`` reports the module missing.
+
+    The check is skipped entirely when ``repo_root`` is ``None`` (mirrors the
+    preflight cwd guard). Every ambiguous or failing probe fails open.
+    """
+    if repo_root is None:
+        return None
+    argv = check.argv
+    if not argv:
+        return None
+
+    executable = argv[0]
+    has_separator = _has_path_separator(executable)
+    resolved_interpreter: str | None
+    if has_separator:
+        resolved_interpreter = executable
+    else:
+        resolved_interpreter = which(executable)
+        if resolved_interpreter is None:
+            return CommandDiagnostic(
+                reason="executable-not-found",
+                detail=f"executable not found on PATH: {executable}",
+            )
+
+    if _is_module_invocation(argv) and resolved_interpreter is not None:
+        module = argv[2]
+        outcome = module_probe(resolved_interpreter, module, cwd=repo_root)
+        if outcome is False:
+            return CommandDiagnostic(
+                reason="module-not-importable",
+                detail=(
+                    f"module not importable by {executable}: {module}"
+                ),
+            )
+
+    return None
 
 
 def _run_file_exists_check(

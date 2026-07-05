@@ -44,6 +44,7 @@ from typing import Any, Literal
 from . import harnesses, progress_repair, responses, state
 from .contracts import (
     COMPLETION_CONTRACT_HEADING,
+    CommandCheck,
     CompletionContract,
     FileExistsCheck,
     RegexInFileCheck,
@@ -65,6 +66,7 @@ from .plans import (
     stable_readiness_sha256,
     write_readiness_metadata,
 )
+from .verification import diagnose_command
 
 
 PreflightSeverity = Literal["red", "yellow", "green"]
@@ -76,6 +78,7 @@ PreflightCategory = Literal[
     "malformed-contract",
     "ambiguity-sentinel",
     "path-reference",
+    "command-not-runnable",
     "progress-journal-missing",
     "env-repo-root",
     "env-git",
@@ -94,6 +97,7 @@ PREFLIGHT_CATEGORIES: tuple[PreflightCategory, ...] = (
     "malformed-contract",
     "ambiguity-sentinel",
     "path-reference",
+    "command-not-runnable",
     "progress-journal-missing",
     "env-repo-root",
     "env-git",
@@ -277,6 +281,22 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
         question_template=(
             "Session {session_id} contract path is not repo-relative ({detail}). "
             "Rewrite it?"
+        ),
+        fix_category="plan-edit",
+    ),
+    "command-not-runnable": RepairHint(
+        category="command-not-runnable",
+        check_id="command-not-runnable.fix",
+        severity_hint="red",
+        message=(
+            "Fix the contract command so it can run in this environment: use "
+            "`python3` (not `python`) if only python3 is on PATH, install the "
+            "missing runner, or switch to the repo's actual test convention "
+            "(e.g. `python3 -m unittest`)."
+        ),
+        question_template=(
+            "Session {session_id} contract command is not runnable ({detail}). "
+            "Should I fix the recipe?"
         ),
         fix_category="plan-edit",
     ),
@@ -507,6 +527,36 @@ _CATEGORY_HINT_OVERRIDES: dict[str, RepairHint] = {
         ),
         fix_category="plan-edit",
     ),
+    "command-not-runnable.executable": RepairHint(
+        category="command-not-runnable",
+        check_id="command-not-runnable.executable",
+        severity_hint="red",
+        message=(
+            "The contract command's executable is not on PATH. Use `python3` "
+            "instead of `python` if only python3 is installed, install the "
+            "missing binary, or switch to a runnable command."
+        ),
+        question_template=(
+            "Session {session_id} contract command's executable is not on PATH "
+            "({detail}). Should I fix the recipe?"
+        ),
+        fix_category="plan-edit",
+    ),
+    "command-not-runnable.module": RepairHint(
+        category="command-not-runnable",
+        check_id="command-not-runnable.module",
+        severity_hint="yellow",
+        message=(
+            "The contract command runs `python -m <module>` for a module that "
+            "is not importable here. Install the module, or prefer the repo's "
+            "actual test convention (e.g. `python3 -m unittest`)."
+        ),
+        question_template=(
+            "Session {session_id} contract command runs a module that is not "
+            "importable ({detail}). Should I fix the recipe?"
+        ),
+        fix_category="plan-edit",
+    ),
 }
 
 
@@ -666,6 +716,12 @@ def _override_check_id_for_finding(finding: PreflightFinding) -> str:
     if finding.category == "env-turn-budget":
         if finding.severity == "yellow":
             return "env-turn-budget.split"
+        return ""
+    if finding.category == "command-not-runnable":
+        if "executable is not on PATH" in finding.message:
+            return "command-not-runnable.executable"
+        if "module is not importable" in finding.message:
+            return "command-not-runnable.module"
         return ""
     return ""
 
@@ -1072,6 +1128,77 @@ def _check_path_references(
                         ),
                         session_id=session_id,
                         detail=f"path: {path_value}",
+                    )
+                )
+
+    return tuple(findings)
+
+
+def _check_command_runnability(
+    contracts_by_session: dict[str, CompletionContract],
+    cwd: str | Path | None,
+    *,
+    which: Any | None = None,
+    module_probe: Any | None = None,
+) -> tuple[PreflightFinding, ...]:
+    """Flag contract command checks that cannot run in this environment.
+
+    Skipped entirely when ``cwd is None`` (mirrors the environment cwd guard):
+    without a repo root there is no interpreter/PATH context to probe against.
+    Otherwise every :class:`CommandCheck` is passed to :func:`diagnose_command`
+    (fail-open by design), mapping ``executable-not-found`` to a red finding and
+    ``module-not-importable`` to a yellow finding. Both block ``--mark-loop-ready``.
+
+    ``which`` and ``module_probe`` are optional injectable seams forwarded to
+    :func:`diagnose_command`; when ``None`` the helper's own defaults
+    (``shutil.which`` / a bounded import probe) are used.
+    """
+    if cwd is None:
+        return ()
+
+    repo_root = Path(cwd)
+    diagnose_kwargs: dict[str, Any] = {}
+    if which is not None:
+        diagnose_kwargs["which"] = which
+    if module_probe is not None:
+        diagnose_kwargs["module_probe"] = module_probe
+
+    findings: list[PreflightFinding] = []
+
+    for session_id in sorted(contracts_by_session):
+        contract = contracts_by_session[session_id]
+        for check in contract.verify.checks:
+            if not isinstance(check, CommandCheck):
+                continue
+            diagnostic = diagnose_command(
+                check, repo_root=repo_root, **diagnose_kwargs
+            )
+            if diagnostic is None:
+                continue
+            if diagnostic.reason == "executable-not-found":
+                findings.append(
+                    _finding(
+                        "red",
+                        "command-not-runnable",
+                        (
+                            f"session {session_id} check {check.name!r} "
+                            "executable is not on PATH"
+                        ),
+                        session_id=session_id,
+                        detail=diagnostic.detail,
+                    )
+                )
+            else:
+                findings.append(
+                    _finding(
+                        "yellow",
+                        "command-not-runnable",
+                        (
+                            f"session {session_id} check {check.name!r} "
+                            "module is not importable"
+                        ),
+                        session_id=session_id,
+                        detail=diagnostic.detail,
                     )
                 )
 
@@ -1593,9 +1720,12 @@ def run_preflight(
         state_dir=state_dir,
         max_pending_sessions=max_pending_sessions,
     )
+    command_findings = _check_command_runnability(
+        core_report.contracts_by_session, cwd
+    )
     return PreflightReport(
         plan_dir=core_report.plan_dir,
-        findings=core_report.findings + env_findings,
+        findings=core_report.findings + env_findings + command_findings,
         snapshot=core_report.snapshot,
         readiness=core_report.readiness,
         expected_readiness_sha256=core_report.expected_readiness_sha256,

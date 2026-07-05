@@ -3788,6 +3788,142 @@ class VerificationExecutorTests(unittest.TestCase):
                     contract, repo_root=repo_root, observer=observer
                 )
 
+    def _command(
+        self, argv: tuple[str, ...], *, name: str = "cmd"
+    ) -> contracts.CommandCheck:
+        return contracts.CommandCheck(
+            name=name, argv=argv, timeout_seconds=10.0
+        )
+
+    def test_diagnose_command_flags_missing_bare_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            check = self._command(("pytest", "-q"))
+            diagnostic = verification.diagnose_command(
+                check, repo_root=Path(tmp), which=lambda _name: None
+            )
+
+            self.assertIsNotNone(diagnostic)
+            self.assertEqual("executable-not-found", diagnostic.reason)
+            self.assertIn("pytest", diagnostic.detail)
+
+    def test_diagnose_command_skips_path_bearing_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            check = self._command((".venv/bin/tool", "run"))
+            diagnostic = verification.diagnose_command(
+                check,
+                repo_root=Path(tmp),
+                which=lambda _name: None,
+            )
+
+            self.assertIsNone(diagnostic)
+
+    def test_diagnose_command_flags_missing_module(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            check = self._command(("python3", "-m", "pytest", "-q"))
+            diagnostic = verification.diagnose_command(
+                check,
+                repo_root=Path(tmp),
+                which=lambda name: f"/usr/bin/{name}",
+                module_probe=lambda *_a, **_k: False,
+            )
+
+            self.assertIsNotNone(diagnostic)
+            self.assertEqual("module-not-importable", diagnostic.reason)
+            self.assertIn("pytest", diagnostic.detail)
+
+    def test_diagnose_command_passes_present_module(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            check = self._command(("python3", "-m", "unittest"))
+            diagnostic = verification.diagnose_command(
+                check,
+                repo_root=Path(tmp),
+                which=lambda name: f"/usr/bin/{name}",
+                module_probe=lambda *_a, **_k: True,
+            )
+
+            self.assertIsNone(diagnostic)
+
+    def test_diagnose_command_fails_open_on_probe_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            check = self._command(("python3", "-m", "pytest"))
+            # A probe that returns the fail-open sentinel (``None``) yields no
+            # finding even when the module might otherwise look absent.
+            diagnostic = verification.diagnose_command(
+                check,
+                repo_root=Path(tmp),
+                which=lambda name: f"/usr/bin/{name}",
+                module_probe=lambda *_a, **_k: None,
+            )
+
+            self.assertIsNone(diagnostic)
+
+    def test_diagnose_command_ignores_non_module_argv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            check = self._command(("python3", "-c", "print(1)"))
+            probe_calls: list[tuple[object, ...]] = []
+
+            def _record(interpreter: str, module: str, **_k: object) -> bool:
+                probe_calls.append((interpreter, module))
+                return False
+
+            diagnostic = verification.diagnose_command(
+                check,
+                repo_root=Path(tmp),
+                which=lambda name: f"/usr/bin/{name}",
+                module_probe=_record,
+            )
+
+            self.assertIsNone(diagnostic)
+            self.assertEqual([], probe_calls)
+
+    def test_diagnose_command_none_for_runnable_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            check = self._command(("python3", "-c", "import sys; sys.exit(0)"))
+            diagnostic = verification.diagnose_command(
+                check, repo_root=Path(tmp)
+            )
+
+            self.assertIsNone(diagnostic)
+
+    def test_diagnose_command_skips_when_repo_root_none(self) -> None:
+        check = self._command(("pytest",))
+        diagnostic = verification.diagnose_command(
+            check, repo_root=None, which=lambda _name: None
+        )
+
+        self.assertIsNone(diagnostic)
+
+    def test_default_module_probe_detects_present_and_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            present = verification._default_module_probe(
+                sys.executable, "unittest", cwd=repo_root
+            )
+            missing = verification._default_module_probe(
+                sys.executable,
+                "definitely_not_a_real_module_xyz",
+                cwd=repo_root,
+            )
+
+            self.assertIs(True, present)
+            self.assertIs(False, missing)
+
+    def test_default_module_probe_detects_missing_dotted_submodule(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            outcome = verification._default_module_probe(
+                sys.executable,
+                "definitely_not_a_real_module_xyz.submodule",
+                cwd=Path(tmp),
+            )
+            self.assertIs(False, outcome)
+
+    def test_default_module_probe_detects_present_dotted_module(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            outcome = verification._default_module_probe(
+                sys.executable, "importlib.util", cwd=Path(tmp)
+            )
+            self.assertIs(True, outcome)
+
 
 class QnAContextLoaderTests(unittest.TestCase):
     def _seed_plan(self, tmp_dir: Path) -> tuple[Path, Path, Path]:
@@ -14344,6 +14480,192 @@ class PreflightCoreTests(unittest.TestCase):
             self.assertIn("v999", finding.message)
 
 
+class PreflightCommandRunnabilityTests(unittest.TestCase):
+    def _contract(
+        self,
+        session_id: str,
+        *checks: contracts.VerificationCheck,
+    ) -> contracts.CompletionContract:
+        return contracts.CompletionContract(
+            session_id=plans.parse_session_id(session_id),
+            done_when=("recipe runs",),
+            verify=contracts.VerifyRecipe(checks=tuple(checks)),
+        )
+
+    def _command(
+        self,
+        name: str,
+        argv: tuple[str, ...],
+    ) -> contracts.CommandCheck:
+        return contracts.CommandCheck(
+            name=name,
+            argv=argv,
+            timeout_seconds=300,
+        )
+
+    def test_missing_bare_executable_emits_single_red(self) -> None:
+        contracts_by_session = {
+            "1": self._contract(
+                "1", self._command("run-1", ("pytest", "-q"))
+            )
+        }
+        findings = preflight._check_command_runnability(
+            contracts_by_session,
+            "/repo",
+            which=lambda name: None,
+        )
+        self.assertEqual(1, len(findings))
+        finding = findings[0]
+        self.assertEqual("red", finding.severity)
+        self.assertEqual("command-not-runnable", finding.category)
+        self.assertEqual("1", finding.session_id)
+        self.assertIn("executable is not on PATH", finding.message)
+        self.assertIn("pytest", finding.detail)
+
+    def test_missing_module_emits_single_yellow(self) -> None:
+        contracts_by_session = {
+            "1": self._contract(
+                "1",
+                self._command(
+                    "run-1", ("python3", "-m", "pytest", "tests")
+                ),
+            )
+        }
+        findings = preflight._check_command_runnability(
+            contracts_by_session,
+            "/repo",
+            which=lambda name: f"/usr/bin/{name}",
+            module_probe=lambda interpreter, module, *, cwd: False,
+        )
+        self.assertEqual(1, len(findings))
+        finding = findings[0]
+        self.assertEqual("yellow", finding.severity)
+        self.assertEqual("command-not-runnable", finding.category)
+        self.assertIn("module is not importable", finding.message)
+        self.assertIn("pytest", finding.detail)
+
+    def test_runnable_command_emits_no_finding(self) -> None:
+        contracts_by_session = {
+            "1": self._contract(
+                "1",
+                self._command(
+                    "run-1", ("python3", "-m", "unittest", "tests")
+                ),
+            )
+        }
+        findings = preflight._check_command_runnability(
+            contracts_by_session,
+            "/repo",
+            which=lambda name: f"/usr/bin/{name}",
+            module_probe=lambda interpreter, module, *, cwd: True,
+        )
+        self.assertEqual((), findings)
+
+    def test_cwd_none_skips_check(self) -> None:
+        contracts_by_session = {
+            "1": self._contract(
+                "1", self._command("run-1", ("pytest", "-q"))
+            )
+        }
+        findings = preflight._check_command_runnability(
+            contracts_by_session,
+            None,
+            which=lambda name: None,
+        )
+        self.assertEqual((), findings)
+
+    def test_non_command_checks_are_ignored(self) -> None:
+        contracts_by_session = {
+            "1": self._contract(
+                "1",
+                contracts.FileExistsCheck(name="f-1", path="README.md"),
+                contracts.RegexInFileCheck(
+                    name="r-1", path="README.md", pattern="x"
+                ),
+            )
+        }
+        findings = preflight._check_command_runnability(
+            contracts_by_session,
+            "/repo",
+            which=lambda name: None,
+        )
+        self.assertEqual((), findings)
+
+    def test_run_preflight_folds_command_finding_with_real_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            repo_root = Path(tmp) / "repo"
+            repo_root.mkdir()
+            _write_loop_ready_plan(
+                plan_dir,
+                ("pending",),
+                contracts_by_id={
+                    "1": _contract_block(
+                        '{"type": "command", "argv": '
+                        '["definitely-not-a-real-binary-xyz", "--version"], '
+                        '"timeout_seconds": 30, "name": "run-1"}',
+                        session="1",
+                    ),
+                },
+            )
+            report = preflight.run_preflight(plan_dir, cwd=repo_root)
+            command_findings = [
+                finding
+                for finding in report.findings
+                if finding.category == "command-not-runnable"
+            ]
+            self.assertEqual(1, len(command_findings))
+            self.assertEqual("red", command_findings[0].severity)
+            self.assertFalse(report.ok)
+
+    def test_run_preflight_cwd_none_emits_no_command_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            _write_loop_ready_plan(
+                plan_dir,
+                ("pending",),
+                contracts_by_id={
+                    "1": _contract_block(
+                        '{"type": "command", "argv": '
+                        '["definitely-not-a-real-binary-xyz", "--version"], '
+                        '"timeout_seconds": 30, "name": "run-1"}',
+                        session="1",
+                    ),
+                },
+            )
+            report = preflight.run_preflight(plan_dir, cwd=None)
+            command_findings = [
+                finding
+                for finding in report.findings
+                if finding.category == "command-not-runnable"
+            ]
+            self.assertEqual([], command_findings)
+
+    def test_executable_finding_resolves_to_override_hint(self) -> None:
+        finding = preflight.PreflightFinding(
+            severity="red",
+            category="command-not-runnable",
+            message="session 1 check 'run-1' executable is not on PATH",
+            session_id="1",
+            detail="executable not found on PATH: pytest",
+        )
+        hint = preflight.repair_hint_for_finding(finding)
+        self.assertEqual("command-not-runnable.executable", hint.check_id)
+        self.assertEqual("red", hint.severity_hint)
+
+    def test_module_finding_resolves_to_override_hint(self) -> None:
+        finding = preflight.PreflightFinding(
+            severity="yellow",
+            category="command-not-runnable",
+            message="session 1 check 'run-1' module is not importable",
+            session_id="1",
+            detail="module not importable by python3: pytest",
+        )
+        hint = preflight.repair_hint_for_finding(finding)
+        self.assertEqual("command-not-runnable.module", hint.check_id)
+        self.assertEqual("yellow", hint.severity_hint)
+
+
 _FIX_CATEGORIES = {
     "plan-recreate",
     "filename-rename",
@@ -15239,6 +15561,41 @@ class PreflightCliTests(unittest.TestCase):
         self.assertTrue(payload["mark_loop_ready_requested"])
         self.assertFalse(payload["marked_loop_ready"])
         self.assertIn("non-readiness", payload["mark_error"])
+        readiness = plans.read_readiness_metadata(self.plan_dir)
+        self.assertIsNotNone(readiness)
+        self.assertEqual("draft", readiness.state)
+
+    def test_preflight_command_not_runnable_blocks_mark_loop_ready(self) -> None:
+        _write_loop_ready_plan(
+            self.plan_dir,
+            ("pending",),
+            contracts_by_id={
+                "1": _contract_block(
+                    '{"type": "command", "argv": '
+                    '["definitely-not-a-real-binary-xyz", "--version"], '
+                    '"timeout_seconds": 30, "name": "run-1"}',
+                    session="1",
+                ),
+            },
+            state="draft",
+        )
+
+        completed = self._run_preflight(cwd=self.repo_root, mark_loop_ready=True)
+
+        self.assertEqual(1, completed.returncode)
+        payload = json.loads(completed.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("preflight-red", payload["reason"])
+        self.assertTrue(payload["mark_loop_ready_requested"])
+        self.assertFalse(payload["marked_loop_ready"])
+        self.assertIn("non-readiness", payload["mark_error"])
+        command_findings = [
+            finding
+            for finding in payload["findings"]
+            if finding["category"] == "command-not-runnable"
+        ]
+        self.assertEqual(1, len(command_findings))
+        self.assertEqual("red", command_findings[0]["severity"])
         readiness = plans.read_readiness_metadata(self.plan_dir)
         self.assertIsNotNone(readiness)
         self.assertEqual("draft", readiness.state)
