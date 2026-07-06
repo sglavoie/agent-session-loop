@@ -349,9 +349,11 @@ Print a concise summary:
 Only when final preflight succeeds with `ok: true` and readiness is `loop-ready`, end by printing both ready-to-paste next-step commands so the user can proceed directly to execution without switching context:
 
 - `<skill-prefix>session-run <plan-directory>/` — run the next pending session in the current conversation, one session at a time (the default when the operator wants to stay in the loop between sessions).
-- `<skill-prefix>asl asl run <plan-directory>/` — hand the whole run to the `asl` autopilot, which supervises `asl run` end to end and pauses only for human decisions it cannot resolve.
+- `<skill-prefix>asl asl run <plan-directory>/ --harness claude --review-harness codex` — hand the whole run to the `asl` autopilot, which supervises `asl run` end to end with Claude for implementation turns and Codex for final review, pausing only for human decisions it cannot resolve.
 
-Otherwise, end with the ready-to-paste `<skill-prefix>plan-preflight-iterate <plan-directory>/` command. Note that `asl run <plan-directory>` self-heals stale/missing `progress.md` and recomputable `manifest.md` readiness metadata before pausing (surfaced via `readiness_gate_repair` in the run JSON), so the iterate skill is only required when a non-derived blocker (contracts, paths, locks, etc.) remains.
+When printing an `asl run` next-step command from this skill, default to including `--harness claude --review-harness codex` unless the user explicitly requested different harnesses. Do not append these flags to the `session-run` skill invocation; `session-run` accepts only the plan directory and runs in the current conversation's active harness.
+
+Otherwise, end with the ready-to-paste `<skill-prefix>plan-preflight-iterate <plan-directory>/` command. Note that `asl run <plan-directory>/ --harness claude --review-harness codex` self-heals stale/missing `progress.md` and recomputable `manifest.md` readiness metadata before pausing (surfaced via `readiness_gate_repair` in the run JSON), so the iterate skill is only required when a non-derived blocker (contracts, paths, locks, etc.) remains.
 
 ## Important Notes
 
