@@ -15906,6 +15906,24 @@ class SkillInstructionTests(unittest.TestCase):
         self.assertIn("missing-contract", text)
         self.assertNotIn("session-contract", text)
 
+    def test_session_run_documents_bounded_manual_auto_repair(self) -> None:
+        text = (REPO_ROOT / "skills/session-run/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("asl unlock <plan-dir> --json", text)
+        self.assertIn("Never run `asl unlock --force`", text)
+        self.assertIn("asl backfill-progress --force <plan-dir>", text)
+        self.assertIn(
+            "asl preflight <plan-dir> --json --mark-loop-ready",
+            text,
+        )
+        self.assertIn(
+            "The only `progress.md` mutation this skill may trigger",
+            text,
+        )
+        self.assertIn("When `runner_managed=true`:", text)
+
 
 class InstallVerificationTests(unittest.TestCase):
     def _install_fake_home_links(self, home: Path) -> Path:

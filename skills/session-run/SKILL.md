@@ -147,13 +147,43 @@ When `runner_managed=false`, run:
 asl preflight <plan-dir> --json
 ```
 
-Stop unless the command exits zero, `ok` is true, and the payload's readiness state is `loop-ready`. Emit:
+Use the JSON payload as the safety gate. If the command does not return parseable JSON, or the JSON has `reason: plan-structure` / `reason: input-error`, stop without repairing and emit a malformed-plan pause with the shortest useful error summary.
+
+If the first preflight is not ready, attempt only the bounded automatic repairs below, in order. Each repair runs before Step 5 and before any handoff mutation. Run at most one attempt per repair type, and rerun `asl preflight <plan-dir> --json` after each successful repair so the next decision uses current findings.
+
+1. **Stale lock repair**: inspect preflight `findings` / `repair_hints` for `env-lock`.
+   - If the lock is active (`env-lock.active`, a red `env-lock` finding, or an error mentioning an active lock), do not run unlock and do not use `--force`; stop with `RUNNER_PAUSE: lock-contention - active plan lock remains; wait for the runner or unlock manually if safe`.
+   - If the lock is stale (`env-lock.stale`, a yellow `env-lock` finding, or a stale-lock message), run:
+
+     ```text
+     asl unlock <plan-dir> --json
+     ```
+
+     Do not add `--force`. If unlock fails or reports an active lock, stop with `RUNNER_PAUSE: lock-contention - automatic stale-lock repair failed: <summary>`.
+
+2. **Progress journal repair**: if any current finding has `category: progress-journal-missing`, run:
+
+   ```text
+   asl backfill-progress --force <plan-dir>
+   ```
+
+   This is the only allowed direct repair of `progress.md` from this skill, and it must happen before implementation starts. If it fails, stop with `RUNNER_PAUSE: unsafe - automatic progress repair failed: <summary>`.
+
+3. **Readiness metadata repair**: if the current preflight still is not ready, run:
+
+   ```text
+   asl preflight <plan-dir> --json --mark-loop-ready
+   ```
+
+   This repairs missing/stale `manifest.md` readiness metadata and reuses preflight's own progress auto-backfill behavior when progress is the only non-readiness blocker.
+
+After the repair attempts, continue only when the final preflight payload has `ok: true` and `readiness.state == "loop-ready"`. Otherwise, stop and emit:
 
 ```text
-RUNNER_PAUSE: unsafe - plan is not loop-ready; run `asl preflight <plan-dir> --mark-loop-ready` (auto-backfills stale/missing progress.md) or `asl run <plan-dir>` (self-heals derived progress/readiness drift before pausing) before continuing
+RUNNER_PAUSE: unsafe - automatic plan repair failed: <summary from final preflight error/findings>
 ```
 
-Do not repair readiness from the skill. `asl preflight --mark-loop-ready` is the canonical manual repair: it auto-backfills `progress.md` when the only blockers are `progress-journal-missing` and then marks the plan loop-ready. `asl run` performs the same auto-repair from inside the loop. Non-derived findings (contracts, paths, locks, etc.) still pause; if `preflight` reports contract findings, surface its `repair_hints` rather than interpreting `session-<ID>.expand.md` contract prose as authoritative.
+Do not edit plan files by hand during repair. Use only the CLI commands above. Non-derived findings (contracts, paths, active locks, ambiguity sentinels, command-not-runnable checks, commit-mode environment failures, etc.) still pause; surface `repair_hints` from the final preflight payload rather than interpreting `session-<ID>.expand.md` contract prose as authoritative.
 
 ### Step 5: Implement
 
@@ -266,11 +296,11 @@ If a derived ledger cannot be updated safely, leave it unchanged and mention tha
 
 ### Step 6d: Do Not Write the Progress Journal
 
-Never edit `progress.md` from a session. The runner appends an entry automatically after parsing the just-updated handoff (`agent_session_loop.plans.append_progress_entry`) once verification has passed. The append is atomic, version-checked against the `<!-- agent-session-loop progress-journal v1 -->` schema comment, and idempotent against `(session_id, completed_at)`, so retries and runner reruns never double-write.
+Never edit `progress.md` by hand from a session. The only `progress.md` mutation this skill may trigger is the pre-implementation Step 4a repair command `asl backfill-progress --force <plan-dir>`, which rebuilds derived history from completed handoffs before implementation starts. The runner appends an entry automatically after parsing the just-updated handoff (`agent_session_loop.plans.append_progress_entry`) once verification has passed. The append is atomic, version-checked against the `<!-- agent-session-loop progress-journal v1 -->` schema comment, and idempotent against `(session_id, completed_at)`, so retries and runner reruns never double-write.
 
 If you produced facts or questions that future sessions should see, record them in the handoff's `### Discovered Facts` / `### Open Questions` subsections (Step 6); if you have session-specific guidance, inject expansion notes (Step 6b). Do not bypass either of these by writing to `progress.md` directly — the journal is read-only from a session's perspective.
 
-If a plan is missing `progress.md` entirely (older plans authored before the runner shipped journal support), use `asl backfill-progress <plan-dir>` from a separate manual step to reconstruct it from completed handoffs. If the journal exists but is stale or malformed, use `asl backfill-progress --force <plan-dir>` so the CLI replaces it atomically. Never recover it by hand from inside a session.
+If a plan is missing `progress.md` entirely (older plans authored before the runner shipped journal support), or if the journal exists but is stale or malformed, use Step 4a's bounded `asl backfill-progress --force <plan-dir>` repair. Never recover it by hand from inside a session.
 
 ### Step 7: Report
 
@@ -278,9 +308,10 @@ Print a brief summary:
 
 1. Which session was completed (ID and title)
 2. Files modified (short list)
-3. Derived status ledgers updated, if any (`manifest.md` and/or `context.md`)
-4. What session comes next, or "All sessions implemented" if this was the last one
-5. Any blockers or notes for the next session — and, for each, name the file you injected it into (e.g., "Injected note for S3 into session-3.expand.md"). Do not put the note content itself in the report; the report only confirms where it was written.
+3. Automatic plan repairs performed before implementation, if any (`asl unlock`, `asl backfill-progress --force`, `asl preflight --mark-loop-ready`)
+4. Derived status ledgers updated, if any (`manifest.md` and/or `context.md`)
+5. What session comes next, or "All sessions implemented" if this was the last one
+6. Any blockers or notes for the next session — and, for each, name the file you injected it into (e.g., "Injected note for S3 into session-3.expand.md"). Do not put the note content itself in the report; the report only confirms where it was written.
 
 For runner-friendly output, you may print one or more machine-readable lines immediately before the final `Next command:` line:
 
@@ -307,7 +338,8 @@ Use the original plan directory argument provided by the user for `<plan-dir>`. 
 - Honor `--runner-managed` as an internal mode from `asl run`: implement the next pending session and update its handoff, but leave readiness, verification, handoff revert, and derived ledger sync to the Python runner.
 - When the prompt carries an `## ASL reply context` block (only on the first turn after `asl run --reply TEXT`), use the `### Operator reply` text as the answers to the paused question and resume the session without re-asking the operator. If the reply is genuinely incomplete, emit `Runner status: paused` and `RUNNER_PAUSE: blocked - interactive decision gates require user answers` before mutating the handoff.
 - Use `asl status <plan-dir> --json` as the authoritative parser for session lists, final handoff statuses, and `next_pending_id`; do not reimplement that parser in prose when the script can answer it.
-- In manual mode, use `asl preflight <plan-dir> --json` before implementation and `asl verify <plan-dir> --session <ID> --json` after marking the handoff complete. `--session <ID>` here is an internal `asl verify` argument; it is never a `session-run` invocation form.
+- In manual mode, use `asl preflight <plan-dir> --json` before implementation, automatically attempt bounded repairs with `asl unlock <plan-dir> --json` for stale locks, `asl backfill-progress --force <plan-dir>` for progress drift, and `asl preflight <plan-dir> --json --mark-loop-ready` for readiness metadata, then use `asl verify <plan-dir> --session <ID> --json` after marking the handoff complete. `--session <ID>` here is an internal `asl verify` argument; it is never a `session-run` invocation form.
+- Never run `asl unlock --force` from this skill. Active locks pause as `lock-contention` and require human judgment.
 - Always read `context.md` before starting implementation
 - Always read `manifest.md`; treat its session-status table as derived bookkeeping, not the completion source of truth. Ignore any legacy `## Parallel Execution` section.
 - Do not read `parallel-validation.md` even if it exists on disk. The skill no longer consults that file.
@@ -320,6 +352,6 @@ Use the original plan directory argument provided by the user for `<plan-dir>`. 
 - Never modify the original plan file
 - Modify `context.md` only for clear derived session-status table sync described in Step 6c
 - Read `progress.md` in Step 2.5 if it exists — it is the runner-maintained cross-session digest. When absent, fall back to reading prior `## Handoff` blocks directly.
-- Never write to `progress.md`; the runner appends entries after verification (Step 6d). Record forward-looking facts in `### Discovered Facts` and forward-looking uncertainties in `### Open Questions` inside the handoff.
+- Never hand-edit `progress.md`; only Step 4a may invoke `asl backfill-progress --force <plan-dir>` before implementation. The runner appends entries after verification (Step 6d). Record forward-looking facts in `### Discovered Facts` and forward-looking uncertainties in `### Open Questions` inside the handoff.
 - `progress.md` is excluded from `plan_content_sha256` / `stable_readiness_sha256`, so reading or skipping it cannot change readiness state.
 - If a session's status is already `complete`, skip it and continue to the next pending one. There is no way to re-run a completed session through this skill.
