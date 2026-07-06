@@ -1073,15 +1073,43 @@ def _check_ambiguity_sentinels(
 
 
 def _matching_ambiguity_sentinel(line: str) -> str | None:
-    word_match = WORD_AMBIGUITY_SENTINEL_PATTERN.search(line)
-    if word_match is not None:
-        return word_match.group(1)
+    # A word sentinel (TODO/FIXME/...) is only an unresolved *placeholder* when it
+    # LEADS a clause as a marker ("TODO: revisit", "- FIXME me later"). Cleanup
+    # sessions legitimately *reference* code anchors mid-sentence ("replace the bare
+    # `FIXME`", "the TODO in the reset route", "Anchor/FIXME cleanups"); those are not
+    # ambiguity and must not block loop-ready. We treat a match as a reference (skip)
+    # when it sits inside inline code (backticks) or anywhere but a marker position.
+    code_spans = [(m.start(), m.end()) for m in re.finditer(r"`[^`]*`", line)]
+    for word_match in WORD_AMBIGUITY_SENTINEL_PATTERN.finditer(line):
+        start = word_match.start()
+        if any(span_start <= start < span_end for span_start, span_end in code_spans):
+            continue
+        if _is_sentinel_marker_position(line[:start]):
+            return word_match.group(1)
 
     for sentinel in LITERAL_AMBIGUITY_SENTINELS:
         if sentinel in line:
             return sentinel
 
     return None
+
+
+# Characters that form structural markdown prefixes (list bullets, headings,
+# blockquotes, ordered-list numbers, emphasis runs). A sentinel preceded only by
+# these leads its line and is therefore a marker rather than a reference.
+_SENTINEL_MARKER_PREFIX = re.compile(r"[\s>#*_`+.)\-0-9]*")
+_SENTINEL_CLAUSE_TERMINATORS = ".:;!?"
+
+
+def _is_sentinel_marker_position(before: str) -> bool:
+    stripped = before.rstrip()
+    if stripped == "":
+        return True
+    # Only structural prefix chars precede the sentinel -> it leads the line.
+    if _SENTINEL_MARKER_PREFIX.fullmatch(stripped) is not None:
+        return True
+    # Otherwise it is a marker only when it opens a fresh clause after a terminator.
+    return stripped[-1] in _SENTINEL_CLAUSE_TERMINATORS
 
 
 def _check_path_references(

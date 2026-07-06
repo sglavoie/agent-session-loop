@@ -14202,6 +14202,82 @@ class PreflightCoreTests(unittest.TestCase):
             ]
             self.assertEqual([], sentinels)
 
+    def test_ambiguity_sentinel_ignores_anchor_references(self) -> None:
+        # Cleanup sessions legitimately reference code anchors mid-sentence or
+        # inside inline code; these are not unresolved placeholders.
+        reference_lines = (
+            "Instructions. Anchor/FIXME cleanups plus migration.",
+            "Instructions. Replace the bare `FIXME` at shared.ts:286.",
+            "Instructions. Refresh the TODO in the internal reset route.",
+            'Instructions. The companion "same password" TODO stays out of scope.',
+            "Instructions. Stale AIDEV-TODOs and the `ssoEmail` FIXME are converted.",
+        )
+        for reference in reference_lines:
+            with self.subTest(reference=reference):
+                with tempfile.TemporaryDirectory() as tmp:
+                    plan_dir = Path(tmp) / "plan"
+                    _write_loop_ready_plan(plan_dir, ("pending",))
+                    session_path = plan_dir / "session-1.md"
+                    text = session_path.read_text(encoding="utf-8")
+                    session_path.write_text(
+                        text.replace("Instructions.", reference),
+                        encoding="utf-8",
+                    )
+                    plans.write_readiness_metadata(
+                        plan_dir,
+                        plans.ReadinessMetadata(
+                            state="loop-ready",
+                            readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                            checked_at="2026-06-19T00:00:00Z",
+                        ),
+                    )
+
+                    report = preflight.run_core_preflight(plan_dir)
+
+                    sentinels = [
+                        finding
+                        for finding in report.findings
+                        if finding.category == "ambiguity-sentinel"
+                    ]
+                    self.assertEqual([], sentinels)
+
+    def test_ambiguity_sentinel_still_flags_leading_markers(self) -> None:
+        # A sentinel that leads a clause (after a terminator or a list/heading
+        # prefix) is a genuine placeholder and must still block loop-ready.
+        marker_lines = (
+            "Instructions. TODO: decide the column name.",
+            "Instructions.\n\n- FIXME resolve this before running.",
+            "Instructions.\n\n## TBD finalize the schema.",
+        )
+        for marker in marker_lines:
+            with self.subTest(marker=marker):
+                with tempfile.TemporaryDirectory() as tmp:
+                    plan_dir = Path(tmp) / "plan"
+                    _write_loop_ready_plan(plan_dir, ("pending",))
+                    session_path = plan_dir / "session-1.md"
+                    text = session_path.read_text(encoding="utf-8")
+                    session_path.write_text(
+                        text.replace("Instructions.", marker),
+                        encoding="utf-8",
+                    )
+                    plans.write_readiness_metadata(
+                        plan_dir,
+                        plans.ReadinessMetadata(
+                            state="loop-ready",
+                            readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                            checked_at="2026-06-19T00:00:00Z",
+                        ),
+                    )
+
+                    report = preflight.run_core_preflight(plan_dir)
+
+                    sentinels = [
+                        finding
+                        for finding in report.findings
+                        if finding.category == "ambiguity-sentinel"
+                    ]
+                    self.assertTrue(sentinels)
+
     def test_path_reference_flags_absolute_paths_as_yellow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
