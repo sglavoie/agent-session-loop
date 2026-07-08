@@ -189,11 +189,21 @@ The resolver creates a fresh collision-safe directory and never overwrites an ex
 Extract these fields from `resolver_json` and keep them available for later steps:
 
 - `output_dir`
+- `plan_id`
 - `source_path`
 - `source_fingerprint`
 - `content_sha256`
+- `content_hash_prefix`
+- `fingerprint_prefix`
 - `slug`
 - `hash_prefix`
+
+Field meanings:
+
+- `plan_id` — the unsuffixed stable base identifier, `<content_hash_prefix>-<fingerprint_prefix>`. It is the basis for the directory name but not the guaranteed directory basename: the resolver may append `-2`, `-3`, and later collision suffixes, so use `output_dir` for the actual path.
+- `content_hash_prefix` — the leading `HASH_PREFIX_LENGTH` characters of the content SHA-256; identifies the plan content.
+- `fingerprint_prefix` — the leading `HASH_PREFIX_LENGTH` characters of the source fingerprint; identifies the source path. Equals `hash_prefix`, which is retained as a backward-compatible alias.
+- `slug` and `hash_prefix` — retained as compatibility metadata for existing JSON consumers. `hash_prefix` is the source-fingerprint prefix (the same value as `fingerprint_prefix`), not the content-hash prefix. Do not build directory names from `slug`.
 
 If you need to parse fields in shell without extra dependencies, use Python stdlib:
 
@@ -207,7 +217,7 @@ PY
 )"
 ```
 
-Use `output_dir` for every generated file path. Use `source_path` as the canonical original plan path in generated content. Do not derive an alternate directory from the plan filename.
+Use `output_dir` for every generated file path — it is the only authoritative path. Do not rebuild the directory from `slug`, `plan_id`, or any other field; the resolver already applied collision suffixes, so a reconstructed path can silently disagree with the real one. Use `source_path` as the canonical original plan path in generated content. Do not derive an alternate directory from the plan filename.
 
 ### Step 7: Write context.md
 
@@ -337,6 +347,7 @@ Write `<output_dir>/manifest.md`. The three readiness metadata lines are require
 
 **Split from**: `<source_path>`
 **Output directory**: `<output_dir>`
+**Plan ID**: `<plan_id>`
 **Source fingerprint**: `<source_fingerprint>`
 **Content SHA-256**: `<content_sha256>`
 **Sessions**: <N>
@@ -361,7 +372,9 @@ Run `<skill-prefix>session-run` once per session, preferably in a fresh harness 
 <skill-prefix>session-run <output_dir>/
 ```
 
-Example rendered command: `<skill-prefix>session-run ~/.local/share/agent-plans/<slug>-<hash>/`
+Example rendered command: `<skill-prefix>session-run <output_dir>/`
+
+Render this example from the resolved `output_dir` value. Do not rebuild a copy-paste path from the default agent-plans directory plus the unsuffixed `plan_id`; any basename example must come from the resolved `output_dir`, which already carries any collision suffix.
 
 `<skill-prefix>session-run` auto-advances — it finds the next pending session from final session handoff statuses, implements it, updates the handoff, and syncs the recognized derived status table in `manifest.md`. No session number is needed and no explicit session selector is accepted; the plan is serial-only by design. Repeat in new conversations until all sessions are complete.
 
@@ -448,7 +461,7 @@ Print a concise summary:
 
 1. Number of sessions extracted
 2. Source plan path, especially when inline content was captured
-3. Output directory path
+3. Output directory path and its `Plan ID` (`<content_hash_prefix>-<fingerprint_prefix>`)
 4. File listing with approximate sizes
 5. The ready-to-paste serial execution command (the `## Execution` block from manifest.md)
 6. Estimated token savings percentage

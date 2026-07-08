@@ -31,8 +31,8 @@ When printing commands, substitute the resolved prefix; never print the literal 
 Examples:
 
 ```
-$session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/
-/session-run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/
+$session-run ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/
+/session-run ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/
 ```
 
 Accepted input forms:

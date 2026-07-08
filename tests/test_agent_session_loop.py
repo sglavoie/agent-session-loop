@@ -21128,6 +21128,42 @@ class WorkbenchDiscoveryTests(unittest.TestCase):
             self.assertEqual(real_plan, result.plans[0].plan_dir)
             self.assertEqual(("plan-root",), result.plans[0].sources)
 
+    def test_discovers_hash_only_plan_directory_names(self) -> None:
+        # Regression: hash-only split-plan output directories (named
+        # <content-hash-prefix>-<source-fingerprint-prefix>) must be discovered
+        # exactly like slug-prefixed ones. Discovery keys on manifest.md +
+        # context.md, not on the directory basename format.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_root = tmp_path / "plans"
+            plan_root.mkdir()
+            hash_only_plan = _write_plan_dir(plan_root / "9e3ab88dedcf-7d2caa1117db")
+            agent_dir = tmp_path / "agent-plans"
+            agent_dir.mkdir()
+            default_hash_only = _write_plan_dir(
+                agent_dir / "9e3ab88dedcf-7d2caa1117db"
+            )
+
+            with patched_env(
+                AGENT_PLANS_DIR=str(agent_dir),
+                HOME=str(tmp_path / "home-overridden"),
+            ):
+                result = workbench.discover_plans(
+                    state_root=tmp_path / "state-empty",
+                    plan_roots=[plan_root],
+                    include_default_dirs=True,
+                )
+
+            paths_to_sources = {
+                plan.plan_dir: plan.sources for plan in result.plans
+            }
+            self.assertIn(hash_only_plan, paths_to_sources)
+            self.assertEqual(("plan-root",), paths_to_sources[hash_only_plan])
+            self.assertIn(default_hash_only, paths_to_sources)
+            self.assertEqual(
+                ("agent-plans-dir",), paths_to_sources[default_hash_only]
+            )
+
     def test_discovers_plans_from_environment_default_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp).resolve()

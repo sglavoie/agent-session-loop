@@ -29,12 +29,12 @@ When printing commands, substitute the resolved prefix; never print the literal 
 Examples:
 
 ```
-$session-expand ~/.local/share/agent-plans/my-plan-abc123def456/
-$session-expand ~/.local/share/agent-plans/my-plan-abc123def456/session-2.md
-$session-expand ~/.local/share/agent-plans/my-plan-abc123def456/session-2.1.md
-/session-expand ~/.local/share/agent-plans/my-plan-abc123def456/
-/session-expand ~/.local/share/agent-plans/my-plan-abc123def456/session-2.md
-/session-expand ~/.local/share/agent-plans/my-plan-abc123def456/session-2.1.md
+$session-expand ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/
+$session-expand ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/session-2.md
+$session-expand ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/session-2.1.md
+/session-expand ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/
+/session-expand ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/session-2.md
+/session-expand ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/session-2.1.md
 ```
 
 - **Directory path**: expand all canonical session files in the directory.

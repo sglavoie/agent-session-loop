@@ -35,14 +35,14 @@ When printing commands, substitute the resolved prefix; never print the literal 
 Examples:
 
 ```
-$plan-preflight-iterate ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/
-$plan-preflight-iterate ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --cwd ~/code/myrepo --harness claude
-$plan-preflight-iterate ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --commit-per-session
-$plan-preflight-iterate ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --max-pending-sessions 40
-/plan-preflight-iterate ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/
-/plan-preflight-iterate ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --cwd ~/code/myrepo --harness claude
-/plan-preflight-iterate ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --commit-per-session
-/plan-preflight-iterate ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --max-pending-sessions 40
+$plan-preflight-iterate ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/
+$plan-preflight-iterate ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/ --cwd ~/code/myrepo --harness claude
+$plan-preflight-iterate ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/ --commit-per-session
+$plan-preflight-iterate ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/ --max-pending-sessions 40
+/plan-preflight-iterate ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/
+/plan-preflight-iterate ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/ --cwd ~/code/myrepo --harness claude
+/plan-preflight-iterate ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/ --commit-per-session
+/plan-preflight-iterate ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/ --max-pending-sessions 40
 ```
 
 Reject malformed inputs and stop without changes:

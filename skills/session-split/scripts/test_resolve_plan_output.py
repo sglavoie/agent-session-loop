@@ -23,7 +23,7 @@ class ResolvePlanOutputTest(unittest.TestCase):
             plan_file.write(content)
         return path
 
-    def test_same_basename_in_different_temp_dirs_produces_different_hash_prefix(self) -> None:
+    def test_same_content_different_paths_shares_content_prefix_but_differs_in_plan_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             left_dir = os.path.join(tmp, "left")
             right_dir = os.path.join(tmp, "right")
@@ -36,10 +36,16 @@ class ResolvePlanOutputTest(unittest.TestCase):
             left = resolver.resolve_plan_output(left_plan, output_base)
             right = resolver.resolve_plan_output(right_plan, output_base)
 
+            # Same content => identical content hash and content_hash_prefix.
+            self.assertEqual(left["content_sha256"], right["content_sha256"])
+            self.assertEqual(left["content_hash_prefix"], right["content_hash_prefix"])
+            # Different source paths => distinct fingerprint prefix and plan_id.
+            self.assertNotEqual(left["fingerprint_prefix"], right["fingerprint_prefix"])
             self.assertNotEqual(left["hash_prefix"], right["hash_prefix"])
             self.assertNotEqual(left["source_fingerprint"], right["source_fingerprint"])
+            self.assertNotEqual(left["plan_id"], right["plan_id"])
 
-    def test_same_path_with_changed_content_produces_different_hash_prefix(self) -> None:
+    def test_changed_content_same_path_changes_content_prefix_and_plan_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             output_base = os.path.join(tmp, "out")
             plan = self.write_plan(tmp, content="# First\n")
@@ -50,7 +56,9 @@ class ResolvePlanOutputTest(unittest.TestCase):
             second = resolver.resolve_plan_output(plan, output_base)
 
             self.assertNotEqual(first["content_sha256"], second["content_sha256"])
+            self.assertNotEqual(first["content_hash_prefix"], second["content_hash_prefix"])
             self.assertNotEqual(first["hash_prefix"], second["hash_prefix"])
+            self.assertNotEqual(first["plan_id"], second["plan_id"])
 
     def test_existing_output_directory_causes_incrementing_suffixes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -64,9 +72,13 @@ class ResolvePlanOutputTest(unittest.TestCase):
             self.assertEqual(1, first["collision_index"])
             self.assertEqual(2, second["collision_index"])
             self.assertEqual(3, third["collision_index"])
-            self.assertTrue(first["output_dir"].endswith(f"{first['slug']}-{first['hash_prefix']}"))
-            self.assertTrue(second["output_dir"].endswith(f"{first['slug']}-{first['hash_prefix']}-2"))
-            self.assertTrue(third["output_dir"].endswith(f"{first['slug']}-{first['hash_prefix']}-3"))
+            plan_id = first["plan_id"]
+            self.assertEqual(
+                f"{first['content_hash_prefix']}-{first['fingerprint_prefix']}", plan_id
+            )
+            self.assertEqual(plan_id, os.path.basename(first["output_dir"]))
+            self.assertEqual(f"{plan_id}-2", os.path.basename(second["output_dir"]))
+            self.assertEqual(f"{plan_id}-3", os.path.basename(third["output_dir"]))
 
     def test_unsafe_filenames_produce_clean_slugs(self) -> None:
         cases = {

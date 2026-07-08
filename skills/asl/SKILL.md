@@ -25,8 +25,8 @@ it reports review findings, open a bounded follow-up fix cycle.
 The user provides the exact `asl run` command as the skill argument, for example:
 
 ```text
-$asl asl run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/
-/asl asl run ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/
+$asl asl run ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/
+/asl asl run ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/
 ```
 
 The command may include leading environment assignments (such as

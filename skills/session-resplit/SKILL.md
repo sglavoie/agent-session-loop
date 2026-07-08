@@ -40,20 +40,20 @@ Examples:
 ```
 $session-resplit
 $session-resplit 3
-$session-resplit ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/
-$session-resplit ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ 4
-$session-resplit ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/session-8.md
-$session-resplit ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/session-8.2.md --parts 3
-$session-resplit ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --session 8
-$session-resplit ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --session 8.2 --parts 3
+$session-resplit ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/
+$session-resplit ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/ 4
+$session-resplit ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/session-8.md
+$session-resplit ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/session-8.2.md --parts 3
+$session-resplit ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/ --session 8
+$session-resplit ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/ --session 8.2 --parts 3
 /session-resplit
 /session-resplit 3
-/session-resplit ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/
-/session-resplit ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ 4
-/session-resplit ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/session-8.md
-/session-resplit ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/session-8.2.md --parts 3
-/session-resplit ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --session 8
-/session-resplit ~/.local/share/agent-plans/tranquil-singing-lantern-abc123def456/ --session 8.2 --parts 3
+/session-resplit ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/
+/session-resplit ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/ 4
+/session-resplit ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/session-8.md
+/session-resplit ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/session-8.2.md --parts 3
+/session-resplit ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/ --session 8
+/session-resplit ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/ --session 8.2 --parts 3
 ```
 
 Accepted input forms:

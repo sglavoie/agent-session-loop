@@ -63,14 +63,14 @@ def source_fingerprint(source_path: str, content_hash: str) -> str:
     return hashlib.sha256(fingerprint_input).hexdigest()
 
 
-def create_output_dir(base_dir: str, slug: str, hash_prefix: str) -> tuple[str, int]:
+def create_output_dir(base_dir: str, plan_id: str) -> tuple[str, int]:
     """Atomically create the first available output directory."""
     os.makedirs(base_dir, exist_ok=True)
 
     collision_index = 1
     while True:
         suffix = "" if collision_index == 1 else f"-{collision_index}"
-        candidate = os.path.join(base_dir, f"{slug}-{hash_prefix}{suffix}")
+        candidate = os.path.join(base_dir, f"{plan_id}{suffix}")
         try:
             os.mkdir(candidate)
         except FileExistsError:
@@ -89,8 +89,11 @@ def resolve_plan_output(plan_file: str, base_dir: str | None = None) -> dict[str
     slug = sanitize_slug(canonical_source)
     content_hash = content_sha256(canonical_source)
     fingerprint = source_fingerprint(canonical_source, content_hash)
+    content_hash_prefix = content_hash[:HASH_PREFIX_LENGTH]
     hash_prefix = fingerprint[:HASH_PREFIX_LENGTH]
-    output_dir, collision_index = create_output_dir(selected_base_dir, slug, hash_prefix)
+    fingerprint_prefix = hash_prefix
+    plan_id = f"{content_hash_prefix}-{fingerprint_prefix}"
+    output_dir, collision_index = create_output_dir(selected_base_dir, plan_id)
 
     return {
         "output_dir": output_dir,
@@ -99,7 +102,10 @@ def resolve_plan_output(plan_file: str, base_dir: str | None = None) -> dict[str
         "source_path": canonical_source,
         "content_sha256": content_hash,
         "source_fingerprint": fingerprint,
+        "content_hash_prefix": content_hash_prefix,
         "hash_prefix": hash_prefix,
+        "fingerprint_prefix": fingerprint_prefix,
+        "plan_id": plan_id,
         "collision_index": collision_index,
     }
 
