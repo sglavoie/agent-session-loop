@@ -26,10 +26,20 @@ SPEC.loader.exec_module(autopilot)
 class ArgParserTest(unittest.TestCase):
     def test_parser_exposes_stable_option_surface(self) -> None:
         parser = autopilot.build_arg_parser()
-        args = parser.parse_args(["--command", "asl run /tmp/plan", "--json", "--reply-stdin"])
+        args = parser.parse_args(
+            [
+                "--command",
+                "asl run /tmp/plan",
+                "--json",
+                "--reply-stdin",
+                "--max-review-fix-plans",
+                "4",
+            ]
+        )
         self.assertEqual(args.command, "asl run /tmp/plan")
         self.assertTrue(args.json)
         self.assertTrue(args.reply_stdin)
+        self.assertEqual(args.max_review_fix_plans, 4)
 
     def test_command_is_required(self) -> None:
         parser = autopilot.build_arg_parser()
@@ -42,6 +52,7 @@ class ArgParserTest(unittest.TestCase):
         args = parser.parse_args(["--command", "asl run /tmp/plan"])
         self.assertFalse(args.json)
         self.assertFalse(args.reply_stdin)
+        self.assertIsNone(args.max_review_fix_plans)
 
 
 class MainTest(unittest.TestCase):
@@ -76,6 +87,9 @@ class ParseCommandTest(unittest.TestCase):
         self.assertEqual(result["run_args"], ["run", "/tmp/plan", "--json"])
         self.assertEqual(result["argv"], ["asl", "run", "/tmp/plan", "--json"])
         self.assertTrue(result["json_appended"])
+        self.assertEqual(
+            result["max_review_fix_plans"], autopilot.DEFAULT_MAX_REVIEW_FIX_PLANS
+        )
 
     def test_existing_json_is_preserved_not_duplicated(self) -> None:
         result = autopilot.parse_command("asl run /tmp/plan --json")
@@ -148,6 +162,22 @@ class ParseCommandTest(unittest.TestCase):
         self.assertIn("--no-unsafe-bypass", args)
         self.assertIn("--allow-not-loop-ready", args)
         self.assertEqual(args[args.index("--timeout") + 1], "600")
+
+    def test_review_fix_plan_limit_is_helper_only(self) -> None:
+        result = autopilot.parse_command(
+            "asl run /tmp/plan --review-harness codex --max-review-fix-plans 5"
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["max_review_fix_plans"], 5)
+        self.assertNotIn("--max-review-fix-plans", result["run_args"])
+        self.assertNotIn("--max-review-fix-plans", result["argv"])
+
+    def test_rejects_non_positive_review_fix_plan_limit(self) -> None:
+        result = autopilot.parse_command(
+            "asl run /tmp/plan --max-review-fix-plans 0"
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "invalid-argument")
 
     def test_rejects_shell_pipe(self) -> None:
         result = autopilot.parse_command("asl run /tmp/plan | tee log")
@@ -242,6 +272,58 @@ class RunAutopilotParseIntegrationTest(unittest.TestCase):
         self.assertEqual(result["stage"], autopilot.PARSE_STAGE)
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "shell-syntax")
+
+    def test_top_level_review_fix_plan_limit_overrides_command_default(self) -> None:
+        parser = autopilot.build_arg_parser()
+        args = parser.parse_args(
+            [
+                "--command",
+                "asl run /tmp/plan --review-harness codex",
+                "--max-review-fix-plans",
+                "6",
+            ]
+        )
+        captured = {}
+
+        def fake_supervisor(parsed):
+            captured["parsed"] = parsed
+            return {
+                "ok": True,
+                "stage": autopilot.RUN_STAGE,
+                "reason": "complete",
+                "chunks": 1,
+            }
+
+        result = autopilot.run_autopilot(
+            args,
+            supervisor=fake_supervisor,
+            review_reader=lambda parsed: {
+                "ok": True,
+                "outcome": "all-clear",
+                "status_line": autopilot.REVIEW_STATUS_ALL_CLEAR,
+                "total_findings": 0,
+                "findings_by_severity": {"high": 0, "med": 0, "low": 0},
+                "review_output_path": "/tmp/plan/final-review.md",
+                "summary": "clean",
+            },
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(captured["parsed"]["max_review_fix_plans"], 6)
+        self.assertEqual(result["command"]["max_review_fix_plans"], 6)
+
+    def test_top_level_review_fix_plan_limit_must_be_positive(self) -> None:
+        parser = autopilot.build_arg_parser()
+        args = parser.parse_args(
+            ["--command", "asl run /tmp/plan", "--max-review-fix-plans", "0"]
+        )
+
+        def fail_supervisor(parsed):  # pragma: no cover - must not run
+            raise AssertionError("supervisor must not run for invalid helper args")
+
+        result = autopilot.run_autopilot(args, supervisor=fail_supervisor)
+        self.assertEqual(result["stage"], autopilot.PARSE_STAGE)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "invalid-argument")
 
 
 class RunAutopilotPauseReplyTest(unittest.TestCase):
@@ -1236,6 +1318,29 @@ class RunAutopilotReviewTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "review_findings")
         self.assertEqual(result["review"]["total_findings"], 1)
+        self.assertEqual(
+            result["review_fix"]["max_generated_follow_up_plans"],
+            autopilot.DEFAULT_MAX_REVIEW_FIX_PLANS,
+        )
+
+    def test_findings_carry_configured_review_fix_plan_limit(self) -> None:
+        verdict = {
+            "ok": True,
+            "outcome": "findings",
+            "status_line": "Status: 1 Findings (0 high, 1 med, 0 low)",
+            "total_findings": 1,
+            "findings_by_severity": {"high": 0, "med": 1, "low": 0},
+            "review_output_path": "/tmp/plan/final-review.md",
+            "summary": "…",
+        }
+        result = autopilot.run_autopilot(
+            self._args("asl run /tmp/plan --review-harness codex --max-review-fix-plans 7"),
+            supervisor=self._complete_supervisor,
+            review_reader=lambda parsed: verdict,
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "review_findings")
+        self.assertEqual(result["review_fix"]["max_generated_follow_up_plans"], 7)
 
     def test_all_clear_stays_complete_with_review_attached(self) -> None:
         verdict = {

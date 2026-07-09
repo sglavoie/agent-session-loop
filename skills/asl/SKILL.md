@@ -31,8 +31,12 @@ $asl asl run ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/
 
 The command may include leading environment assignments (such as
 `CLAUDE_CONFIG_DIR=~/.claude-personal`), quoted arguments, and normal `asl run`
-flags. Shell operators, pipes, redirects, `--dry-run`, and user-supplied
-`--reply` / `--reply-stdin` are not accepted — the helper owns resume behavior.
+flags. It may also include the helper-only `--max-review-fix-plans N` option,
+which is stripped before launching `asl run` and controls how many generated
+follow-up review-fix plans this skill may create before handing remaining
+findings to the user. Shell operators, pipes, redirects, `--dry-run`, and
+user-supplied `--reply` / `--reply-stdin` are not accepted — the helper owns
+resume behavior.
 
 ## Instructions
 
@@ -60,6 +64,16 @@ Invoke the helper with the user's exact command:
 
 Pass `--json` so the helper emits a single machine-readable result on stdout;
 progress heartbeats go to stderr. Read the JSON result to decide what to report.
+To override the default follow-up review-fix cap at launch time, either include
+`--max-review-fix-plans N` inside the exact `asl run` command passed to
+`--command`, or pass the same option directly to the helper invocation:
+
+```text
+<skill-dir>/scripts/asl-autopilot.py --command '<exact asl run command>' --json --max-review-fix-plans 5
+```
+
+When both forms are present, the helper-level option wins. The real `asl run`
+child process never receives this helper-only option.
 
 Each stderr heartbeat carries live progress — the running session label,
 `(n/total)`, and `idle <n>s` since the child last emitted output — and escalates
@@ -119,9 +133,13 @@ On `review_findings`, open a bounded follow-up fix cycle:
    ```
 
 3. Supervise the new plan by rerunning this helper against the generated plan
-   directory (a fresh `asl run <new-plan-dir>/ --review-harness ...` command).
-4. **Limit automatic review-fix loops to 2 generated follow-up plans.** If a
-   second follow-up plan still comes back with `review_findings`, stop
+   directory (a fresh
+   `asl run <new-plan-dir>/ --review-harness ... [--max-review-fix-plans N]`
+   command, preserving the configured review-fix cap when one was supplied).
+4. **Limit automatic review-fix loops to 3 generated follow-up plans by
+   default**, unless the helper result's `review_fix.max_generated_follow_up_plans`
+   carries a launch-time override. If the final allowed follow-up plan still
+   comes back with `review_findings`, stop
    auto-generating plans and hand the remaining findings to the user for a
    decision instead of looping again.
 
@@ -136,8 +154,9 @@ and any blocker that needs the user's attention.
 - The helper — not the skill prose — owns command parsing, safety rejection,
   run start/attach, polling, reply handling, and final-review verdict parsing.
   Keep the skill workflow thin.
-- Automatic review-fix cycles are bounded to 2 generated follow-up plans; after
-  that, unresolved findings go to the user rather than another auto-loop.
+- Automatic review-fix cycles are bounded to 3 generated follow-up plans by
+  default; after the configured cap, unresolved findings go to the user rather
+  than another auto-loop.
 - The preflight/`asl run` readiness gate now rejects a plan whose completion-contract
   `command` checks are not runnable (an unresolved `argv[0]`, or a non-importable
   `python -m <module>`), so a paused run may cite a `command-not-runnable` finding —

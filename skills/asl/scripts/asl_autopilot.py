@@ -100,6 +100,12 @@ RECOVERABLE_PAUSE_REASONS = (
 # (session id, reason) so an unrelated later pause starts fresh.
 DEFAULT_MAX_RETRIES = 2
 
+# How many generated follow-up fix plans the supervising skill may create after
+# review_findings before handing unresolved findings back to the user. The
+# helper does not create those plans itself, but it parses and surfaces this cap
+# so the host agent can honor a launch-time override consistently.
+DEFAULT_MAX_REVIEW_FIX_PLANS = 3
+
 # Final review artifacts. When a run uses `--review-harness`, ASL writes the
 # review verdict to `<plan-dir>/final-review.md` with a single trailing
 # `Status:` line. These mirror `agent_session_loop.runner`
@@ -170,6 +176,11 @@ def _build_run_parser() -> _RunArgumentParser:
     parser.add_argument("--timeout", type=int)
     parser.add_argument("--max-sessions", dest="max_sessions", type=int)
     parser.add_argument("--max-pending-sessions", dest="max_pending_sessions", type=int)
+    parser.add_argument(
+        "--max-review-fix-plans",
+        dest="max_review_fix_plans",
+        type=int,
+    )
     commit_group = parser.add_mutually_exclusive_group()
     commit_group.add_argument(
         "--commit-per-session",
@@ -318,6 +329,11 @@ def parse_command(command: str) -> dict:
         return _parse_error(
             "invalid-argument", "--max-pending-sessions must be a positive integer"
         )
+    if namespace.max_review_fix_plans is not None and namespace.max_review_fix_plans <= 0:
+        return _parse_error(
+            "invalid-argument",
+            "--max-review-fix-plans must be a positive integer",
+        )
     if (
         namespace.review_harness is not None
         and namespace.review_harness == namespace.harness
@@ -385,6 +401,11 @@ def parse_command(command: str) -> dict:
         "state_dir": state_dir,
         "harness": namespace.harness,
         "review_harness": namespace.review_harness,
+        "max_review_fix_plans": (
+            namespace.max_review_fix_plans
+            if namespace.max_review_fix_plans is not None
+            else DEFAULT_MAX_REVIEW_FIX_PLANS
+        ),
     }
 
 
@@ -1152,6 +1173,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Resume a paused run using inferred reply text streamed on stdin.",
     )
+    parser.add_argument(
+        "--max-review-fix-plans",
+        type=int,
+        default=None,
+        help=(
+            "Maximum generated follow-up fix plans after review_findings. "
+            f"Defaults to {DEFAULT_MAX_REVIEW_FIX_PLANS}; the helper surfaces "
+            "the value for the supervising skill and does not pass it to `asl run`."
+        ),
+    )
     return parser
 
 
@@ -1235,6 +1266,15 @@ def run_autopilot(
     if not parsed.get("ok"):
         return parsed
 
+    max_review_fix_plans = getattr(args, "max_review_fix_plans", None)
+    if max_review_fix_plans is not None:
+        if max_review_fix_plans <= 0:
+            return _parse_error(
+                "invalid-argument",
+                "--max-review-fix-plans must be a positive integer",
+            )
+        parsed["max_review_fix_plans"] = max_review_fix_plans
+
     reply_text: Optional[str] = None
     if getattr(args, "reply_stdin", False):
         source = sys.stdin if stdin is None else stdin
@@ -1261,6 +1301,12 @@ def run_autopilot(
         _attach_question_context(result, parsed, questioner)
     elif result.get("reason") == "complete" and parsed.get("review_harness"):
         _attach_review_context(result, parsed, review_reader)
+    if result.get("reason") == "review_findings":
+        result["review_fix"] = {
+            "max_generated_follow_up_plans": parsed.get(
+                "max_review_fix_plans", DEFAULT_MAX_REVIEW_FIX_PLANS
+            )
+        }
     return result
 
 
