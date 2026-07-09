@@ -534,7 +534,7 @@ claude --print --output-format stream-json --include-partial-messages --add-dir 
 Copilot:
 
 ```text
-copilot -C <cwd> --add-dir <plan-dir> --allow-all-tools --allow-all-paths --no-ask-user --silent [--model <model>] [--effort <effort>] -p <prompt>
+copilot -C <cwd> --add-dir <plan-dir> [--allow-all-tools --allow-all-paths] --no-ask-user --silent [--model <model>] [--effort <effort>] -p <prompt>
 ```
 
 Harness prompts use the expected skill prefix:
@@ -560,25 +560,28 @@ selected harnesses.
 ## Safety Modes
 
 By default, `run` and `doctor` use harness-specific bypass modes for every
-harness. For Codex and Claude this means:
+harness. For Codex, Claude, and Copilot this means:
 
 ```text
 codex exec -C <cwd> --add-dir <plan-dir> --dangerously-bypass-approvals-and-sandbox -o <last-message-file> <prompt>
 claude --print --output-format stream-json --include-partial-messages --add-dir <plan-dir> --permission-mode bypassPermissions <prompt>
+copilot -C <cwd> --add-dir <plan-dir> --allow-all-tools --allow-all-paths --no-ask-user --silent -p <prompt>
 ```
 
 `--unsafe-bypass` is accepted as an explicit form of the default. Pass
-`--no-unsafe-bypass` to use the harness default sandbox and approval behavior:
+`--no-unsafe-bypass` to use the harness default sandbox and permission mode
+where supported by that harness:
 
 ```text
 codex exec -C <cwd> --add-dir <plan-dir> -s workspace-write -o <last-message-file> <prompt>
 claude --print --output-format stream-json --include-partial-messages --add-dir <plan-dir> --permission-mode dontAsk <prompt>
+copilot -C <cwd> --add-dir <plan-dir> --no-ask-user --silent -p <prompt>
 ```
 
-Copilot always uses its explicit allow flags. Because bypass mode is the
-default, run only trusted plans against trusted repositories, or pass
-`--no-unsafe-bypass` when the harness should stay in its normal workspace
-sandbox.
+For Copilot, `--no-unsafe-bypass` does not re-enable interactive approval prompts; it keeps `--no-ask-user --silent` and only removes `--allow-all-tools --allow-all-paths`.
+Because bypass mode is the default, run only trusted plans against trusted
+repositories, or pass `--no-unsafe-bypass` when the harness should stay in its
+normal workspace sandbox.
 
 The runner itself never marks sessions complete. Durable completion is only the
 `- **Status**: complete` line inside the final `## Handoff` block of each

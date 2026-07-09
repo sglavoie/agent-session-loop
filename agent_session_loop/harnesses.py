@@ -550,18 +550,17 @@ class CopilotAdapter(HarnessAdapter):
         model: str | None = None,
         effort: str | None = None,
     ) -> list[str]:
-        del unsafe_bypass, last_message_path
+        del last_message_path
         argv = [
             self.executable,
             "-C",
             str(cwd),
             "--add-dir",
             str(plan_dir),
-            "--allow-all-tools",
-            "--allow-all-paths",
-            "--no-ask-user",
-            "--silent",
         ]
+        if unsafe_bypass:
+            argv.extend(["--allow-all-tools", "--allow-all-paths"])
+        argv.extend(["--no-ask-user", "--silent"])
         if model is not None:
             argv.extend(["--model", model])
         if effort is not None:

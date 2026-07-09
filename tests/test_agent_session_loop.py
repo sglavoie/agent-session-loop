@@ -6602,14 +6602,37 @@ class CommandAndConfigTests(unittest.TestCase):
             claude_unsafe[claude_unsafe.index("--permission-mode") + 1],
         )
 
-        copilot = harnesses.CopilotAdapter(executable="copilot").build_argv(
+        copilot_safe = harnesses.CopilotAdapter(executable="copilot").build_argv(
             cwd=cwd,
             plan_dir=plan_dir,
             prompt="/session-run /tmp/plan/",
+            unsafe_bypass=False,
         )
-        self.assertIn("--allow-all-tools", copilot)
-        self.assertIn("--allow-all-paths", copilot)
-        self.assertEqual(str(cwd), copilot[copilot.index("-C") + 1])
+        self.assertNotIn("--allow-all-tools", copilot_safe)
+        self.assertNotIn("--allow-all-paths", copilot_safe)
+        self.assertIn("--no-ask-user", copilot_safe)
+        self.assertIn("--silent", copilot_safe)
+        self.assertEqual(str(cwd), copilot_safe[copilot_safe.index("-C") + 1])
+        self.assertEqual(
+            str(plan_dir),
+            copilot_safe[copilot_safe.index("--add-dir") + 1],
+        )
+        self.assertEqual(
+            "/session-run /tmp/plan/",
+            copilot_safe[copilot_safe.index("-p") + 1],
+        )
+
+        copilot_unsafe = harnesses.CopilotAdapter(executable="copilot").build_argv(
+            cwd=cwd,
+            plan_dir=plan_dir,
+            prompt="/session-run /tmp/plan/",
+            unsafe_bypass=True,
+        )
+        self.assertIn("--allow-all-tools", copilot_unsafe)
+        self.assertIn("--allow-all-paths", copilot_unsafe)
+        self.assertIn("--no-ask-user", copilot_unsafe)
+        self.assertIn("--silent", copilot_unsafe)
+        self.assertEqual(str(cwd), copilot_unsafe[copilot_unsafe.index("-C") + 1])
 
     def test_adapter_model_and_effort_flags_for_claude_and_copilot(self) -> None:
         cwd = Path("/tmp/repo")
@@ -12996,6 +13019,79 @@ class JsonCliTests(unittest.TestCase):
             self.assertIn("workspace-write", argv)
             self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
 
+            copilot_completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_session_loop",
+                    "run",
+                    str(plan_dir),
+                    "--cwd",
+                    str(REPO_ROOT),
+                    "--state-dir",
+                    str(tmp_dir / "copilot-state"),
+                    "--dry-run",
+                    "--json",
+                    "--harness",
+                    "copilot",
+                    "--no-unsafe-bypass",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            copilot_payload = json.loads(copilot_completed.stdout)
+            copilot_argv = copilot_payload["planned"]["invocation"]["argv"]
+            self.assertIn("--no-ask-user", copilot_argv)
+            self.assertIn("--silent", copilot_argv)
+            self.assertIn("-C", copilot_argv)
+            self.assertIn("--add-dir", copilot_argv)
+            self.assertNotIn("--allow-all-tools", copilot_argv)
+            self.assertNotIn("--allow-all-paths", copilot_argv)
+
+    def test_dry_run_json_copilot_default_unsafe_bypass_allows_all(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("pending",))
+
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(tmp_dir / "config")
+            env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_session_loop",
+                    "run",
+                    str(plan_dir),
+                    "--cwd",
+                    str(REPO_ROOT),
+                    "--state-dir",
+                    str(state_dir),
+                    "--dry-run",
+                    "--json",
+                    "--harness",
+                    "copilot",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            payload = json.loads(completed.stdout)
+            argv = payload["planned"]["invocation"]["argv"]
+            self.assertIn("--allow-all-tools", argv)
+            self.assertIn("--allow-all-paths", argv)
+            self.assertIn("--no-ask-user", argv)
+            self.assertIn("--silent", argv)
+
     def test_run_json_uses_current_directory_when_cwd_is_omitted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -18163,11 +18259,12 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.repo_root = self.tmp_path / "repo"
         self.config_home = self.tmp_path / "config"
         init_git_repo(self.repo_root)
-        # Install fake_codex as both `codex` and `claude` so the test can
-        # exercise a distinct --harness / --review-harness pair without
+        # Install fake_codex under each harness name so review lifecycle tests
+        # can exercise distinct --harness / --review-harness pairs without
         # touching the production fixture file.
         self.fake_codex = install_fake_codex(self.tmp_path)
         self.fake_claude = install_fake_harness(self.tmp_path, "claude")
+        self.fake_copilot = install_fake_harness(self.tmp_path, "copilot")
         config_path = (
             self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
         )
@@ -18177,6 +18274,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                 {
                     "codex": {"executable": str(self.fake_codex)},
                     "claude": {"executable": str(self.fake_claude)},
+                    "copilot": {"executable": str(self.fake_copilot)},
                 }
             ),
             encoding="utf-8",
@@ -19063,6 +19161,74 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual(
             self._valid_final_review_body(),
             review_path.read_text(encoding="utf-8"),
+        )
+
+    def test_copilot_implementation_run_completes_claude_review(
+        self,
+    ) -> None:
+        self._write_plan(("pending",), readiness="loop-ready")
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            harness="copilot",
+            review_harness="claude",
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual("claude", payload["review_harness"])
+        self.assertTrue(payload["review_completed"])
+        self.assertEqual("2", payload["review_session_id"])
+        self.assertEqual(
+            {
+                "status_line": "Status: All clear, no findings",
+                "outcome": "all-clear",
+                "total_findings": 0,
+                "findings_by_severity": {"high": 0, "med": 0, "low": 0},
+            },
+            payload["review_verdict"],
+        )
+        turns = payload["turns"]
+        self.assertEqual(["copilot", "claude"], [turn["harness"] for turn in turns])
+        self.assertEqual(
+            [runner.SESSION_KIND_IMPLEMENTATION, runner.SESSION_KIND_REVIEW],
+            [turn["session_kind"] for turn in turns],
+        )
+
+    def test_codex_implementation_run_completes_copilot_review(
+        self,
+    ) -> None:
+        self._write_plan(("pending",), readiness="loop-ready")
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            harness="codex",
+            review_harness="copilot",
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual("copilot", payload["review_harness"])
+        self.assertTrue(payload["review_completed"])
+        self.assertEqual("2", payload["review_session_id"])
+        self.assertEqual(
+            {
+                "status_line": "Status: All clear, no findings",
+                "outcome": "all-clear",
+                "total_findings": 0,
+                "findings_by_severity": {"high": 0, "med": 0, "low": 0},
+            },
+            payload["review_verdict"],
+        )
+        turns = payload["turns"]
+        self.assertEqual(["codex", "copilot"], [turn["harness"] for turn in turns])
+        self.assertEqual(
+            [runner.SESSION_KIND_IMPLEMENTATION, runner.SESSION_KIND_REVIEW],
+            [turn["session_kind"] for turn in turns],
         )
 
     def test_review_verdict_persisted_for_counted_findings(self) -> None:
@@ -29229,6 +29395,55 @@ class WorkbenchCliHandlerTests(unittest.TestCase):
                 str(tmp_path),
                 payload["registry"]["pins"][0]["profile"]["cwd"],
             )
+
+
+class HarnessDocsRegressionTests(unittest.TestCase):
+    """Lock harness documentation expectations."""
+
+    def _read(self, relative: str) -> str:
+        path = REPO_ROOT / relative
+        return path.read_text(encoding="utf-8")
+
+    def test_docs_describe_copilot_no_unsafe_bypass_noninteractive_expectation(
+        self,
+    ) -> None:
+        import re as _re
+
+        docs = self._read("docs/agent-session-loop.md")
+        unsafe_copilot_argv = (
+            "copilot -C <cwd> --add-dir <plan-dir> --allow-all-tools "
+            "--allow-all-paths --no-ask-user --silent -p <prompt>"
+        )
+        safe_copilot_argv = (
+            "copilot -C <cwd> --add-dir <plan-dir> --no-ask-user "
+            "--silent -p <prompt>"
+        )
+        exact_expectation = (
+            "For Copilot, `--no-unsafe-bypass` does not re-enable "
+            "interactive approval prompts; it keeps `--no-ask-user --silent` "
+            "and only removes `--allow-all-tools --allow-all-paths`."
+        )
+
+        self.assertIn(exact_expectation, docs)
+        safety_modes = docs.split("## Safety Modes", 1)[1].split("\n## ", 1)[0]
+        text_blocks = _re.findall(
+            r"```text\n(.*?)\n```", safety_modes, _re.DOTALL
+        )
+        unsafe_block = next(
+            (block for block in text_blocks if unsafe_copilot_argv in block),
+            None,
+        )
+        safe_block = next(
+            (block for block in text_blocks if safe_copilot_argv in block),
+            None,
+        )
+
+        self.assertIsNotNone(unsafe_block)
+        self.assertIsNotNone(safe_block)
+        self.assertIn(unsafe_copilot_argv, unsafe_block)
+        self.assertIn(safe_copilot_argv, safe_block)
+        self.assertNotIn("--allow-all-tools", safe_block)
+        self.assertNotIn("--allow-all-paths", safe_block)
 
 
 class WorkbenchDocsRegressionTests(unittest.TestCase):
