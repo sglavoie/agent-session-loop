@@ -40,6 +40,20 @@ RegexInFileKind = Literal["regex_in_file"]
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 60.0
 MAX_COMMAND_TIMEOUT_SECONDS = 3600.0
 
+BaselineExpectation = Literal["pass", "fail", "skip"]
+
+#: Baseline expectations, in a stable order for error messages.
+BASELINE_EXPECTATIONS: tuple[str, ...] = ("pass", "fail", "skip")
+
+#: Legacy contracts (and any check that omits ``baseline_expectation``) default
+#: to ``skip`` so plans authored before this field parse unchanged. Newly
+#: prepared plans are expected to specify the field explicitly.
+DEFAULT_BASELINE_EXPECTATION: BaselineExpectation = "skip"
+
+#: Per-check baseline execution budget and total recipe budget, in seconds.
+DEFAULT_BASELINE_CHECK_BUDGET_SECONDS = 120.0
+DEFAULT_BASELINE_TOTAL_BUDGET_SECONDS = 600.0
+
 
 @dataclass(frozen=True)
 class CommandCheck:
@@ -49,6 +63,7 @@ class CommandCheck:
     argv: tuple[str, ...]
     timeout_seconds: float
     cwd: str | None = None
+    baseline_expectation: BaselineExpectation = DEFAULT_BASELINE_EXPECTATION
     kind: CommandKind = "command"
 
 
@@ -58,6 +73,7 @@ class FileExistsCheck:
 
     name: str
     path: str
+    baseline_expectation: BaselineExpectation = DEFAULT_BASELINE_EXPECTATION
     kind: FileExistsKind = "file_exists"
 
 
@@ -68,6 +84,7 @@ class RegexInFileCheck:
     name: str
     path: str
     pattern: str
+    baseline_expectation: BaselineExpectation = DEFAULT_BASELINE_EXPECTATION
     kind: RegexInFileKind = "regex_in_file"
 
 
@@ -199,6 +216,21 @@ def _require_positive_number(
     return numeric
 
 
+def _baseline_expectation(
+    payload: dict, *, index: int, session_id: SessionId
+) -> BaselineExpectation:
+    raw = payload.get("baseline_expectation")
+    if raw is None:
+        return DEFAULT_BASELINE_EXPECTATION
+    if raw not in BASELINE_EXPECTATIONS:
+        allowed = ", ".join(BASELINE_EXPECTATIONS)
+        raise PlanError(
+            f"session {session_id.value} contract check #{index + 1} "
+            f"'baseline_expectation' must be one of: {allowed}; got {raw!r}"
+        )
+    return raw  # type: ignore[return-value]
+
+
 def _check_name(raw_name: object, *, index: int, session_id: SessionId) -> str:
     if raw_name is None:
         return f"check-{index + 1}"
@@ -246,11 +278,13 @@ def _parse_command_check(
         )
 
     name = _check_name(payload.get("name"), index=index, session_id=session_id)
+    baseline = _baseline_expectation(payload, index=index, session_id=session_id)
     return CommandCheck(
         name=name,
         argv=tuple(argv),
         timeout_seconds=timeout,
         cwd=raw_cwd,
+        baseline_expectation=baseline,
     )
 
 
@@ -259,7 +293,8 @@ def _parse_file_exists_check(
 ) -> FileExistsCheck:
     path = _require_str(payload.get("path"), label="path", session_id=session_id)
     name = _check_name(payload.get("name"), index=index, session_id=session_id)
-    return FileExistsCheck(name=name, path=path)
+    baseline = _baseline_expectation(payload, index=index, session_id=session_id)
+    return FileExistsCheck(name=name, path=path, baseline_expectation=baseline)
 
 
 def _parse_regex_in_file_check(
@@ -277,7 +312,10 @@ def _parse_regex_in_file_check(
             f"'pattern' is not a valid regex: {error}"
         ) from error
     name = _check_name(payload.get("name"), index=index, session_id=session_id)
-    return RegexInFileCheck(name=name, path=path, pattern=pattern)
+    baseline = _baseline_expectation(payload, index=index, session_id=session_id)
+    return RegexInFileCheck(
+        name=name, path=path, pattern=pattern, baseline_expectation=baseline
+    )
 
 
 CHECK_PARSERS = {
@@ -408,6 +446,27 @@ def parse_completion_contract(
         done_when=done_when,
         verify=recipe,
     )
+
+
+def baseline_check_budget_seconds(check: VerificationCheck) -> float:
+    """Return the per-check baseline execution budget, in seconds.
+
+    Command checks are clamped to :data:`DEFAULT_BASELINE_CHECK_BUDGET_SECONDS`
+    so a generous per-session timeout cannot exceed the baseline budget. File
+    and regex checks have no command timeout and use the full check budget.
+    """
+    timeout = getattr(check, "timeout_seconds", DEFAULT_BASELINE_CHECK_BUDGET_SECONDS)
+    return min(float(timeout), DEFAULT_BASELINE_CHECK_BUDGET_SECONDS)
+
+
+def recipe_total_budget_seconds(recipe: VerifyRecipe) -> float:
+    """Return the total baseline budget for a recipe, in seconds.
+
+    The sum of per-check budgets is clamped to
+    :data:`DEFAULT_BASELINE_TOTAL_BUDGET_SECONDS`.
+    """
+    total = sum(baseline_check_budget_seconds(check) for check in recipe.checks)
+    return min(float(total), DEFAULT_BASELINE_TOTAL_BUDGET_SECONDS)
 
 
 def read_completion_contract(

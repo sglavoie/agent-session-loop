@@ -3,9 +3,17 @@
 
 This helper performs the filesystem-safe parts of the session-resplit skill:
 plan inspection, target validation, lock acquisition, archival, child file
-creation, and derived ledger updates. The skill may provide child specs for
-better semantic boundaries; otherwise the helper falls back to deterministic
-phase-based child instructions.
+creation, and derived ledger updates. Deterministic rendering, table mutation,
+archive-path, readiness, and atomic multi-file writes are delegated to
+``agent_session_loop.authoring`` so split and resplit share one implementation.
+
+Child completion contracts are never placeholders. Explicit child specs must
+allocate the parent's verification checks by name (``inherit_checks``) or
+replace them (``checks``), and must state explicit ``done_when`` criteria;
+ambiguous allocation is rejected. Without explicit specs, every generated
+child derives its contract from the parent's own completion contract, and a
+parent without a contract is rejected instead of receiving a
+``python3 -m unittest`` placeholder.
 
 Sequential by design: this script does not read `parallel-validation.md`, does
 not emit `## Parallel Metadata` blocks for generated children, and leaves
@@ -30,13 +38,16 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from agent_session_loop import plans, state  # noqa: E402
+from agent_session_loop import authoring, contracts, plans, state  # noqa: E402
 
 
 MIN_PARTS = 2
 MAX_PARTS = 20
 HANDOFF_HEADING = "## Handoff"
-ARCHIVE_ROOT_NAME = "resplit-archive"
+ARCHIVE_ROOT_NAME = authoring.ARCHIVE_ROOT_NAME
+CHILD_SPEC_KEYS = frozenset(
+    {"title", "instructions", "done_when", "checks", "inherit_checks"}
+)
 
 
 class ResplitError(Exception):
@@ -55,7 +66,8 @@ class ChildSpec:
     session_id: plans.SessionId
     title: str
     instructions: str
-    previous_session_file: str | None
+    contract: contracts.CompletionContract
+    previous_session_id: plans.SessionId | None
 
     @property
     def filename(self) -> str:
@@ -70,19 +82,11 @@ class ParentDetails:
     body: str
     had_expansion: bool
     prior_session_file: str | None
+    contract: contracts.CompletionContract | None
 
 
 def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
-
-
-def _write_text(path: Path, text: str) -> None:
-    path.write_text(text, encoding="utf-8")
-
-
-def _write_text_exclusive(path: Path, text: str) -> None:
-    with path.open("x", encoding="utf-8") as output:
-        output.write(text)
 
 
 def _session_sort_key(session_id: plans.SessionId) -> tuple[int, ...]:
@@ -212,6 +216,16 @@ def _extract_previous_session_file(before_handoff: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _strip_contract_section(lines: list[str]) -> list[str]:
+    start = contracts._find_heading_index(
+        lines, contracts.COMPLETION_CONTRACT_HEADING, 0, len(lines)
+    )
+    if start is None:
+        return lines
+    end = contracts._section_end(lines, start, max_level=2, end=len(lines))
+    return lines[:start] + lines[end:]
+
+
 def _extract_instruction_body(before_handoff: str) -> str:
     lines = before_handoff.splitlines()
     output: list[str] = []
@@ -236,6 +250,7 @@ def _extract_instruction_body(before_handoff: str) -> str:
         output.append(line)
         index += 1
 
+    output = _strip_contract_section(output)
     return _strip_horizontal_rules("\n".join(output).strip())
 
 
@@ -263,11 +278,22 @@ def _parse_parent_details(
             f"{parent_status.session.filename} has no implementation instructions above handoff",
         )
 
+    try:
+        contract = contracts.parse_completion_contract(
+            parent_text, session_id=parent_status.session_id
+        )
+    except plans.PlanError as error:
+        raise ResplitError(
+            "malformed-plan",
+            f"{parent_status.session.filename} has a malformed completion contract: {error}",
+        ) from error
+
     return ParentDetails(
         title=_extract_parent_title(parent_status.session_id, before_handoff),
         body=body,
         had_expansion=parent_expansion_path.exists(),
         prior_session_file=_extract_previous_session_file(before_handoff),
+        contract=contract,
     )
 
 
@@ -448,19 +474,39 @@ def _phase_instruction(parent_body: str, index: int, parts: int) -> str:
     )
 
 
-def _load_child_specs(path: Path | None) -> list[dict[str, str]] | None:
+def _require_str_list(value: object, *, label: str, index: int) -> list[str]:
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and item.strip() for item in value
+    ):
+        raise ResplitError(
+            "ambiguous-contract",
+            f"child spec {index} {label!r} must be a list of non-empty strings",
+        )
+    return [item.strip() for item in value]
+
+
+def _load_child_specs(path: Path | None) -> list[Any] | None:
     if path is None:
         return None
     raw = json.loads(_read_text(path))
     children = raw.get("children") if isinstance(raw, dict) else raw
     if not isinstance(children, list):
         raise ResplitError("ambiguous-input", "child spec must be a list or object with children")
+    return children
 
-    specs: list[dict[str, str]] = []
+
+def _normalize_child_specs(children: list[Any]) -> list[dict[str, Any]]:
+    specs: list[dict[str, Any]] = []
     for index, item in enumerate(children, start=1):
         if not isinstance(item, dict):
             raise ResplitError(
                 "ambiguous-input", f"child spec {index} must be a JSON object"
+            )
+        unknown_keys = sorted(set(item) - CHILD_SPEC_KEYS)
+        if unknown_keys:
+            raise ResplitError(
+                "ambiguous-input",
+                f"child spec {index} has unknown keys: {', '.join(unknown_keys)}",
             )
         title = str(item.get("title", "")).strip()
         instructions = str(item.get("instructions", "")).strip()
@@ -469,19 +515,145 @@ def _load_child_specs(path: Path | None) -> list[dict[str, str]] | None:
                 "ambiguous-input",
                 f"child spec {index} requires nonempty title and instructions",
             )
-        specs.append({"title": title, "instructions": instructions})
+
+        if "done_when" not in item:
+            raise ResplitError(
+                "ambiguous-contract",
+                f"child spec {index} must state explicit 'done_when' criteria",
+            )
+        done_when = _require_str_list(
+            item["done_when"], label="done_when", index=index
+        )
+
+        raw_checks = item.get("checks", [])
+        if not isinstance(raw_checks, list) or not all(
+            isinstance(check, dict) for check in raw_checks
+        ):
+            raise ResplitError(
+                "ambiguous-contract",
+                f"child spec {index} 'checks' must be a list of check objects",
+            )
+        inherit_checks = _require_str_list(
+            item.get("inherit_checks", []), label="inherit_checks", index=index
+        )
+        if not raw_checks and not inherit_checks:
+            raise ResplitError(
+                "ambiguous-contract",
+                f"child spec {index} allocates no verification checks; provide "
+                "'inherit_checks' naming parent checks or replacement 'checks'",
+            )
+
+        specs.append(
+            {
+                "title": title,
+                "instructions": instructions,
+                "done_when": done_when,
+                "checks": raw_checks,
+                "inherit_checks": inherit_checks,
+            }
+        )
     _validate_parts(len(specs))
     return specs
+
+
+def _allocate_explicit_contract(
+    child_session_id: plans.SessionId,
+    spec: dict[str, Any],
+    parent_checks: dict[str, contracts.VerificationCheck],
+    *,
+    index: int,
+) -> contracts.CompletionContract:
+    check_payloads: list[dict[str, object]] = []
+    for name in spec["inherit_checks"]:
+        parent_check = parent_checks.get(name)
+        if parent_check is None:
+            raise ResplitError(
+                "ambiguous-contract",
+                f"child spec {index} inherits unknown parent check {name!r}",
+            )
+        check_payloads.append(authoring._check_to_json(parent_check))
+    check_payloads.extend(spec["checks"])
+
+    try:
+        return authoring.contract_from_payload(
+            child_session_id,
+            spec["done_when"],
+            {"session": child_session_id.value, "checks": check_payloads},
+        )
+    except plans.PlanError as error:
+        raise ResplitError(
+            "ambiguous-contract", f"child spec {index} has invalid checks: {error}"
+        ) from error
+
+
+def _validate_parent_check_allocation(
+    parent_contract: contracts.CompletionContract | None,
+    explicit_specs: list[dict[str, Any]],
+) -> None:
+    inherited_names = {
+        name for spec in explicit_specs for name in spec["inherit_checks"]
+    }
+    if not inherited_names:
+        # Full replacement mode: every child carries its own explicit checks
+        # (enforced per spec), so the parent recipe is explicitly superseded.
+        return
+    if parent_contract is None:
+        raise ResplitError(
+            "ambiguous-contract",
+            "child specs inherit parent checks but the parent session has no "
+            "completion contract",
+        )
+    parent_names = {check.name for check in parent_contract.verify.checks}
+    unallocated = sorted(parent_names - inherited_names)
+    if unallocated:
+        raise ResplitError(
+            "ambiguous-contract",
+            "parent checks not allocated to any child: "
+            f"{', '.join(unallocated)}; inherit each parent check explicitly "
+            "or replace all checks with explicit 'checks' entries",
+        )
+
+
+def _derive_fallback_contract(
+    child_session_id: plans.SessionId,
+    child_title: str,
+    parent_contract: contracts.CompletionContract,
+    *,
+    is_last: bool,
+) -> contracts.CompletionContract:
+    done_when: tuple[str, ...] = (
+        f"{child_title} is implemented as described in the child scope above.",
+    )
+    if is_last:
+        done_when = done_when + parent_contract.done_when
+    return contracts.CompletionContract(
+        session_id=child_session_id,
+        done_when=done_when,
+        verify=parent_contract.verify,
+    )
+
+
+def _previous_session_id_from_filename(filename: str | None) -> plans.SessionId | None:
+    if filename is None:
+        return None
+    return plans.session_id_from_filename(filename)
 
 
 def _build_child_specs(
     parent_id: plans.SessionId,
     parent_details: ParentDetails,
     parts: int,
-    explicit_specs: list[dict[str, str]] | None,
+    explicit_specs: list[dict[str, Any]] | None,
     first_previous_session_file: str | None,
 ) -> list[ChildSpec]:
     if explicit_specs is None:
+        if parent_details.contract is None:
+            raise ResplitError(
+                "no-contract",
+                f"session {parent_id.value} has no completion contract to derive "
+                "child contracts from; provide --child-spec with explicit "
+                "'done_when' and 'checks'/'inherit_checks' per child",
+            )
         semantic_units = _semantic_units(parent_details.body)
         if len(semantic_units) >= parts:
             instruction_groups = _balanced_groups(semantic_units, parts)
@@ -498,7 +670,7 @@ def _build_child_specs(
                     _phase_instruction(parent_details.body, index, parts)
                     for index in range(1, parts + 1)
                 ]
-        raw_specs = [
+        raw_specs: list[dict[str, Any]] = [
             {
                 "title": _generated_child_title(
                     parent_details.title, index, instruction_groups[index - 1]
@@ -508,22 +680,42 @@ def _build_child_specs(
             for index in range(1, parts + 1)
         ]
     else:
+        _validate_parent_check_allocation(parent_details.contract, explicit_specs)
         raw_specs = explicit_specs
+
+    parent_checks = (
+        {check.name: check for check in parent_details.contract.verify.checks}
+        if parent_details.contract is not None
+        else {}
+    )
 
     children: list[ChildSpec] = []
     for index, raw in enumerate(raw_specs, start=1):
         child_session_id = _child_id(parent_id, index)
-        previous_file = (
-            first_previous_session_file
+        if explicit_specs is None:
+            assert parent_details.contract is not None
+            contract = _derive_fallback_contract(
+                child_session_id,
+                raw["title"],
+                parent_details.contract,
+                is_last=index == len(raw_specs),
+            )
+        else:
+            contract = _allocate_explicit_contract(
+                child_session_id, raw, parent_checks, index=index
+            )
+        previous_session_id = (
+            _previous_session_id_from_filename(first_previous_session_file)
             if index == 1
-            else _child_id(parent_id, index - 1).filename
+            else _child_id(parent_id, index - 1)
         )
         children.append(
             ChildSpec(
                 session_id=child_session_id,
                 title=raw["title"],
                 instructions=raw["instructions"],
-                previous_session_file=previous_file,
+                contract=contract,
+                previous_session_id=previous_session_id,
             )
         )
     return children
@@ -557,62 +749,21 @@ def _instruction_summary(instructions: str) -> str | None:
     return None
 
 
-def _render_completion_contract(child: ChildSpec) -> list[str]:
-    verify_payload = {
-        "session": child.session_id.value,
-        "checks": [
-            {
-                "type": "command",
-                "argv": ["python3", "-m", "unittest", "-q"],
-                "timeout_seconds": 60,
-            }
-        ],
-    }
-    verify_json = json.dumps(verify_payload, indent=2)
-    return [
-        "## Completion Contract",
-        "",
-        "### Done when",
-        "",
-        f"- {child.title} is implemented as described in the child scope above.",
-        "",
-        "### Verify",
-        "",
-        "```json",
-        *verify_json.splitlines(),
-        "```",
-    ]
-
-
-def _render_child_session(
+def _child_body_lines(
     parent_id: plans.SessionId,
     child: ChildSpec,
     archive_relative_path: str,
     parent_details: ParentDetails,
     skill_prefix: str,
-) -> str:
+) -> list[str]:
     lines = [
-        f"# Session {child.session_id.value}: {child.title}",
+        "## Lineage",
         "",
-        "> **Before starting**: Read `context.md` in this directory for shared project context.",
+        f"- **Split from**: `session-{parent_id.value}.md`",
+        f"- **Parent title**: {parent_details.title}",
+        f"- **Child session**: {child.session_id.value}",
+        f"- **Parent archive**: `{archive_relative_path}`",
     ]
-    if child.previous_session_file is not None:
-        lines.append(
-            "> **Previous session**: Read the **Handoff** section at the "
-            f"bottom of `{child.previous_session_file}`."
-        )
-
-    lines.extend(
-        [
-            "",
-            "## Lineage",
-            "",
-            f"- **Split from**: `session-{parent_id.value}.md`",
-            f"- **Parent title**: {parent_details.title}",
-            f"- **Child session**: {child.session_id.value}",
-            f"- **Parent archive**: `{archive_relative_path}`",
-        ]
-    )
     if parent_details.had_expansion:
         lines.append(
             "- **Archived parent expansion**: historical context only; rerun "
@@ -645,31 +796,29 @@ def _render_child_session(
             "",
             "## Child Scope",
             "",
-            child.instructions.strip(),
-            "",
-            "---",
-            "",
+            *child.instructions.strip().splitlines(),
         ]
     )
-    lines.extend(_render_completion_contract(child))
-    lines.extend(
-        [
-            "",
-            "---",
-            "",
-            "## Handoff",
-            "",
-            "<!-- Fill this section when the session is complete -->",
-            "",
-            "- **Status**: pending",
-            "- **Files modified**: (none yet)",
-            "- **Key decisions**: (none yet)",
-            "- **Blockers for next session**: (none)",
-            "- **Notes**:",
-            "",
-        ]
+    return lines
+
+
+def _render_child_session(
+    parent_id: plans.SessionId,
+    child: ChildSpec,
+    archive_relative_path: str,
+    parent_details: ParentDetails,
+    skill_prefix: str,
+) -> str:
+    return authoring.render_session_file(
+        session_id=child.session_id,
+        title=child.title,
+        instruction_lines=_child_body_lines(
+            parent_id, child, archive_relative_path, parent_details, skill_prefix
+        ),
+        is_first=False,
+        previous_session_id=child.previous_session_id,
+        contract=child.contract,
     )
-    return "\n".join(lines)
 
 
 def _preceding_session_file(
@@ -697,225 +846,6 @@ def _next_session_after(
     return None
 
 
-def _replace_previous_session_reference(
-    text: str,
-    parent_id: plans.SessionId,
-    replacement_id: plans.SessionId,
-) -> tuple[str, bool]:
-    pattern = re.compile(
-        r"(?m)^> \*\*Previous session\*\*: Read the \*\*Handoff\*\* "
-        r"section at the bottom of `"
-        + re.escape(parent_id.filename)
-        + r"`\.$"
-    )
-    replacement = (
-        "> **Previous session**: Read the **Handoff** section at the bottom "
-        f"of `{replacement_id.filename}`."
-    )
-    updated = pattern.sub(replacement, text)
-    return updated, updated != text
-
-
-def _repair_next_session_references(
-    snapshot: plans.PlanSnapshot,
-    parent_id: plans.SessionId,
-    children: list[ChildSpec],
-) -> list[str]:
-    next_session = _next_session_after(snapshot, parent_id)
-    if next_session is None:
-        return []
-
-    replacement_id = children[-1].session_id
-    text = _read_text(next_session.path)
-    updated, previous_changed = _replace_previous_session_reference(
-        text,
-        parent_id,
-        replacement_id,
-    )
-    if not previous_changed:
-        return []
-
-    _write_text(next_session.path, updated)
-    return [next_session.session.filename]
-
-
-def _create_archive_dir(plan_dir: Path, parent_id: plans.SessionId, now: datetime) -> Path:
-    archive_root = plan_dir / ARCHIVE_ROOT_NAME
-    archive_root.mkdir(exist_ok=True)
-    timestamp = now.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    base = archive_root / f"session-{parent_id.value}-{timestamp}"
-    candidate = base
-    suffix = 2
-    while True:
-        try:
-            candidate.mkdir()
-            return candidate
-        except FileExistsError:
-            candidate = archive_root / f"session-{parent_id.value}-{timestamp}-{suffix}"
-            suffix += 1
-
-
-def _archive_file(path: Path, archive_dir: Path) -> str | None:
-    if not path.exists():
-        return None
-    destination = archive_dir / path.name
-    path.rename(destination)
-    return path.name
-
-
-def _split_table_row(line: str) -> tuple[str, list[str]] | None:
-    if not line.lstrip().startswith("|"):
-        return None
-    leading = line[: len(line) - len(line.lstrip())]
-    return leading, line.strip().strip("|").split("|")
-
-
-def _is_separator_row(cells: list[str]) -> bool:
-    return bool(cells) and all(re.fullmatch(r"\s*:?-{3,}:?\s*", cell) for cell in cells)
-
-
-def _normalize_header(value: str) -> str:
-    cleaned = value.strip().strip("`").lower()
-    cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
-    return re.sub(r"\s+", " ", cleaned)
-
-
-def _replace_cell_content(cell: str, value: str) -> str:
-    match = re.fullmatch(r"(\s*)(.*?)(\s*)", cell)
-    if match is None:
-        return value
-    return f"{match.group(1)}{value}{match.group(3)}"
-
-
-def _join_table_row(leading: str, cells: list[str]) -> str:
-    return f"{leading}|{'|'.join(cells)}|"
-
-
-def _session_id_from_cell(value: str) -> plans.SessionId | None:
-    text = value.strip().strip("`")
-    match = re.fullmatch(
-        rf"(?:session[\s-]*|s)?({plans.SESSION_ID_PATTERN})",
-        text,
-        re.IGNORECASE,
-    )
-    if match is None:
-        return None
-    return plans.parse_session_id(match.group(1))
-
-
-def _find_header(headers: list[str], names: set[str]) -> int | None:
-    for index, header in enumerate(headers):
-        if header in names:
-            return index
-    return None
-
-
-def _is_status_table(headers: list[str]) -> bool:
-    session_headers = {"#", "session", "session #", "session number", "session id", "id"}
-    if _find_header(headers, session_headers) is None:
-        return False
-    return _find_header(headers, {"status"}) is not None
-
-
-def _replace_status_table_parent(
-    block: list[str],
-    parent_id: plans.SessionId,
-    children: list[ChildSpec],
-) -> tuple[list[str], bool]:
-    parsed_header = _split_table_row(block[0])
-    assert parsed_header is not None
-    headers = [_normalize_header(cell) for cell in parsed_header[1]]
-    session_index = _find_header(
-        headers, {"#", "session", "session #", "session number", "session id", "id"}
-    )
-    status_index = _find_header(headers, {"status"})
-    title_index = _find_header(headers, {"title"})
-    file_index = _find_header(headers, {"file"})
-    if session_index is None or status_index is None:
-        return block, False
-
-    changed = False
-    updated = block[:2]
-    for row in block[2:]:
-        parsed = _split_table_row(row)
-        if parsed is None:
-            updated.append(row)
-            continue
-        leading, cells = parsed
-        if max(session_index, status_index) >= len(cells):
-            updated.append(row)
-            continue
-        row_session_id = _session_id_from_cell(cells[session_index])
-        if row_session_id != parent_id:
-            updated.append(row)
-            continue
-
-        for child in children:
-            child_cells = list(cells)
-            child_cells[session_index] = _replace_cell_content(
-                child_cells[session_index], child.session_id.value
-            )
-            child_cells[status_index] = _replace_cell_content(
-                child_cells[status_index], "pending"
-            )
-            if title_index is not None and title_index < len(child_cells):
-                child_cells[title_index] = _replace_cell_content(
-                    child_cells[title_index], child.title
-                )
-            if file_index is not None and file_index < len(child_cells):
-                child_cells[file_index] = _replace_cell_content(
-                    child_cells[file_index], child.filename
-                )
-            updated.append(_join_table_row(leading, child_cells))
-        changed = True
-    return updated, changed
-
-
-def _update_table_blocks(
-    text: str,
-    parent_id: plans.SessionId,
-    children: list[ChildSpec],
-) -> tuple[str, bool]:
-    lines = text.splitlines()
-    updated: list[str] = []
-    changed = False
-    index = 0
-
-    while index < len(lines):
-        if not lines[index].lstrip().startswith("|"):
-            updated.append(lines[index])
-            index += 1
-            continue
-
-        block_start = index
-        while index < len(lines) and lines[index].lstrip().startswith("|"):
-            index += 1
-        block = lines[block_start:index]
-        parsed_header = _split_table_row(block[0]) if len(block) >= 2 else None
-        parsed_separator = _split_table_row(block[1]) if len(block) >= 2 else None
-        if (
-            parsed_header is None
-            or parsed_separator is None
-            or not _is_separator_row(parsed_separator[1])
-        ):
-            updated.extend(block)
-            continue
-
-        headers = [_normalize_header(cell) for cell in parsed_header[1]]
-        if _is_status_table(headers):
-            new_block, block_changed = _replace_status_table_parent(
-                block, parent_id, children
-            )
-        else:
-            new_block, block_changed = block, False
-
-        updated.extend(new_block)
-        changed = changed or block_changed
-
-    suffix = "\n" if text.endswith("\n") else ""
-    return "\n".join(updated) + suffix, changed
-
-
 def _append_resplit_notes(
     text: str,
     parent_id: plans.SessionId,
@@ -938,37 +868,68 @@ def _append_resplit_notes(
     return text.rstrip() + "\n" + note
 
 
-def _update_manifest(
+def _manifest_replacements(children: list[ChildSpec]) -> tuple[authoring.ManifestSession, ...]:
+    return tuple(
+        authoring.ManifestSession(
+            session_id=child.session_id, title=child.title, status="pending"
+        )
+        for child in children
+    )
+
+
+def _updated_manifest_text(
     manifest_path: Path,
     parent_id: plans.SessionId,
     children: list[ChildSpec],
     total_sessions: int,
     archive_relative_path: str,
-) -> bool:
+) -> tuple[str, bool]:
     text = _read_text(manifest_path)
-    updated = re.sub(
-        r"(?m)^(\*\*Sessions\*\*:[ \t]*)\d+[ \t]*$",
-        rf"\g<1>{total_sessions}",
-        text,
+    updated = authoring.replace_manifest_sessions_count(text, total_sessions)
+    updated, tables_changed = authoring.replace_session_status_rows(
+        updated, parent_id, _manifest_replacements(children)
     )
-    updated, tables_changed = _update_table_blocks(updated, parent_id, children)
     updated = _append_resplit_notes(updated, parent_id, children, archive_relative_path)
-    changed = updated != text or tables_changed
-    if changed:
-        _write_text(manifest_path, updated)
-    return changed
+    return updated, updated != text or tables_changed
 
 
-def _update_context(
+def _updated_context_text(
     context_path: Path,
     parent_id: plans.SessionId,
     children: list[ChildSpec],
-) -> bool:
+) -> tuple[str, bool]:
     text = _read_text(context_path)
-    updated, changed = _update_table_blocks(text, parent_id, children)
-    if changed:
-        _write_text(context_path, updated)
-    return changed
+    return authoring.replace_session_status_rows(
+        text, parent_id, _manifest_replacements(children)
+    )
+
+
+def _archive_parent_files(
+    paths: list[Path], archive_dir: Path
+) -> tuple[list[str], list[tuple[Path, Path]]]:
+    archived_files: list[str] = []
+    moves: list[tuple[Path, Path]] = []
+    for path in paths:
+        if not path.exists():
+            continue
+        destination = archive_dir / path.name
+        path.rename(destination)
+        archived_files.append(path.name)
+        moves.append((path, destination))
+    return archived_files, moves
+
+
+def _rollback_archive(moves: list[tuple[Path, Path]], archive_dir: Path) -> None:
+    for original, archived in moves:
+        try:
+            archived.rename(original)
+        except OSError:
+            pass
+    for directory in (archive_dir, archive_dir.parent):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
 
 
 def resplit_session(
@@ -976,13 +937,14 @@ def resplit_session(
     *,
     session_id: str | None = None,
     parts: int | None = None,
-    child_specs: list[dict[str, str]] | None = None,
+    child_specs: list[dict[str, Any]] | None = None,
     state_dir: str | Path | None = None,
     skill_prefix: str = "$",
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Resplit one pending session and return a JSON-serializable summary."""
     if child_specs is not None:
+        child_specs = _normalize_child_specs(child_specs)
         parts = _validate_parts(len(child_specs))
     elif parts is not None:
         parts = _validate_parts(parts)
@@ -1009,6 +971,7 @@ def resplit_session(
         raise ResplitError("lock-contention", str(error)) from error
 
     try:
+        timestamp = now or datetime.now(timezone.utc)
         locked_snapshot = plans.inspect_plan(snapshot.plan_dir)
         locked_parent_status = _validate_snapshot(locked_snapshot, parent_id, parts)
         parent_details = _parse_parent_details(
@@ -1025,47 +988,74 @@ def resplit_session(
             child_specs,
             first_previous_session_file,
         )
-        archive_dir = _create_archive_dir(
-            locked_snapshot.plan_dir, parent_id, now or datetime.now(timezone.utc)
+
+        archive_dir = authoring.create_archive_dir(
+            locked_snapshot.plan_dir, parent_id, timestamp
         )
         archive_relative_path = archive_dir.relative_to(locked_snapshot.plan_dir).as_posix()
 
-        archived_files: list[str] = []
-        for path in (
-            locked_parent_status.path,
-            locked_snapshot.plan_dir / parent_id.expansion_filename,
-        ):
-            archived = _archive_file(path, archive_dir)
-            if archived is not None:
-                archived_files.append(archived)
-
+        # Build every staged write before mutating anything on disk.
+        transaction = authoring.PlanTransaction(locked_snapshot.plan_dir)
         for child in children:
-            child_text = _render_child_session(
-                parent_id,
-                child,
-                archive_relative_path,
-                parent_details,
-                skill_prefix,
+            transaction.stage(
+                child.filename,
+                _render_child_session(
+                    parent_id,
+                    child,
+                    archive_relative_path,
+                    parent_details,
+                    skill_prefix,
+                ),
             )
-            _write_text_exclusive(locked_snapshot.plan_dir / child.filename, child_text)
 
-        reference_updates = _repair_next_session_references(
-            locked_snapshot,
-            parent_id,
-            children,
-        )
+        reference_updates: list[str] = []
+        next_session = _next_session_after(locked_snapshot, parent_id)
+        if next_session is not None:
+            next_text, next_changed = authoring.replace_previous_session_reference(
+                _read_text(next_session.path),
+                parent_id,
+                children[-1].session_id,
+            )
+            if next_changed:
+                transaction.stage(next_session.session.filename, next_text)
+                reference_updates.append(next_session.session.filename)
+
         total_sessions = len(locked_snapshot.sessions) - 1 + len(children)
         ledger_updates: list[str] = []
-        if _update_manifest(
+        manifest_text, manifest_changed = _updated_manifest_text(
             locked_snapshot.manifest_path,
             parent_id,
             children,
             total_sessions,
             archive_relative_path,
-        ):
+        )
+        if manifest_changed:
+            transaction.stage("manifest.md", manifest_text)
             ledger_updates.append("manifest.md")
-        if _update_context(locked_snapshot.context_path, parent_id, children):
+        context_text, context_changed = _updated_context_text(
+            locked_snapshot.context_path, parent_id, children
+        )
+        if context_changed:
+            transaction.stage("context.md", context_text)
             ledger_updates.append("context.md")
+
+        archived_files, archive_moves = _archive_parent_files(
+            [
+                locked_parent_status.path,
+                locked_snapshot.plan_dir / parent_id.expansion_filename,
+            ],
+            archive_dir,
+        )
+
+        try:
+            transaction.commit()
+        except plans.PlanError:
+            _rollback_archive(archive_moves, archive_dir)
+            raise
+
+        readiness = authoring.refresh_readiness_metadata(
+            locked_snapshot.plan_dir, state="draft", now=timestamp
+        )
 
         return {
             "ok": True,
@@ -1077,6 +1067,11 @@ def resplit_session(
             "archived_files": archived_files,
             "ledger_updates": ledger_updates,
             "reference_updates": reference_updates,
+            "readiness": {
+                "state": readiness.state,
+                "readiness_sha256": readiness.readiness_sha256,
+                "checked_at": readiness.checked_at,
+            },
             "next_command": f"{skill_prefix}session-expand {locked_snapshot.plan_dir}/",
         }
     finally:
@@ -1145,7 +1140,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--child-spec",
         type=Path,
-        help="JSON list or {children: [...]} with title/instructions per child",
+        help=(
+            "JSON list or {children: [...]} with title/instructions/done_when "
+            "plus checks and/or inherit_checks per child"
+        ),
     )
     parser.add_argument("--state-dir", help="Override agent-session-loop state directory")
     parser.add_argument(
@@ -1168,6 +1166,9 @@ def _print_result(result: dict[str, Any]) -> None:
     print(f"Derived ledgers updated: {', '.join(ledgers)}")
     references = result.get("reference_updates") or ["none"]
     print(f"Downstream references updated: {', '.join(references)}")
+    readiness = result.get("readiness") or {}
+    if readiness:
+        print(f"Readiness metadata refreshed: {readiness.get('state', 'draft')}")
     print("Rerun session-expand before continuing execution.")
     print("RESPLIT_STATUS: complete")
     print(f"Next command: {result['next_command']}")

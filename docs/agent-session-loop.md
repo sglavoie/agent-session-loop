@@ -226,6 +226,11 @@ shapes. Required and optional fields:
 - `file_exists`: `path` (string, repo-root-relative).
 - `regex_in_file`: `path` (string, repo-root-relative), `pattern` (regex
   string).
+- Every check also accepts an optional `baseline_expectation` (one of `skip`,
+  `pass`, `fail`; defaults to `skip`). `pass`/`fail` declare how the check must
+  behave on the *unmodified* repository; `asl baseline` records the evidence
+  and preflight blocks a not-yet-started plan whose declared baselines lack
+  current evidence.
 
 `session-expand` validates each contract against the codebase and records any
 problems in a per-session `## Contract Issues` section in
@@ -300,15 +305,20 @@ without running the final `--commit-at-end` commit.
 ## Commands
 
 ```text
-asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--review-harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--max-pending-sessions N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--allow-not-loop-ready] [--reply TEXT|--reply-stdin] [--json] [--dry-run]
+asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--review-harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--max-pending-sessions N] [--max-review-fix-cycles N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--allow-not-loop-ready] [--reply TEXT|--reply-stdin] [--json] [--dry-run]
 asl preflight PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--max-pending-sessions N] [--mark-loop-ready] [--json]
-asl verify PLAN_DIR --session ID [--cwd REPO_ROOT] [--json]
+asl verify PLAN_DIR --session ID [--cwd REPO_ROOT] [--artifact-dir DIR] [--json]
+asl baseline PLAN_DIR [--cwd REPO_ROOT] [--per-check-timeout SECONDS] [--total-timeout SECONDS] [--json]
+asl prepare PLAN.md [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--validator-harness H] [--review-harness H] [--base-dir DIR] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--json]
+asl prepare --resume PLAN_DIR [...]
 asl status PLAN_DIR [--state-dir DIR] [--json]
 asl questions PLAN_DIR [--state-dir DIR] [--json]
 asl tail PLAN_DIR [--state-dir DIR] [--lines N] [--no-follow]
 asl sessions [--running] [--recent] [--limit N] [--state-dir DIR] [--verbose] [--json]
 asl doctor --harness codex|claude|copilot [--model MODEL] [--effort EFFORT] [--cwd REPO_ROOT] --plan-dir PLAN_DIR [--unsafe-bypass|--no-unsafe-bypass] [--json]
 asl unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
+asl compact-state PLAN_DIR [--state-dir DIR] [--apply] [--json]
+asl metrics [--since-days N] [--state-dir DIR] [--json]
 ```
 
 `run` acquires a per-plan lock, inspects the first pending session, invokes the
@@ -330,6 +340,16 @@ verification gate's `no-contract` pause for sessions that lack a
 present. `--commit-per-session` then runs
 `spec commit --yes --no-verify` before the next harness turn starts.
 
+Autonomous `asl run` turns prompt the harness with a Python-built session task
+packet (`runner.build_task_packet`): a harness-neutral prompt that references
+the session file, `context.md`, `progress.md`, expansion notes, and the
+predecessor handoff by absolute path and embeds no readiness, lock, or
+session-selection policy — the runner owns all of that. Packet turns do not
+invoke the manual `session-run` skill; that skill remains the manual
+one-session-per-conversation path. Setting `ASL_WORKER_MODE=skill` in the
+runner's environment is a temporary rollback that restores the legacy
+skill-invocation prompt for autonomous turns.
+
 `--review-harness codex|claude|copilot` appends a final pure-critique session
 after the implementation sessions finish. The flag must differ from the startup
 `--harness`; otherwise the run exits with `reason: input-error` before any
@@ -344,9 +364,23 @@ turn). The review session instructs the harness to write findings to
 complete; `final-review.md` is overwritten by the latest successful review.
 The final non-empty line must be exactly `Status: All clear, no findings` or
 `Status: N Findings (H high, M med, L low)` with severity counts adding up to
-`N`; missing or malformed status lines fail review verification. Other review
-execution failures (nonzero exit, timeout, verification failure on missing or
-empty `final-review.md`) or repo mutations outside the plan directory also fail
+`N`; missing or malformed status lines fail review verification. Generated
+review sessions carry a versioned marker (`asl:generated-review-session
+version=2`) and additionally require the structured artifact
+`PLAN_DIR/final-review.json`: a JSON object with `version: 2`, an `outcome`
+(`all-clear` or `findings`), and a `findings` list where every finding carries
+a unique `id`, `severity` (`high`/`med`/`low`), `title`, `evidence` (objects
+with a `path` and optional `symbol`), `explanation`, `repair_group`,
+`done_criteria`, and `verification_checks` (completion-contract check
+objects). The artifact must agree with the `final-review.md` status line on
+outcome and per-severity totals; a malformed, contradictory, or incomplete
+artifact fails review verification. Pre-existing v1 review sessions (base
+marker only) remain Markdown-only compatible — no `final-review.json` is
+required for them. The grammar, artifact schema, and shared verdict payload
+live in `agent_session_loop.review`; the runner and the `asl` skill's
+autopilot helper both read verdicts through it. Other review execution
+failures (nonzero exit, timeout, verification failure on missing or empty
+`final-review.md`) or repo mutations outside the plan directory also fail
 the run. A git mutation guard fingerprints dirty, staged, and untracked content
 outside `PLAN_DIR` before and after the review turn and pauses the run with
 `reason: review-mutated-worktree` if the fingerprint changes. Review turns are
@@ -360,6 +394,32 @@ the run is started without `--review-harness`, the run pauses with
 `reason: review-harness-required`. After a successful review, text runs print
 `Review: PLAN_DIR/final-review.md` followed by the `Status:` line as the final
 summary line.
+
+After a review session completes with structured findings, the runner drives
+bounded same-plan repair/rereview cycles: it materializes one pending repair
+child per `repair_group` beneath the review session (`N.1`, `N.2`, ... via
+`agent_session_loop.review_repair`), executes the children serially with the
+implementation harness, then appends the next top-level review session and
+rereviews. `--max-review-fix-cycles N` bounds how many repair materializations
+a plan may accumulate (default 2; `0` still runs the review but never creates
+repair sessions; `--max-review-fix-plans` is a deprecated compatibility
+alias — passing both flags is an input error). The loop stops early on an
+all-clear rereview, on repeated findings (each finding is fingerprinted from
+its normalized severity, title, evidence paths, and symbols —
+`review.finding_fingerprint` — so line-number drift between reviews does not
+defeat the comparison; a fingerprint that repeats the previous review stops
+the loop without another cycle), on operator stop requests, or on cap
+exhaustion, and pauses with `reason: malformed-review-repair` when safe repair
+sessions cannot be materialized. Every review completion appends a
+`review_cycle` event and a `review_cycles[]` state entry recording the cycle
+number, review session id, outcome, introduced/closed/repeated finding
+fingerprints, repair session ids, and disposition; the run payload's
+`review_fix_disposition` carries the final disposition (`all-clear`,
+`repairs-materialized`, `cycles-disabled`, `cycle-cap-exhausted`,
+`findings-repeated`, `unstructured-findings`, `malformed-review-repair`, or
+`not-loop-ready`). Cycle state is reconstructed from the persistent
+`events.jsonl`, so caps and repeated-finding detection survive pauses and
+relaunches.
 
 `preflight` inspects the plan without invoking a harness and reports every
 finding needed to clear the loop-ready gate: missing readiness lines, contract
@@ -465,6 +525,67 @@ scriptable prerequisite checks.
 `unlock` removes a stale lock. It refuses to remove an active lock unless
 `--force` is supplied. Use `--json` when automation needs the removed lock
 state or an active-lock failure payload.
+
+`compact-state` reclaims duplicated operational JSON by converting a plan's
+older v1 `state.json`, `events.jsonl`, and per-turn `result.json` records to the
+compact schema-v2 projection (the same shape new runs already persist). It
+strips per-turn plan snapshots and raw verification output from state and
+events, and for result records it extracts complete failed-check output into
+recoverable gzip artifacts (readable through the bounded log API) while
+discarding successful-check output after keeping a bounded preview. The default
+is a dry-run that reports projected bytes reclaimed, files rewritten, and lossy
+pass-output removal without writing; pass `--apply` to rewrite the records.
+Reclaim figures are net of the gzip bytes those retained failure artifacts add
+(reported separately as `artifact_bytes_added`), so a compaction that keeps a
+poorly compressible failure artifact never reports more saving than is actually
+reclaimed on disk.
+Every rewrite is atomic (temp-file + rename), so an interrupted compaction never
+leaves a partially written JSON file, and re-running is idempotent. `--json`
+emits the full `CompactionReport` payload.
+
+`baseline` executes every contract check that declares a `baseline_expectation`
+of `pass` or `fail` (checks with the default `skip` carry no baseline
+obligation) and records the observed outcome as evidence in the derived
+`PLAN_DIR/baseline-results.json`. Evidence is keyed by normalized recipe,
+canonical cwd, resolved executable, and environment signature; the repository
+fingerprint is stored inside the record so preflight can tell *stale* evidence
+(fingerprint changed) from *missing* evidence. Per-check runtime is clamped to
+120 seconds and the whole pass to 600 seconds by default
+(`--per-check-timeout` / `--total-timeout` override, never exceeding the caps).
+`baseline-results.json` is excluded from the readiness hash by construction, so
+recording evidence never invalidates a loop-ready manifest. Preflight requires
+current baseline evidence only while no session is complete; once
+implementation has started, baseline findings are suppressed.
+
+`prepare` runs the whole preparation pipeline in one deterministic command:
+structure gate (at least two session headings, each with a parseable inline
+`## Completion Contract`) → deterministic authoring (the session-split Step 8
+sequence through one atomic plan transaction) → batched validator workers →
+expansion rendering and exact factual corrections → baseline execution →
+`--mark-loop-ready` preflight. A source plan that fails the structure gate is
+rejected with `reason: needs-plan-iteration` before any output directory is
+created. Failures after authoring preserve the plan directory as `draft` with
+structured `blockers` and print a shell-quoted `asl prepare --resume PLAN_DIR`
+command; success prints the exact `asl run` command. `--resume` reruns
+validation only for sessions missing from the stored
+`prepare-validation.json` aggregate and reuses recorded baseline evidence
+whose repository fingerprint still matches; it never creates another split.
+Stable JSON reasons: `ok`, `needs-plan-iteration`, `validation-failed`,
+`baseline-unsatisfied`, `not-loop-ready`, `input-error`, `cwd-error`, and
+`plan-structure`.
+
+`metrics` aggregates workflow reliability and storage numbers from the
+persisted state corpus, defaulting to the last 7 days (`--since-days N`
+widens or narrows the window). It reports turn totals and unsuccessful
+runtime, first-pass session completion, pause counts by reason (including the
+never-retry quota/auth/invalid-model classifications), verification repair
+convergence (verify-failed pauses, exhaustion, and sessions repaired after a
+failure), review repair-cycle dispositions with introduced/closed/repeated
+finding counts, artifact corpus size and in-window growth, and projected
+compaction savings (a dry-run over the state directories active inside the
+window, net of retained failure-artifact bytes; use `asl compact-state` for a
+full per-plan projection). The command
+is read-only: it never mutates state, events, or plan directories.
 
 `asl questions` reads the durable paused turn for a plan and renders an external
 resolver prompt that another agent (or a human) can use to gather operator
@@ -608,6 +729,17 @@ from the immutable artifact tree, so the same plan's repeated runs are visible
 rather than collapsed by whichever `state.json` was overwritten last; running
 rows come from the live lock plus the latest `state.json` `active_turn`.
 
+State, event, and result records carry schema version 2: `state.json` and each
+turn `result.json` have a top-level `version: 2`, and every `events.jsonl`
+record carries `version: 2` on its envelope. Readers treat a missing `version`
+key as v1 and keep accepting those records. The persisted v2 `state.json` is a
+compact projection — per-turn `before`/`after` session lists and raw
+verification check stdout/stderr are dropped (bounded previews, byte counts,
+sha256 digests, and gzip artifact paths remain) — while each turn's
+`result.json` keeps full per-turn detail. No v2 state or event record embeds
+raw verification output; full failed-check output lives in the referenced
+`verification/*.gz` artifacts.
+
 Runtime files include:
 
 - `state.json`: latest run payload.
@@ -658,8 +790,8 @@ both are `null` between turns and after `run_finished`. `events.jsonl` records
 `turn_started`, `turn_heartbeat`, `action_required`, `turn_finished`,
 `verification_started`, `verification_check_started`, `verification_heartbeat`,
 `verification_check_finished`, `verification_finished`, `commit_started`,
-`commit_finished`, `run_control`, `review_session_created`, `run_paused`, and
-`run_finished` events as they happen. Verification heartbeats fire every 30
+`commit_finished`, `run_control`, `review_session_created`, `review_cycle`,
+`run_paused`, and `run_finished` events as they happen. Verification heartbeats fire every 30
 seconds while a single check is in flight, so long-running checks remain
 observable in `tail` and the live status snapshot. Verification check argv is
 captured in the `verification_check_started` payload and not streamed to a
@@ -669,8 +801,11 @@ key. `review_session_created`
 fires once per run, when the runner appends a fresh generated review session;
 resuming an existing pending review session does not re-emit it. Its payload
 carries `run_id`, the review `session_id`, `review_harness`,
-`review_session_path`, and `review_output_path`. `tail` renders it inline
-alongside other events. Commit events include the commit index,
+`review_session_path`, and `review_output_path`. `review_cycle` fires once per
+completed review session and carries the repair/rereview cycle record (cycle
+number, review session id, outcome, finding fingerprints with
+introduced/closed/repeated classification, repair session ids, and
+disposition). `tail` renders them inline alongside other events. Commit events include the commit index,
 scope, session ID for per-session commits, argv, cwd, artifact paths, status
 result, duration, and commit SHA when one was created. `run_control` events
 record `stop-after-current-requested`, `stop-after-current-canceled`,
@@ -1112,6 +1247,11 @@ asl backfill-progress --force ~/.local/share/agent-plans/example-plan/
 replaces an existing journal atomically. Never edit `progress.md` by hand from
 a session — the schema-versioned `<!-- agent-session-loop progress-journal v1 -->`
 header is what the runner uses to refuse stale or malformed journals.
+
+To inspect the journal without opening the file, use
+`asl progress PLAN_DIR [--tail] [--json]`: it prints the runner-managed
+journal, follows it live with `--tail`, and emits parsed entries with
+`--json`.
 
 ### Interactive Q&A resume
 
@@ -2082,16 +2222,28 @@ a runner cleanup window should retry once before opening a bug.
 Run the regression suite and compile check from this repository:
 
 ```bash
-python3 -m pytest tests/test_agent_session_loop.py
-python3 -m pytest skills/session-split/scripts/test_*.py skills/session-resplit/scripts/test_*.py
+just test-fast
+just test-all
+just lint
 python3 /Users/dev/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/session-resplit
 just sync-skills
-python3 -m unittest discover -s tests
 python3 -m py_compile agent_session_loop/*.py bin/.local/bin/agent-session-loop bin/.local/bin/asl
 just build-ccl
 just all
 just verify-asl-install
 ```
+
+The test suite is organized as subsystem modules (`tests/test_asl_*.py`,
+stdlib `unittest` only) sharing fixtures through `tests/support.py`.
+`just test-fast` runs the unit/schema/parser modules; `just test-all` runs
+everything — including the helper-script suites under `skills/` — as isolated
+parallel shards via `tests/run_suite.py`, which also fails if a test module is
+missing from its shard lists. `tests/test_agent_session_loop.py` remains as a
+compatibility shim so historical dotted names
+(`tests.test_agent_session_loop.SomeTests`) keep resolving; it contributes no
+tests under discovery, so `python3 -m unittest discover -s tests` runs each
+test exactly once. Individual modules still run directly, for example
+`python3 -m unittest tests.test_asl_verification -q`.
 
 Use a synthetic plan directory for manual smoke tests so generated state, locks,
 and logs do not touch an active project plan.

@@ -8,8 +8,13 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from . import (
+    baseline,
+    compact_state,
+    contracts,
     harnesses,
+    metrics,
     preflight,
+    prepare,
     progress_cli,
     qna,
     runner,
@@ -213,6 +218,24 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
             "Override the preflight pending-session budget gate "
             "(default: 24, which turns yellow at 25 pending sessions)"
         ),
+    )
+    run_parser.add_argument(
+        "--max-review-fix-cycles",
+        dest="max_review_fix_cycles",
+        type=int,
+        default=None,
+        help=(
+            "Maximum automatic repair/rereview cycles after a findings "
+            "review (default: 2). 0 still runs the review but creates no "
+            "repair sessions"
+        ),
+    )
+    run_parser.add_argument(
+        "--max-review-fix-plans",
+        dest="max_review_fix_plans",
+        type=int,
+        default=None,
+        help="Deprecated compatibility alias for --max-review-fix-cycles",
     )
     commit_group = run_parser.add_mutually_exclusive_group()
     commit_group.add_argument(
@@ -427,11 +450,139 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Repository root for verification checks (default: current directory)",
     )
     verify_parser.add_argument(
+        "--artifact-dir",
+        default=None,
+        help=(
+            "Directory to retain failed command output as gzip artifacts "
+            "(default: previews only, no full-output artifacts)"
+        ),
+    )
+    verify_parser.add_argument(
         "--json",
         action="store_true",
         help="Print machine-readable JSON output",
     )
     verify_parser.set_defaults(handler=verification.verify_from_args)
+
+    baseline_parser = subparsers.add_parser(
+        "baseline",
+        help=(
+            "Run each session's baseline-expectation checks and record "
+            "pass/fail/timeout evidence for the preflight readiness gate."
+        ),
+    )
+    baseline_parser.add_argument(
+        "plan_dir", help="Split plan directory whose baseline checks to run"
+    )
+    baseline_parser.add_argument(
+        "--cwd",
+        default=".",
+        help="Repository root to run baseline checks in (default: current directory)",
+    )
+    baseline_parser.add_argument(
+        "--per-check-timeout",
+        dest="per_check_timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Clamp each baseline check to this many seconds "
+            "(default: the contract budget, capped at "
+            f"{contracts.DEFAULT_BASELINE_CHECK_BUDGET_SECONDS:g}s)"
+        ),
+    )
+    baseline_parser.add_argument(
+        "--total-timeout",
+        dest="total_timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Stop running baseline checks once cumulative wall-clock exceeds "
+            "this many seconds (default: the summed contract budget, capped at "
+            f"{contracts.DEFAULT_BASELINE_TOTAL_BUDGET_SECONDS:g}s)"
+        ),
+    )
+    baseline_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    baseline_parser.set_defaults(handler=baseline.baseline_from_args)
+
+    prepare_parser = subparsers.add_parser(
+        "prepare",
+        help=(
+            "Split, validate, baseline, and mark a source plan loop-ready "
+            "in one deterministic pipeline."
+        ),
+    )
+    prepare_parser.add_argument(
+        "plan",
+        help=(
+            "Source plan markdown file to prepare (or an existing split "
+            "plan directory with --resume)"
+        ),
+    )
+    prepare_parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Treat PLAN as an existing plan directory and rerun validation "
+            "and baselines without creating another split"
+        ),
+    )
+    prepare_parser.add_argument(
+        "--cwd",
+        default=".",
+        help=(
+            "Repository root the prepared plan will run against "
+            "(default: current directory)"
+        ),
+    )
+    prepare_parser.add_argument(
+        "--harness",
+        choices=harnesses.HARNESS_NAMES,
+        default="codex",
+        help="Implementation harness for the resulting `asl run` command",
+    )
+    prepare_parser.add_argument(
+        "--validator-harness",
+        dest="validator_harness",
+        choices=harnesses.HARNESS_NAMES,
+        default="codex",
+        help="Harness used to run preparation validation workers",
+    )
+    prepare_parser.add_argument(
+        "--review-harness",
+        choices=harnesses.HARNESS_NAMES,
+        default=None,
+        help=(
+            "Review harness for the resulting `asl run` command; "
+            "must differ from --harness"
+        ),
+    )
+    prepare_parser.add_argument(
+        "--base-dir",
+        dest="base_dir",
+        default=None,
+        help=(
+            "Base directory for the split plan output "
+            "(default: the persistent agent-plans directory)"
+        ),
+    )
+    prepare_parser.add_argument(
+        "--state-dir",
+        default=None,
+        help="Override operational state directory",
+    )
+    _add_unsafe_bypass_flags(prepare_parser)
+    prepare_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    prepare_parser.set_defaults(handler=prepare.prepare_from_args)
 
     preflight_parser = subparsers.add_parser(
         "preflight",
@@ -490,6 +641,61 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="When checks pass, mark the plan readiness state as loop-ready",
     )
     preflight_parser.set_defaults(handler=preflight.preflight_from_args)
+
+    compact_state_parser = subparsers.add_parser(
+        "compact-state",
+        help=(
+            "Reclaim duplicated operational JSON by compacting v1 state, "
+            "events, and result records to schema v2 (default: dry-run)."
+        ),
+    )
+    compact_state_parser.add_argument(
+        "plan_dir", help="Split plan directory whose state to compact"
+    )
+    compact_state_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    compact_state_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Rewrite records on disk (default: dry-run, no writes)",
+    )
+    compact_state_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    compact_state_parser.set_defaults(
+        handler=compact_state.compact_state_from_args
+    )
+
+    metrics_parser = subparsers.add_parser(
+        "metrics",
+        help=(
+            "Report workflow reliability and storage metrics from the "
+            "persisted state corpus (default window: last 7 days)."
+        ),
+    )
+    metrics_parser.add_argument(
+        "--since-days",
+        type=int,
+        default=metrics.DEFAULT_SINCE_DAYS,
+        help=(
+            "Number of days of history to aggregate "
+            f"(default: {metrics.DEFAULT_SINCE_DAYS})"
+        ),
+    )
+    metrics_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    metrics_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    metrics_parser.set_defaults(handler=metrics.metrics_from_args)
 
     unlock_parser = subparsers.add_parser(
         "unlock",

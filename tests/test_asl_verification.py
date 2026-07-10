@@ -1,0 +1,1783 @@
+"""Verification executor, verify CLI, and artifact storage tests.
+
+Split from tests/test_agent_session_loop.py."""
+
+from __future__ import annotations
+
+import argparse
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+import dataclasses
+from datetime import datetime, timezone
+import errno
+import hashlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import pty
+import select
+import shlex
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import tracemalloc
+import unittest
+import urllib.parse
+from unittest import mock
+
+from agent_session_loop import (
+    artifacts,
+    authoring,
+    baseline,
+    baseline_cache,
+    cli,
+    compact_state,
+    config,
+    contracts,
+    control_queue,
+    events,
+    harnesses,
+    install_verify,
+    plans,
+    preflight,
+    prepare,
+    progress_cli,
+    progress_repair,
+    qna,
+    review,
+    review_repair,
+    run_control,
+    runner,
+    state,
+    tail,
+    verification,
+    workbench,
+    workbench_server,
+)
+from agent_session_loop.formatting import (
+    format_duration_seconds,
+    format_turn_finished_message,
+    format_turn_started_message,
+)
+from tests.support import (
+    REPO_ROOT,
+    write_plan,
+    _contract_block,
+)
+
+
+class VerificationExecutorTests(unittest.TestCase):
+    def _session_id(self, value: str = "1") -> plans.SessionId:
+        return plans.parse_session_id(value)
+
+    def _contract(
+        self, checks: tuple[contracts.VerificationCheck, ...]
+    ) -> contracts.CompletionContract:
+        return contracts.CompletionContract(
+            session_id=self._session_id(),
+            done_when=("done",),
+            verify=contracts.VerifyRecipe(checks=checks),
+        )
+
+    def test_command_check_passes_when_argv_exits_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            check = contracts.CommandCheck(
+                name="echo",
+                argv=("python3", "-c", "import sys; sys.exit(0)"),
+                timeout_seconds=10.0,
+            )
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("pass", result.status)
+            self.assertEqual("echo", result.name)
+            self.assertEqual("command", result.kind)
+            self.assertEqual(0, result.returncode)
+            self.assertIsNone(result.failure_reason)
+
+    def test_command_check_fails_on_nonzero_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            check = contracts.CommandCheck(
+                name="exit-1",
+                argv=("python3", "-c", "import sys; sys.exit(7)"),
+                timeout_seconds=10.0,
+            )
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("fail", result.status)
+            self.assertEqual("command-failed", result.failure_reason)
+            self.assertEqual(7, result.returncode)
+            self.assertIn("exited 7", result.detail)
+
+    def test_command_check_fails_on_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            check = contracts.CommandCheck(
+                name="sleeper",
+                argv=("python3", "-c", "import time; time.sleep(5)"),
+                timeout_seconds=0.1,
+            )
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("fail", result.status)
+            self.assertEqual("command-timeout", result.failure_reason)
+            self.assertIsNone(result.returncode)
+            self.assertIn("timed out", result.detail)
+
+    def test_command_check_reports_command_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            check = contracts.CommandCheck(
+                name="missing",
+                argv=("definitely-not-a-real-binary-xyz",),
+                timeout_seconds=5.0,
+            )
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("fail", result.status)
+            self.assertEqual("command-not-found", result.failure_reason)
+            self.assertIn("definitely-not-a-real-binary-xyz", result.detail)
+
+    def test_command_check_resolves_cwd_under_repo_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            sub = repo_root / "nested"
+            sub.mkdir()
+            check = contracts.CommandCheck(
+                name="pwd",
+                argv=(
+                    "python3",
+                    "-c",
+                    "import os, sys; sys.stdout.write(os.getcwd())",
+                ),
+                timeout_seconds=10.0,
+                cwd="nested",
+            )
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("pass", result.status)
+            self.assertEqual(
+                str(plans.canonicalize_path(sub)),
+                str(plans.canonicalize_path(result.stdout)),
+            )
+
+    def test_file_exists_check_passes_when_file_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "target.txt").write_text("data\n", encoding="utf-8")
+            check = contracts.FileExistsCheck(name="target", path="target.txt")
+
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("pass", result.status)
+            self.assertIsNone(result.failure_reason)
+
+    def test_file_exists_check_fails_when_file_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            check = contracts.FileExistsCheck(name="absent", path="nope.txt")
+
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("fail", result.status)
+            self.assertEqual("file-missing", result.failure_reason)
+            self.assertIn("nope.txt", result.detail)
+
+    def test_regex_in_file_check_passes_when_pattern_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "module.py").write_text(
+                "def parse_completion_contract():\n    pass\n",
+                encoding="utf-8",
+            )
+            check = contracts.RegexInFileCheck(
+                name="symbol",
+                path="module.py",
+                pattern=r"^def parse_completion_contract",
+            )
+
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("pass", result.status)
+
+    def test_regex_in_file_check_fails_when_pattern_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "module.py").write_text("nothing\n", encoding="utf-8")
+            check = contracts.RegexInFileCheck(
+                name="symbol",
+                path="module.py",
+                pattern=r"^def parse_completion_contract",
+            )
+
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("fail", result.status)
+            self.assertEqual("regex-not-matched", result.failure_reason)
+            self.assertIn("module.py", result.detail)
+
+    def test_regex_in_file_check_fails_when_file_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            check = contracts.RegexInFileCheck(
+                name="symbol",
+                path="missing.py",
+                pattern=r"anything",
+            )
+
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("fail", result.status)
+            self.assertEqual("file-missing", result.failure_reason)
+
+    def test_run_verification_aggregates_all_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "present.txt").write_text("hi\n", encoding="utf-8")
+            contract = self._contract(
+                checks=(
+                    contracts.FileExistsCheck(name="present", path="present.txt"),
+                    contracts.FileExistsCheck(name="absent", path="absent.txt"),
+                    contracts.CommandCheck(
+                        name="ok",
+                        argv=("python3", "-c", "import sys; sys.exit(0)"),
+                        timeout_seconds=10.0,
+                    ),
+                )
+            )
+
+            result = verification.run_verification(contract, repo_root=repo_root)
+
+            self.assertEqual("1", result.session_id.value)
+            self.assertEqual(3, len(result.checks))
+            self.assertFalse(result.passed)
+            failure_names = {failure.name for failure in result.failures}
+            self.assertEqual({"absent"}, failure_names)
+
+    def test_run_verification_passes_when_all_checks_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "present.txt").write_text("hi\n", encoding="utf-8")
+            contract = self._contract(
+                checks=(
+                    contracts.FileExistsCheck(name="present", path="present.txt"),
+                    contracts.CommandCheck(
+                        name="ok",
+                        argv=("python3", "-c", "import sys; sys.exit(0)"),
+                        timeout_seconds=10.0,
+                    ),
+                )
+            )
+
+            result = verification.run_verification(contract, repo_root=repo_root)
+
+            self.assertTrue(result.passed)
+            self.assertEqual((), result.failures)
+
+    def _record_observer(
+        self,
+    ) -> tuple[verification.VerificationObserver, list[tuple[str, object]]]:
+        events: list[tuple[str, object]] = []
+        observer = verification.VerificationObserver(
+            on_check_started=lambda event: events.append(("started", event)),
+            on_check_finished=lambda event: events.append(("finished", event)),
+        )
+        return observer, events
+
+    def test_run_verification_emits_observer_events_for_passing_command(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            check = contracts.CommandCheck(
+                name="ok",
+                argv=("python3", "-c", "import sys; sys.exit(0)"),
+                timeout_seconds=10.0,
+            )
+            contract = self._contract(checks=(check,))
+            observer, events = self._record_observer()
+
+            result = verification.run_verification(
+                contract, repo_root=repo_root, observer=observer
+            )
+
+            self.assertTrue(result.passed)
+            self.assertEqual(["started", "finished"], [tag for tag, _ in events])
+            started = events[0][1]
+            finished = events[1][1]
+            self.assertIsInstance(started, verification.CheckStartedEvent)
+            self.assertIsInstance(finished, verification.CheckFinishedEvent)
+            self.assertEqual(0, started.check_index)
+            self.assertEqual(1, started.check_count)
+            self.assertEqual("ok", started.name)
+            self.assertEqual("command", started.kind)
+            self.assertEqual(check.argv, started.argv)
+            self.assertEqual(
+                str(plans.canonicalize_path(repo_root)), started.cwd
+            )
+            self.assertEqual(started.session_id, contract.session_id)
+            self.assertEqual(0, finished.check_index)
+            self.assertEqual(1, finished.check_count)
+            self.assertEqual("pass", finished.result.status)
+            self.assertEqual("command", finished.result.kind)
+            self.assertEqual(0, finished.result.returncode)
+
+    def test_run_verification_emits_observer_events_for_failing_command(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            check = contracts.CommandCheck(
+                name="boom",
+                argv=("python3", "-c", "import sys; sys.exit(3)"),
+                timeout_seconds=10.0,
+            )
+            contract = self._contract(checks=(check,))
+            observer, events = self._record_observer()
+
+            result = verification.run_verification(
+                contract, repo_root=repo_root, observer=observer
+            )
+
+            self.assertFalse(result.passed)
+            self.assertEqual(["started", "finished"], [tag for tag, _ in events])
+            finished = events[1][1]
+            self.assertEqual("fail", finished.result.status)
+            self.assertEqual("command-failed", finished.result.failure_reason)
+            self.assertEqual(3, finished.result.returncode)
+
+    def test_run_verification_emits_observer_events_for_command_timeout(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            check = contracts.CommandCheck(
+                name="sleeper",
+                argv=("python3", "-c", "import time; time.sleep(5)"),
+                timeout_seconds=0.1,
+            )
+            contract = self._contract(checks=(check,))
+            observer, events = self._record_observer()
+
+            result = verification.run_verification(
+                contract, repo_root=repo_root, observer=observer
+            )
+
+            self.assertFalse(result.passed)
+            self.assertEqual(["started", "finished"], [tag for tag, _ in events])
+            finished = events[1][1]
+            self.assertEqual("fail", finished.result.status)
+            self.assertEqual("command-timeout", finished.result.failure_reason)
+
+    def test_run_verification_emits_observer_events_for_file_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "present.txt").write_text("hi\n", encoding="utf-8")
+            check = contracts.FileExistsCheck(name="present", path="present.txt")
+            contract = self._contract(checks=(check,))
+            observer, events = self._record_observer()
+
+            result = verification.run_verification(
+                contract, repo_root=repo_root, observer=observer
+            )
+
+            self.assertTrue(result.passed)
+            self.assertEqual(["started", "finished"], [tag for tag, _ in events])
+            started = events[0][1]
+            self.assertEqual("file_exists", started.kind)
+            self.assertIsNone(started.argv)
+            self.assertIsNone(started.cwd)
+            finished = events[1][1]
+            self.assertEqual("pass", finished.result.status)
+            self.assertEqual("file_exists", finished.kind)
+
+    def test_run_verification_emits_observer_events_for_regex_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "module.py").write_text(
+                "def parse_completion_contract():\n    pass\n",
+                encoding="utf-8",
+            )
+            check = contracts.RegexInFileCheck(
+                name="symbol",
+                path="module.py",
+                pattern=r"^def parse_completion_contract",
+            )
+            contract = self._contract(checks=(check,))
+            observer, events = self._record_observer()
+
+            result = verification.run_verification(
+                contract, repo_root=repo_root, observer=observer
+            )
+
+            self.assertTrue(result.passed)
+            self.assertEqual(["started", "finished"], [tag for tag, _ in events])
+            started = events[0][1]
+            self.assertEqual("regex_in_file", started.kind)
+            self.assertIsNone(started.argv)
+            self.assertIsNone(started.cwd)
+            finished = events[1][1]
+            self.assertEqual("pass", finished.result.status)
+            self.assertEqual("regex_in_file", finished.kind)
+
+    def test_run_verification_emits_events_in_declared_check_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "present.txt").write_text("hi\n", encoding="utf-8")
+            contract = self._contract(
+                checks=(
+                    contracts.FileExistsCheck(
+                        name="present", path="present.txt"
+                    ),
+                    contracts.CommandCheck(
+                        name="middle",
+                        argv=("python3", "-c", "import sys; sys.exit(0)"),
+                        timeout_seconds=10.0,
+                    ),
+                    contracts.FileExistsCheck(
+                        name="absent", path="nope.txt"
+                    ),
+                )
+            )
+            observer, events = self._record_observer()
+
+            result = verification.run_verification(
+                contract, repo_root=repo_root, observer=observer
+            )
+
+            self.assertFalse(result.passed)
+            self.assertEqual(
+                [
+                    ("started", 0, "present"),
+                    ("finished", 0, "present"),
+                    ("started", 1, "middle"),
+                    ("finished", 1, "middle"),
+                    ("started", 2, "absent"),
+                    ("finished", 2, "absent"),
+                ],
+                [
+                    (tag, event.check_index, event.name)
+                    for tag, event in events
+                ],
+            )
+            for tag, event in events:
+                self.assertEqual(3, event.check_count)
+                if tag == "finished":
+                    expected_status = "pass" if event.name != "absent" else "fail"
+                    self.assertEqual(expected_status, event.result.status)
+
+    def test_run_verification_resolves_observer_cwd_for_command_subdir(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "nested").mkdir()
+            check = contracts.CommandCheck(
+                name="pwd",
+                argv=("python3", "-c", "import sys; sys.exit(0)"),
+                timeout_seconds=10.0,
+                cwd="nested",
+            )
+            contract = self._contract(checks=(check,))
+            observer, events = self._record_observer()
+
+            verification.run_verification(
+                contract, repo_root=repo_root, observer=observer
+            )
+
+            started = events[0][1]
+            self.assertEqual(
+                str(plans.canonicalize_path(repo_root / "nested")),
+                started.cwd,
+            )
+
+    def test_run_verification_with_partial_observer_only_fires_set_callback(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "present.txt").write_text("hi\n", encoding="utf-8")
+            contract = self._contract(
+                checks=(
+                    contracts.FileExistsCheck(name="present", path="present.txt"),
+                )
+            )
+            finished_events: list[verification.CheckFinishedEvent] = []
+            observer = verification.VerificationObserver(
+                on_check_started=None,
+                on_check_finished=finished_events.append,
+            )
+
+            verification.run_verification(
+                contract, repo_root=repo_root, observer=observer
+            )
+
+            self.assertEqual(1, len(finished_events))
+            self.assertEqual("present", finished_events[0].name)
+
+    def test_run_verification_without_observer_matches_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "present.txt").write_text("hi\n", encoding="utf-8")
+            contract = self._contract(
+                checks=(
+                    contracts.FileExistsCheck(name="present", path="present.txt"),
+                )
+            )
+
+            result = verification.run_verification(contract, repo_root=repo_root)
+
+            self.assertTrue(result.passed)
+            self.assertEqual(1, len(result.checks))
+
+    def test_run_verification_propagates_observer_callback_exceptions(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "present.txt").write_text("hi\n", encoding="utf-8")
+            contract = self._contract(
+                checks=(
+                    contracts.FileExistsCheck(name="present", path="present.txt"),
+                )
+            )
+
+            class _Boom(RuntimeError):
+                pass
+
+            def _explode(_event: verification.CheckStartedEvent) -> None:
+                raise _Boom("observer error")
+
+            observer = verification.VerificationObserver(
+                on_check_started=_explode
+            )
+
+            with self.assertRaises(_Boom):
+                verification.run_verification(
+                    contract, repo_root=repo_root, observer=observer
+                )
+
+    def _command(
+        self,
+        argv: tuple[str, ...],
+        *,
+        name: str = "cmd",
+        timeout_seconds: float = 10.0,
+    ) -> contracts.CommandCheck:
+        return contracts.CommandCheck(
+            name=name, argv=argv, timeout_seconds=timeout_seconds
+        )
+
+    def test_diagnose_command_flags_missing_bare_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            check = self._command(("pytest", "-q"))
+            diagnostic = verification.diagnose_command(
+                check, repo_root=Path(tmp), which=lambda _name: None
+            )
+
+            self.assertIsNotNone(diagnostic)
+            self.assertEqual("executable-not-found", diagnostic.reason)
+            self.assertIn("pytest", diagnostic.detail)
+
+    def test_diagnose_command_skips_path_bearing_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            check = self._command((".venv/bin/tool", "run"))
+            diagnostic = verification.diagnose_command(
+                check,
+                repo_root=Path(tmp),
+                which=lambda _name: None,
+            )
+
+            self.assertIsNone(diagnostic)
+
+    def test_diagnose_command_flags_missing_module(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            check = self._command(("python3", "-m", "pytest", "-q"))
+            diagnostic = verification.diagnose_command(
+                check,
+                repo_root=Path(tmp),
+                which=lambda name: f"/usr/bin/{name}",
+                module_probe=lambda *_a, **_k: False,
+            )
+
+            self.assertIsNotNone(diagnostic)
+            self.assertEqual("module-not-importable", diagnostic.reason)
+            self.assertIn("pytest", diagnostic.detail)
+
+    def test_diagnose_command_passes_present_module(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            check = self._command(("python3", "-m", "unittest"))
+            diagnostic = verification.diagnose_command(
+                check,
+                repo_root=Path(tmp),
+                which=lambda name: f"/usr/bin/{name}",
+                module_probe=lambda *_a, **_k: True,
+            )
+
+            self.assertIsNone(diagnostic)
+
+    def test_diagnose_command_fails_open_on_probe_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            check = self._command(("python3", "-m", "pytest"))
+            # A probe that returns the fail-open sentinel (``None``) yields no
+            # finding even when the module might otherwise look absent.
+            diagnostic = verification.diagnose_command(
+                check,
+                repo_root=Path(tmp),
+                which=lambda name: f"/usr/bin/{name}",
+                module_probe=lambda *_a, **_k: None,
+            )
+
+            self.assertIsNone(diagnostic)
+
+    def test_diagnose_command_ignores_non_module_argv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            check = self._command(("python3", "-c", "print(1)"))
+            probe_calls: list[tuple[object, ...]] = []
+
+            def _record(interpreter: str, module: str, **_k: object) -> bool:
+                probe_calls.append((interpreter, module))
+                return False
+
+            diagnostic = verification.diagnose_command(
+                check,
+                repo_root=Path(tmp),
+                which=lambda name: f"/usr/bin/{name}",
+                module_probe=_record,
+            )
+
+            self.assertIsNone(diagnostic)
+            self.assertEqual([], probe_calls)
+
+    def test_diagnose_command_none_for_runnable_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            check = self._command(("python3", "-c", "import sys; sys.exit(0)"))
+            diagnostic = verification.diagnose_command(
+                check, repo_root=Path(tmp)
+            )
+
+            self.assertIsNone(diagnostic)
+
+    def test_diagnose_command_skips_when_repo_root_none(self) -> None:
+        check = self._command(("pytest",))
+        diagnostic = verification.diagnose_command(
+            check, repo_root=None, which=lambda _name: None
+        )
+
+        self.assertIsNone(diagnostic)
+
+    def test_default_module_probe_detects_present_and_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            present = verification._default_module_probe(
+                sys.executable, "unittest", cwd=repo_root
+            )
+            missing = verification._default_module_probe(
+                sys.executable,
+                "definitely_not_a_real_module_xyz",
+                cwd=repo_root,
+            )
+
+            self.assertIs(True, present)
+            self.assertIs(False, missing)
+
+    def test_default_module_probe_detects_missing_dotted_submodule(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            outcome = verification._default_module_probe(
+                sys.executable,
+                "definitely_not_a_real_module_xyz.submodule",
+                cwd=Path(tmp),
+            )
+            self.assertIs(False, outcome)
+
+    def test_default_module_probe_detects_present_dotted_module(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            outcome = verification._default_module_probe(
+                sys.executable, "importlib.util", cwd=Path(tmp)
+            )
+            self.assertIs(True, outcome)
+
+    # --- Streaming / bounded command-output regression coverage (session 2) ---
+    # These live in VerificationExecutorTests so the session-2 completion
+    # contract's verify recipe (which names this class) exercises them.
+
+    def test_passing_command_records_bounded_metadata_no_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "repo"
+            repo_root.mkdir()
+            artifact_dir = Path(tmp) / "artifacts"
+            check = self._command(
+                (
+                    "python3",
+                    "-c",
+                    "import sys; sys.stdout.write('hello world')",
+                )
+            )
+
+            result = verification.run_check(
+                check, repo_root=repo_root, artifact_dir=artifact_dir
+            )
+
+            self.assertEqual("pass", result.status)
+            self.assertEqual("hello world", result.stdout)
+            self.assertFalse(result.stdout_truncated)
+            self.assertEqual(len(b"hello world"), result.stdout_byte_count)
+            self.assertEqual(
+                artifacts.sha256_hex(b"hello world"), result.stdout_sha256
+            )
+            # Passing output never writes a full raw artifact.
+            self.assertIsNone(result.stdout_artifact_path)
+            self.assertIsNone(result.stderr_artifact_path)
+            self.assertFalse(artifact_dir.exists())
+
+    def test_large_passing_output_is_previewed_not_embedded_whole(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "repo"
+            repo_root.mkdir()
+            # Emit far more than the 16 KiB preview window.
+            size = 400 * 1024
+            check = self._command(
+                (
+                    "python3",
+                    "-c",
+                    f"import sys; sys.stdout.write('a' * {size})",
+                )
+            )
+
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("pass", result.status)
+            self.assertEqual(size, result.stdout_byte_count)
+            self.assertTrue(result.stdout_truncated)
+            # The serialized result cannot contain the full large output.
+            self.assertLess(len(result.stdout), size)
+            self.assertLessEqual(
+                len(result.stdout),
+                artifacts.PREVIEW_HEAD_BYTES
+                + artifacts.PREVIEW_TAIL_BYTES
+                + len(artifacts.PREVIEW_TRUNCATION_MARKER),
+            )
+            self.assertIn(artifacts.PREVIEW_TRUNCATION_MARKER, result.stdout)
+
+    def test_failed_command_retains_full_output_recoverable_from_gzip(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "repo"
+            repo_root.mkdir()
+            artifact_dir = Path(tmp) / "artifacts"
+            size = 200 * 1024
+            check = self._command(
+                (
+                    "python3",
+                    "-c",
+                    "import sys\n"
+                    f"sys.stdout.write('x' * {size})\n"
+                    "sys.exit(5)",
+                ),
+                name="boom",
+            )
+
+            result = verification.run_check(
+                check, repo_root=repo_root, artifact_dir=artifact_dir
+            )
+
+            self.assertEqual("fail", result.status)
+            self.assertEqual("command-failed", result.failure_reason)
+            self.assertTrue(result.stdout_truncated)
+            self.assertIsNotNone(result.stdout_artifact_path)
+            recovered = artifacts.read_gzip(Path(result.stdout_artifact_path))
+            self.assertEqual(b"x" * size, recovered)
+            self.assertEqual(
+                artifacts.sha256_hex(recovered), result.stdout_sha256
+            )
+
+    def test_colliding_check_names_write_distinct_recoverable_artifacts(
+        self,
+    ) -> None:
+        # Each pair sanitizes to the same stem; without a collision-resistant
+        # identifier the second failed check would overwrite the first
+        # check's artifact via os.replace. The second pair additionally
+        # shares the first 8 hex chars of the SHA-256 digests of its
+        # "-stdout" artifact names, so a short digest suffix still collided.
+        pairs = (
+            ("a/b", "a?b"),
+            ("a$%#:??/b", "a%%#%$:/b"),
+        )
+        for first_name, second_name in pairs:
+            with self.subTest(pair=(first_name, second_name)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    repo_root = Path(tmp) / "repo"
+                    repo_root.mkdir()
+                    artifact_dir = Path(tmp) / "artifacts"
+                    results = {}
+                    for name, payload in (
+                        (first_name, "first-output"),
+                        (second_name, "second-output"),
+                    ):
+                        check = self._command(
+                            (
+                                "python3",
+                                "-c",
+                                "import sys; "
+                                f"sys.stdout.write({payload!r}); sys.exit(1)",
+                            ),
+                            name=name,
+                        )
+                        result = verification.run_check(
+                            check, repo_root=repo_root, artifact_dir=artifact_dir
+                        )
+                        self.assertEqual("fail", result.status)
+                        self.assertIsNotNone(result.stdout_artifact_path)
+                        results[name] = (result, payload)
+
+                    first, first_payload = results[first_name]
+                    second, second_payload = results[second_name]
+                    self.assertNotEqual(
+                        first.stdout_artifact_path, second.stdout_artifact_path
+                    )
+                    self.assertNotEqual(
+                        first.stderr_artifact_path, second.stderr_artifact_path
+                    )
+                    self.assertEqual(
+                        first_payload.encode("utf-8"),
+                        artifacts.read_gzip(Path(first.stdout_artifact_path)),
+                    )
+                    self.assertEqual(
+                        second_payload.encode("utf-8"),
+                        artifacts.read_gzip(Path(second.stdout_artifact_path)),
+                    )
+
+    def test_failed_command_without_artifact_dir_keeps_previews_only(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "repo"
+            repo_root.mkdir()
+            check = self._command(
+                (
+                    "python3",
+                    "-c",
+                    "import sys; sys.stderr.write('nope'); sys.exit(2)",
+                )
+            )
+
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("fail", result.status)
+            self.assertEqual("nope", result.stderr)
+            self.assertEqual(len(b"nope"), result.stderr_byte_count)
+            self.assertIsNone(result.stdout_artifact_path)
+            self.assertIsNone(result.stderr_artifact_path)
+
+    def test_timeout_retains_partial_output_under_failure_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "repo"
+            repo_root.mkdir()
+            artifact_dir = Path(tmp) / "artifacts"
+            check = self._command(
+                (
+                    "python3",
+                    "-c",
+                    "import sys, time\n"
+                    "sys.stdout.write('partial')\n"
+                    "sys.stdout.flush()\n"
+                    "time.sleep(5)",
+                ),
+                name="slow",
+                timeout_seconds=0.3,
+            )
+
+            result = verification.run_check(
+                check, repo_root=repo_root, artifact_dir=artifact_dir
+            )
+
+            self.assertEqual("fail", result.status)
+            self.assertEqual("command-timeout", result.failure_reason)
+            # Whatever was flushed before the timeout is retained as a bounded
+            # preview and, because timeout is a failure, an artifact was written.
+            self.assertIn("partial", result.stdout)
+            self.assertIsNotNone(result.stdout_artifact_path)
+            recovered = artifacts.read_gzip(Path(result.stdout_artifact_path))
+            self.assertEqual(b"partial", recovered)
+
+    def test_stream_capture_fails_open_when_artifact_write_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "repo"
+            repo_root.mkdir()
+            # Point the artifact directory at a path blocked by an existing file
+            # so directory creation raises; verification must still succeed with
+            # bounded metadata and no artifact path.
+            blocker = Path(tmp) / "blocker"
+            blocker.write_text("not a dir\n", encoding="utf-8")
+            artifact_dir = blocker / "sub"
+            check = self._command(
+                (
+                    "python3",
+                    "-c",
+                    "import sys; sys.stdout.write('data'); sys.exit(9)",
+                )
+            )
+
+            result = verification.run_check(
+                check, repo_root=repo_root, artifact_dir=artifact_dir
+            )
+
+            self.assertEqual("fail", result.status)
+            self.assertEqual("data", result.stdout)
+            self.assertEqual(
+                artifacts.sha256_hex(b"data"), result.stdout_sha256
+            )
+            self.assertIsNone(result.stdout_artifact_path)
+
+    def test_run_verification_forwards_artifact_dir_to_command_checks(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "repo"
+            repo_root.mkdir()
+            artifact_dir = Path(tmp) / "artifacts"
+            contract = contracts.CompletionContract(
+                session_id=plans.parse_session_id("1"),
+                done_when=("done",),
+                verify=contracts.VerifyRecipe(
+                    checks=(
+                        self._command(
+                            (
+                                "python3",
+                                "-c",
+                                "import sys; sys.stdout.write('boom'); "
+                                "sys.exit(1)",
+                            ),
+                            name="fail-check",
+                        ),
+                    )
+                ),
+            )
+
+            result = verification.run_verification(
+                contract, repo_root=repo_root, artifact_dir=artifact_dir
+            )
+
+            self.assertFalse(result.passed)
+            check_result = result.checks[0]
+            self.assertIsNotNone(check_result.stdout_artifact_path)
+            self.assertTrue(
+                Path(check_result.stdout_artifact_path).exists()
+            )
+
+    # --- Incremental streaming regression coverage (M1) ---
+    # Verification must bound command output as it arrives instead of
+    # buffering the full stream before truncation.
+
+    def test_large_output_peak_memory_stays_bounded(self) -> None:
+        # Regression (M1): before streaming, subprocess.run buffered the full
+        # stream in memory, so the traced-heap peak was at least the output
+        # size. Streaming keeps the peak far below it.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "repo"
+            repo_root.mkdir()
+            size = 8 * 1024 * 1024
+            check = self._command(
+                (
+                    "python3",
+                    "-c",
+                    "import sys\n"
+                    "chunk = 'a' * 65536\n"
+                    f"for _ in range({size} // 65536):\n"
+                    "    sys.stdout.write(chunk)\n",
+                ),
+                timeout_seconds=120.0,
+            )
+
+            tracemalloc.start()
+            try:
+                result = verification.run_check(check, repo_root=repo_root)
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+
+            self.assertEqual("pass", result.status)
+            self.assertEqual(size, result.stdout_byte_count)
+            self.assertTrue(result.stdout_truncated)
+            self.assertLess(peak, size // 2)
+
+    def test_streamed_digest_and_preview_match_buffered_reference(self) -> None:
+        # The streamed capture must be indistinguishable from the previous
+        # fully-buffered implementation: same digest, preview, truncation
+        # flag, and byte count as store_stream_output over the whole stream.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "repo"
+            repo_root.mkdir()
+            # Patterned output larger than the 16 KiB preview window,
+            # including bytes that are invalid UTF-8.
+            expected = bytes(range(256)) * 256
+            check = self._command(
+                (
+                    "python3",
+                    "-c",
+                    "import sys\n"
+                    "sys.stdout.buffer.write(bytes(range(256)) * 256)\n",
+                )
+            )
+
+            result = verification.run_check(check, repo_root=repo_root)
+
+            reference = artifacts.store_stream_output(expected, failed=False)
+            self.assertEqual("pass", result.status)
+            self.assertEqual(reference.byte_count, result.stdout_byte_count)
+            self.assertEqual(reference.sha256, result.stdout_sha256)
+            self.assertEqual(reference.preview, result.stdout)
+            self.assertEqual(reference.truncated, result.stdout_truncated)
+
+
+class VerifyCliTests(unittest.TestCase):
+    def _run_verify(
+        self,
+        plan_dir: Path,
+        *,
+        session: str,
+        cwd: Path,
+        json_output: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        argv = [
+            sys.executable,
+            "-m",
+            "agent_session_loop",
+            "verify",
+            str(plan_dir),
+            "--session",
+            session,
+            "--cwd",
+            str(cwd),
+        ]
+        if json_output:
+            argv.append("--json")
+        return subprocess.run(
+            argv,
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_verify_json_passes_when_all_checks_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            (repo_root / "target.txt").write_text("ok\n", encoding="utf-8")
+            contract = _contract_block(
+                '{"type": "file_exists", "path": "target.txt", "name": "target"}'
+            )
+            write_plan(
+                plan_dir, ("pending",), contracts_by_id={"1": contract}
+            )
+
+            completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertEqual("", completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertTrue(payload["passed"])
+            self.assertEqual("verify", payload["command"])
+            self.assertEqual("ok", payload["reason"])
+            self.assertEqual("1", payload["session"])
+            self.assertEqual(
+                str(plans.canonicalize_path(repo_root)), payload["cwd"]
+            )
+            self.assertEqual(str(plan_dir), payload["plan_dir"])
+            self.assertEqual(1, payload["recipe"]["check_count"])
+            self.assertEqual(["file_exists"], payload["recipe"]["kinds"])
+            self.assertEqual(["target"], payload["recipe"]["names"])
+            self.assertEqual(1, len(payload["checks"]))
+            check = payload["checks"][0]
+            self.assertEqual("target", check["name"])
+            self.assertEqual("file_exists", check["kind"])
+            self.assertEqual("pass", check["status"])
+            self.assertIsNone(check["failure_reason"])
+
+    def test_verify_json_failure_reports_check_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            contract = _contract_block(
+                '{"type": "file_exists", "path": "absent.txt", "name": "absent"}'
+            )
+            write_plan(
+                plan_dir, ("pending",), contracts_by_id={"1": contract}
+            )
+
+            completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
+
+            self.assertEqual(1, completed.returncode)
+            self.assertEqual("", completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertFalse(payload["passed"])
+            self.assertFalse(payload["paused"])
+            self.assertEqual("verify-failed", payload["reason"])
+            self.assertEqual("1", payload["session"])
+            self.assertIn("verification check", payload["error"])
+            self.assertEqual(1, len(payload["checks"]))
+            check = payload["checks"][0]
+            self.assertEqual("absent", check["name"])
+            self.assertEqual("fail", check["status"])
+            self.assertEqual("file-missing", check["failure_reason"])
+            self.assertIn("absent.txt", check["detail"])
+
+    def test_verify_json_no_contract_returns_no_contract_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            write_plan(plan_dir, ("pending",))
+
+            completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
+
+            self.assertEqual(1, completed.returncode)
+            self.assertEqual("", completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("no-contract", payload["reason"])
+            self.assertEqual("1", payload["session"])
+            self.assertEqual([], payload["checks"])
+            self.assertEqual(0, payload["recipe"]["check_count"])
+            self.assertFalse(payload["passed"])
+
+    def test_verify_json_malformed_contract_reports_plan_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            contract = "\n".join(
+                [
+                    "## Completion Contract",
+                    "",
+                    "### Done when",
+                    "- something",
+                    "",
+                    "### Verify",
+                    "",
+                    "```json",
+                    "{not valid json",
+                    "```",
+                ]
+            )
+            write_plan(
+                plan_dir, ("pending",), contracts_by_id={"1": contract}
+            )
+
+            completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
+
+            self.assertEqual(1, completed.returncode)
+            self.assertEqual("", completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("malformed-contract", payload["reason"])
+            self.assertEqual("1", payload["session"])
+            self.assertIn("Verify JSON is invalid", payload["error"])
+
+    def test_verify_json_invalid_session_id_reports_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            write_plan(plan_dir, ("pending",))
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_session_loop",
+                    "verify",
+                    str(plan_dir),
+                    "--session",
+                    "not-a-session",
+                    "--cwd",
+                    str(repo_root),
+                    "--json",
+                ],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(1, completed.returncode)
+            self.assertEqual("", completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("invalid-session", payload["reason"])
+            self.assertEqual("not-a-session", payload["session"])
+
+    def test_verify_text_output_shows_per_check_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            (repo_root / "present.txt").write_text("yes\n", encoding="utf-8")
+            contract = _contract_block(
+                '{"type": "file_exists", "path": "present.txt", "name": "present"}'
+            )
+            write_plan(
+                plan_dir, ("pending",), contracts_by_id={"1": contract}
+            )
+
+            completed = self._run_verify(
+                plan_dir, session="1", cwd=repo_root, json_output=False
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertIn("Session: 1", completed.stdout)
+            self.assertIn("[PASS] file_exists present", completed.stdout)
+            self.assertIn("Verify: passed", completed.stdout)
+
+    def test_verify_text_output_reports_failure_on_stderr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            contract = _contract_block(
+                '{"type": "file_exists", "path": "absent.txt", "name": "absent"}'
+            )
+            write_plan(
+                plan_dir, ("pending",), contracts_by_id={"1": contract}
+            )
+
+            completed = self._run_verify(
+                plan_dir, session="1", cwd=repo_root, json_output=False
+            )
+
+            self.assertEqual(1, completed.returncode)
+            self.assertIn("[FAIL] file_exists absent", completed.stdout)
+            self.assertIn("Verify: failed", completed.stderr)
+
+    def test_verify_json_check_payload_carries_bounded_stream_metadata(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            argv = [
+                "python3",
+                "-c",
+                "import sys; sys.stdout.write('ok output'); sys.exit(0)",
+            ]
+            contract = _contract_block(
+                '{"type": "command", "name": "cmd", '
+                f'"argv": {json.dumps(argv)}, "timeout_seconds": 30}}'
+            )
+            write_plan(
+                plan_dir, ("pending",), contracts_by_id={"1": contract}
+            )
+
+            completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            payload = json.loads(completed.stdout)
+            check = payload["checks"][0]
+            self.assertEqual("ok output", check["stdout"])
+            self.assertEqual(len(b"ok output"), check["stdout_byte_count"])
+            self.assertFalse(check["stdout_truncated"])
+            self.assertIsNone(check["stdout_artifact_path"])
+            self.assertEqual(64, len(check["stdout_sha256"]))
+
+    def test_verify_artifact_dir_retains_failed_command_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            artifact_dir = tmp_dir / "verify-artifacts"
+            argv = [
+                "python3",
+                "-c",
+                "import sys; sys.stdout.write('failure detail'); sys.exit(4)",
+            ]
+            contract = _contract_block(
+                '{"type": "command", "name": "cmd", '
+                f'"argv": {json.dumps(argv)}, "timeout_seconds": 30}}'
+            )
+            write_plan(
+                plan_dir, ("pending",), contracts_by_id={"1": contract}
+            )
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_session_loop",
+                    "verify",
+                    str(plan_dir),
+                    "--session",
+                    "1",
+                    "--cwd",
+                    str(repo_root),
+                    "--artifact-dir",
+                    str(artifact_dir),
+                    "--json",
+                ],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(1, completed.returncode)
+            payload = json.loads(completed.stdout)
+            check = payload["checks"][0]
+            self.assertEqual("command-failed", check["failure_reason"])
+            self.assertEqual("failure detail", check["stdout"])
+            artifact_path = check["stdout_artifact_path"]
+            self.assertIsNotNone(artifact_path)
+            recovered = artifacts.read_gzip(Path(artifact_path))
+            self.assertEqual(b"failure detail", recovered)
+
+
+class ArtifactStorageTests(unittest.TestCase):
+    def test_sha256_and_counts_are_exact(self) -> None:
+        data = b"hello world"
+        meta = artifacts.store_stream_output(data, failed=False)
+
+        self.assertEqual(artifacts.OUTPUT_METADATA_VERSION, meta.version)
+        self.assertEqual(len(data), meta.byte_count)
+        self.assertEqual(len("hello world"), meta.char_count)
+        self.assertEqual(
+            hashlib.sha256(data).hexdigest(), meta.sha256
+        )
+        self.assertFalse(meta.truncated)
+        self.assertEqual("hello world", meta.preview)
+        self.assertIsNone(meta.artifact_path)
+
+    def test_empty_stream_produces_bounded_metadata(self) -> None:
+        meta = artifacts.store_stream_output(b"", failed=False)
+
+        self.assertEqual(0, meta.byte_count)
+        self.assertEqual(0, meta.char_count)
+        self.assertFalse(meta.truncated)
+        self.assertEqual("", meta.preview)
+        self.assertEqual(hashlib.sha256(b"").hexdigest(), meta.sha256)
+
+    def test_synthetic_14mb_stream_produces_bounded_metadata(self) -> None:
+        data = b"A" * (14 * 1024 * 1024)
+        meta = artifacts.store_stream_output(data, failed=False)
+
+        self.assertTrue(meta.truncated)
+        self.assertEqual(len(data), meta.byte_count)
+        self.assertEqual(len(data), meta.char_count)
+        # Preview is bounded to head + tail (plus the truncation marker),
+        # never the full 14 MB stream.
+        self.assertLessEqual(
+            len(meta.preview),
+            artifacts.PREVIEW_HEAD_BYTES
+            + artifacts.PREVIEW_TAIL_BYTES
+            + len(artifacts.PREVIEW_TRUNCATION_MARKER),
+        )
+        self.assertIn(artifacts.PREVIEW_TRUNCATION_MARKER, meta.preview)
+        self.assertTrue(meta.preview.startswith("A" * 32))
+        self.assertTrue(meta.preview.endswith("A" * 32))
+
+    def test_preview_uses_first_and_last_8kib(self) -> None:
+        head = b"H" * artifacts.PREVIEW_HEAD_BYTES
+        middle = b"M" * 4096
+        tail = b"T" * artifacts.PREVIEW_TAIL_BYTES
+        preview, truncated = artifacts.bounded_preview(head + middle + tail)
+
+        self.assertTrue(truncated)
+        self.assertNotIn("M", preview)
+        self.assertEqual(
+            "H" * artifacts.PREVIEW_HEAD_BYTES,
+            preview[: artifacts.PREVIEW_HEAD_BYTES],
+        )
+        self.assertEqual(
+            "T" * artifacts.PREVIEW_TAIL_BYTES,
+            preview[-artifacts.PREVIEW_TAIL_BYTES :],
+        )
+
+    def test_preview_not_truncated_at_exact_boundary(self) -> None:
+        data = b"X" * (
+            artifacts.PREVIEW_HEAD_BYTES + artifacts.PREVIEW_TAIL_BYTES
+        )
+        preview, truncated = artifacts.bounded_preview(data)
+
+        self.assertFalse(truncated)
+        self.assertEqual(data.decode("utf-8"), preview)
+
+    def test_invalid_utf8_is_handled_in_preview_and_counts(self) -> None:
+        data = b"ok\xff\xfebytes"
+        meta = artifacts.store_stream_output(data, failed=False)
+
+        self.assertEqual(len(data), meta.byte_count)
+        # Invalid bytes decode to U+FFFD replacement characters, so the
+        # character count reflects the replaced string, not the raw bytes.
+        self.assertEqual(
+            len(data.decode("utf-8", errors="replace")), meta.char_count
+        )
+        self.assertIn("�", meta.preview)
+        self.assertEqual(hashlib.sha256(data).hexdigest(), meta.sha256)
+
+    def test_failed_output_is_recoverable_byte_for_byte(self) -> None:
+        data = bytes(range(256)) * 2048  # 512 KiB of every byte value
+        with tempfile.TemporaryDirectory() as tmp:
+            meta = artifacts.store_stream_output(
+                data,
+                failed=True,
+                artifact_dir=tmp,
+                artifact_name="stdout",
+            )
+
+            self.assertIsNotNone(meta.artifact_path)
+            artifact = Path(meta.artifact_path)
+            self.assertTrue(artifact.exists())
+            self.assertEqual("stdout.gz", artifact.name)
+            recovered = artifacts.read_gzip(artifact)
+            self.assertEqual(data, recovered)
+            self.assertEqual(meta.sha256, artifacts.sha256_hex(recovered))
+
+    def test_passing_output_creates_no_full_raw_artifact(self) -> None:
+        data = b"C" * (1024 * 1024)
+        with tempfile.TemporaryDirectory() as tmp:
+            meta = artifacts.store_stream_output(
+                data,
+                failed=False,
+                artifact_dir=tmp,
+                artifact_name="stdout",
+            )
+
+            self.assertIsNone(meta.artifact_path)
+            self.assertEqual([], list(Path(tmp).iterdir()))
+
+    def test_empty_failed_output_still_recoverable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta = artifacts.store_stream_output(
+                b"", failed=True, artifact_dir=tmp, artifact_name="stderr"
+            )
+
+            self.assertIsNotNone(meta.artifact_path)
+            self.assertEqual(b"", artifacts.read_gzip(meta.artifact_path))
+
+    def test_artifact_name_is_sanitized(self) -> None:
+        cases = {
+            "../../etc/passwd": "etc-passwd",
+            "weird name!@#.log": "weird-name-.log",
+            "  ": "output",
+            "": "output",
+            "...": "output",
+            "already_safe.txt": "already_safe.txt",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(expected, artifacts.sanitize_artifact_name(raw))
+
+    def test_derive_artifact_stem_keeps_safe_names_unchanged(self) -> None:
+        for name in ("stdout", "boom-stdout", "already_safe.txt"):
+            with self.subTest(name=name):
+                self.assertEqual(name, artifacts.derive_artifact_stem(name))
+        self.assertEqual("output", artifacts.derive_artifact_stem(None))
+        self.assertEqual("output", artifacts.derive_artifact_stem(""))
+
+    def test_derive_artifact_stem_distinguishes_colliding_names(self) -> None:
+        first = artifacts.derive_artifact_stem("a/b-stdout")
+        second = artifacts.derive_artifact_stem("a?b-stdout")
+
+        self.assertNotEqual(first, second)
+        # Both keep the human-readable sanitized stem as a prefix and stay
+        # single-path-segment safe.
+        self.assertTrue(first.startswith("a-b-stdout-"))
+        self.assertTrue(second.startswith("a-b-stdout-"))
+        self.assertEqual(first, artifacts.sanitize_artifact_name(first))
+        self.assertEqual(second, artifacts.sanitize_artifact_name(second))
+
+    def test_derive_artifact_stem_distinguishes_digest_prefix_collisions(
+        self,
+    ) -> None:
+        # These names sanitize to the same stem AND share the first 8 hex
+        # chars of their SHA-256 digests ("cc47903e"), so an 8-char digest
+        # suffix still collided; the full digest must keep them apart.
+        first = artifacts.derive_artifact_stem("a$%#:??/b-stdout")
+        second = artifacts.derive_artifact_stem("a%%#%$:/b-stdout")
+
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.startswith("a-b-stdout-"))
+        self.assertTrue(second.startswith("a-b-stdout-"))
+        self.assertEqual(first, artifacts.sanitize_artifact_name(first))
+        self.assertEqual(second, artifacts.sanitize_artifact_name(second))
+
+    def test_derive_artifact_stem_is_idempotent_and_deterministic(self) -> None:
+        derived = artifacts.derive_artifact_stem("../../etc/passwd")
+        self.assertEqual(derived, artifacts.derive_artifact_stem(derived))
+        self.assertEqual(
+            derived, artifacts.derive_artifact_stem("../../etc/passwd")
+        )
+
+    def test_derive_artifact_stem_byte_caps_overlong_names(self) -> None:
+        # A ~192-char sanitized name plus the full 64-hex digest used to
+        # yield a 260-byte .gz filename (267 with the live -stdout suffix),
+        # past the 255-byte per-component limit once the atomic-write
+        # ``.{name}.tmp`` decoration is added.
+        first = "a" * 190 + "/x-stdout"
+        second = "b" + "a" * 189 + "/x-stdout"
+        stems = [
+            artifacts.derive_artifact_stem(first),
+            artifacts.derive_artifact_stem(second),
+        ]
+
+        self.assertNotEqual(stems[0], stems[1])
+        for stem in stems:
+            with self.subTest(stem=stem):
+                # The longest generated component is the temp form of the
+                # gzip artifact; it must fit the 255-byte limit.
+                tmp_component = f".{stem}.gz.tmp"
+                self.assertLessEqual(len(tmp_component.encode("utf-8")), 255)
+                self.assertEqual(stem, artifacts.sanitize_artifact_name(stem))
+                self.assertEqual(stem, artifacts.derive_artifact_stem(stem))
+        # The readable prefix survives truncation.
+        self.assertTrue(stems[0].startswith("a" * 32))
+
+    def test_derive_artifact_stem_caps_safe_but_overlong_names(self) -> None:
+        # Names that sanitize losslessly can still overflow the component
+        # limit on their own; they get the same truncate-plus-digest
+        # treatment, and distinct names stay distinct.
+        first = artifacts.derive_artifact_stem("a" * 250)
+        second = artifacts.derive_artifact_stem("a" * 251)
+
+        self.assertNotEqual(first, second)
+        for stem in (first, second):
+            with self.subTest(stem=stem):
+                self.assertLessEqual(len(f".{stem}.gz.tmp".encode()), 255)
+                self.assertEqual(stem, artifacts.derive_artifact_stem(stem))
+
+    def test_truncate_utf8_never_splits_multibyte_characters(self) -> None:
+        # Sanitized stems are ASCII today, but the byte cap must stay safe if
+        # sanitization ever preserves multibyte characters: a cut that lands
+        # mid-sequence drops the partial character instead of splitting it.
+        text = "é" * 100  # two bytes per character
+        for max_bytes in (0, 1, 2, 3, 199, 200, 201):
+            with self.subTest(max_bytes=max_bytes):
+                truncated = artifacts._truncate_utf8(text, max_bytes)
+                self.assertLessEqual(
+                    len(truncated.encode("utf-8")), max_bytes
+                )
+                self.assertTrue(text.startswith(truncated))
+
+    def test_overlong_check_name_yields_recoverable_live_artifact(self) -> None:
+        # Live verification names failure artifacts ``{check.name}-stdout``;
+        # a ~192-char check name must still produce a bounded, recoverable
+        # artifact instead of losing the spool at promotion time.
+        data = b"failure output for an overlong check name"
+        names = ["a" * 190 + "/x-stdout", "b" + "a" * 189 + "/x-stdout"]
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for name in names:
+                capture = artifacts.StreamCapture(spool=True)
+                capture.feed(data)
+                meta = capture.finalize(
+                    failed=True, artifact_dir=tmp, artifact_name=name
+                )
+                with self.subTest(name=name):
+                    self.assertIsNotNone(meta.artifact_path)
+                    artifact = Path(meta.artifact_path)
+                    self.assertLessEqual(
+                        len(artifact.name.encode("utf-8")), 255
+                    )
+                    self.assertLessEqual(
+                        len(f".{artifact.name}.tmp".encode("utf-8")), 255
+                    )
+                    self.assertEqual(data, artifacts.read_gzip(artifact))
+                paths.append(meta.artifact_path)
+            self.assertNotEqual(paths[0], paths[1])
+
+    def test_colliding_artifact_names_do_not_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            first = artifacts.store_stream_output(
+                b"first", failed=True, artifact_dir=tmp, artifact_name="a/b"
+            )
+            second = artifacts.store_stream_output(
+                b"second", failed=True, artifact_dir=tmp, artifact_name="a?b"
+            )
+
+            self.assertNotEqual(first.artifact_path, second.artifact_path)
+            self.assertEqual(b"first", artifacts.read_gzip(first.artifact_path))
+            self.assertEqual(
+                b"second", artifacts.read_gzip(second.artifact_path)
+            )
+
+    def test_sanitized_name_has_no_path_separators(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta = artifacts.store_stream_output(
+                b"data",
+                failed=True,
+                artifact_dir=tmp,
+                artifact_name="../escape/attempt",
+            )
+
+            artifact = Path(meta.artifact_path)
+            self.assertEqual(Path(tmp), artifact.parent)
+            self.assertNotIn("/", artifact.name.replace(".gz", ""))
+
+    def test_interrupted_write_cleans_up_and_leaves_destination_untouched(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "output.gz"
+            target.write_bytes(b"original")
+
+            with mock.patch(
+                "agent_session_loop.artifacts.os.replace",
+                side_effect=OSError("boom"),
+            ):
+                with self.assertRaises(artifacts.ArtifactError):
+                    artifacts.atomic_write_bytes(target, b"new-data")
+
+            # Destination is unchanged and no stray temp file remains.
+            self.assertEqual(b"original", target.read_bytes())
+            self.assertEqual(["output.gz"], [p.name for p in Path(tmp).iterdir()])
+
+    def test_gzip_write_is_atomic_and_deterministic(self) -> None:
+        data = b"deterministic payload" * 100
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Path(tmp) / "a.gz"
+            second = Path(tmp) / "b.gz"
+            artifacts.atomic_write_gzip(first, data)
+            artifacts.atomic_write_gzip(second, data)
+
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+            self.assertEqual(data, artifacts.read_gzip(first))
+
+    def test_read_gzip_rejects_non_gzip_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bogus = Path(tmp) / "bogus.gz"
+            bogus.write_bytes(b"not gzip at all")
+            with self.assertRaises(artifacts.ArtifactError):
+                artifacts.read_gzip(bogus)
+
+    def test_metadata_roundtrips_through_dict(self) -> None:
+        meta = artifacts.store_stream_output(b"payload", failed=False)
+        restored = artifacts.OutputMetadata.from_dict(meta.to_dict())
+        self.assertEqual(meta, restored)
+
+    def test_metadata_from_dict_rejects_unknown_version(self) -> None:
+        payload = artifacts.store_stream_output(b"x", failed=False).to_dict()
+        payload["version"] = 999
+        with self.assertRaises(artifacts.ArtifactError):
+            artifacts.OutputMetadata.from_dict(payload)
+
+    def test_stream_capture_matches_store_stream_output_across_chunkings(
+        self,
+    ) -> None:
+        # Multi-byte characters ensure chunk boundaries split UTF-8 sequences;
+        # the incremental capture must still produce metadata identical to the
+        # whole-buffer reference for every chunking.
+        data = ("héllo wörld ✓" * 3000).encode("utf-8")
+        reference = artifacts.store_stream_output(data, failed=False)
+        for chunk_size in (1, 7, 1024, len(data)):
+            with self.subTest(chunk_size=chunk_size):
+                capture = artifacts.StreamCapture()
+                for offset in range(0, len(data), chunk_size):
+                    capture.feed(data[offset : offset + chunk_size])
+                meta = capture.finalize(failed=False)
+                self.assertEqual(reference, meta)
+
+    def test_stream_capture_matches_reference_below_preview_bound(self) -> None:
+        data = b"short output\n"
+        reference = artifacts.store_stream_output(data, failed=False)
+        capture = artifacts.StreamCapture()
+        capture.feed(data)
+        self.assertEqual(reference, capture.finalize(failed=False))
+
+    def test_stream_capture_empty_stream_matches_reference(self) -> None:
+        reference = artifacts.store_stream_output(b"", failed=False)
+        capture = artifacts.StreamCapture()
+        self.assertEqual(reference, capture.finalize(failed=False))
+
+    def test_stream_capture_spool_retains_failed_stream_byte_for_byte(
+        self,
+    ) -> None:
+        data = bytes(range(256)) * 512  # 128 KiB of every byte value
+        with tempfile.TemporaryDirectory() as tmp:
+            capture = artifacts.StreamCapture(spool=True)
+            for offset in range(0, len(data), 4096):
+                capture.feed(data[offset : offset + 4096])
+            meta = capture.finalize(
+                failed=True, artifact_dir=tmp, artifact_name="stdout"
+            )
+
+            self.assertIsNotNone(meta.artifact_path)
+            artifact = Path(meta.artifact_path)
+            self.assertEqual("stdout.gz", artifact.name)
+            self.assertEqual(data, artifacts.read_gzip(artifact))
+            self.assertEqual(artifacts.sha256_hex(data), meta.sha256)
+            # The spooled artifact is byte-identical to the buffered writer's
+            # output, so compressed-artifact digests stay stable across runs.
+            reference = Path(tmp) / "reference.gz"
+            artifacts.atomic_write_gzip(reference, data)
+            self.assertEqual(reference.read_bytes(), artifact.read_bytes())
+
+    def test_stream_capture_spool_deleted_when_not_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            capture = artifacts.StreamCapture(spool=True)
+            capture.feed(b"passing output")
+            spool_path = capture._spool_path
+            self.assertIsNotNone(spool_path)
+
+            meta = capture.finalize(
+                failed=False, artifact_dir=tmp, artifact_name="stdout"
+            )
+
+            self.assertIsNone(meta.artifact_path)
+            self.assertEqual([], list(Path(tmp).iterdir()))
+            self.assertFalse(spool_path.exists())
+
+    def test_stream_capture_promotion_failure_fails_open(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            blocker = Path(tmp) / "blocker"
+            blocker.write_text("not a dir\n", encoding="utf-8")
+            capture = artifacts.StreamCapture(spool=True)
+            capture.feed(b"failure output")
+            spool_path = capture._spool_path
+
+            meta = capture.finalize(
+                failed=True,
+                artifact_dir=blocker / "sub",
+                artifact_name="stdout",
+            )
+
+            self.assertIsNone(meta.artifact_path)
+            self.assertEqual("failure output", meta.preview)
+            self.assertEqual(
+                artifacts.sha256_hex(b"failure output"), meta.sha256
+            )
+            self.assertFalse(spool_path.exists())
+
+    def test_stream_capture_discard_removes_spool(self) -> None:
+        capture = artifacts.StreamCapture(spool=True)
+        capture.feed(b"aborted")
+        spool_path = capture._spool_path
+        self.assertIsNotNone(spool_path)
+
+        capture.discard()
+
+        self.assertFalse(spool_path.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

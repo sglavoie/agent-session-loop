@@ -12,7 +12,8 @@ happens before the ledger re-inspect.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -37,6 +38,8 @@ from . import (
     progress_repair,
     qna,
     responses,
+    review,
+    review_repair,
     run_control,
     state,
     tail,
@@ -58,13 +61,18 @@ COMMIT_MODE_END = "end"
 COMMIT_MODES = (COMMIT_MODE_PER_SESSION, COMMIT_MODE_END)
 COMMIT_ARGV: tuple[str, ...] = ("spec", "commit", "--yes", "--no-verify")
 RUNNER_MANAGED_SESSION_ARG = "--runner-managed"
-FINAL_REVIEW_FILENAME = "final-review.md"
-REVIEW_STATUS_ALL_CLEAR = "Status: All clear, no findings"
-_REVIEW_STATUS_FINDINGS_RE = re.compile(
-    r"^Status: ([0-9]+) Findings "
-    r"\(([0-9]+) high, ([0-9]+) med, ([0-9]+) low\)$"
-)
-REVIEW_SESSION_MARKER = "<!-- asl:generated-review-session -->"
+SESSION_RUN_SKILL_NAME = "session-run"
+# Review artifact contract. The grammar, the structured final-review.json
+# schema, and the shared verdict payload all live in
+# ``agent_session_loop.review``; these re-exports keep the runner's historical
+# public names stable.
+FINAL_REVIEW_FILENAME = review.FINAL_REVIEW_FILENAME
+FINAL_REVIEW_ARTIFACT_FILENAME = review.FINAL_REVIEW_ARTIFACT_FILENAME
+REVIEW_STATUS_ALL_CLEAR = review.REVIEW_STATUS_ALL_CLEAR
+_REVIEW_STATUS_FINDINGS_RE = review._REVIEW_STATUS_FINDINGS_RE
+REVIEW_SESSION_MARKER = review.REVIEW_SESSION_MARKER
+GENERATED_REVIEW_SESSION_VERSION = review.GENERATED_REVIEW_SESSION_VERSION
+REVIEW_ARTIFACT_VERSION = review.REVIEW_ARTIFACT_VERSION
 SESSION_KIND_IMPLEMENTATION = "implementation"
 SESSION_KIND_REVIEW = "review"
 SESSION_KINDS: tuple[str, ...] = (
@@ -107,13 +115,97 @@ AGENT_MUX_TURN_START_REASON = "turn_started"
 AGENT_MUX_FINISH_REASON = "run_finished"
 AGENT_MUX_NOTIFY_TIMEOUT_SECONDS = 1.0
 AGENT_MUX_FINISH_NOTIFY_TIMEOUT_SECONDS = AGENT_MUX_NOTIFY_TIMEOUT_SECONDS
+AGENT_MUX_NOTIFY_TIMEOUT_ENV_VAR = "ASL_AGENT_MUX_NOTIFY_TIMEOUT_SECONDS"
 INLINE_TAIL_JOIN_TIMEOUT_SECONDS = 1.0
 INLINE_TAIL_INITIAL_LOG_LINES = 40
+
+# Schema version stamped on persisted ``state.json`` and per-turn
+# ``result.json`` records. Absence of a ``version`` key means v1; readers must
+# accept both. ``state.json`` (a v2 state record) stores only compact turn
+# summaries and never embeds raw verification output — the full per-turn detail,
+# including verification stdout/stderr previews, lives in ``result.json`` (a v2
+# result record, which may carry detailed output) referenced by ``result_path``.
+STATE_SCHEMA_VERSION = 2
+RESULT_SCHEMA_VERSION = 2
+# Keys carrying raw command output on a verification check payload. These are
+# stripped from every v2 state and event record; the accompanying
+# ``*_artifact_path`` / ``*_byte_count`` / ``*_sha256`` fields survive so full
+# diagnostics remain recoverable from the referenced artifact.
+_VERIFICATION_OUTPUT_KEYS = ("stdout", "stderr")
+
+# Worker mode selects how autonomous ``asl run`` turns prompt the harness.
+# ``packet`` (the default) sends a compact Python-built task packet
+# (:func:`build_task_packet`) so autonomous runs never invoke the manual
+# ``session-run`` skill. ``skill`` is a temporary rollback that restores the
+# legacy ``session-run`` skill invocation (:func:`build_session_prompt`). The
+# manual ``$session-run`` path is unaffected by this switch either way.
+WORKER_MODE_ENV_VAR = "ASL_WORKER_MODE"
+WORKER_MODE_PACKET = "packet"
+WORKER_MODE_SKILL = "skill"
+
+# Verification-repair loop control. A verify-failed session is reverted to
+# ``pending`` and paused; the autopilot relaunches it. To stop an identical
+# failure from looping forever, the runner fingerprints each verification
+# failure and marks the repair *exhausted* once the fingerprint repeats a prior
+# failure for the same session, or once the total number of verify-failures for
+# the session exceeds :data:`MAX_VERIFICATION_REPAIR_ATTEMPTS`. A *changed*
+# failure (new fingerprint) is still eligible for another repair attempt within
+# that cap. The autopilot honors the recorded ``verification_repair_exhausted``
+# flag and stops relaunching.
+MAX_VERIFICATION_REPAIR_ATTEMPTS = 2
+VERIFICATION_FINGERPRINT_PREFIX = "verify-failed"
+
+# Review repair/rereview cycle control. After a generated review session
+# completes with structured findings, the runner materializes same-plan repair
+# children (``agent_session_loop.review_repair``), executes them serially, and
+# appends the next top-level review session — one *cycle*. Cycles are bounded
+# by ``--max-review-fix-cycles`` (default below; ``0`` still reviews but never
+# creates repair sessions; ``--max-review-fix-plans`` is a deprecated alias).
+# Every review completion appends a ``review_cycle`` event whose fingerprints
+# (:func:`review.finding_fingerprint`) let the next cycle detect repeated
+# findings across processes; a repeated fingerprint stops the loop without
+# another cycle.
+DEFAULT_MAX_REVIEW_FIX_CYCLES = 2
+REVIEW_CYCLE_DISPOSITION_ALL_CLEAR = "all-clear"
+REVIEW_CYCLE_DISPOSITION_REPAIRS = "repairs-materialized"
+REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED = "cycles-disabled"
+REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED = "cycle-cap-exhausted"
+REVIEW_CYCLE_DISPOSITION_REPEATED = "findings-repeated"
+REVIEW_CYCLE_DISPOSITION_UNSTRUCTURED = "unstructured-findings"
+REVIEW_CYCLE_DISPOSITION_MALFORMED = (
+    events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR
+)
+REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY = "not-loop-ready"
+REVIEW_CYCLE_DISPOSITIONS: tuple[str, ...] = (
+    REVIEW_CYCLE_DISPOSITION_ALL_CLEAR,
+    REVIEW_CYCLE_DISPOSITION_REPAIRS,
+    REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED,
+    REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
+    REVIEW_CYCLE_DISPOSITION_REPEATED,
+    REVIEW_CYCLE_DISPOSITION_UNSTRUCTURED,
+    REVIEW_CYCLE_DISPOSITION_MALFORMED,
+    REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY,
+)
+
+
+def _worker_mode() -> str:
+    """Return the active worker mode, defaulting to packet mode.
+
+    Any value other than a case-insensitive ``skill`` resolves to
+    :data:`WORKER_MODE_PACKET` so an unrecognized override fails safe onto the
+    new default rather than silently disabling packet mode.
+    """
+    raw = os.environ.get(WORKER_MODE_ENV_VAR)
+    if raw is None:
+        return WORKER_MODE_PACKET
+    if raw.strip().lower() == WORKER_MODE_SKILL:
+        return WORKER_MODE_SKILL
+    return WORKER_MODE_PACKET
 
 
 def contains_review_session_marker(text: str) -> bool:
     """Return True when a session file body carries the review marker."""
-    return REVIEW_SESSION_MARKER in text
+    return review.contains_review_session_marker(text)
 
 
 def is_generated_review_session_file(path: str | Path) -> bool:
@@ -125,9 +217,28 @@ def is_generated_review_session_file(path: str | Path) -> bool:
     return contains_review_session_marker(body)
 
 
+def generated_review_session_version(path: str | Path) -> int | None:
+    """Return the generated-review version of a session file, if any.
+
+    ``None`` for unreadable files and files without a review marker; ``1``
+    for legacy sessions carrying only the base marker; otherwise the integer
+    from the versioned marker.
+    """
+    try:
+        body = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return review.review_session_marker_version(body)
+
+
 def final_review_output_path(plan_dir: str | Path) -> Path:
     """Return the path where the final review output is written."""
-    return Path(plan_dir) / FINAL_REVIEW_FILENAME
+    return review.final_review_output_path(plan_dir)
+
+
+def final_review_artifact_path(plan_dir: str | Path) -> Path:
+    """Return the path where the structured review artifact is written."""
+    return review.final_review_artifact_path(plan_dir)
 
 
 class ReviewVerdictError(ValueError):
@@ -135,48 +246,20 @@ class ReviewVerdictError(ValueError):
 
 
 def parse_review_verdict(text: str) -> dict[str, Any]:
-    """Parse the required final review status line into a stable payload."""
-    nonempty_lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if not nonempty_lines:
-        raise ReviewVerdictError(f"{FINAL_REVIEW_FILENAME} is empty")
+    """Parse the required final review status line into a stable payload.
 
-    status_lines = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip().startswith("Status:")
-    ]
-    if not status_lines:
-        raise ReviewVerdictError("missing required final Status line")
-    if len(status_lines) > 1:
-        raise ReviewVerdictError("expected exactly one Status line")
-
-    status_line = status_lines[0]
-    if status_line != nonempty_lines[-1]:
-        raise ReviewVerdictError("Status line must be the final non-empty line")
-
-    if status_line == REVIEW_STATUS_ALL_CLEAR:
-        return {
-            "status_line": status_line,
-            "outcome": "all-clear",
-            "total_findings": 0,
-            "findings_by_severity": {"high": 0, "med": 0, "low": 0},
-        }
-
-    match = _REVIEW_STATUS_FINDINGS_RE.fullmatch(status_line)
-    if match is None:
-        raise ReviewVerdictError("malformed Status line")
-
-    total, high, med, low = (int(value) for value in match.groups())
-    if total <= 0:
-        raise ReviewVerdictError("finding total must be greater than zero")
-    if high + med + low != total:
-        raise ReviewVerdictError("finding severity counts do not add up")
-
+    Raising wrapper over the shared :func:`review.parse_review_verdict`
+    grammar, preserved for existing importers; the run loop itself reads
+    verdicts through :func:`review.load_review_verdict`.
+    """
+    payload = review.parse_review_verdict(text)
+    if not payload["ok"]:
+        raise ReviewVerdictError(payload["error"])
     return {
-        "status_line": status_line,
-        "outcome": "findings",
-        "total_findings": total,
-        "findings_by_severity": {"high": high, "med": med, "low": low},
+        "status_line": payload["status_line"],
+        "outcome": payload["outcome"],
+        "total_findings": payload["total_findings"],
+        "findings_by_severity": payload["findings_by_severity"],
     }
 
 
@@ -221,6 +304,68 @@ _GENERATED_REVIEW_VERIFY_SOURCE = "\n".join(
 )
 
 
+# Standalone consistency gate for the structured review artifact. Runs as a
+# `python3 -c` contract check inside the plan directory (no package import
+# available there), so it mirrors the structural subset of
+# ``review.parse_review_artifact``: the artifact must exist, parse, carry the
+# supported version, and agree with the ``final-review.md`` status line on
+# outcome and severity totals; every finding must carry every required key.
+# The runner's post-verification verdict gate re-validates the artifact in
+# depth through the shared module.
+_GENERATED_REVIEW_ARTIFACT_VERIFY_SOURCE = "\n".join(
+    [
+        "import json, pathlib, re, sys",
+        (
+            "md = pathlib.Path("
+            f"{review.FINAL_REVIEW_FILENAME!r}).read_text(encoding='utf-8')"
+        ),
+        f"path = pathlib.Path({review.FINAL_REVIEW_ARTIFACT_FILENAME!r})",
+        "if not path.is_file(): sys.exit(1)",
+        "try:",
+        "    artifact = json.loads(path.read_text(encoding='utf-8'))",
+        "except ValueError:",
+        "    sys.exit(1)",
+        "if not isinstance(artifact, dict): sys.exit(1)",
+        f"if artifact.get('version') != {review.REVIEW_ARTIFACT_VERSION}: sys.exit(1)",
+        "outcome = artifact.get('outcome')",
+        "findings = artifact.get('findings')",
+        (
+            "if outcome not in ('all-clear', 'findings') "
+            "or not isinstance(findings, list): sys.exit(1)"
+        ),
+        (
+            "required = ('id', 'severity', 'title', 'evidence', 'explanation',"
+            " 'repair_group', 'done_criteria', 'verification_checks')"
+        ),
+        "tally = {'high': 0, 'med': 0, 'low': 0}",
+        "for finding in findings:",
+        "    if not isinstance(finding, dict): sys.exit(1)",
+        "    if any(not finding.get(key) for key in required): sys.exit(1)",
+        "    if finding['severity'] not in tally: sys.exit(1)",
+        "    tally[finding['severity']] += 1",
+        "if (outcome == 'findings') != bool(findings): sys.exit(1)",
+        (
+            "nonempty = [line.strip() for line in md.splitlines() "
+            "if line.strip()]"
+        ),
+        "status = nonempty[-1] if nonempty else ''",
+        f"if status == {review.REVIEW_STATUS_ALL_CLEAR!r}:",
+        "    sys.exit(0 if outcome == 'all-clear' else 1)",
+        (
+            "match = re.fullmatch(r'Status: ([0-9]+) Findings "
+            r"\(([0-9]+) high, ([0-9]+) med, ([0-9]+) low\)', status)"
+        ),
+        "if match is None: sys.exit(1)",
+        "total, high, med, low = (int(value) for value in match.groups())",
+        (
+            "sys.exit(0 if (outcome == 'findings' and len(findings) == total "
+            "and tally['high'] == high and tally['med'] == med "
+            "and tally['low'] == low) else 1)"
+        ),
+    ]
+)
+
+
 def _generated_review_contract_payload(
     session_id: plans.SessionId, *, plan_dir: Path
 ) -> dict[str, Any]:
@@ -233,7 +378,18 @@ def _generated_review_contract_payload(
                 "argv": ["python3", "-c", _GENERATED_REVIEW_VERIFY_SOURCE],
                 "cwd": str(plan_dir),
                 "timeout_seconds": 60,
-            }
+            },
+            {
+                "type": "command",
+                "name": "final-review-artifact-consistent",
+                "argv": [
+                    "python3",
+                    "-c",
+                    _GENERATED_REVIEW_ARTIFACT_VERIFY_SOURCE,
+                ],
+                "cwd": str(plan_dir),
+                "timeout_seconds": 60,
+            },
         ],
     }
 
@@ -255,6 +411,7 @@ def build_generated_review_session_body(
             f"# {session_id.display_label}: Final Review",
             "",
             REVIEW_SESSION_MARKER,
+            review.review_session_version_marker(),
             "",
             "## Instructions",
             "",
@@ -284,6 +441,30 @@ def build_generated_review_session_body(
                 "`Status: N Findings (H high, M med, L low)`, where "
                 "`H + M + L == N`."
             ),
+            (
+                "- Also write the structured review artifact "
+                f"`{FINAL_REVIEW_ARTIFACT_FILENAME}` inside this plan "
+                "directory: a JSON object with `\"version\": "
+                f"{REVIEW_ARTIFACT_VERSION}`, `\"outcome\"` "
+                "(`\"all-clear\"` or `\"findings\"`), and `\"findings\"` "
+                "(a list, empty for all-clear)."
+            ),
+            (
+                "- Each finding object requires every one of these keys: "
+                "`id` (unique string), `severity` (`high`|`med`|`low`), "
+                "`title`, `evidence` (non-empty list of objects with a "
+                "`path` and optional `symbol`), `explanation`, "
+                "`repair_group` (findings sharing one fix share one group), "
+                "`done_criteria` (non-empty list of strings), and "
+                "`verification_checks` (non-empty list of completion-contract "
+                "check objects: `command`, `file_exists`, or "
+                "`regex_in_file`)."
+            ),
+            (
+                f"- The `{FINAL_REVIEW_ARTIFACT_FILENAME}` outcome and "
+                "per-severity finding totals must agree exactly with the "
+                f"final `Status:` line of `{FINAL_REVIEW_FILENAME}`."
+            ),
             "- Do not modify any files in the repository under review.",
             (
                 "- Mark only this session's handoff complete; do not change any "
@@ -300,6 +481,13 @@ def build_generated_review_session_body(
                 "source/doc/test path-like references, and at least one "
                 "review-oriented section heading, and ends with exactly one "
                 "valid `Status:` verdict line."
+            ),
+            (
+                f"- `{FINAL_REVIEW_ARTIFACT_FILENAME}` exists in the plan "
+                f"directory, parses as version {REVIEW_ARTIFACT_VERSION} "
+                "JSON with complete findings, and agrees with the "
+                f"`{FINAL_REVIEW_FILENAME}` status line on outcome and "
+                "severity totals."
             ),
             "",
             "### Verify",
@@ -383,8 +571,8 @@ def build_session_prompt(harness: str, plan_dir: str | Path) -> str:
     """Build the one-turn prompt, keeping the skill invocation first."""
     adapter = harnesses.get_adapter(harness)
     return (
-        f"{adapter.skill_prefix}session-run {_prompt_plan_dir(plan_dir)} "
-        f"{RUNNER_MANAGED_SESSION_ARG}"
+        f"{adapter.skill_prefix}{SESSION_RUN_SKILL_NAME} "
+        f"{_prompt_plan_dir(plan_dir)} {RUNNER_MANAGED_SESSION_ARG}"
     )
 
 
@@ -466,6 +654,22 @@ def build_reply_prompt(
         raise ValueError("reply must contain non-whitespace content")
 
     lines: list[str] = [base, "", REPLY_CONTEXT_HEADING, ""]
+    lines.extend(_reply_context_body(reply_text, context))
+    return "\n".join(lines)
+
+
+def _reply_context_body(
+    reply_text: str, context: qna.QnAContext
+) -> list[str]:
+    """Render the ``## ASL reply context`` body (heading excluded).
+
+    Shared by :func:`build_reply_prompt` and :func:`build_task_packet` so
+    the operator-reply block reads identically whether it follows the manual
+    skill invocation or a compact task packet. ``reply_text`` is assumed to
+    be already stripped; operator-reply redaction from persisted argv is
+    handled separately by :func:`_sanitize_reply_argv`.
+    """
+    lines: list[str] = []
     lines.append(
         "The previous agent turn paused waiting on a clarifying answer. "
         "Use the operator reply below as the answer to the question(s) "
@@ -513,14 +717,252 @@ def build_reply_prompt(
         "contradictory; in that case, ask only about the parts that "
         "remain unclear."
     )
-
-    return "\n".join(lines)
+    return lines
 
 
 def _reply_display(value: Any) -> str:
     if value is None or value == "":
         return "(unknown)"
     return str(value)
+
+
+TASK_PACKET_HEADING_PREFIX = "# ASL session task packet"
+
+
+@dataclass(frozen=True)
+class SessionTaskPacket:
+    """Structured, harness-neutral packet for one runner-managed session.
+
+    The packet is a compact autonomous-worker prompt that stands in for the
+    large manual ``session-run`` skill: the Python runner owns readiness,
+    locking, session selection, and verification, so none of that policy is
+    embedded here. Plan contents are referenced as paths to read rather than
+    inlined. :meth:`render` produces the prompt string; the structured fields
+    let the runner (packet mode) reason about the selected session without
+    re-parsing the prompt.
+    """
+
+    harness: str
+    plan_dir: str
+    session_id: str
+    session_path: str
+    context_path: str
+    progress_path: str | None = None
+    expansion_path: str | None = None
+    predecessor_id: str | None = None
+    predecessor_path: str | None = None
+    repair_references: tuple[str, ...] = ()
+    reply_block: tuple[str, ...] = field(default_factory=tuple)
+
+    @property
+    def has_reply_context(self) -> bool:
+        return bool(self.reply_block)
+
+    def render(self) -> str:
+        lines: list[str] = [f"{TASK_PACKET_HEADING_PREFIX} — session {self.session_id}"]
+        lines.append("")
+        lines.append(
+            "You are an autonomous ASL worker. Implement exactly this one "
+            "session, then stop. The Python runner owns readiness, locking, "
+            "session selection, and verification — do not run or reason about "
+            "any of those."
+        )
+        lines.append("")
+
+        lines.append("## Selected session (fixed — do not reinterpret)")
+        lines.append(f"- Session ID: {self.session_id}")
+        lines.append(f"- Session file: {self.session_path}")
+        if self.expansion_path is not None:
+            lines.append(
+                "- Expansion notes (authoritative factual corrections): "
+                f"{self.expansion_path}"
+            )
+        lines.append("")
+
+        lines.append(
+            "## Read before implementing (open these paths; not embedded)"
+        )
+        lines.append(f"- Shared context: {self.context_path}")
+        if self.progress_path is not None:
+            lines.append(
+                f"- Progress journal (cross-session digest): {self.progress_path}"
+            )
+        if self.predecessor_path is not None:
+            lines.append(
+                f"- Predecessor handoff: {self.predecessor_path} "
+                "(read its `## Handoff` section)"
+            )
+        lines.append("")
+
+        if self.repair_references:
+            lines.append("## Verification repair references")
+            for reference in self.repair_references:
+                lines.append(f"- {reference}")
+            lines.append("")
+
+        lines.append("## Implement")
+        lines.append(
+            "Execute the instructions above the `## Handoff` section of "
+            f"{self.session_path}. Make real changes and run any tests the "
+            "session names."
+        )
+        lines.append("")
+
+        lines.append(
+            "## Allowed mutation (the only write that completes this session)"
+        )
+        lines.append(
+            f"- In {self.session_path}, set `- **Status**: complete` and fill "
+            "the `## Handoff` fields for this session only."
+        )
+        lines.append(
+            f"- Record new facts under `{plans.DISCOVERED_FACTS_HEADING}` and "
+            f"open uncertainties under `{plans.OPEN_QUESTIONS_HEADING}` "
+            "(flat, top-level bullets)."
+        )
+        lines.append(
+            "- Do not edit progress.md, manifest readiness metadata, or any "
+            "lock file."
+        )
+        lines.append("")
+
+        lines.append("## Notes for future sessions")
+        lines.append(
+            "- Write guidance for a later session into that session's "
+            "`.expand.md` (or above its `## Handoff`), never inline in chat."
+        )
+        lines.append("")
+
+        lines.append("## Runner signal protocol")
+        lines.append(
+            "- After writing the `complete` handoff, print "
+            "`Runner status: complete`."
+        )
+        lines.append(
+            "- To stop without completing, print `Runner status: paused` then "
+            "`RUNNER_PAUSE: <reason> - <detail>` reusing the existing "
+            "vocabulary (blocked, unsafe, verify-failed, malformed-plan, ...)."
+        )
+
+        if self.reply_block:
+            lines.append("")
+            lines.extend(self.reply_block)
+
+        return "\n".join(lines)
+
+
+def build_task_packet(
+    harness: str,
+    plan_dir: str | Path,
+    *,
+    session_id: str | plans.SessionId,
+    predecessor_id: str | plans.SessionId | None = None,
+    has_expansion: bool = False,
+    has_progress: bool = True,
+    reply: str | None = None,
+    reply_context: qna.QnAContext | None = None,
+    repair_references: Sequence[str] = (),
+) -> SessionTaskPacket:
+    """Build the compact autonomous-worker packet for one selected session.
+
+    ``harness`` is validated (Codex, Claude, and Copilot all yield the same
+    harness-neutral body). The packet names the exact ``session_id`` and the
+    artifact paths to read; it embeds neither manual-mode readiness/lock
+    policy nor any session-selection logic. Optional inputs are included only
+    when applicable:
+
+    - ``predecessor_id`` adds the immediate predecessor handoff reference.
+    - ``has_expansion`` adds the ``session-<id>.expand.md`` correction path.
+    - ``has_progress`` adds the ``progress.md`` digest path (default on).
+    - ``repair_references`` add verification-repair references.
+    - ``reply`` + ``reply_context`` append the operator-reply block; the
+      runner supplies these only on the first resumed turn, so reply context
+      never leaks onto later turns.
+
+    The returned :class:`SessionTaskPacket` carries structured data and a
+    :meth:`~SessionTaskPacket.render` method producing the prompt string.
+    """
+    # Validate the harness even though the body is harness-neutral, so an
+    # unknown harness fails fast the same way the other prompt builders do.
+    harnesses.get_adapter(harness)
+
+    canonical_dir = plans.canonicalize_path(plan_dir)
+    selected = plans.parse_session_id(session_id)
+
+    predecessor_value: str | None = None
+    predecessor_path: str | None = None
+    if predecessor_id is not None:
+        predecessor = plans.parse_session_id(predecessor_id)
+        predecessor_value = predecessor.value
+        predecessor_path = str(canonical_dir / predecessor.filename)
+
+    reply_block: tuple[str, ...] = ()
+    if reply_context is not None or reply is not None:
+        if reply_context is None or reply is None:
+            raise ValueError(
+                "reply and reply_context must be provided together"
+            )
+        reply_text = reply.strip()
+        if not reply_text:
+            raise ValueError("reply must contain non-whitespace content")
+        reply_block = (
+            REPLY_CONTEXT_HEADING,
+            "",
+            *_reply_context_body(reply_text, reply_context),
+        )
+
+    return SessionTaskPacket(
+        harness=harnesses.get_adapter(harness).name,
+        plan_dir=_prompt_plan_dir(canonical_dir),
+        session_id=selected.value,
+        session_path=str(canonical_dir / selected.filename),
+        context_path=str(canonical_dir / "context.md"),
+        progress_path=(
+            str(canonical_dir / plans.PROGRESS_FILE_NAME)
+            if has_progress
+            else None
+        ),
+        expansion_path=(
+            str(canonical_dir / selected.expansion_filename)
+            if has_expansion
+            else None
+        ),
+        predecessor_id=predecessor_value,
+        predecessor_path=predecessor_path,
+        repair_references=tuple(repair_references),
+        reply_block=reply_block,
+    )
+
+
+def _predecessor_session_id(
+    snapshot: plans.PlanSnapshot, session_id: str
+) -> str | None:
+    """Return the id of the session immediately before ``session_id``.
+
+    Uses the plan's declared session order (not integer arithmetic) so dotted
+    ids resolve correctly. Returns ``None`` for the first session or when the
+    session is not found in the snapshot.
+    """
+    index = next(
+        (
+            position
+            for position, session in enumerate(snapshot.sessions)
+            if session.id == session_id
+        ),
+        None,
+    )
+    if index is None or index == 0:
+        return None
+    return snapshot.sessions[index - 1].id
+
+
+def _session_has_expansion(plan_dir: Path, session_id: str) -> bool:
+    """Return True when ``session-<id>.expand.md`` exists in ``plan_dir``."""
+    try:
+        selected = plans.parse_session_id(session_id)
+    except plans.PlanError:
+        return False
+    return (plan_dir / selected.expansion_filename).is_file()
 
 
 def _reply_argv_placeholder(reply_length: int) -> str:
@@ -1082,7 +1524,39 @@ def _validate_run_inputs(
             f"(both set to {args.harness!r})"
         )
 
+    cycles = getattr(args, "max_review_fix_cycles", None)
+    legacy_cycles = getattr(args, "max_review_fix_plans", None)
+    if cycles is not None and cycles < 0:
+        raise RunError(
+            "--max-review-fix-cycles must be zero or a positive integer"
+        )
+    if legacy_cycles is not None and legacy_cycles < 0:
+        raise RunError(
+            "--max-review-fix-plans must be zero or a positive integer"
+        )
+    if cycles is not None and legacy_cycles is not None:
+        raise RunError(
+            "--max-review-fix-plans is a deprecated alias of "
+            "--max-review-fix-cycles; pass only one"
+        )
+
     return cwd, timeout, max_sessions, commit_mode
+
+
+def _max_review_fix_cycles(args: argparse.Namespace) -> int:
+    """Resolve the repair/rereview cycle cap for this run.
+
+    ``--max-review-fix-cycles`` wins; the deprecated ``--max-review-fix-plans``
+    alias is honored when it is the only flag supplied; otherwise the default
+    applies. Values are validated by :func:`_validate_run_inputs`.
+    """
+    cycles = getattr(args, "max_review_fix_cycles", None)
+    if cycles is not None:
+        return cycles
+    legacy_cycles = getattr(args, "max_review_fix_plans", None)
+    if legacy_cycles is not None:
+        return legacy_cycles
+    return DEFAULT_MAX_REVIEW_FIX_CYCLES
 
 
 def _run_git(
@@ -1316,6 +1790,221 @@ def _build_invocation_payload(
     }
 
 
+# --- Harness failure classification -----------------------------------------
+#
+# A nonzero harness exit is turned into a stable, evidence-based category rather
+# than a generic ``nonzero-exit`` pause. The classifier is fail-closed: only
+# positively recognized transport failures are retryable; quota, auth, and
+# invalid-model failures are always non-retryable; and anything unrecognized
+# stays ``nonzero-exit`` (non-retryable) so legacy and novel failures never
+# get retried automatically. Reset/retry timestamps are parsed when present but
+# never gate the retryability decision.
+
+# Upper bound on the bounded evidence preview kept on a classification. Long
+# harness output must never bloat a turn result or pause event.
+FAILURE_EVIDENCE_MAX_CHARS = 280
+# Upper bound on the combined harness text scanned for classification markers.
+# Matching only the head keeps classification cheap and bounded regardless of
+# how much output a failing harness produced.
+_FAILURE_SCAN_MAX_CHARS = 20000
+_WHITESPACE_RE = re.compile(r"\s+")
+
+# Ordered (marker, reason, retryable, pattern) rules. First match wins, so more
+# specific / higher-priority categories (quota, auth, invalid model) precede the
+# broader transient-transport rule. Markers are stable slugs used to build the
+# normalized fingerprint.
+_FAILURE_CLASSIFICATION_RULES: tuple[tuple[str, str, bool, re.Pattern[str]], ...] = (
+    (
+        "usage-limit",
+        events.PAUSE_REASON_QUOTA_EXHAUSTED,
+        False,
+        re.compile(
+            r"usage limit|rate limit|rate.?limited|too many requests|"
+            r"\b429\b|quota|session limit|weekly limit|"
+            r"\d+-hour limit|limit reached|reached your .*limit|"
+            r"you've (?:hit|reached) your|insufficient_quota|"
+            r"out of (?:credits|tokens)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "authentication",
+        events.PAUSE_REASON_AUTH_FAILED,
+        False,
+        re.compile(
+            r"\b401\b|unauthorized|authentication|not logged in|"
+            r"invalid api key|invalid_api_key|missing api key|api key|"
+            r"please (?:log ?in|sign in)|login required|"
+            r"permission denied|forbidden|\b403\b|token expired|"
+            r"credentials",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "invalid-model",
+        events.PAUSE_REASON_INVALID_MODEL,
+        False,
+        re.compile(
+            r"invalid model|unknown model|model not found|no such model|"
+            r"model_not_found|unsupported model|does not exist.*model|"
+            r"model .* (?:not found|is not available|does not exist)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "transport",
+        events.PAUSE_REASON_TRANSPORT_FAILED,
+        True,
+        re.compile(
+            r"connection reset|connection refused|connection closed|"
+            r"econnreset|econnrefused|etimedout|"
+            r"\b50[234]\b|bad gateway|service unavailable|"
+            r"gateway timeout|temporarily unavailable|"
+            r"network error|stream (?:error|disconnected)|"
+            r"read ECONNRESET|socket hang up|"
+            r"unexpected eof|tls handshake|dns",
+            re.IGNORECASE,
+        ),
+    ),
+)
+
+# Best-effort reset/retry-time extraction. These are advisory only and never
+# influence the retryability decision.
+_RETRY_AT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"retry-after:\s*(\d+)", re.IGNORECASE),
+    re.compile(r"resets?\s+(?:at|on|in)\s+([^\n.]{1,48})", re.IGNORECASE),
+    re.compile(r"reset\s+(?:at|on|in)\s+([^\n.]{1,48})", re.IGNORECASE),
+    re.compile(
+        r"try again\s+(?:at|after|in|on)\s+([^\n.]{1,48})", re.IGNORECASE
+    ),
+    re.compile(r"will reset (?:at|on|in)\s+([^\n.]{1,48})", re.IGNORECASE),
+)
+
+
+@dataclass(frozen=True)
+class FailureClassification:
+    """A stable, evidence-based classification of a nonzero harness turn.
+
+    ``reason`` is one of the ``events.PAUSE_REASON_*`` harness-failure
+    categories. ``retryable`` says whether a supervisor may relaunch the same
+    session; it is derived solely from the category, never from ``retry_at``.
+    ``fingerprint`` is a normalized signature for per-session retry accounting.
+    ``evidence`` is a bounded preview of the matched output. ``retry_at`` is a
+    best-effort reset hint (``None`` when absent) and is advisory only.
+    """
+
+    reason: str
+    retryable: bool
+    fingerprint: str
+    evidence: str
+    returncode: int | None = None
+    retry_at: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "reason": self.reason,
+            "retryable": self.retryable,
+            "fingerprint": self.fingerprint,
+            "evidence": self.evidence,
+            "returncode": self.returncode,
+            "retry_at": self.retry_at,
+        }
+
+
+def _failure_scan_text(result: harnesses.HarnessResult) -> str:
+    """Combine the harness streams most likely to carry a failure signal.
+
+    The last message and stderr come first because harnesses surface the
+    operative error there; stdout is appended for completeness. The result is
+    bounded so classification stays cheap regardless of output volume.
+    """
+    parts = [result.last_message or "", result.stderr or "", result.stdout or ""]
+    combined = "\n".join(part for part in parts if part)
+    return combined[:_FAILURE_SCAN_MAX_CHARS]
+
+
+def _bounded_evidence(text: str, match: re.Match[str] | None) -> str:
+    """Return a whitespace-collapsed, bounded preview around ``match``.
+
+    Falls back to the head of ``text`` when there is no match (the fail-closed
+    ``nonzero-exit`` path still records what the harness said).
+    """
+    if match is not None:
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        line_end = text.find("\n", match.end())
+        if line_end == -1:
+            line_end = len(text)
+        snippet = text[line_start:line_end]
+    else:
+        snippet = text
+    snippet = _WHITESPACE_RE.sub(" ", snippet).strip()
+    if len(snippet) > FAILURE_EVIDENCE_MAX_CHARS:
+        snippet = snippet[: FAILURE_EVIDENCE_MAX_CHARS - 1].rstrip() + "…"
+    return snippet
+
+
+def _parse_retry_at(text: str) -> str | None:
+    """Extract a best-effort reset/retry hint, or ``None`` when absent."""
+    for pattern in _RETRY_AT_PATTERNS:
+        match = pattern.search(text)
+        if match is None:
+            continue
+        value = _WHITESPACE_RE.sub(" ", match.group(1)).strip(" .,;:")
+        if value:
+            return value[:60]
+    return None
+
+
+def classify_harness_failure(
+    result: harnesses.HarnessResult,
+) -> FailureClassification:
+    """Classify a nonzero harness turn into a stable failure category.
+
+    Recognizes quota/session exhaustion, authentication failures, invalid
+    models, transient transport failures, and interruption; everything else
+    fails closed as ``nonzero-exit``. Only transport failures are retryable.
+    """
+    returncode = result.returncode
+    if result.interrupted:
+        return FailureClassification(
+            reason=events.PAUSE_REASON_INTERRUPTED,
+            retryable=False,
+            fingerprint=f"{events.PAUSE_REASON_INTERRUPTED}:user",
+            evidence="run interrupted by user",
+            returncode=returncode,
+            retry_at=None,
+        )
+
+    text = _failure_scan_text(result)
+    for marker, reason, retryable, pattern in _FAILURE_CLASSIFICATION_RULES:
+        match = pattern.search(text)
+        if match is None:
+            continue
+        retry_at = (
+            _parse_retry_at(text)
+            if reason == events.PAUSE_REASON_QUOTA_EXHAUSTED
+            else None
+        )
+        return FailureClassification(
+            reason=reason,
+            retryable=retryable,
+            fingerprint=f"{reason}:{marker}",
+            evidence=_bounded_evidence(text, match),
+            returncode=returncode,
+            retry_at=retry_at,
+        )
+
+    # Fail closed: unrecognized nonzero exits are never retried automatically.
+    return FailureClassification(
+        reason=events.PAUSE_REASON_NONZERO_EXIT,
+        retryable=False,
+        fingerprint=f"{events.PAUSE_REASON_NONZERO_EXIT}:exit-{returncode}",
+        evidence=_bounded_evidence(text, None),
+        returncode=returncode,
+        retry_at=None,
+    )
+
+
 def _turn_status_result(
     *,
     result: harnesses.HarnessResult,
@@ -1335,7 +2024,7 @@ def _turn_status_result(
     if runner_pause is not None:
         return _runner_pause_reason(str(runner_pause))
     if result.returncode != 0:
-        return "nonzero-exit"
+        return classify_harness_failure(result).reason
     if not status_changes:
         return "no-status-change"
     if len(status_changes) > 1:
@@ -1394,6 +2083,7 @@ def _write_turn_artifacts(
             reply_length=int(reply_source["reply_length"]),
         )
     payload = {
+        "version": RESULT_SCHEMA_VERSION,
         "run_id": run_id,
         "turn_index": turn_index,
         **_session_identity_payload(session_id),
@@ -1436,6 +2126,14 @@ def _write_turn_artifacts(
         "before": _snapshot_payload(before),
         "after": _snapshot_payload(after) if after is not None else None,
     }
+    if (
+        result.returncode != 0
+        and not result.timed_out
+        and runner_signals.get("runner_pause") is None
+    ):
+        payload["failure_classification"] = classify_harness_failure(
+            result
+        ).to_dict()
     if live_turn.get("action_required") is not None:
         payload["action_required"] = live_turn["action_required"]
     if plan_error is not None:
@@ -1639,11 +2337,144 @@ def _commit_started_payload(
     }
 
 
+def _strip_check_output(check: Any) -> Any:
+    """Drop raw stdout/stderr from a verification check payload.
+
+    Preserves every other field, including the bounded ``*_byte_count`` /
+    ``*_sha256`` metadata and ``*_artifact_path`` references, so full
+    verification output stays recoverable from the referenced artifact without
+    embedding it in a compact state or event record.
+    """
+    if not isinstance(check, dict):
+        return check
+    return {
+        key: value
+        for key, value in check.items()
+        if key not in _VERIFICATION_OUTPUT_KEYS
+    }
+
+
+def _bounded_verification_details(details: Any) -> Any:
+    """Return ``details`` with raw verification output stripped from checks.
+
+    Used for both persisted pause details and the ``run_paused`` event so a v2
+    record references verification artifacts instead of embedding their output.
+    """
+    if not isinstance(details, dict):
+        return details
+    bounded = dict(details)
+    for key in ("checks", "failures"):
+        value = bounded.get(key)
+        if isinstance(value, list):
+            bounded[key] = [_strip_check_output(check) for check in value]
+    return bounded
+
+
+def _compact_snapshot(snapshot: Any) -> Any:
+    """Compact a per-turn plan snapshot by dropping the full session list.
+
+    The session list is the dominant size driver when many turns each embed a
+    ``before``/``after`` snapshot. Counts, hashes, and next-pending pointers are
+    retained; the full session list stays in ``result.json``.
+    """
+    if not isinstance(snapshot, dict):
+        return snapshot
+    return {
+        key: value for key, value in snapshot.items() if key != "sessions"
+    }
+
+
+def _compact_turn_summary(turn: Any) -> Any:
+    """Project one detailed turn payload into a compact state summary.
+
+    Keeps every scalar/path field readers rely on (paths, harness, model,
+    status, timings) but replaces the heavy ``before``/``after`` snapshots with
+    count-only summaries and strips raw verification output from the embedded
+    verification summary. The detailed turn payload remains in ``result.json``.
+    """
+    if not isinstance(turn, dict):
+        return turn
+    summary = dict(turn)
+    if "before" in summary:
+        summary["before"] = _compact_snapshot(summary["before"])
+    if "after" in summary:
+        summary["after"] = _compact_snapshot(summary["after"])
+    verification = summary.get("verification")
+    if isinstance(verification, dict):
+        compact_verification = dict(verification)
+        checks = compact_verification.get("checks")
+        if isinstance(checks, list):
+            compact_verification["checks"] = [
+                _strip_check_output(check) for check in checks
+            ]
+        summary["verification"] = compact_verification
+    return summary
+
+
+def _compact_state_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build the v2 ``state.json`` projection persisted to disk.
+
+    Returns a fresh dict so no mutable detailed turn dictionary stays aliased
+    inside the persisted state payload. Detailed per-turn data (full snapshots
+    and verification output) is dropped here and kept in ``result.json``.
+    """
+    compact = dict(payload)
+    compact["version"] = STATE_SCHEMA_VERSION
+    turns = payload.get("turns")
+    if isinstance(turns, list):
+        compact["turns"] = [_compact_turn_summary(turn) for turn in turns]
+    for key in ("pause_details", "details"):
+        if key in compact:
+            compact[key] = _bounded_verification_details(compact[key])
+    return compact
+
+
+def _run_finished_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Compact ``run_finished`` event payload.
+
+    Carries the run outcome, duration, session counts, review summary, and
+    artifact references instead of duplicating the entire state payload (which
+    embeds every turn and, transitively, raw verification output).
+    """
+    counts: dict[str, Any] | None = None
+    final_snapshot = payload.get("final_snapshot")
+    if isinstance(final_snapshot, dict):
+        snapshot_counts = final_snapshot.get("counts")
+        if isinstance(snapshot_counts, dict):
+            counts = snapshot_counts
+    return {
+        "run_id": payload.get("run_id"),
+        "run_dir": payload.get("run_dir"),
+        "ok": payload.get("ok"),
+        "paused": payload.get("paused"),
+        "reason": payload.get("reason"),
+        "pause_reason": payload.get("pause_reason"),
+        "pause_message": payload.get("pause_message"),
+        "run_started_at": payload.get("run_started_at"),
+        "run_finished_at": payload.get("run_finished_at"),
+        "duration_seconds": payload.get("duration_seconds"),
+        "counts": counts,
+        "completed_sessions": payload.get("completed_sessions"),
+        "completed_session_ids": payload.get("completed_session_ids"),
+        "turn_count": (
+            len(payload["turns"]) if isinstance(payload.get("turns"), list) else 0
+        ),
+        "control": payload.get("control"),
+        "review_completed": payload.get("review_completed"),
+        "review_verdict": payload.get("review_verdict"),
+        "review_output_path": payload.get("review_output_path"),
+        "review_cycles": payload.get("review_cycles"),
+        "review_fix_disposition": payload.get("review_fix_disposition"),
+        "state_path": payload.get("state_path"),
+        "events_path": payload.get("events_path"),
+    }
+
+
 def _write_state_payload(payload: dict[str, Any]) -> None:
     state_path = payload.get("state_path")
     if not isinstance(state_path, str) or not state_path:
         return
-    _write_json_file(Path(state_path), payload)
+    _write_json_file(Path(state_path), _compact_state_payload(payload))
 
 
 def _loop_harness(
@@ -1708,6 +2539,26 @@ def _agent_mux_loop_payload(
     return hook_payload
 
 
+def _agent_mux_notify_timeout() -> float:
+    """Return the amx notification timeout in seconds.
+
+    ``ASL_AGENT_MUX_NOTIFY_TIMEOUT_SECONDS`` overrides the default when it
+    parses as a finite positive float; anything else fails safe onto
+    :data:`AGENT_MUX_NOTIFY_TIMEOUT_SECONDS` so a bad override can never hang
+    or break notifications.
+    """
+    raw = os.environ.get(AGENT_MUX_NOTIFY_TIMEOUT_ENV_VAR)
+    if raw is None:
+        return AGENT_MUX_NOTIFY_TIMEOUT_SECONDS
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        return AGENT_MUX_NOTIFY_TIMEOUT_SECONDS
+    if not 0 < value < float("inf"):
+        return AGENT_MUX_NOTIFY_TIMEOUT_SECONDS
+    return value
+
+
 def _notify_agent_mux_loop(
     event_name: str,
     payload: dict[str, Any],
@@ -1731,7 +2582,7 @@ def _notify_agent_mux_loop(
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=AGENT_MUX_NOTIFY_TIMEOUT_SECONDS,
+            timeout=_agent_mux_notify_timeout(),
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -2985,7 +3836,9 @@ def _finish_run(
         payload["active_turn"] = None
         payload["active_verification"] = None
         _finalize_readiness_lifecycle(payload)
-        persistence.append_event(event_path, "run_finished", payload)
+        persistence.append_event(
+            event_path, "run_finished", _run_finished_event_payload(payload)
+        )
         persistence.write_state(payload)
     _notify_agent_mux_loop_finished(payload)
     if progress is not None:
@@ -3064,7 +3917,11 @@ def _pause_run(
                 "run_dir": payload.get("run_dir"),
                 "reason": reason,
                 "message": message,
-                "details": {} if details is None else details,
+                "details": (
+                    {}
+                    if details is None
+                    else _bounded_verification_details(details)
+                ),
             },
         )
 
@@ -3535,6 +4392,443 @@ def _verification_failure_details(
     }
 
 
+def _verification_fingerprint(details: dict[str, Any] | None) -> str | None:
+    """Normalize a verification failure into a stable repeat-detection slug.
+
+    The fingerprint folds each failed check's name, kind, failure reason,
+    return code, and the full-stream stdout/stderr digests (bounded evidence
+    identity, preserved by :func:`_strip_check_output`) into one sorted digest.
+    Two byte-for-byte identical failures share a fingerprint; a failure whose
+    output changed after a repair attempt yields a different one, so a changed
+    failure can retry while an identical failure is caught as a repeat.
+    Returns ``None`` when no failing check evidence is present.
+    """
+    if not isinstance(details, dict):
+        return None
+    failures = details.get("failures")
+    if not isinstance(failures, list):
+        return None
+    parts: list[str] = []
+    for check in failures:
+        if not isinstance(check, dict):
+            continue
+        returncode = check.get("returncode")
+        parts.append(
+            "|".join(
+                (
+                    str(check.get("name", "")),
+                    str(check.get("kind", "")),
+                    str(check.get("failure_reason") or ""),
+                    "" if returncode is None else str(returncode),
+                    str(check.get("stdout_sha256") or ""),
+                    str(check.get("stderr_sha256") or ""),
+                )
+            )
+        )
+    if not parts:
+        return None
+    normalized = "\n".join(sorted(parts))
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    return f"{VERIFICATION_FINGERPRINT_PREFIX}:{digest}"
+
+
+def _read_prior_verification_failures(
+    event_path: str | Path, session_id: str
+) -> list[dict[str, Any]]:
+    """Return prior verify-failed pause detail dicts for ``session_id``.
+
+    Reads the persistent ``events.jsonl`` log (append-only across ``asl run``
+    invocations) and returns the ``details`` payload of every ``run_paused``
+    event whose reason is ``verify-failed`` and whose session matches, in
+    chronological (oldest-first) order. Malformed or unrelated lines are
+    skipped. Used to reconstruct repair context and prior fingerprints when a
+    paused run is relaunched, without re-running the failed session.
+    """
+    try:
+        text = Path(event_path).read_text(encoding="utf-8")
+    except OSError:
+        return []
+    priors: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("name") != events.RUN_PAUSED_EVENT:
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("reason") != verification.VERIFY_EXIT_REASON_FAILED:
+            continue
+        details = payload.get("details")
+        if not isinstance(details, dict):
+            continue
+        if str(details.get("session")) != str(session_id):
+            continue
+        priors.append(details)
+    return priors
+
+
+def _verification_repair_references(
+    priors: Sequence[dict[str, Any]],
+) -> tuple[str, ...]:
+    """Render packet repair references from the most recent prior failure.
+
+    Summarizes the last verify-failed attempt for a session as flat, bounded
+    strings — the fingerprint, each failed check's name/kind/reason, and any
+    retained full-output artifact paths — so the task packet can hand the
+    worker concrete prior-failure context instead of re-deriving it.
+    """
+    if not priors:
+        return ()
+    latest = priors[-1]
+    fingerprint = _verification_fingerprint(latest)
+    references: list[str] = []
+    attempt = len(priors)
+    references.append(
+        f"Prior verification attempt {attempt} failed"
+        + (f" (fingerprint {fingerprint})." if fingerprint else ".")
+    )
+    failures = latest.get("failures")
+    if isinstance(failures, list):
+        for check in failures:
+            if not isinstance(check, dict):
+                continue
+            name = str(check.get("name", "?"))
+            kind = str(check.get("kind", "?"))
+            reason = str(check.get("failure_reason") or "failed")
+            references.append(f"Failed check `{name}` ({kind}): {reason}.")
+            for stream in ("stdout", "stderr"):
+                artifact = check.get(f"{stream}_artifact_path")
+                if artifact:
+                    references.append(
+                        f"Full {stream} for `{name}` retained at {artifact}."
+                    )
+    references.append(
+        "Diagnose and fix the root cause; do not re-submit the same failing "
+        "result unchanged."
+    )
+    return tuple(references)
+
+
+def _verification_repair_state(
+    event_path: str | Path, session_id: str
+) -> dict[str, Any]:
+    """Compute repair context for the session's *next* verification attempt.
+
+    Returns a dict with the packet ``references`` derived from the latest prior
+    failure, the ``attempt`` number that the next verification failure would be
+    (``len(priors) + 1``), and the set of prior ``fingerprints`` seen so far.
+    """
+    priors = _read_prior_verification_failures(event_path, session_id)
+    fingerprints = tuple(
+        fp
+        for fp in (_verification_fingerprint(details) for details in priors)
+        if fp is not None
+    )
+    return {
+        "references": _verification_repair_references(priors),
+        "attempt": len(priors) + 1,
+        "prior_fingerprints": fingerprints,
+    }
+
+
+def _is_verification_repair_exhausted(
+    fingerprint: str | None,
+    prior_fingerprints: Sequence[str],
+    attempt: int,
+) -> bool:
+    """Decide whether a verification repair loop must stop.
+
+    Exhausted when the current failure fingerprint repeats a prior failure for
+    the same session (an identical failure cannot loop), or when ``attempt``
+    (the 1-indexed count of verify-failures for the session) exceeds
+    :data:`MAX_VERIFICATION_REPAIR_ATTEMPTS`. A new fingerprint under the cap is
+    not exhausted, so a *changed* verification failure stays eligible to retry.
+    """
+    if fingerprint is not None and fingerprint in prior_fingerprints:
+        return True
+    return attempt > MAX_VERIFICATION_REPAIR_ATTEMPTS
+
+
+def _read_prior_review_cycles(event_path: str | Path) -> list[dict[str, Any]]:
+    """Return prior ``review_cycle`` event payloads, oldest first.
+
+    Reads the persistent ``events.jsonl`` log (append-only across ``asl run``
+    invocations under the same plan state dir) so cycle numbering, the
+    materialization cap, and repeated-fingerprint detection all survive a
+    pause/relaunch instead of resetting per process. Malformed or unrelated
+    lines are skipped.
+    """
+    try:
+        text = Path(event_path).read_text(encoding="utf-8")
+    except OSError:
+        return []
+    priors: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("name") != events.REVIEW_CYCLE_EVENT:
+            continue
+        payload = record.get("payload")
+        if isinstance(payload, dict):
+            priors.append(payload)
+    return priors
+
+
+def _review_cycle_state(event_path: str | Path) -> dict[str, Any]:
+    """Compute the cross-process cycle state for the next review completion.
+
+    ``cycle`` is the 1-indexed number the next ``review_cycle`` record gets;
+    ``repairs_materialized`` counts prior cycles that created repair children
+    (the value the cap compares against); ``previous_fingerprints`` are the
+    finding fingerprints of the most recent prior review, used for
+    introduced/closed/repeated classification.
+    """
+    priors = _read_prior_review_cycles(event_path)
+    repairs_materialized = sum(
+        1
+        for prior in priors
+        if prior.get("disposition") == REVIEW_CYCLE_DISPOSITION_REPAIRS
+    )
+    previous_fingerprints: tuple[str, ...] = ()
+    if priors:
+        raw = priors[-1].get("fingerprints")
+        if isinstance(raw, list):
+            previous_fingerprints = tuple(
+                fp for fp in raw if isinstance(fp, str)
+            )
+    return {
+        "cycle": len(priors) + 1,
+        "repairs_materialized": repairs_materialized,
+        "previous_fingerprints": previous_fingerprints,
+    }
+
+
+def _record_review_cycle(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    persistence: "_RunPersistence",
+    cycle_record: dict[str, Any],
+    disposition: str,
+) -> None:
+    """Persist one review-cycle record into state and the event log."""
+    cycle_record["disposition"] = disposition
+    with persistence.lock:
+        payload.setdefault("review_cycles", []).append(cycle_record)
+        payload["review_fix_disposition"] = disposition
+        persistence.append_event(
+            event_path, events.REVIEW_CYCLE_EVENT, cycle_record
+        )
+        persistence.write_state(payload)
+
+
+def _advance_review_cycle(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    persistence: "_RunPersistence",
+    args: argparse.Namespace,
+    cwd: Path,
+    session_id: str,
+    session_label: str,
+    session_details: dict[str, Any],
+    snapshot: plans.PlanSnapshot,
+    turn_payload: dict[str, Any],
+    max_review_fix_cycles: int,
+) -> tuple[str, plans.PlanSnapshot]:
+    """Advance the repair/rereview loop after a review session completed.
+
+    Classifies the just-enforced review verdict against the previous cycle's
+    finding fingerprints, records one ``review_cycle`` state/event entry
+    (cycle number, introduced/closed/repeated findings, repair session ids,
+    disposition), and decides how the run continues:
+
+    - ``("complete", snapshot)`` — stop successfully (all-clear, cycles
+      disabled, cap exhausted, repeated findings, or unstructured findings).
+    - ``("continue", snapshot)`` — repair children were materialized; the
+      caller re-enters the loop to execute them serially and then append the
+      next review session.
+    - ``("paused", snapshot)`` — the run was paused (malformed repair output
+      or a failed executability gate); ``_pause_run`` has already fired.
+    """
+    verdict = turn_payload.get("review_verdict")
+    verdict = verdict if isinstance(verdict, dict) else {}
+    outcome = verdict.get("outcome")
+    fingerprints = review.finding_fingerprints(verdict.get("findings"))
+    cycle_state = _review_cycle_state(event_path)
+    previous = cycle_state["previous_fingerprints"]
+    current = () if fingerprints is None else fingerprints
+    cycle_record: dict[str, Any] = {
+        "run_id": payload.get("run_id"),
+        "cycle": cycle_state["cycle"],
+        "review_session_id": session_id,
+        "outcome": outcome,
+        "total_findings": verdict.get("total_findings"),
+        "fingerprints": list(current),
+        "introduced_findings": [fp for fp in current if fp not in previous],
+        "closed_findings": [fp for fp in previous if fp not in current],
+        "repeated_findings": [fp for fp in current if fp in previous],
+        "repair_session_ids": [],
+        "max_review_fix_cycles": max_review_fix_cycles,
+    }
+
+    def record_and_complete(disposition: str) -> tuple[str, plans.PlanSnapshot]:
+        _record_review_cycle(
+            event_path=event_path,
+            payload=payload,
+            persistence=persistence,
+            cycle_record=cycle_record,
+            disposition=disposition,
+        )
+        return "complete", snapshot
+
+    if outcome != review.REVIEW_OUTCOME_FINDINGS:
+        return record_and_complete(REVIEW_CYCLE_DISPOSITION_ALL_CLEAR)
+    if fingerprints is None:
+        # Legacy Markdown-only verdict (no structured findings): repair
+        # materialization is impossible, so surface the findings and stop.
+        return record_and_complete(REVIEW_CYCLE_DISPOSITION_UNSTRUCTURED)
+    if cycle_record["repeated_findings"]:
+        # A finding survived its own targeted repair; another identical
+        # cycle cannot converge, so stop without creating one.
+        return record_and_complete(REVIEW_CYCLE_DISPOSITION_REPEATED)
+    if max_review_fix_cycles == 0:
+        return record_and_complete(REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED)
+    if cycle_state["repairs_materialized"] >= max_review_fix_cycles:
+        return record_and_complete(REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED)
+
+    repair_result = review_repair.materialize_review_repair_sessions(
+        snapshot.plan_dir,
+        review_session_id=session_id,
+        cwd=cwd,
+        state_dir=args.state_dir,
+        hold_lock=False,
+    )
+    cycle_record["repair_session_ids"] = [
+        child.session_id.value for child in repair_result.children
+    ]
+
+    if not repair_result.ok:
+        _record_review_cycle(
+            event_path=event_path,
+            payload=payload,
+            persistence=persistence,
+            cycle_record=cycle_record,
+            disposition=REVIEW_CYCLE_DISPOSITION_MALFORMED,
+        )
+        with persistence.lock:
+            payload["final_snapshot"] = _snapshot_payload(snapshot)
+        _pause_run(
+            event_path,
+            payload,
+            reason=events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
+            message=(
+                "review repair materialization failed after "
+                f"{session_label}: {repair_result.error}"
+            ),
+            details={
+                **session_details,
+                "error": repair_result.error,
+                "detail": repair_result.detail,
+                "cycle": cycle_record["cycle"],
+            },
+            persistence=persistence,
+        )
+        return "paused", snapshot
+
+    if repair_result.reason == review_repair.REVIEW_REPAIR_REASON_NO_FINDINGS:
+        # The verdict said findings but the artifact re-read reported none;
+        # nothing to repair, treat as clean.
+        return record_and_complete(REVIEW_CYCLE_DISPOSITION_ALL_CLEAR)
+
+    if (
+        repair_result.reason
+        == review_repair.REVIEW_REPAIR_REASON_NOT_LOOP_READY
+        and not _allow_not_loop_ready(args)
+    ):
+        _record_review_cycle(
+            event_path=event_path,
+            payload=payload,
+            persistence=persistence,
+            cycle_record=cycle_record,
+            disposition=REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY,
+        )
+        with persistence.lock:
+            payload["final_snapshot"] = _snapshot_payload(snapshot)
+        _pause_run(
+            event_path,
+            payload,
+            reason="not-loop-ready",
+            message=(
+                "repair sessions were materialized after "
+                f"{session_label} but the plan could not be marked "
+                "loop-ready"
+            ),
+            details={
+                **session_details,
+                "blockers": list(repair_result.blockers),
+                "repair_session_ids": cycle_record["repair_session_ids"],
+                "cycle": cycle_record["cycle"],
+            },
+            persistence=persistence,
+        )
+        return "paused", snapshot
+
+    _record_review_cycle(
+        event_path=event_path,
+        payload=payload,
+        persistence=persistence,
+        cycle_record=cycle_record,
+        disposition=REVIEW_CYCLE_DISPOSITION_REPAIRS,
+    )
+    try:
+        refreshed = plans.inspect_plan(snapshot.plan_dir)
+    except plans.PlanError as error:
+        with persistence.lock:
+            payload["final_snapshot"] = _snapshot_payload(snapshot)
+        _pause_run(
+            event_path,
+            payload,
+            reason="malformed-plan",
+            message=(
+                "plan could not be inspected after materializing repair "
+                f"sessions: {error}"
+            ),
+            details={**session_details, "error": str(error)},
+            persistence=persistence,
+        )
+        return "paused", snapshot
+    running_success, running_error = _write_readiness_state(
+        refreshed.plan_dir, "running"
+    )
+    with persistence.lock:
+        payload["final_snapshot"] = _snapshot_payload(refreshed)
+        if running_success:
+            payload["readiness_state_active"] = True
+            payload["readiness_state_current"] = "running"
+            payload["readiness_state_refreshed_at"] = _isoformat(_utc_now())
+            payload["readiness_state_refresh_error"] = None
+        else:
+            payload["readiness_state_refresh_error"] = running_error
+        persistence.write_state(payload)
+    return "continue", refreshed
+
+
 def _session_path_in_snapshot(
     snapshot: plans.PlanSnapshot, session_id: str
 ) -> Path | None:
@@ -3632,15 +4926,12 @@ def _revert_session_status_to_pending(
     return path
 
 
-def _read_review_verdict(plan_dir: Path) -> dict[str, Any]:
-    review_path = final_review_output_path(plan_dir)
-    try:
-        text = review_path.read_text(encoding="utf-8")
-    except OSError as error:
-        raise ReviewVerdictError(
-            f"could not read {FINAL_REVIEW_FILENAME}: {error}"
-        ) from error
-    return parse_review_verdict(text)
+def _read_review_verdict(
+    plan_dir: Path, *, require_artifact: bool = False
+) -> dict[str, Any]:
+    return review.load_review_verdict(
+        plan_dir, require_artifact=require_artifact
+    )
 
 
 def _enforce_review_verdict(
@@ -3655,15 +4946,21 @@ def _enforce_review_verdict(
     session_details: dict[str, Any],
     turn_payload: dict[str, Any],
     paths: dict[str, Path],
+    require_artifact: bool = False,
 ) -> bool:
     """Validate and persist the final review verdict.
 
-    Returns ``True`` when the run should pause (the caller must ``break``).
+    ``require_artifact=True`` (generated v2 review sessions) additionally
+    requires a valid, consistent ``final-review.json``; v1 review sessions
+    stay Markdown-compatible. Returns ``True`` when the run should pause
+    (the caller must ``break``).
     """
     review_path = final_review_output_path(before.plan_dir)
-    try:
-        verdict = _read_review_verdict(before.plan_dir)
-    except ReviewVerdictError as error:
+    verdict = _read_review_verdict(
+        before.plan_dir, require_artifact=require_artifact
+    )
+    if not verdict.get("ok"):
+        error = verdict.get("error", "invalid review verdict")
         failure_note = f"review verdict validation failed: {error}"
         reverted = _revert_session_status_to_pending(
             after, session_id, failure_note=failure_note
@@ -3673,15 +4970,22 @@ def _enforce_review_verdict(
             **session_details,
             "review_output_path": str(review_path),
             "error": str(error),
+            "failure_reason": verdict.get("reason"),
         }
+        if "review_artifact_path" in verdict:
+            details["review_artifact_path"] = verdict["review_artifact_path"]
         with persistence.lock:
             payload["final_snapshot"] = _snapshot_payload(snapshot_after)
             payload["review_verdict"] = None
             turn_payload["review_verdict"] = {
                 "passed": False,
                 "reason": "invalid-review-verdict",
-                "review_output_path": str(review_path),
-                "error": str(error),
+                **{
+                    key: value
+                    for key, value in verdict.items()
+                    if key not in ("ok", "reason")
+                },
+                "failure_reason": verdict.get("reason"),
             }
             _write_json_file(paths["result"], turn_payload)
         _pause_run(
@@ -3700,8 +5004,11 @@ def _enforce_review_verdict(
     with persistence.lock:
         turn_payload["review_verdict"] = {
             "passed": True,
-            "review_output_path": str(review_path),
-            **verdict,
+            **{
+                key: value
+                for key, value in verdict.items()
+                if key != "ok"
+            },
         }
         _write_json_file(paths["result"], turn_payload)
     return False
@@ -3850,10 +5157,18 @@ def _enforce_session_verification(
         on_check_finished=_on_check_finished,
     )
 
+    # Retain failed command stdout/stderr under the turn's artifact directory so
+    # large output stays recoverable off to the side while result.json keeps
+    # only bounded previews.
+    verification_artifact_dir = paths["artifact_dir"] / "verification"
+
     live_verification.start()
     try:
         result = verification.run_verification(
-            contract, repo_root=cwd, observer=observer
+            contract,
+            repo_root=cwd,
+            observer=observer,
+            artifact_dir=verification_artifact_dir,
         )
     except KeyboardInterrupt:
         live_verification.finish(
@@ -3954,8 +5269,29 @@ def _enforce_session_verification(
         failure_note=f"verification failed: {summary}",
     )
     snapshot_after = _reinspect_after_revert(before.plan_dir, after, reverted)
+
+    # Fingerprint this failure and compare against prior verify-failed events
+    # for the same session (read before this pause is appended). The repair is
+    # exhausted when the fingerprint repeats a prior failure (an identical
+    # failure cannot loop) or when the total number of verify-failures exceeds
+    # the attempt cap. The autopilot honors ``verification_repair_exhausted``
+    # and stops relaunching; a changed fingerprint under the cap stays eligible.
+    fingerprint = _verification_fingerprint(details)
+    prior_state = _verification_repair_state(event_path, session_id)
+    attempt = prior_state["attempt"]
+    exhausted = _is_verification_repair_exhausted(
+        fingerprint, prior_state["prior_fingerprints"], attempt
+    )
+    repair_payload = {
+        "verification_fingerprint": fingerprint,
+        "verification_repair_attempt": attempt,
+        "verification_repair_exhausted": exhausted,
+        "verification_repair_max_attempts": MAX_VERIFICATION_REPAIR_ATTEMPTS,
+    }
     with persistence.lock:
         payload["final_snapshot"] = _snapshot_payload(snapshot_after)
+        turn_payload["verification"].update(repair_payload)
+        _write_json_file(paths["result"], turn_payload)
     _pause_run(
         event_path,
         payload,
@@ -3963,7 +5299,7 @@ def _enforce_session_verification(
         message=(
             f"verification failed for {session_label}: {summary}"
         ),
-        details={**session_details, **details},
+        details={**session_details, **details, **repair_payload},
         persistence=persistence,
     )
     return True
@@ -4087,6 +5423,9 @@ def _initial_payload(
         review_completed=False,
         review_verdict=None,
         review_skipped_reason=None,
+        max_review_fix_cycles=_max_review_fix_cycles(args),
+        review_cycles=[],
+        review_fix_disposition=None,
     )
 
 
@@ -4293,6 +5632,7 @@ def _run_locked(
         return finish_run_locked(1, payload)
 
     review_requested = getattr(args, "review_harness", None) is not None
+    max_review_fix_cycles = _max_review_fix_cycles(args)
 
     if snapshot.next_pending is None:
         if not _all_sessions_complete(snapshot):
@@ -4697,6 +6037,11 @@ def _run_locked(
             is_review_session = is_generated_review_session_file(
                 pending_session.path
             )
+            review_session_version = (
+                generated_review_session_version(pending_session.path)
+                if is_review_session
+                else None
+            )
 
             if (
                 not is_review_session
@@ -4770,6 +6115,19 @@ def _run_locked(
                     persistence=persistence,
                 )
                 break
+            # Autonomous turns default to Python-built task packets (packet
+            # mode); ASL_WORKER_MODE=skill restores the legacy `session-run`
+            # skill invocation as a temporary rollback. Either way the manual
+            # `$session-run` path is unchanged.
+            worker_mode = _worker_mode()
+            predecessor_id = _predecessor_session_id(before, session_id)
+            has_expansion = _session_has_expansion(before.plan_dir, session_id)
+            has_progress = (
+                before.plan_dir / plans.PROGRESS_FILE_NAME
+            ).is_file()
+            repair_references = _verification_repair_state(
+                event_path, session_id
+            )["references"]
             use_reply_prompt = (
                 reply_context is not None
                 and reply_text is not None
@@ -4777,12 +6135,25 @@ def _run_locked(
             )
             if use_reply_prompt:
                 assert reply_context is not None and reply_text is not None
-                prompt = build_reply_prompt(
-                    turn_harness,
-                    before.plan_dir,
-                    reply=reply_text,
-                    context=reply_context,
-                )
+                if worker_mode == WORKER_MODE_SKILL:
+                    prompt = build_reply_prompt(
+                        turn_harness,
+                        before.plan_dir,
+                        reply=reply_text,
+                        context=reply_context,
+                    )
+                else:
+                    prompt = build_task_packet(
+                        turn_harness,
+                        before.plan_dir,
+                        session_id=session_id,
+                        predecessor_id=predecessor_id,
+                        has_expansion=has_expansion,
+                        has_progress=has_progress,
+                        reply=reply_text,
+                        reply_context=reply_context,
+                        repair_references=repair_references,
+                    ).render()
                 prompt_kind = "reply"
                 reply_source_meta: dict[str, Any] | None = {
                     "run_id": reply_context.run_id,
@@ -4794,7 +6165,20 @@ def _run_locked(
                 }
                 persisted_prompt = _reply_argv_placeholder(len(reply_text))
             else:
-                prompt = build_session_prompt(turn_harness, before.plan_dir)
+                if worker_mode == WORKER_MODE_SKILL:
+                    prompt = build_session_prompt(
+                        turn_harness, before.plan_dir
+                    )
+                else:
+                    prompt = build_task_packet(
+                        turn_harness,
+                        before.plan_dir,
+                        session_id=session_id,
+                        predecessor_id=predecessor_id,
+                        has_expansion=has_expansion,
+                        has_progress=has_progress,
+                        repair_references=repair_references,
+                    ).render()
                 prompt_kind = "session"
                 reply_source_meta = None
                 persisted_prompt = prompt
@@ -5034,19 +6418,28 @@ def _run_locked(
                 )
                 break
             if result.returncode != 0:
+                classification = classify_harness_failure(result)
+                if classification.reason == events.PAUSE_REASON_NONZERO_EXIT:
+                    pause_message = (
+                        f"harness exited with status {result.returncode} "
+                        f"for {session_label}"
+                    )
+                else:
+                    pause_message = (
+                        f"{session_label} failed: {classification.reason} "
+                        f"(harness exit {result.returncode})"
+                    )
                 with persistence.lock:
                     payload["final_snapshot"] = _snapshot_payload(after)
                 _pause_run(
                     event_path,
                     payload,
-                    reason="nonzero-exit",
-                    message=(
-                        f"harness exited with status {result.returncode} "
-                        f"for {session_label}"
-                    ),
+                    reason=classification.reason,
+                    message=pause_message,
                     details={
                         **session_details,
                         "returncode": result.returncode,
+                        "failure_classification": classification.to_dict(),
                     },
                     persistence=persistence,
                 )
@@ -5189,6 +6582,11 @@ def _run_locked(
                 session_details=session_details,
                 turn_payload=turn_payload,
                 paths=paths,
+                require_artifact=(
+                    review_session_version is not None
+                    and review_session_version
+                    >= GENERATED_REVIEW_SESSION_VERSION
+                ),
             ):
                 break
 
@@ -5312,9 +6710,30 @@ def _run_locked(
                 payload["final_snapshot"] = _snapshot_payload(snapshot)
 
             if is_review_session:
-                with persistence.lock:
-                    payload["reason"] = "all-complete"
-                break
+                cycle_action, snapshot = _advance_review_cycle(
+                    event_path=event_path,
+                    payload=payload,
+                    persistence=persistence,
+                    args=args,
+                    cwd=cwd,
+                    session_id=session_id,
+                    session_label=session_label,
+                    session_details=session_details,
+                    snapshot=snapshot,
+                    turn_payload=turn_payload,
+                    max_review_fix_cycles=max_review_fix_cycles,
+                )
+                if cycle_action == "paused":
+                    break
+                if cycle_action == "complete":
+                    with persistence.lock:
+                        payload["reason"] = "all-complete"
+                    break
+                # Repair children were materialized: clear the appended flag
+                # so the loop appends the next review session once the
+                # children complete, then fall through to the control tail
+                # so operator stop requests are honored between cycles.
+                review_appended = False
 
             _drain_external_control_queue(
                 plan_dir=snapshot.plan_dir,

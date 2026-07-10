@@ -120,6 +120,106 @@ def _append_future_note(path: Path, *, source_session_id: str) -> None:
         return
 
 
+REVIEW_SESSION_MARKER = "<!-- asl:generated-review-session -->"
+
+
+def _completed_review_count(plan_dir: Path) -> int:
+    """Count generated review sessions already marked complete.
+
+    Repair children carry the distinct ``generated-review-repair-session``
+    marker, so they never match the review marker literal.
+    """
+    count = 0
+    for path in _session_files(plan_dir):
+        text = path.read_text(encoding="utf-8")
+        if REVIEW_SESSION_MARKER not in text:
+            continue
+        if _handoff_status_line(path) == STATUS_COMPLETE:
+            count += 1
+    return count
+
+
+def _findings_review_artifacts(variant: str) -> tuple[str, str]:
+    """Return canned ``(final-review.md, final-review.json)`` bodies.
+
+    ``findings`` and ``findings-drift`` describe the same defect — the drift
+    variant only shifts evidence line numbers — so their normalized finding
+    fingerprints match across review cycles. ``findings-new`` is a different
+    defect with a distinct fingerprint.
+    """
+    import json as _json
+
+    if variant == "findings-new":
+        finding_id = "cycle-finding-2"
+        title = "Missing error handling in verification executor"
+        evidence_path = "agent_session_loop/verification.py:88"
+        symbol = "run_check"
+        repair_group = "verification-errors"
+    elif variant == "findings-drift":
+        finding_id = "cycle-finding-1-redetected"
+        title = "Unbounded retry loop in runner"
+        evidence_path = "agent_session_loop/runner.py:250"
+        symbol = "supervise_run"
+        repair_group = "runner-retries"
+    else:
+        finding_id = "cycle-finding-1"
+        title = "Unbounded retry loop in runner"
+        evidence_path = "agent_session_loop/runner.py:100"
+        symbol = "supervise_run"
+        repair_group = "runner-retries"
+
+    review_body = (
+        "## Findings\n"
+        f"- {evidence_path} — {title}.\n"
+        "- Checked tests/test_agent_session_loop.py for regression coverage.\n"
+        "- Compared docs/agent-session-loop.md for documented behavior.\n"
+        "Status: 1 Findings (1 high, 0 med, 0 low)\n"
+    )
+    artifact = {
+        "version": 2,
+        "outcome": "findings",
+        "findings": [
+            {
+                "id": finding_id,
+                "severity": "high",
+                "title": title,
+                "evidence": [{"path": evidence_path, "symbol": symbol}],
+                "explanation": "Canned finding from the fake harness.",
+                "repair_group": repair_group,
+                "done_criteria": ["The reviewed defect is resolved."],
+                "verification_checks": [
+                    {
+                        "type": "command",
+                        "name": f"{repair_group}-check",
+                        "argv": ["python3", "-c", "pass"],
+                    }
+                ],
+            }
+        ],
+    }
+    return review_body, _json.dumps(artifact) + "\n"
+
+
+def _write_review_outcome(plan_dir: Path, outcome: str) -> None:
+    """Write review artifacts for one scripted review outcome."""
+    if outcome == "all-clear":
+        review_body = (
+            "## Findings\n"
+            "- Reviewed agent_session_loop/runner.py for repair-cycle "
+            "behavior.\n"
+            "- Checked tests/test_agent_session_loop.py for lifecycle "
+            "coverage.\n"
+            "- Compared docs/agent-session-loop.md for operator-facing "
+            "documentation impact.\n"
+            "Status: All clear, no findings\n"
+        )
+        review_json = '{"version": 2, "outcome": "all-clear", "findings": []}\n'
+    else:
+        review_body, review_json = _findings_review_artifacts(outcome)
+    (plan_dir / "final-review.md").write_text(review_body, encoding="utf-8")
+    (plan_dir / "final-review.json").write_text(review_json, encoding="utf-8")
+
+
 def _blocked_last_message() -> str:
     """Return a realistic multi-question blocked-pause last-message body."""
     return (
@@ -290,28 +390,54 @@ def main() -> int:
     if mode == "success-with-review":
         target = pending[0] if pending else None
         if target is not None:
+            # Index scripted review outcomes by how many generated review
+            # sessions were already complete before this turn.
+            review_index = _completed_review_count(plan_dir)
             _mark_complete(target)
             # When the harness is asked to run a generated review session,
             # the file body carries this marker and the session must produce
-            # ``final-review.md`` inside the plan directory.
+            # ``final-review.md`` inside the plan directory. Sessions
+            # generated at version >= 2 additionally require the structured
+            # ``final-review.json`` artifact.
             body = target.read_text(encoding="utf-8")
-            if "<!-- asl:generated-review-session -->" in body:
-                review_body = os.environ.get(
-                    "FAKE_CODEX_REVIEW_BODY",
-                    (
-                        "## Findings\n"
-                        "- Reviewed agent_session_loop/runner.py for generated "
-                        "review contract behavior.\n"
-                        "- Checked tests/test_agent_session_loop.py for lifecycle "
-                        "coverage.\n"
-                        "- Compared docs/agent-session-loop.md for operator-facing "
-                        "documentation impact.\n"
-                        "Status: All clear, no findings\n"
-                    ),
-                )
-                (plan_dir / "final-review.md").write_text(
-                    review_body, encoding="utf-8"
-                )
+            if REVIEW_SESSION_MARKER in body:
+                outcomes_env = os.environ.get("FAKE_CODEX_REVIEW_OUTCOMES")
+                if outcomes_env:
+                    # Scripted per-review outcomes for repair/rereview cycle
+                    # tests: e.g. "findings,all-clear". The list is clamped
+                    # to its last entry for any additional review.
+                    outcomes = [
+                        token.strip()
+                        for token in outcomes_env.split(",")
+                        if token.strip()
+                    ]
+                    outcome = outcomes[min(review_index, len(outcomes) - 1)]
+                    _write_review_outcome(plan_dir, outcome)
+                else:
+                    review_body = os.environ.get(
+                        "FAKE_CODEX_REVIEW_BODY",
+                        (
+                            "## Findings\n"
+                            "- Reviewed agent_session_loop/runner.py for generated "
+                            "review contract behavior.\n"
+                            "- Checked tests/test_agent_session_loop.py for lifecycle "
+                            "coverage.\n"
+                            "- Compared docs/agent-session-loop.md for operator-facing "
+                            "documentation impact.\n"
+                            "Status: All clear, no findings\n"
+                        ),
+                    )
+                    (plan_dir / "final-review.md").write_text(
+                        review_body, encoding="utf-8"
+                    )
+                    if "asl:generated-review-session version=" in body:
+                        review_json = os.environ.get(
+                            "FAKE_CODEX_REVIEW_JSON",
+                            '{"version": 2, "outcome": "all-clear", "findings": []}\n',
+                        )
+                        (plan_dir / "final-review.json").write_text(
+                            review_json, encoding="utf-8"
+                        )
         _write_last_message("Runner status: complete\nNext command: $session-run plan/\n")
         print("completed one session (review-aware)")
         return 0

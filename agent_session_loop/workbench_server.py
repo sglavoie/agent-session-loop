@@ -66,6 +66,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import (
+    artifacts,
     control_queue,
     events as events_module,
     harnesses,
@@ -1766,6 +1767,74 @@ def _optional_int_query(
         )
 
 
+def _is_gzip_artifact(path: Path) -> bool:
+    """Return True when ``path`` names a gzip artifact written by this project.
+
+    Gzip verification artifacts always use the ``.gz`` suffix
+    (``{check}-stdout.gz`` etc.), so suffix detection is deterministic and lets
+    the bounded-window log APIs serve plain and gzip logs uniformly.
+    """
+    return path.suffix == ".gz"
+
+
+def _read_gzip_log_window(
+    path: Path,
+    *,
+    offset: int | None,
+    tail_lines: int | None,
+    max_bytes: int,
+) -> _JSONDict | None:
+    """Bounded-window read over a gzip artifact.
+
+    Gzip cannot be seeked, so the artifact is decompressed fully and the same
+    offset/tail/max_bytes windowing is applied to the decompressed bytes. The
+    payload shape matches :func:`_read_log_window` so callers are agnostic to
+    the on-disk encoding.
+    """
+    try:
+        data = artifacts.read_gzip(path)
+    except artifacts.ArtifactError as error:
+        if not path.exists():
+            return None
+        return {
+            "path": str(path),
+            "exists": True,
+            "error": str(error),
+            "size": None,
+            "offset": offset or 0,
+            "next_offset": None,
+            "truncated_head": False,
+            "truncated_tail": False,
+            "text": "",
+        }
+    size = len(data)
+    read_offset = offset if offset is not None else max(0, size - max_bytes)
+    if read_offset > size:
+        read_offset = size
+    raw = data[read_offset : read_offset + max_bytes]
+    text = raw.decode("utf-8", errors="replace")
+    truncated_head = read_offset > 0
+    next_offset = read_offset + len(raw)
+    truncated_tail = next_offset < size
+    if tail_lines is not None:
+        lines = text.splitlines()
+        if tail_lines == 0:
+            text = ""
+        elif len(lines) > tail_lines:
+            text = "\n".join(lines[-tail_lines:])
+            truncated_head = True
+    return {
+        "path": str(path),
+        "exists": True,
+        "size": size,
+        "offset": read_offset,
+        "next_offset": next_offset if truncated_tail else None,
+        "truncated_head": truncated_head,
+        "truncated_tail": truncated_tail,
+        "text": text,
+    }
+
+
 def _read_log_window(
     path: Path,
     *,
@@ -1773,13 +1842,20 @@ def _read_log_window(
     tail_lines: int | None,
     max_bytes: int,
 ) -> _JSONDict | None:
-    """Read a bounded slice of a log file.
+    """Read a bounded slice of a log file (plain text or gzip artifact).
 
     - ``offset`` mode: byte offset into the file; reads up to ``max_bytes``.
     - ``tail_lines`` mode: read the trailing ``max_bytes`` and keep the last
       ``tail_lines`` lines (the most-recent slice operators care about).
     - When neither is set: read from the end like ``tail -c max_bytes``.
+
+    Gzip artifacts are decompressed transparently and windowed over their
+    decompressed contents.
     """
+    if _is_gzip_artifact(path):
+        return _read_gzip_log_window(
+            path, offset=offset, tail_lines=tail_lines, max_bytes=max_bytes
+        )
     try:
         size = path.stat().st_size
     except FileNotFoundError:
@@ -1844,7 +1920,33 @@ def _read_log_window(
 
 
 def _read_bounded_text(path: Path, *, max_bytes: int) -> _JSONDict | None:
-    """Read up to ``max_bytes`` from the start of ``path`` as text."""
+    """Read up to ``max_bytes`` from the start of ``path`` as text.
+
+    Gzip artifacts are decompressed transparently before the byte bound is
+    applied so plain and gzip logs read through the same API.
+    """
+    if _is_gzip_artifact(path):
+        try:
+            data = artifacts.read_gzip(path)
+        except artifacts.ArtifactError as error:
+            if not path.exists():
+                return None
+            return {
+                "path": str(path),
+                "exists": True,
+                "size": None,
+                "error": str(error),
+                "truncated": False,
+                "text": "",
+            }
+        raw = data[:max_bytes]
+        return {
+            "path": str(path),
+            "exists": True,
+            "size": len(data),
+            "truncated": len(raw) < len(data),
+            "text": raw.decode("utf-8", errors="replace"),
+        }
     try:
         size = path.stat().st_size
     except FileNotFoundError:

@@ -22,10 +22,12 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from typing import Any, Callable, Literal
 
 from . import plans, responses
+from .artifacts import StreamCapture
 from .contracts import (
     CommandCheck,
     CompletionContract,
@@ -51,7 +53,16 @@ FailureReason = Literal[
 
 @dataclass(frozen=True)
 class CheckResult:
-    """Structured outcome for a single verification check."""
+    """Structured outcome for a single verification check.
+
+    ``stdout`` and ``stderr`` are bounded UTF-8 previews (first/last 8 KiB) so
+    the serialized result can never embed a full large command output. The
+    ``*_byte_count``/``*_sha256``/``*_truncated``/``*_artifact_path`` fields carry
+    the original size, digest, truncation flag, and — when a failed command's
+    full stream was retained under an artifact directory — the gzip artifact
+    path for byte-for-byte recovery. File and regex checks leave the streaming
+    fields at their defaults.
+    """
 
     name: str
     kind: str
@@ -62,6 +73,14 @@ class CheckResult:
     stdout: str = ""
     stderr: str = ""
     duration_seconds: float = 0.0
+    stdout_byte_count: int = 0
+    stdout_sha256: str = ""
+    stdout_truncated: bool = False
+    stdout_artifact_path: str | None = None
+    stderr_byte_count: int = 0
+    stderr_sha256: str = ""
+    stderr_truncated: bool = False
+    stderr_artifact_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -159,35 +178,86 @@ def _resolve_under_root(repo_root: Path, relative: str) -> Path:
     return repo_root / candidate
 
 
-def _run_command_check(check: CommandCheck, *, repo_root: Path) -> CheckResult:
+# Pipe reads are folded into a StreamCapture in chunks of this size, bounding
+# the transient memory per read regardless of how much the command emits.
+_STREAM_CHUNK_BYTES = 64 * 1024
+
+
+def _drain_stream(stream: Any, capture: StreamCapture) -> None:
+    """Feed a process pipe into ``capture`` chunk by chunk until EOF."""
+    try:
+        while True:
+            chunk = stream.read1(_STREAM_CHUNK_BYTES)
+            if not chunk:
+                break
+            capture.feed(chunk)
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
+def _command_stream_fields(
+    check: CommandCheck,
+    stdout_capture: StreamCapture,
+    stderr_capture: StreamCapture,
+    *,
+    failed: bool,
+    artifact_dir: Path | None,
+) -> dict[str, Any]:
+    """Finalize both captures into the bounded ``CheckResult`` stream fields.
+
+    Full-stream gzip retention only happens for failed checks with an
+    ``artifact_dir``; ``StreamCapture`` fails open on artifact IO errors, so
+    verification never crashes on a disk problem and still returns bounded
+    metadata (preview + digest) with no artifact path. The
+    ``{check.name}-{stream}`` names below flow through
+    :func:`agent_session_loop.artifacts.derive_artifact_stem` when the capture
+    finalizes, so two checks whose display names sanitize to the same stem
+    still write distinct failure artifacts.
+    """
+    stdout_meta = stdout_capture.finalize(
+        failed=failed,
+        artifact_dir=artifact_dir,
+        artifact_name=f"{check.name}-stdout",
+    )
+    stderr_meta = stderr_capture.finalize(
+        failed=failed,
+        artifact_dir=artifact_dir,
+        artifact_name=f"{check.name}-stderr",
+    )
+    return {
+        "stdout": stdout_meta.preview,
+        "stderr": stderr_meta.preview,
+        "stdout_byte_count": stdout_meta.byte_count,
+        "stdout_sha256": stdout_meta.sha256,
+        "stdout_truncated": stdout_meta.truncated,
+        "stdout_artifact_path": stdout_meta.artifact_path,
+        "stderr_byte_count": stderr_meta.byte_count,
+        "stderr_sha256": stderr_meta.sha256,
+        "stderr_truncated": stderr_meta.truncated,
+        "stderr_artifact_path": stderr_meta.artifact_path,
+    }
+
+
+def _run_command_check(
+    check: CommandCheck,
+    *,
+    repo_root: Path,
+    artifact_dir: Path | None = None,
+) -> CheckResult:
     cwd = repo_root if check.cwd is None else _resolve_under_root(repo_root, check.cwd)
     start = time.monotonic()
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             list(check.argv),
             cwd=str(cwd),
-            timeout=check.timeout_seconds,
-            capture_output=True,
-            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             shell=False,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as error:
-        duration = time.monotonic() - start
-        stdout = error.stdout if isinstance(error.stdout, str) else ""
-        stderr = error.stderr if isinstance(error.stderr, str) else ""
-        return CheckResult(
-            name=check.name,
-            kind=check.kind,
-            status="fail",
-            failure_reason="command-timeout",
-            detail=(
-                f"command timed out after {check.timeout_seconds:g}s: "
-                f"{' '.join(check.argv)}"
-            ),
-            stdout=stdout,
-            stderr=stderr,
-            duration_seconds=duration,
         )
     except FileNotFoundError as error:
         return CheckResult(
@@ -208,30 +278,102 @@ def _run_command_check(check: CommandCheck, *, repo_root: Path) -> CheckResult:
             duration_seconds=time.monotonic() - start,
         )
 
+    # Output is bounded as it arrives: each pipe feeds a StreamCapture that
+    # keeps only the preview windows, running digest/counts, and — when an
+    # artifact directory is set — a gzip spool on disk, so a noisy command can
+    # never exhaust runner memory before truncation.
+    spool = artifact_dir is not None
+    stdout_capture = StreamCapture(spool=spool)
+    stderr_capture = StreamCapture(spool=spool)
+    timed_out = False
+    try:
+        readers = (
+            threading.Thread(
+                target=_drain_stream,
+                args=(process.stdout, stdout_capture),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=_drain_stream,
+                args=(process.stderr, stderr_capture),
+                daemon=True,
+            ),
+        )
+        for reader in readers:
+            reader.start()
+        try:
+            process.wait(timeout=check.timeout_seconds)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            process.kill()
+            process.wait()
+        for reader in readers:
+            reader.join()
+    except BaseException:
+        process.kill()
+        process.wait()
+        stdout_capture.discard()
+        stderr_capture.discard()
+        raise
+
     duration = time.monotonic() - start
-    if completed.returncode == 0:
+    if timed_out:
+        # Partial output captured before the timeout is retained under the
+        # failure policy (gzip artifact when an artifact directory is set).
+        stream_fields = _command_stream_fields(
+            check,
+            stdout_capture,
+            stderr_capture,
+            failed=True,
+            artifact_dir=artifact_dir,
+        )
+        return CheckResult(
+            name=check.name,
+            kind=check.kind,
+            status="fail",
+            failure_reason="command-timeout",
+            detail=(
+                f"command timed out after {check.timeout_seconds:g}s: "
+                f"{' '.join(check.argv)}"
+            ),
+            duration_seconds=duration,
+            **stream_fields,
+        )
+    if process.returncode == 0:
+        stream_fields = _command_stream_fields(
+            check,
+            stdout_capture,
+            stderr_capture,
+            failed=False,
+            artifact_dir=artifact_dir,
+        )
         return CheckResult(
             name=check.name,
             kind=check.kind,
             status="pass",
             detail=f"command exited 0: {' '.join(check.argv)}",
             returncode=0,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
             duration_seconds=duration,
+            **stream_fields,
         )
+    stream_fields = _command_stream_fields(
+        check,
+        stdout_capture,
+        stderr_capture,
+        failed=True,
+        artifact_dir=artifact_dir,
+    )
     return CheckResult(
         name=check.name,
         kind=check.kind,
         status="fail",
         failure_reason="command-failed",
         detail=(
-            f"command exited {completed.returncode}: {' '.join(check.argv)}"
+            f"command exited {process.returncode}: {' '.join(check.argv)}"
         ),
-        returncode=completed.returncode,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
+        returncode=process.returncode,
         duration_seconds=duration,
+        **stream_fields,
     )
 
 
@@ -444,11 +586,28 @@ def _run_regex_in_file_check(
     )
 
 
-def run_check(check: VerificationCheck, *, repo_root: str | Path) -> CheckResult:
-    """Execute a single verification check and return a structured result."""
+def run_check(
+    check: VerificationCheck,
+    *,
+    repo_root: str | Path,
+    artifact_dir: str | Path | None = None,
+) -> CheckResult:
+    """Execute a single verification check and return a structured result.
+
+    ``artifact_dir`` — when set — is where failed command checks retain their
+    full gzip-compressed stdout/stderr; command previews and metadata are
+    always bounded regardless. File and regex checks ignore it.
+    """
     canonical_root = canonicalize_path(repo_root)
+    resolved_artifact_dir = (
+        None if artifact_dir is None else Path(artifact_dir)
+    )
     if isinstance(check, CommandCheck):
-        return _run_command_check(check, repo_root=canonical_root)
+        return _run_command_check(
+            check,
+            repo_root=canonical_root,
+            artifact_dir=resolved_artifact_dir,
+        )
     if isinstance(check, FileExistsCheck):
         return _run_file_exists_check(check, repo_root=canonical_root)
     if isinstance(check, RegexInFileCheck):
@@ -461,6 +620,7 @@ def run_verification(
     *,
     repo_root: str | Path,
     observer: VerificationObserver | None = None,
+    artifact_dir: str | Path | None = None,
 ) -> VerificationResult:
     """Execute every check in ``contract.verify`` against ``repo_root``.
 
@@ -468,8 +628,15 @@ def run_verification(
     ``on_check_finished`` callbacks are invoked synchronously around each
     check in declared order. The CLI behavior and JSON payload of
     :func:`verify_from_args` are unchanged when no observer is passed.
+
+    ``artifact_dir`` — when set — is forwarded to each command check so failed
+    commands retain their full stdout/stderr as gzip artifacts there; without
+    it, only bounded previews and metadata are recorded.
     """
     canonical_root = canonicalize_path(repo_root)
+    resolved_artifact_dir = (
+        None if artifact_dir is None else Path(artifact_dir)
+    )
     on_started = observer.on_check_started if observer is not None else None
     on_finished = observer.on_check_finished if observer is not None else None
     checks = contract.verify.checks
@@ -486,7 +653,11 @@ def run_verification(
                     repo_root=canonical_root,
                 )
             )
-        check_result = run_check(check, repo_root=canonical_root)
+        check_result = run_check(
+            check,
+            repo_root=canonical_root,
+            artifact_dir=resolved_artifact_dir,
+        )
         results.append(check_result)
         if on_finished is not None:
             on_finished(
@@ -597,6 +768,7 @@ def verify_from_args(args: argparse.Namespace) -> int:
     raw_session = args.session
     cwd_arg = args.cwd
     want_json = args.json
+    artifact_dir_arg = getattr(args, "artifact_dir", None)
 
     try:
         session_id = plans.parse_session_id(raw_session)
@@ -657,7 +829,11 @@ def verify_from_args(args: argparse.Namespace) -> int:
             _print_text_no_contract(session_id, plan_dir=str(plan_dir_arg))
         return 1
 
-    result = run_verification(contract, repo_root=canonical_cwd)
+    result = run_verification(
+        contract,
+        repo_root=canonical_cwd,
+        artifact_dir=artifact_dir_arg,
+    )
 
     if want_json:
         if result.passed:

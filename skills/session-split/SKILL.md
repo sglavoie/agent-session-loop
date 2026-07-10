@@ -112,20 +112,9 @@ Report the captured source path in the final summary so the user can reuse it wi
 
 Read the entire plan file at `<plan-file>`.
 
-Scan for session headings by checking each line against this pattern (case-insensitive):
+Canonical parsing is owned by `agent_session_loop.authoring.parse_plan_document`: it splits the plan into shared context lines plus per-session blocks using the `## Session <id>` / `### Session <id>` headings (case-insensitive, dotted IDs supported), treats headings inside ``` / ~~~ code fences as content rather than structure, and rejects duplicate session IDs. Step 8 runs this parser for the actual file generation, so do not re-derive the split by hand.
 
-```
-^#{2,3}\s+Session\s+(\d+)\b
-```
-
-This matches `## Session 1: Title`, `### Session 2: Title`, `## Session 3`, etc.
-
-**Code fence awareness**: Track whether you are inside a fenced code block (lines between matching ``` or ~~~ delimiters). Skip any heading matches found inside code blocks — they are content, not structure.
-
-Record:
-
-- **context**: all lines from the start of the file up to (but not including) the first session heading
-- **sessions**: for each session, capture the session number, title (text after the colon if any), heading level, and all lines from that heading until the next session heading or end of file
+For your own reasoning in Steps 4–5 (surface scan, boundary proposal), read the plan normally and note which session each piece of content belongs to; the parser is the source of truth for the final boundaries.
 
 ### Step 4: Surface Scan
 
@@ -168,7 +157,7 @@ Record a tuple for each: `(path, lines | NEW, session_number)` — where `sessio
 4. Present the proposed session structure with per-session summaries: `<Title> -- <N> files, ~<L> existing lines, <subsystem(s)>`
 5. If surface scan was skipped (< 5 file references), fall back to heading/affinity grouping
 6. Ask the user for approval before proceeding
-7. Once approved, restructure the plan content accordingly and continue to Step 6
+7. Once approved, write the restructured plan — original content unchanged, but organized under `## Session N: <title>` headings — and capture it as a new durable source with `capture-inline-plan.py` (Step 2). Use that captured `source_path` as `<plan-file>` for Step 6 onward so the generated directory traces to a real source file.
 
 **Single session found**: Tell the user: "Only 1 session found — splitting is not needed." Stop.
 
@@ -219,202 +208,48 @@ PY
 
 Use `output_dir` for every generated file path — it is the only authoritative path. Do not rebuild the directory from `slug`, `plan_id`, or any other field; the resolver already applied collision suffixes, so a reconstructed path can silently disagree with the real one. Use `source_path` as the canonical original plan path in generated content. Do not derive an alternate directory from the plan filename.
 
-### Step 7: Write context.md
+### Step 7: Author Completion Contracts
 
-Write the context lines to `<output_dir>/context.md`.
-
-If context is empty (the plan starts directly with Session 1), write:
-
-```markdown
-# Context
-
-_No shared context section found in the original plan._
-
-**Original plan**: `<source_path>`
-```
-
-### Step 8: Write session-N.md Files
-
-For each session, write `<output_dir>/session-N.md` where N is the canonical session number from the heading. Normalize numeric IDs by parsing each dotted component as an integer before naming files: `Session 01` writes `session-1.md`, `Session 02.03` writes `session-2.3.md`, and leading zeroes must never appear in filenames, expansion references, manifest tables, or execution commands.
-
-**File structure**:
-
-````markdown
-# Session N: <title>
-
-> **Before starting**: Read `context.md` in this directory for shared project context.
-> **Previous session**: Read the **Handoff** section at the bottom of `session-<N-1>.md`.
-
----
-
-<original session content here>
-
----
-
-## Completion Contract
-
-### Done when
-
-- <one concrete human-readable exit criterion derived from the session>
-
-### Verify
+Contracts are the only generated content the skill still authors; everything else is rendered deterministically in Step 8. Write one contract per session to a temp JSON file (`contracts_file`), keyed by canonical session id:
 
 ```json
 {
-  "session": "<canonical session id>",
-  "checks": [
-    {
-      "type": "command",
-      "argv": ["python3", "-m", "unittest", "-q"],
-      "timeout_seconds": 60
+  "1": {
+    "done_when": ["<one concrete human-readable exit criterion derived from the session>"],
+    "verify": {
+      "session": "1",
+      "checks": [
+        {"type": "command", "argv": ["python3", "-m", "unittest", "-q"], "timeout_seconds": 60}
+      ]
     }
-  ]
+  }
 }
 ```
 
----
+Contract authoring rules (validated by `agent_session_loop.authoring.contract_from_payload`, which fails closed on any malformed entry):
 
-## Handoff
+- `done_when` needs at least one non-trivial bullet. Use the session's own goal (from its title or first sentence); never leave generic placeholders that read like `<criterion>`.
+- `verify.checks` must be non-empty. Check `type` is one of `command`, `file_exists`, `regex_in_file`; `command` checks take a non-empty `argv` list (no shell strings) and `timeout_seconds <= 3600`; `file_exists` / `regex_in_file` take repo-relative paths (and a Python-`re`-valid `pattern`). `name` is optional and auto-assigned as `check-<index>` when omitted.
+- The `verify.session` field must match the session id exactly (no leading zeroes, dotted form).
+- When choosing the contract command, make the repo's actual tooling authoritative over plan prose: never emit bare `python` (always `python3`); prefer the test convention evidenced by the Step 4 surface scan (a `justfile`/`Makefile`/CI recipe, or the existing test-file style and imports) over a runner named only in prose; and when prose names a runner such as `pytest` with no corresponding evidence in the repo, keep the `python3 -m unittest -q` stdlib default rather than trusting the prose. A `command` check whose `argv[0]` does not resolve — or whose `python -m <module>` is not importable — is rejected by the `command-not-runnable` preflight check, so an unrunnable default fails the readiness gate before a session runs.
+- Never emit ambiguity sentinels (`TBD`, `TODO`, `FIXME`, `XXX`, `<placeholder>`, `<fill in>`); `asl preflight` flags them as yellow `ambiguity-sentinel` findings.
 
-<!-- Fill this section when the session is complete -->
+Optionally, also write an analysis markdown file (`analysis_file`) holding the `## Token Budget` and `## Execution Weight` sections computed from the Step 4 surface scan (omit Execution Weight if the scan was skipped). It is appended verbatim to the manifest. Do not include parallel-execution sections of any kind.
 
-- **Status**: pending
-- **Files modified**: (none yet)
-- **Key decisions**: (none yet)
-- **Blockers for next session**: (none)
-- **Notes**:
-````
+### Step 8: Generate the Plan Directory via the Authoring API
 
-Rules:
-
-- For Session 1, omit the "Previous session" line
-- Preserve all original content exactly — do not summarize, rewrite, or reformat
-- Do not emit a `## Parallel Metadata` block, internal-track prompts, or any other parallel-scheduling scaffolding. The generated plan is serial-only and `session-run` ignores legacy parallel sections even if they appear on disk.
-- **Heading normalization**: if the original session heading was `###` level, promote all headings within the session by one level so the file reads naturally as a standalone document (session title becomes `#`, its `####` sub-sections become `##`, etc.)
-- Preserve fenced code blocks verbatim
-
-**Completion contract emission rules** (the contract is consumed by `agent_session_loop.contracts.parse_completion_contract` and by `asl verify` / `asl run` verification enforcement, so the shape must be exact):
-
-- Place the `## Completion Contract` block between the preserved original content and the `## Handoff` block, separated from both by `---` rules as shown.
-- The contract must always sit above the final `## Handoff` heading; the parser ignores anything inside the handoff.
-- `### Done when` must contain at least one non-trivial bullet. Use the session's own goal (from its title or first sentence) to populate the first bullet; do not leave generic placeholders that read like `<criterion>`.
-- `### Verify` must contain exactly one fenced code block whose language is `json` (or no language tag). Other languages are rejected by the parser.
-- The JSON object must include a non-empty `"checks"` list. The default skeleton emits one `"command"` check running `python3 -m unittest -q` because the package is stdlib-only. When choosing the contract command, make the repo's actual tooling authoritative over plan prose: never emit bare `python` (always `python3`, since a bare `python` is frequently not on PATH); prefer the test convention evidenced by the Step 4 surface scan (a `justfile`/`Makefile`/CI recipe, or the existing test-file style and imports) over a runner named only in prose; and when prose names a runner such as `pytest` with no corresponding evidence in the repo, keep the `python3 -m unittest -q` default rather than trusting the prose. A `command` check whose `argv[0]` does not resolve — or whose `python -m <module>` is not importable — is now rejected by the `command-not-runnable` preflight check, so an unrunnable default fails the readiness gate before a session runs. Replace the skeleton with the session-appropriate command, `file_exists` path, or `regex_in_file` pattern when the surface scan or session content makes a better default obvious.
-- The optional top-level `"session"` field must match the enclosing canonical session id exactly (no leading zeroes, dotted form). Always emit it so `session-expand` can confirm contract/file alignment.
-- Check `"type"` must be one of `command`, `file_exists`, `regex_in_file`. For `command`, `argv` must be a non-empty list of non-empty strings (no shell strings); `timeout_seconds` defaults to `60` and must be `<= 3600`. For `file_exists`, emit a repo-relative `path`. For `regex_in_file`, emit a repo-relative `path` and a Python-`re.compile`-valid `pattern`.
-- Check `name` is optional. When omitted, the parser assigns `check-<index>` automatically; when supplied, names must be unique within the recipe.
-- Never emit ambiguity sentinels (`TBD`, `TODO`, `FIXME`, `XXX`, `<placeholder>`, `<fill in>`) above the handoff. They would be caught by `asl preflight` as yellow `ambiguity-sentinel` findings.
-
-### Step 8a: Write progress.md Skeleton
-
-After every `session-N.md` has been written, write a skeleton `<output_dir>/progress.md` containing only the `PROGRESS_HEADER` constant (header line + `<!-- agent-session-loop progress-journal v1 -->` schema-version comment + descriptive paragraph). This way fresh plans never trigger the yellow `progress-journal-missing` preflight finding once Session 1 completes, and the runner has a well-formed file to append the first entry to.
-
-Reuse `agent_session_loop.plans.PROGRESS_HEADER` verbatim — do not paraphrase the header or rewrite the schema-version comment by hand. `append_progress_entry` matches the version comment via regex, so any drift in the literal will cause a `PlanError` at the first runner append.
+All file generation is delegated to `agent_session_loop.authoring` — fence-aware parsing, dotted-ID canonicalization (`Session 02.03` becomes `session-2.3.md`, never with leading zeroes), heading normalization for `###`-level sessions, verbatim content preservation, previous-session references, contract rendering, the `progress.md` skeleton, the serial-only manifest, atomic multi-file commit, and the readiness refresh. Do not hand-write any generated file.
 
 ```bash
-PROGRESS_OUTPUT_DIR="$output_dir" python3 - <<'PY'
-import os
-import shutil
-import sys
-from pathlib import Path
-
-asl_path = shutil.which("asl")
-if asl_path is not None:
-    repo_root = Path(asl_path).resolve().parents[3]
-    if str(repo_root) not in sys.path:
-        sys.path.insert(0, str(repo_root))
-
-from agent_session_loop.plans import PROGRESS_HEADER, progress_path
-
-plan_dir = Path(os.environ["PROGRESS_OUTPUT_DIR"])
-progress_path(plan_dir).write_text(PROGRESS_HEADER, encoding="utf-8")
-PY
-```
-
-Behavior requirements:
-
-- The skeleton must contain only the header — no `## Session …` entries. The runner appends the first session block when Session 1 completes and verification passes.
-- `progress.md` is **runner-managed** and **excluded** from `plan_content_sha256` / `stable_readiness_sha256`. Do not list it in the manifest's `## Sessions` table; it is derived bookkeeping like `context.md` status, not a unit of work.
-- Authors must never write to `progress.md` from a session; only the runner's `append_progress_entry` mutates it (`session-run` Step 6d documents this for the agent side). If a plan loses or never had a journal, `asl backfill-progress <plan-dir>` reconstructs one from completed handoffs; if a stale or malformed journal already exists, use `asl backfill-progress --force <plan-dir>` so the CLI replaces it atomically.
-- If `agent_session_loop` cannot be imported (running the skill outside this repo without an installed `asl`), fail fast with a clear error pointing to `asl --version`; do not write a placeholder file. A malformed journal would surface as a yellow `progress-journal-missing` finding once Session 1 completes.
-
-### Step 9: Write manifest.md
-
-Write `<output_dir>/manifest.md`. The three readiness metadata lines are required so that `asl preflight` can parse the manifest immediately; their values are populated in Step 9a below.
-
-````markdown
-# <Plan Title>
-
-**Split from**: `<source_path>`
-**Output directory**: `<output_dir>`
-**Plan ID**: `<plan_id>`
-**Source fingerprint**: `<source_fingerprint>`
-**Content SHA-256**: `<content_sha256>`
-**Sessions**: <N>
-**Split date**: <YYYY-MM-DD>
-**Readiness**: draft
-**Readiness SHA-256**: `<readiness_sha256>`
-**Readiness checked at**: <readiness_checked_at>
-
-## Sessions
-
-| #   | Title   | Status  | File         |
-| --- | ------- | ------- | ------------ |
-| 1   | <title> | pending | session-1.md |
-| 2   | <title> | pending | session-2.md |
-| ... | ...     | ...     | ...          |
-
-## Execution
-
-Run `<skill-prefix>session-run` once per session, preferably in a fresh harness conversation for each:
-
-```text
-<skill-prefix>session-run <output_dir>/
-```
-
-Example rendered command: `<skill-prefix>session-run <output_dir>/`
-
-Render this example from the resolved `output_dir` value. Do not rebuild a copy-paste path from the default agent-plans directory plus the unsuffixed `plan_id`; any basename example must come from the resolved `output_dir`, which already carries any collision suffix.
-
-`<skill-prefix>session-run` auto-advances — it finds the next pending session from final session handoff statuses, implements it, updates the handoff, and syncs the recognized derived status table in `manifest.md`. No session number is needed and no explicit session selector is accepted; the plan is serial-only by design. Repeat in new conversations until all sessions are complete.
-
-Session handoff statuses are the source of truth. The `manifest.md` status table is derived bookkeeping for humans and automation.
-
-## Token Budget
-
-- Original plan: ~<X> lines
-- Context file: ~<Y> lines
-- Average session file: ~<Z> lines
-- Estimated savings vs full plan per session: ~<P>%
-
-## Execution Weight
-
-| Session | Plan Lines | Files | Existing LoC | New Files | Subsystems | Weight |
-| ------- | ---------- | ----- | ------------ | --------- | ---------- | ------ |
-| 1       | ~L         | F     | ~E           | N         | S          | W      |
-
-Weight classification:
-
-- **light**: < 500 existing LoC AND <= 3 files
-- **heavy**: > 2000 existing LoC OR > 10 files OR >= 4 subsystems
-- **medium**: everything else
-````
-
-Replace all `<placeholders>` with actual computed values.
-
-Do not emit a `## Parallel Execution` section, `### Dependency Waves`, `### Session Ownership`, `### Parallel Worker Commands`, `### Worker Prompts`, or `### Serial Blockers`. The generated manifest is serial-only and `session-run` rejects explicit `--session` selectors.
-
-**Note**: Omit the Execution Weight section entirely if the surface scan was skipped (< 5 file references).
-
-### Step 9a: Populate Readiness Metadata
-
-After every `session-N.md`, `context.md`, and `manifest.md` file has been written, compute the stable readiness SHA-256 for the just-written directory and overwrite the two placeholder fields (`<readiness_sha256>` and `<readiness_checked_at>`) in `manifest.md`. The readiness state stays at `draft`; only `asl preflight --mark-loop-ready` (after the user repairs all yellow/red findings) may advance the state to `loop-ready`.
-
-Use `agent_session_loop.plans.stable_readiness_sha256` so the hash matches the one `asl preflight` recomputes. The `asl` CLI wrapper exposes the repository root that holds the `agent_session_loop` package, so locating it from `$(command -v asl)` works on any machine where this loop is installed:
-
-```bash
-readiness_payload="$(
-  OUTPUT_DIR="$output_dir" python3 - <<'PY'
+generation_json="$(
+  SPLIT_PLAN_FILE="$plan_file" \
+  SPLIT_OUTPUT_DIR="$output_dir" \
+  SPLIT_RESOLVER_JSON="$resolver_json" \
+  SPLIT_CONTRACTS_FILE="$contracts_file" \
+  SPLIT_SKILL_PREFIX="<skill-prefix>" \
+  SPLIT_ANALYSIS_FILE="${analysis_file:-}" \
+  python3 - <<'PY'
+import json
 import os
 import shutil
 import sys
@@ -427,35 +262,106 @@ if asl_path is not None:
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
-from agent_session_loop.plans import (
-    ReadinessMetadata,
-    write_readiness_metadata,
-    stable_readiness_sha256,
-)
+from agent_session_loop import authoring, plans
 
-plan_dir = os.environ["OUTPUT_DIR"]
-sha = stable_readiness_sha256(plan_dir)
-checked_at = datetime.now(timezone.utc).isoformat()
-metadata = ReadinessMetadata(
-    state="draft",
-    readiness_sha256=sha,
-    checked_at=checked_at,
+plan_file = Path(os.environ["SPLIT_PLAN_FILE"])
+output_dir = Path(os.environ["SPLIT_OUTPUT_DIR"])
+resolver = json.loads(os.environ["SPLIT_RESOLVER_JSON"])
+contracts_by_id = json.loads(
+    Path(os.environ["SPLIT_CONTRACTS_FILE"]).read_text(encoding="utf-8")
 )
-write_readiness_metadata(plan_dir, metadata)
-print(f"{sha}\t{checked_at}")
+prefix = os.environ["SPLIT_SKILL_PREFIX"]
+analysis_file = os.environ.get("SPLIT_ANALYSIS_FILE") or None
+
+text = plan_file.read_text(encoding="utf-8")
+parsed = authoring.parse_plan_document(text)
+if len(parsed.sessions) < 2:
+    raise SystemExit(f"expected at least 2 sessions, found {len(parsed.sessions)}")
+
+transaction = authoring.PlanTransaction(output_dir)
+transaction.stage(
+    "context.md",
+    authoring.render_context(parsed.context_lines, resolver["source_path"]),
+)
+transaction.stage("progress.md", authoring.render_progress_skeleton())
+
+manifest_sessions = []
+for index, session in enumerate(parsed.sessions):
+    session_id = session.session_id.value
+    spec = contracts_by_id[session_id]
+    contract = authoring.contract_from_payload(
+        session_id, spec["done_when"], spec["verify"]
+    )
+    transaction.stage(
+        session.session_id.filename,
+        authoring.render_session_file(
+            session_id=session_id,
+            title=session.title,
+            instruction_lines=session.instruction_lines,
+            heading_level=session.heading_level,
+            is_first=index == 0,
+            previous_session_id=(
+                parsed.sessions[index - 1].session_id if index else None
+            ),
+            contract=contract,
+        ),
+    )
+    manifest_sessions.append(
+        authoring.ManifestSession(
+            session_id=session.session_id,
+            title=session.title or f"Session {session_id}",
+        )
+    )
+
+analysis_note = (
+    Path(analysis_file).read_text(encoding="utf-8") if analysis_file else None
+)
+transaction.stage(
+    "manifest.md",
+    authoring.render_manifest(
+        authoring.ManifestSpec(
+            plan_title=authoring.title_from_plan(text),
+            source_path=resolver["source_path"],
+            output_dir=str(output_dir),
+            plan_id=resolver["plan_id"],
+            source_fingerprint=resolver["source_fingerprint"],
+            content_sha256=resolver["content_sha256"],
+            sessions=tuple(manifest_sessions),
+            split_date=datetime.now(timezone.utc).date().isoformat(),
+            readiness=plans.ReadinessMetadata(
+                state="draft", readiness_sha256="pending", checked_at="pending"
+            ),
+            skill_prefix=prefix,
+            execution_note=analysis_note,
+        )
+    ),
+)
+written = transaction.commit()
+metadata = authoring.refresh_readiness_metadata(output_dir, state="draft")
+print(
+    json.dumps(
+        {
+            "session_ids": list(parsed.session_ids),
+            "files": [str(path) for path in written],
+            "readiness_sha256": metadata.readiness_sha256,
+            "readiness_checked_at": metadata.checked_at,
+        },
+        sort_keys=True,
+    )
+)
 PY
 )"
 ```
 
-Behavior requirements:
+Behavior notes:
 
-- Compute the SHA after every other generated file is finalized; the hash depends on the contents of the session, context, manifest, and expansion (if any) files. `parallel-validation.md` is no longer hashed even if a legacy copy is present on disk. Recomputing earlier produces a hash that the next `asl preflight` will treat as a red `manifest-readiness` finding.
-- Do not write a `parallel-validation.md` file. It is not generated by this skill and `agent_session_loop.plans.stable_readiness_sha256` ignores it.
-- Always emit `**Readiness**: draft`. Do not advance the state in `session-split`; directory-mode `session-expand` runs final `asl preflight --mark-loop-ready` after validation, and manual preflight may do the same after repair.
-- The timestamp must be a UTC ISO-8601 string. The parser only checks non-emptiness, but consumers (preflight repair hints, guided skill) display the value verbatim.
-- If `agent_session_loop` cannot be imported (for example when running the skill outside this repo), fail fast with a clear error pointing to `asl --version`; do not write a placeholder SHA. A placeholder would cause `asl preflight` to emit a red `manifest-readiness` finding and block `--mark-loop-ready` until the user repairs the manifest by hand.
+- The transaction is atomic: a failure while staging or committing leaves no partially authored plan, and a missing/malformed contract for any session (`contract_from_payload` raises) aborts generation before any file lands.
+- `render_session_file` runs in deterministic preparation mode (`require_contract=True`) — sessions without contracts cannot be rendered, which is what keeps `asl preflight` `missing-contract` findings from ever appearing in fresh splits.
+- `progress.md` is the header-only skeleton (`plans.PROGRESS_HEADER`). It is runner-managed, excluded from `plan_content_sha256` / `stable_readiness_sha256`, and never listed in the manifest session table. Only the runner's `append_progress_entry` mutates it; `asl backfill-progress [--force] <plan-dir>` is the manual recovery path.
+- The manifest is serial-only (no `## Parallel Execution`, waves, ownership, or worker-prompt sections) and always ships as `**Readiness**: draft` with a stable SHA computed by the same `plans.stable_readiness_sha256` that `asl preflight` recomputes. Only `asl preflight --mark-loop-ready` (typically run by directory-mode `session-expand`) advances the state.
+- If `agent_session_loop` cannot be imported (running the skill outside this repo without an installed `asl`), fail fast with a clear error pointing to `asl --version`; do not fall back to hand-writing files.
 
-### Step 10: Report Results
+### Step 9: Report Results
 
 Print a concise summary:
 
@@ -475,6 +381,7 @@ Print a concise summary:
 - Never modify the original plan file
 - Inline plans must be saved as source markdown before splitting; do not split directly from ephemeral conversation text
 - Content preservation is paramount — only restructure, never rewrite
+- Deterministic generation is owned by `agent_session_loop.authoring` (Step 8). This skill authors session boundaries and completion contracts; it never hand-writes `context.md`, `session-N.md`, `manifest.md`, or `progress.md` content.
 - If a session contains "Exit criteria" or "Verification" sub-sections, they belong to that session (not to context)
 - Content between `---` horizontal rules that appears between context and the first session should go at the end of context.md
 - Always use `<skill-prefix>session-run` in generated execution instructions — it auto-advances through sessions and runs within the active harness conversation.

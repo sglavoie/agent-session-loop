@@ -41,7 +41,8 @@ import subprocess
 import sys
 from typing import Any, Literal
 
-from . import harnesses, progress_repair, responses, state
+from . import baseline, harnesses, progress_repair, responses, state
+from .baseline_cache import BASELINE_RESULTS_FILENAME, BaselineCache
 from .contracts import (
     COMPLETION_CONTRACT_HEADING,
     CommandCheck,
@@ -80,6 +81,11 @@ PreflightCategory = Literal[
     "path-reference",
     "command-not-runnable",
     "progress-journal-missing",
+    "baseline-missing",
+    "baseline-stale",
+    "baseline-unexpected",
+    "baseline-timeout",
+    "baseline-near-timeout",
     "env-repo-root",
     "env-git",
     "env-harness",
@@ -99,6 +105,11 @@ PREFLIGHT_CATEGORIES: tuple[PreflightCategory, ...] = (
     "path-reference",
     "command-not-runnable",
     "progress-journal-missing",
+    "baseline-missing",
+    "baseline-stale",
+    "baseline-unexpected",
+    "baseline-timeout",
+    "baseline-near-timeout",
     "env-repo-root",
     "env-git",
     "env-harness",
@@ -314,6 +325,81 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
             "Should I run `asl backfill-progress` to reconstruct it?"
         ),
         fix_category="manifest-update",
+    ),
+    "baseline-missing": RepairHint(
+        category="baseline-missing",
+        check_id="baseline-missing.refresh",
+        severity_hint="red",
+        message=(
+            "Record baseline evidence before the first session by running "
+            "`asl baseline <plan> --cwd <repo-root>`; the readiness gate "
+            "requires current evidence when no session is complete."
+        ),
+        question_template=(
+            "Session {session_id} declares a baseline expectation but no "
+            "evidence is recorded ({detail}). Should I run `asl baseline`?"
+        ),
+        fix_category="manifest-update",
+    ),
+    "baseline-stale": RepairHint(
+        category="baseline-stale",
+        check_id="baseline-stale.refresh",
+        severity_hint="yellow",
+        message=(
+            "Refresh stale baseline evidence with "
+            "`asl baseline <plan> --cwd <repo-root>`; the recorded repository "
+            "fingerprint no longer matches the working tree."
+        ),
+        question_template=(
+            "Session {session_id} baseline evidence is stale ({detail}). "
+            "Should I re-run `asl baseline` to refresh it?"
+        ),
+        fix_category="manifest-update",
+    ),
+    "baseline-unexpected": RepairHint(
+        category="baseline-unexpected",
+        check_id="baseline-unexpected.fix",
+        severity_hint="red",
+        message=(
+            "Resolve the baseline mismatch: fix the pre-existing failure, or "
+            "correct the check's `baseline_expectation` in the session recipe "
+            "so it matches reality."
+        ),
+        question_template=(
+            "Session {session_id} baseline check did not match its declared "
+            "expectation ({detail}). Should I fix the recipe or the code?"
+        ),
+        fix_category="session-recipe-edit",
+    ),
+    "baseline-timeout": RepairHint(
+        category="baseline-timeout",
+        check_id="baseline-timeout.fix",
+        severity_hint="red",
+        message=(
+            "The baseline check exceeded its budget. Narrow the recipe to the "
+            "session's own targeted tests, or raise the budget only if the "
+            "slow command is genuinely required."
+        ),
+        question_template=(
+            "Session {session_id} baseline check timed out ({detail}). "
+            "Should I narrow the recipe?"
+        ),
+        fix_category="session-recipe-edit",
+    ),
+    "baseline-near-timeout": RepairHint(
+        category="baseline-near-timeout",
+        check_id="baseline-near-timeout.split",
+        severity_hint="yellow",
+        message=(
+            "The baseline check ran within 80% of its budget. Consider "
+            "narrowing the recipe to targeted tests so it does not begin "
+            "timing out as the repository grows."
+        ),
+        question_template=(
+            "Session {session_id} baseline check is near its timeout budget "
+            "({detail}). Should I narrow the recipe?"
+        ),
+        fix_category="session-recipe-edit",
     ),
     "env-repo-root": RepairHint(
         category="env-repo-root",
@@ -1233,6 +1319,156 @@ def _check_command_runnability(
     return tuple(findings)
 
 
+def _any_session_complete(snapshot: PlanSnapshot | None) -> bool:
+    if snapshot is None:
+        return False
+    return any(session.status == "complete" for session in snapshot.sessions)
+
+
+def _check_baselines(
+    contracts_by_session: dict[str, CompletionContract],
+    cwd: str | Path | None,
+    snapshot: PlanSnapshot | None,
+    *,
+    plan_dir: Path,
+) -> tuple[PreflightFinding, ...]:
+    """Evaluate recorded baseline evidence against declared expectations.
+
+    This reads ``baseline-results.json`` only — it never runs commands, so an
+    ordinary ``asl preflight`` stays fast and side-effect free (use
+    ``asl baseline`` to populate the evidence). Skipped when ``cwd is None``
+    (the identity key needs a working directory) or when no check declares a
+    baseline expectation.
+
+    Findings are emitted only at *initial run start* — that is, when no session
+    is complete. Once implementation has begun (any session complete), baseline
+    evidence is intentionally not re-validated: the repository has legitimately
+    changed and a declared expected-fail check is meant to pass at final
+    verification, not before. This mirrors the run readiness gate's
+    "require current baseline evidence when no session is complete" rule while
+    honoring "do not invalidate execution after Session 1".
+    """
+    if cwd is None:
+        return ()
+    collected = baseline.collect_baseline_checks(contracts_by_session)
+    if not collected:
+        return ()
+    if _any_session_complete(snapshot):
+        # Implementation has started; do not re-gate on baseline evidence.
+        return ()
+
+    canonical_cwd = canonicalize_path(cwd)
+    cache = BaselineCache.load(plan_dir / BASELINE_RESULTS_FILENAME)
+    current_fingerprint = baseline.repository_fingerprint(canonical_cwd)
+    refresh_hint = f"run `asl baseline {plan_dir} --cwd {canonical_cwd}`"
+
+    findings: list[PreflightFinding] = []
+    seen_keys: set[str] = set()
+    for session_id, check in collected:
+        key = baseline.baseline_identity_key(check, canonical_cwd)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        record = cache.get(key)
+        expectation = getattr(check, "baseline_expectation", "skip")
+        if record is None:
+            findings.append(
+                _finding(
+                    "red",
+                    "baseline-missing",
+                    (
+                        f"session {session_id} check {check.name!r} declares "
+                        f"baseline_expectation={expectation!r} but has no "
+                        "recorded evidence"
+                    ),
+                    session_id=session_id,
+                    detail=refresh_hint,
+                )
+            )
+            continue
+        result = record.result
+        stored_fingerprint = str(result.get("repository_fingerprint", ""))
+        if stored_fingerprint != current_fingerprint:
+            findings.append(
+                _finding(
+                    "yellow",
+                    "baseline-stale",
+                    (
+                        f"session {session_id} check {check.name!r} baseline "
+                        "evidence predates the current repository state"
+                    ),
+                    session_id=session_id,
+                    detail=refresh_hint,
+                )
+            )
+            continue
+        # A record produced under a total-budget overrun is never loop-ready
+        # evidence, even when it was stored as satisfied (e.g. by an older
+        # `asl baseline` that only flagged the overrun without failing it).
+        if bool(result.get("total_budget_exceeded", False)):
+            findings.append(
+                _finding(
+                    "red",
+                    "baseline-timeout",
+                    (
+                        f"session {session_id} check {check.name!r} baseline "
+                        "run exceeded the total baseline budget"
+                    ),
+                    session_id=session_id,
+                    detail=str(result.get("detail", "")),
+                )
+            )
+            continue
+        status = str(result.get("status", ""))
+        if status == "timeout":
+            findings.append(
+                _finding(
+                    "red",
+                    "baseline-timeout",
+                    (
+                        f"session {session_id} check {check.name!r} baseline "
+                        "run timed out"
+                    ),
+                    session_id=session_id,
+                    detail=str(result.get("detail", "")),
+                )
+            )
+            continue
+        if not bool(result.get("satisfied", False)):
+            findings.append(
+                _finding(
+                    "red",
+                    "baseline-unexpected",
+                    (
+                        f"session {session_id} check {check.name!r} baseline "
+                        f"outcome {status!r} does not satisfy "
+                        f"baseline_expectation={expectation!r}"
+                    ),
+                    session_id=session_id,
+                    detail=str(result.get("detail", "")),
+                )
+            )
+            continue
+        if bool(result.get("near_timeout", False)):
+            findings.append(
+                _finding(
+                    "yellow",
+                    "baseline-near-timeout",
+                    (
+                        f"session {session_id} check {check.name!r} baseline "
+                        "run used over 80% of its timeout budget"
+                    ),
+                    session_id=session_id,
+                    detail=(
+                        f"{result.get('duration_seconds', 0)}s of "
+                        f"{result.get('budget_seconds', 0)}s budget"
+                    ),
+                )
+            )
+
+    return tuple(findings)
+
+
 def _format_progress_session_ids(session_ids: tuple[str, ...]) -> str:
     if not session_ids:
         return "none"
@@ -1751,9 +1987,20 @@ def run_preflight(
     command_findings = _check_command_runnability(
         core_report.contracts_by_session, cwd
     )
+    baseline_findings = _check_baselines(
+        core_report.contracts_by_session,
+        cwd,
+        core_report.snapshot,
+        plan_dir=core_report.plan_dir,
+    )
     return PreflightReport(
         plan_dir=core_report.plan_dir,
-        findings=core_report.findings + env_findings + command_findings,
+        findings=(
+            core_report.findings
+            + env_findings
+            + command_findings
+            + baseline_findings
+        ),
         snapshot=core_report.snapshot,
         readiness=core_report.readiness,
         expected_readiness_sha256=core_report.expected_readiness_sha256,

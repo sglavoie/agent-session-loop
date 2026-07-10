@@ -22,12 +22,23 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
 import re
 import shlex
 import subprocess
 import sys
 import time
 from typing import Optional, Sequence
+
+# Review verdict parsing is shared with the runner through
+# ``agent_session_loop.review`` (the same thin-wrapper pattern the
+# session-split scripts use for ``agent_session_loop.authoring``), so the
+# runner and this helper report the same verdict payload by construction.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from agent_session_loop import review as _review  # noqa: E402
 
 HELPER_NAME = "asl-autopilot"
 HELPER_DESCRIPTION = (
@@ -84,13 +95,17 @@ DEFAULT_STALL_IDLE_THRESHOLD = 90.0
 
 # Pause reasons the supervisor treats as transient and same-session
 # retryable. These mirror ASL's own stable pause vocabulary
-# (`agent_session_loop.runner`): `verify-failed`, `nonzero-exit`, `timeout`,
-# and `no-status-change` are all cases where relaunching the same session can
-# succeed without any human answer. Every other pause (a question/blocked
-# state) needs an agent- or user-supplied reply and is never auto-retried.
+# (`agent_session_loop.events` / `agent_session_loop.runner`): `verify-failed`,
+# `timeout`, and `no-status-change` are cases where relaunching the same
+# session can succeed without any human answer, and `transport-failed` is the
+# only harness-failure *category* the classifier marks retryable. Crucially,
+# unclassified `nonzero-exit` is fail-closed (never retried), and the
+# quota/auth/invalid-model categories are deliberately absent so quota and
+# session-limit exhaustion are never relaunched. Every other pause (a
+# question/blocked state) needs an agent- or user-supplied reply.
 RECOVERABLE_PAUSE_REASONS = (
     "verify-failed",
-    "nonzero-exit",
+    "transport-failed",
     "timeout",
     "no-status-change",
 )
@@ -100,29 +115,51 @@ RECOVERABLE_PAUSE_REASONS = (
 # (session id, reason) so an unrelated later pause starts fresh.
 DEFAULT_MAX_RETRIES = 2
 
-# How many generated follow-up fix plans the supervising skill may create after
-# review_findings before handing unresolved findings back to the user. The
-# helper does not create those plans itself, but it parses and surfaces this cap
-# so the host agent can honor a launch-time override consistently.
-DEFAULT_MAX_REVIEW_FIX_PLANS = 3
+# Non-retryable harness-failure categories that always require human
+# intervention and carry no useful question/answer context: quota /
+# session-limit exhaustion, authentication failures, and invalid-model
+# rejections. The supervisor surfaces these as `user_required` — carrying any
+# parsed reset information — and deliberately skips `asl questions`, since no
+# reply can clear them. Mirrors the non-retryable categories the Session 5
+# classifier marks (`agent_session_loop.events` /
+# `agent_session_loop.runner.classify_harness_failure`).
+USER_REQUIRED_HARNESS_FAILURE_REASONS = (
+    "quota-exhausted",
+    "auth-failed",
+    "invalid-model",
+)
+
+# Bounded backoff schedule (seconds) applied before each relaunch of a
+# transient `transport-failed` pause. The classifier marks only
+# `transport-failed` retryable, so we relaunch the same session at most
+# len(TRANSPORT_RETRY_DELAYS_SECONDS) times, sleeping the scheduled delay first
+# (5s, then 30s). The other recoverable pauses (`verify-failed`, `timeout`,
+# `no-status-change`) keep their immediate, zero-delay retry — Session 10
+# revisits verification repair with fingerprint-aware context.
+TRANSPORT_RETRY_DELAYS_SECONDS = (5.0, 30.0)
+
+# Default automatic repair/rereview cycle cap, mirroring
+# ``agent_session_loop.runner.DEFAULT_MAX_REVIEW_FIX_CYCLES``. The runner owns
+# the repair cycles (Session 18): after a findings review it materializes
+# same-plan repair children, executes them, and rereviews — bounded by
+# ``asl run --max-review-fix-cycles`` (``--max-review-fix-plans`` is a
+# deprecated alias). The helper only validates and forwards the flag; it never
+# creates follow-up fix plans.
+DEFAULT_MAX_REVIEW_FIX_CYCLES = 2
 
 # Final review artifacts. When a run uses `--review-harness`, ASL writes the
 # review verdict to `<plan-dir>/final-review.md` with a single trailing
-# `Status:` line. These mirror `agent_session_loop.runner`
-# (FINAL_REVIEW_FILENAME / REVIEW_STATUS_ALL_CLEAR / the findings regex,
-# runner.py:61-67) so the helper can classify the verdict as a standalone
-# script; the review-parser tests are the alignment tripwire if the status
-# grammar drifts.
-FINAL_REVIEW_FILENAME = "final-review.md"
-REVIEW_STATUS_ALL_CLEAR = "Status: All clear, no findings"
-_REVIEW_STATUS_FINDINGS_RE = re.compile(
-    r"^Status: ([0-9]+) Findings "
-    r"\(([0-9]+) high, ([0-9]+) med, ([0-9]+) low\)$"
-)
+# `Status:` line (and, for generated v2 review sessions, the structured
+# `final-review.json` artifact). The grammar and artifact schema live in
+# `agent_session_loop.review`; these re-exports keep the helper's historical
+# public names stable.
+FINAL_REVIEW_FILENAME = _review.FINAL_REVIEW_FILENAME
+FINAL_REVIEW_ARTIFACT_FILENAME = _review.FINAL_REVIEW_ARTIFACT_FILENAME
+REVIEW_STATUS_ALL_CLEAR = _review.REVIEW_STATUS_ALL_CLEAR
 
 # Upper bound on the bounded review excerpt attached to a `review_findings`
 # result. Keeps the structured payload small while still handing the host agent
-# enough of `final-review.md` to seed a follow-up fix plan.
+# enough of `final-review.md` to surface the remaining findings to the user.
 REVIEW_SUMMARY_MAX_CHARS = 2000
 
 
@@ -176,6 +213,11 @@ def _build_run_parser() -> _RunArgumentParser:
     parser.add_argument("--timeout", type=int)
     parser.add_argument("--max-sessions", dest="max_sessions", type=int)
     parser.add_argument("--max-pending-sessions", dest="max_pending_sessions", type=int)
+    parser.add_argument(
+        "--max-review-fix-cycles",
+        dest="max_review_fix_cycles",
+        type=int,
+    )
     parser.add_argument(
         "--max-review-fix-plans",
         dest="max_review_fix_plans",
@@ -329,10 +371,24 @@ def parse_command(command: str) -> dict:
         return _parse_error(
             "invalid-argument", "--max-pending-sessions must be a positive integer"
         )
-    if namespace.max_review_fix_plans is not None and namespace.max_review_fix_plans <= 0:
+    if namespace.max_review_fix_cycles is not None and namespace.max_review_fix_cycles < 0:
         return _parse_error(
             "invalid-argument",
-            "--max-review-fix-plans must be a positive integer",
+            "--max-review-fix-cycles must be zero or a positive integer",
+        )
+    if namespace.max_review_fix_plans is not None and namespace.max_review_fix_plans < 0:
+        return _parse_error(
+            "invalid-argument",
+            "--max-review-fix-plans must be zero or a positive integer",
+        )
+    if (
+        namespace.max_review_fix_cycles is not None
+        and namespace.max_review_fix_plans is not None
+    ):
+        return _parse_error(
+            "invalid-argument",
+            "--max-review-fix-plans is a deprecated alias of "
+            "--max-review-fix-cycles; pass only one",
         )
     if (
         namespace.review_harness is not None
@@ -369,6 +425,18 @@ def parse_command(command: str) -> dict:
         child_args += ["--max-sessions", str(namespace.max_sessions)]
     if namespace.max_pending_sessions is not None:
         child_args += ["--max-pending-sessions", str(namespace.max_pending_sessions)]
+    # The runner owns repair/rereview cycles; forward the cap under the
+    # canonical flag, translating the deprecated alias.
+    if namespace.max_review_fix_cycles is not None:
+        child_args += [
+            "--max-review-fix-cycles",
+            str(namespace.max_review_fix_cycles),
+        ]
+    elif namespace.max_review_fix_plans is not None:
+        child_args += [
+            "--max-review-fix-cycles",
+            str(namespace.max_review_fix_plans),
+        ]
     if namespace.commit_mode == "per-session":
         child_args.append("--commit-per-session")
     elif namespace.commit_mode == "end":
@@ -401,76 +469,23 @@ def parse_command(command: str) -> dict:
         "state_dir": state_dir,
         "harness": namespace.harness,
         "review_harness": namespace.review_harness,
-        "max_review_fix_plans": (
-            namespace.max_review_fix_plans
-            if namespace.max_review_fix_plans is not None
-            else DEFAULT_MAX_REVIEW_FIX_PLANS
+        "max_review_fix_cycles": (
+            namespace.max_review_fix_cycles
+            if namespace.max_review_fix_cycles is not None
+            else (
+                namespace.max_review_fix_plans
+                if namespace.max_review_fix_plans is not None
+                else DEFAULT_MAX_REVIEW_FIX_CYCLES
+            )
         ),
     }
 
 
-def _review_error(error: str) -> dict:
-    """Structured payload for an unparseable/unreadable review verdict."""
-    return {"ok": False, "reason": "malformed-review", "error": error}
-
-
-def parse_review_verdict(text: str) -> dict:
-    """Parse a ``final-review.md`` status line into a stable verdict payload.
-
-    Mirrors ``agent_session_loop.runner.parse_review_verdict``
-    (runner.py:137-180): there must be exactly one ``Status:`` line and it must
-    be the final non-empty line, ``all-clear`` is the fixed all-clear string, and
-    a findings line must carry severity counts that sum to the total. This is the
-    review analogue of :func:`parse_command` — it returns a structured verdict
-    (``ok: True`` with ``outcome`` ``all-clear``/``findings``) rather than
-    raising, and returns ``ok: False`` with ``reason: "malformed-review"`` for
-    any grammar violation so callers branch on ``ok``/``outcome``.
-    """
-    nonempty = [line.strip() for line in text.splitlines() if line.strip()]
-    if not nonempty:
-        return _review_error(f"{FINAL_REVIEW_FILENAME} is empty")
-
-    status_lines = [line for line in nonempty if line.startswith("Status:")]
-    if not status_lines:
-        return _review_error("missing required final Status line")
-    if len(status_lines) > 1:
-        return _review_error("expected exactly one Status line")
-
-    status_line = status_lines[0]
-    if status_line != nonempty[-1]:
-        return _review_error("Status line must be the final non-empty line")
-
-    if status_line == REVIEW_STATUS_ALL_CLEAR:
-        return {
-            "ok": True,
-            "outcome": "all-clear",
-            "status_line": status_line,
-            "total_findings": 0,
-            "findings_by_severity": {"high": 0, "med": 0, "low": 0},
-        }
-
-    match = _REVIEW_STATUS_FINDINGS_RE.fullmatch(status_line)
-    if match is None:
-        return _review_error("malformed Status line")
-
-    total, high, med, low = (int(value) for value in match.groups())
-    if total <= 0:
-        return _review_error("finding total must be greater than zero")
-    if high + med + low != total:
-        return _review_error("finding severity counts do not add up")
-
-    return {
-        "ok": True,
-        "outcome": "findings",
-        "status_line": status_line,
-        "total_findings": total,
-        "findings_by_severity": {"high": high, "med": med, "low": low},
-    }
-
-
-def _review_output_path(parsed: dict) -> str:
-    """Path to ``final-review.md`` inside the run's plan directory."""
-    return os.path.join(parsed["plan_dir"], FINAL_REVIEW_FILENAME)
+# Single source of truth for the review verdict grammar. The shared parser
+# returns the same ``ok``/``outcome`` payload this helper always exposed; the
+# runner enforces the same grammar (and the structured-artifact contract)
+# through the same module.
+parse_review_verdict = _review.parse_review_verdict
 
 
 def _bounded_review_summary(text: str, *, max_chars: int = REVIEW_SUMMARY_MAX_CHARS) -> str:
@@ -482,28 +497,26 @@ def _bounded_review_summary(text: str, *, max_chars: int = REVIEW_SUMMARY_MAX_CH
 
 
 def _read_review_verdict(parsed: dict) -> dict:
-    """Read and classify ``final-review.md`` for the supervised run.
+    """Read and classify the review artifacts for the supervised run.
 
-    Returns the :func:`parse_review_verdict` payload with the
-    ``review_output_path`` attached (and a bounded ``summary`` on success). A
+    Delegates to :func:`agent_session_loop.review.load_review_verdict` — the
+    same loader the runner enforces mid-run — so both report the same verdict
+    payload (``review_output_path`` attached; structured ``findings`` and
+    ``artifact_version`` merged in when ``final-review.json`` is present). A
     missing or unreadable file yields ``ok: False`` with ``reason:
     "review-missing"`` so callers can distinguish "no review artifact" from a
-    grammar violation.
+    grammar violation. On success a bounded ``summary`` of the review body is
+    attached so unresolved findings can be surfaced to the user.
     """
-    path = _review_output_path(parsed)
-    try:
-        with open(path, encoding="utf-8") as handle:
-            text = handle.read()
-    except OSError as exc:
-        return {
-            "ok": False,
-            "reason": "review-missing",
-            "error": f"could not read {FINAL_REVIEW_FILENAME}: {exc}",
-            "review_output_path": path,
-        }
-    verdict = parse_review_verdict(text)
-    verdict["review_output_path"] = path
+    verdict = _review.load_review_verdict(parsed["plan_dir"])
     if verdict.get("ok"):
+        try:
+            with open(
+                verdict["review_output_path"], encoding="utf-8"
+            ) as handle:
+                text = handle.read()
+        except OSError:
+            text = ""
         verdict["summary"] = _bounded_review_summary(text)
     return verdict
 
@@ -933,6 +946,58 @@ def _run_result(
     return result
 
 
+def _transport_retry_delay(attempt: int) -> float:
+    """Backoff delay (seconds) before the ``attempt``-th transport relaunch.
+
+    ``attempt`` is 1-indexed. Follows :data:`TRANSPORT_RETRY_DELAYS_SECONDS`
+    (5s then 30s), clamping to the final scheduled entry for any retry beyond
+    the schedule so an out-of-range ``max_retries`` still backs off instead of
+    busy-relaunching. A non-positive attempt (or empty schedule) yields no delay.
+    """
+    schedule = TRANSPORT_RETRY_DELAYS_SECONDS
+    if attempt < 1 or not schedule:
+        return 0.0
+    return schedule[min(attempt, len(schedule)) - 1]
+
+
+def _pause_classification(run_payload: dict) -> Optional[dict]:
+    """Extract the runner's ``failure_classification`` from a paused payload.
+
+    Session 5's classifier embeds a bounded, serializable
+    ``failure_classification`` dict (``reason``/``retryable``/``fingerprint``/
+    ``evidence``/``returncode``/``retry_at``) under the pause ``details`` /
+    ``pause_details``. Returns it when present so the supervision result can
+    record the classification and any reset (``retry_at``) information, else
+    ``None``.
+    """
+    for key in ("pause_details", "details"):
+        details = run_payload.get(key)
+        if isinstance(details, dict):
+            classification = details.get("failure_classification")
+            if isinstance(classification, dict):
+                return classification
+    return None
+
+
+def _verification_repair_exhausted(run_payload: dict) -> bool:
+    """Return True when the runner marked a verify-failed repair exhausted.
+
+    Session 10's runner fingerprints each verification failure and records
+    ``verification_repair_exhausted`` in the paused ``details`` /
+    ``pause_details`` when the failure fingerprint repeats a prior attempt or
+    the per-session attempt cap is exceeded. The supervisor honors that verdict
+    to stop an identical verification failure from looping, while a changed
+    failure (flag clear) stays eligible for another bounded retry.
+    """
+    for key in ("pause_details", "details"):
+        details = run_payload.get(key)
+        if isinstance(details, dict) and details.get(
+            "verification_repair_exhausted"
+        ):
+            return True
+    return False
+
+
 def supervise_run(
     parsed: dict,
     *,
@@ -958,12 +1023,24 @@ def supervise_run(
     - an active matching lock means another run is driving the plan, so the
       supervisor sleeps ``poll_interval`` and re-polls (attach);
     - otherwise it starts one ``asl run`` chunk. A recoverable same-session
-      pause (``verify-failed``, ``nonzero-exit``, ``timeout``,
+      pause (``verify-failed``, ``transport-failed``, ``timeout``,
       ``no-status-change``) is relaunched up to ``max_retries`` times per
-      (session, reason) before it is surfaced; any other pause stops with
-      ``paused`` for agent/user reply handling. A non-paused failure stops with
+      (session, reason) before it is surfaced. Only ``transport-failed`` backs
+      off, sleeping the :data:`TRANSPORT_RETRY_DELAYS_SECONDS` schedule (5s then
+      30s) before each relaunch; the others relaunch immediately. A
+      non-retryable harness failure that needs a human and has no useful Q&A
+      context (``quota-exhausted``/``auth-failed``/``invalid-model``) stops
+      immediately with ``user_required`` — carrying any reset (``retry_at``)
+      information — and is never retried. Any other pause stops with ``paused``
+      for agent/user reply handling. A non-paused failure stops with
       ``blocked``, and a clean stop with pending sessions remaining (the
       ``--max-sessions`` cap) relaunches on the next iteration.
+
+    The per-(session, reason) retry counts and accumulated backoff delay persist
+    across attach polls and capped-chunk relaunches, and the surfaced result's
+    ``retries`` records the attempted delay (``delayed_seconds``), the runner's
+    failure ``classification``, and whether the recoverable budget was
+    ``exhausted``.
 
     When ``reply_text`` is supplied the first self-started chunk resumes the
     paused run via ``asl run --reply-stdin`` (reply streamed on stdin); later
@@ -1001,6 +1078,7 @@ def supervise_run(
     attach_start: Optional[float] = None
     last_attach_beat: Optional[float] = None
     retry_counts: dict = {}
+    retry_delays: dict = {}
 
     while True:
         status = status_invoker(parsed)
@@ -1104,14 +1182,65 @@ def supervise_run(
             )
             session_id = _current_session_id(status)
             retry_key = (session_id, pause_reason)
+            classification = _pause_classification(run_payload)
+
+            # Non-retryable harness failures that need a human and carry no
+            # useful Q&A context (quota/session-limit, auth, invalid-model):
+            # surface immediately as `user_required` with any reset info, never
+            # retry, and let run_autopilot skip `asl questions` for them.
+            if pause_reason in USER_REQUIRED_HARNESS_FAILURE_REASONS:
+                return _run_result(
+                    False,
+                    "user_required",
+                    status=status,
+                    chunks=chunks,
+                    run=run_payload,
+                    error=run_payload.get("pause_message") or pause_reason,
+                    retries={
+                        "session": session_id,
+                        "reason": pause_reason,
+                        "count": retry_counts.get(retry_key, 0),
+                        "exhausted": False,
+                        "delayed_seconds": retry_delays.get(retry_key, 0.0),
+                        "classification": classification,
+                    },
+                )
+
             used = retry_counts.get(retry_key, 0)
-            if pause_reason in RECOVERABLE_PAUSE_REASONS and used < max_retries:
-                retry_counts[retry_key] = used + 1
+            # A verify-failed pause carries the runner's fingerprint-aware
+            # repair verdict. When the runner marks the repair exhausted (the
+            # failure fingerprint repeated a prior attempt, or the per-session
+            # attempt cap was exceeded), stop relaunching so an identical
+            # verification failure cannot loop. A changed failure (new
+            # fingerprint) leaves the flag clear and stays eligible for another
+            # bounded retry.
+            verify_repair_exhausted = (
+                pause_reason == "verify-failed"
+                and _verification_repair_exhausted(run_payload)
+            )
+            if (
+                pause_reason in RECOVERABLE_PAUSE_REASONS
+                and used < max_retries
+                and not verify_repair_exhausted
+            ):
+                attempt = used + 1
+                retry_counts[retry_key] = attempt
+                # Only transport failures back off (5s/30s); verify-failed,
+                # timeout, and no-status-change relaunch immediately (Session 10
+                # revisits verification repair).
+                delay = (
+                    _transport_retry_delay(attempt)
+                    if pause_reason == "transport-failed"
+                    else 0.0
+                )
+                retry_delays[retry_key] = retry_delays.get(retry_key, 0.0) + delay
+                backoff = f" after {int(delay)}s backoff" if delay else ""
                 heartbeat(
                     f"chunk {chunks}: recoverable pause {pause_reason!r} for "
-                    f"session {session_id}; retry {retry_counts[retry_key]}/"
-                    f"{max_retries}"
+                    f"session {session_id}; retry {attempt}/{max_retries}{backoff}"
                 )
+                if delay:
+                    sleep(delay)
                 # Relaunch the same session on the next iteration (a new chunk).
                 continue
             return _run_result(
@@ -1126,6 +1255,8 @@ def supervise_run(
                     "reason": pause_reason,
                     "count": used,
                     "exhausted": pause_reason in RECOVERABLE_PAUSE_REASONS,
+                    "delayed_seconds": retry_delays.get(retry_key, 0.0),
+                    "classification": classification,
                 },
             )
         if run_payload.get("ok") is False:
@@ -1173,16 +1304,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Resume a paused run using inferred reply text streamed on stdin.",
     )
-    parser.add_argument(
-        "--max-review-fix-plans",
-        type=int,
-        default=None,
-        help=(
-            "Maximum generated follow-up fix plans after review_findings. "
-            f"Defaults to {DEFAULT_MAX_REVIEW_FIX_PLANS}; the helper surfaces "
-            "the value for the supervising skill and does not pass it to `asl run`."
-        ),
-    )
     return parser
 
 
@@ -1210,16 +1331,18 @@ def _attach_review_context(result: dict, parsed: dict, reader) -> dict:
     """Re-tag a completed run as ``review_findings`` when review found issues.
 
     After a run that used ``--review-harness``, ``final-review.md`` holds the
-    verdict. When it reports findings this re-tags the completed result as
-    ``review_findings`` (``ok: False`` so callers know follow-up work remains,
-    mirroring the ``needs_agent_reply`` handshake) and attaches the final-review
-    path, status line, severity counts, and a bounded summary under ``review`` so
-    the host agent can open a follow-up fix cycle. An all-clear review keeps the
-    result ``complete`` but still attaches the clean verdict. A missing or
-    malformed review file also leaves the result ``complete`` and records the
-    problem under ``review_error`` — the runner already pauses on a malformed
-    verdict mid-run, so reaching a clean ``complete`` with an unreadable file is
-    not expected.
+    verdict. The runner already drove its bounded repair/rereview cycles
+    before completing, so remaining findings mean automatic repair stopped
+    (all-clear never came); this re-tags the completed result as
+    ``review_findings`` (``ok: False``, mirroring the ``needs_agent_reply``
+    handshake) and attaches the final-review path, status line, severity
+    counts, and a bounded summary under ``review`` so the host agent can
+    surface them to the user. An all-clear review keeps the result
+    ``complete`` but still attaches the clean verdict. A missing or malformed
+    review file also leaves the result ``complete`` and records the problem
+    under ``review_error`` — the runner already pauses on a malformed verdict
+    mid-run, so reaching a clean ``complete`` with an unreadable file is not
+    expected.
     """
     verdict = reader(parsed)
     if not verdict.get("ok"):
@@ -1256,24 +1379,20 @@ def run_autopilot(
 
     Any run that stops ``paused`` is enriched with ``asl questions --json``
     context and re-tagged ``needs_agent_reply`` so the caller knows a reply is
-    required. A run that completes after using ``--review-harness`` has its
+    required. A run that stops ``user_required`` (a quota/auth/invalid-model
+    harness failure) is passed through untouched — no ``asl questions`` fetch,
+    since no reply can clear it — so the caller can surface the reset info. A
+    run that completes after using ``--review-harness`` has its
     ``final-review.md`` verdict parsed: findings re-tag the result as
-    ``review_findings`` so the caller can open a follow-up fix cycle.
-    ``supervisor``, ``questioner``, ``review_reader``, and ``stdin`` are
-    injectable so tests can drive the seam without spawning real subprocesses.
+    ``review_findings`` so the caller can hand the unresolved findings to the
+    user (the runner already exhausted its own bounded repair/rereview
+    cycles). ``supervisor``, ``questioner``, ``review_reader``, and ``stdin``
+    are injectable so tests can drive the seam without spawning real
+    subprocesses.
     """
     parsed = parse_command(args.command)
     if not parsed.get("ok"):
         return parsed
-
-    max_review_fix_plans = getattr(args, "max_review_fix_plans", None)
-    if max_review_fix_plans is not None:
-        if max_review_fix_plans <= 0:
-            return _parse_error(
-                "invalid-argument",
-                "--max-review-fix-plans must be a positive integer",
-            )
-        parsed["max_review_fix_plans"] = max_review_fix_plans
 
     reply_text: Optional[str] = None
     if getattr(args, "reply_stdin", False):
@@ -1301,12 +1420,6 @@ def run_autopilot(
         _attach_question_context(result, parsed, questioner)
     elif result.get("reason") == "complete" and parsed.get("review_harness"):
         _attach_review_context(result, parsed, review_reader)
-    if result.get("reason") == "review_findings":
-        result["review_fix"] = {
-            "max_generated_follow_up_plans": parsed.get(
-                "max_review_fix_plans", DEFAULT_MAX_REVIEW_FIX_PLANS
-            )
-        }
     return result
 
 

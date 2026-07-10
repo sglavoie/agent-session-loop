@@ -32,14 +32,27 @@ class ArgParserTest(unittest.TestCase):
                 "asl run /tmp/plan",
                 "--json",
                 "--reply-stdin",
-                "--max-review-fix-plans",
-                "4",
             ]
         )
         self.assertEqual(args.command, "asl run /tmp/plan")
         self.assertTrue(args.json)
         self.assertTrue(args.reply_stdin)
-        self.assertEqual(args.max_review_fix_plans, 4)
+
+    def test_helper_no_longer_accepts_review_fix_plan_flag(self) -> None:
+        # The runner owns repair cycles (Session 18); the helper-only
+        # --max-review-fix-plans option is gone. It survives only inside the
+        # `asl run ...` command string as a deprecated alias.
+        parser = autopilot.build_arg_parser()
+        with self.assertRaises(SystemExit):
+            with redirect_stderr(io.StringIO()):
+                parser.parse_args(
+                    [
+                        "--command",
+                        "asl run /tmp/plan",
+                        "--max-review-fix-plans",
+                        "4",
+                    ]
+                )
 
     def test_command_is_required(self) -> None:
         parser = autopilot.build_arg_parser()
@@ -52,7 +65,6 @@ class ArgParserTest(unittest.TestCase):
         args = parser.parse_args(["--command", "asl run /tmp/plan"])
         self.assertFalse(args.json)
         self.assertFalse(args.reply_stdin)
-        self.assertIsNone(args.max_review_fix_plans)
 
 
 class MainTest(unittest.TestCase):
@@ -88,7 +100,8 @@ class ParseCommandTest(unittest.TestCase):
         self.assertEqual(result["argv"], ["asl", "run", "/tmp/plan", "--json"])
         self.assertTrue(result["json_appended"])
         self.assertEqual(
-            result["max_review_fix_plans"], autopilot.DEFAULT_MAX_REVIEW_FIX_PLANS
+            result["max_review_fix_cycles"],
+            autopilot.DEFAULT_MAX_REVIEW_FIX_CYCLES,
         )
 
     def test_existing_json_is_preserved_not_duplicated(self) -> None:
@@ -163,20 +176,47 @@ class ParseCommandTest(unittest.TestCase):
         self.assertIn("--allow-not-loop-ready", args)
         self.assertEqual(args[args.index("--timeout") + 1], "600")
 
-    def test_review_fix_plan_limit_is_helper_only(self) -> None:
+    def test_review_fix_cycles_forwarded_to_child(self) -> None:
+        result = autopilot.parse_command(
+            "asl run /tmp/plan --review-harness codex --max-review-fix-cycles 3"
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["max_review_fix_cycles"], 3)
+        args = result["run_args"]
+        self.assertEqual(args[args.index("--max-review-fix-cycles") + 1], "3")
+
+    def test_deprecated_review_fix_plans_alias_translates_to_cycles(self) -> None:
         result = autopilot.parse_command(
             "asl run /tmp/plan --review-harness codex --max-review-fix-plans 5"
         )
         self.assertTrue(result["ok"])
-        self.assertEqual(result["max_review_fix_plans"], 5)
-        self.assertNotIn("--max-review-fix-plans", result["run_args"])
-        self.assertNotIn("--max-review-fix-plans", result["argv"])
+        self.assertEqual(result["max_review_fix_cycles"], 5)
+        args = result["run_args"]
+        self.assertNotIn("--max-review-fix-plans", args)
+        self.assertEqual(args[args.index("--max-review-fix-cycles") + 1], "5")
 
-    def test_rejects_non_positive_review_fix_plan_limit(self) -> None:
+    def test_zero_review_fix_cycles_is_accepted(self) -> None:
+        # 0 is the review-only mode: the runner reviews but creates no repairs.
         result = autopilot.parse_command(
-            "asl run /tmp/plan --max-review-fix-plans 0"
+            "asl run /tmp/plan --max-review-fix-cycles 0"
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["max_review_fix_cycles"], 0)
+
+    def test_rejects_negative_review_fix_cycles(self) -> None:
+        result = autopilot.parse_command(
+            "asl run /tmp/plan --max-review-fix-cycles -1"
         )
         self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "invalid-argument")
+
+    def test_rejects_both_review_fix_flags_together(self) -> None:
+        result = autopilot.parse_command(
+            "asl run /tmp/plan --max-review-fix-cycles 2 "
+            "--max-review-fix-plans 2"
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "invalid-argument")
         self.assertEqual(result["reason"], "invalid-argument")
 
     def test_rejects_shell_pipe(self) -> None:
@@ -273,14 +313,13 @@ class RunAutopilotParseIntegrationTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "shell-syntax")
 
-    def test_top_level_review_fix_plan_limit_overrides_command_default(self) -> None:
+    def test_command_review_fix_cycles_reach_supervisor(self) -> None:
         parser = autopilot.build_arg_parser()
         args = parser.parse_args(
             [
                 "--command",
-                "asl run /tmp/plan --review-harness codex",
-                "--max-review-fix-plans",
-                "6",
+                "asl run /tmp/plan --review-harness codex "
+                "--max-review-fix-cycles 1",
             ]
         )
         captured = {}
@@ -308,22 +347,12 @@ class RunAutopilotParseIntegrationTest(unittest.TestCase):
             },
         )
         self.assertTrue(result["ok"])
-        self.assertEqual(captured["parsed"]["max_review_fix_plans"], 6)
-        self.assertEqual(result["command"]["max_review_fix_plans"], 6)
-
-    def test_top_level_review_fix_plan_limit_must_be_positive(self) -> None:
-        parser = autopilot.build_arg_parser()
-        args = parser.parse_args(
-            ["--command", "asl run /tmp/plan", "--max-review-fix-plans", "0"]
+        self.assertEqual(captured["parsed"]["max_review_fix_cycles"], 1)
+        self.assertEqual(result["command"]["max_review_fix_cycles"], 1)
+        run_args = captured["parsed"]["run_args"]
+        self.assertEqual(
+            run_args[run_args.index("--max-review-fix-cycles") + 1], "1"
         )
-
-        def fail_supervisor(parsed):  # pragma: no cover - must not run
-            raise AssertionError("supervisor must not run for invalid helper args")
-
-        result = autopilot.run_autopilot(args, supervisor=fail_supervisor)
-        self.assertEqual(result["stage"], autopilot.PARSE_STAGE)
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["reason"], "invalid-argument")
 
 
 class RunAutopilotPauseReplyTest(unittest.TestCase):
@@ -378,6 +407,39 @@ class RunAutopilotPauseReplyTest(unittest.TestCase):
         # Without loadable context the result stays paused but records why.
         self.assertEqual(result["reason"], "paused")
         self.assertEqual(result["questions_error"]["reason"], "no-paused-run")
+
+    def test_user_required_harness_pause_skips_question_context(self) -> None:
+        # A quota/auth/invalid-model user_required stop must not fetch Q&A
+        # context; the result passes through with its reset info intact.
+        def user_required_supervisor(parsed):
+            return {
+                "ok": False,
+                "stage": autopilot.RUN_STAGE,
+                "reason": "user_required",
+                "chunks": 1,
+                "run": {"paused": True, "pause_reason": "quota-exhausted"},
+                "retries": {
+                    "reason": "quota-exhausted",
+                    "classification": {"retry_at": "2026-07-10T06:00:00Z"},
+                },
+            }
+
+        def fail_questioner(parsed):  # pragma: no cover - must not run
+            raise AssertionError("asl questions must not be fetched for user_required")
+
+        result = autopilot.run_autopilot(
+            self._args(),
+            supervisor=user_required_supervisor,
+            questioner=fail_questioner,
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "user_required")
+        self.assertNotIn("questions", result)
+        self.assertNotIn("questions_error", result)
+        self.assertEqual(
+            result["retries"]["classification"]["retry_at"],
+            "2026-07-10T06:00:00Z",
+        )
 
     def test_reply_stdin_streams_reply_into_supervisor(self) -> None:
         captured = {}
@@ -680,6 +742,50 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         self.assertEqual(result["retries"]["count"], 0)
         self.assertFalse(result["retries"]["exhausted"])
 
+    def test_verify_failed_exhausted_flag_stops_without_retry(self) -> None:
+        # The runner marked the verification repair exhausted (an identical
+        # failure fingerprint repeated), so the supervisor must not relaunch.
+        status = _StatusScript([_status_payload(1)])
+        run = _RunScript([
+            {
+                "ok": False,
+                "paused": True,
+                "reason": "verify-failed",
+                "pause_reason": "verify-failed",
+                "pause_message": "identical checks failed",
+                "pause_details": {"verification_repair_exhausted": True},
+            }
+        ])
+        result = self._supervise(status, run, max_retries=2)
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["reason"], "paused")
+        # Only the initial chunk ran; no retry consumed.
+        self.assertEqual(run.chunks, [1])
+        self.assertEqual(result["retries"]["count"], 0)
+
+    def test_verify_failed_changed_fingerprint_still_retries(self) -> None:
+        # A changed verification failure (exhausted flag clear) stays eligible
+        # for another bounded retry, which then completes the plan.
+        status = _StatusScript([
+            _status_payload(1),
+            _status_payload(1),
+            _status_payload(0),
+        ])
+        run = _RunScript([
+            {
+                "ok": False,
+                "paused": True,
+                "reason": "verify-failed",
+                "pause_reason": "verify-failed",
+                "pause_details": {"verification_repair_exhausted": False},
+            },
+            {"ok": True, "paused": False, "reason": "all-complete"},
+        ])
+        result = self._supervise(status, run)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "complete")
+        self.assertEqual(run.chunks, [1, 2])
+
     def test_default_run_invoker_forwards_status_probe_and_stall_threshold(self) -> None:
         # With no injected run_invoker, the default closure must thread the
         # status probe (reusing the status_invoker seam) and stall_threshold
@@ -722,6 +828,186 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         probe_payload = kwargs["status_probe"]()
         self.assertEqual(calls["status"], before + 1)
         self.assertTrue(probe_payload["ok"])
+
+
+class SuperviseRunTransportBackoffTest(unittest.TestCase):
+    """Transient transport failures back off on the bounded 5s/30s schedule."""
+
+    def _supervise(self, status_invoker, run_invoker, sleeps, **kwargs):
+        return autopilot.supervise_run(
+            {"plan_dir": "/tmp/plan", "argv": ["asl", "run", "/tmp/plan", "--json"]},
+            status_invoker=status_invoker,
+            run_invoker=run_invoker,
+            clock=_counter_clock(),
+            sleep=lambda seconds: sleeps.append(seconds),
+            heartbeat=lambda *_: None,
+            **kwargs,
+        )
+
+    def _transport_pause(self, *, retry_at=None):
+        return {
+            "ok": False,
+            "paused": True,
+            "reason": "transport-failed",
+            "pause_reason": "transport-failed",
+            "pause_message": "connection reset by peer",
+            "pause_details": {
+                "failure_classification": {
+                    "reason": "transport-failed",
+                    "retryable": True,
+                    "fingerprint": "transport-failed:connection-reset",
+                    "retry_at": retry_at,
+                }
+            },
+        }
+
+    def test_transport_retry_clears_after_first_backoff(self) -> None:
+        # First chunk hits a transport pause; after a single 5s backoff the
+        # relaunch completes the plan.
+        status = _StatusScript([
+            _status_payload(1),
+            _status_payload(1),
+            _status_payload(0),
+        ])
+        run = _RunScript([
+            self._transport_pause(),
+            {"ok": True, "paused": False, "reason": "all-complete"},
+        ])
+        sleeps = []
+        result = self._supervise(status, run, sleeps)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "complete")
+        self.assertEqual(run.chunks, [1, 2])
+        # Exactly one 5s backoff slept before the successful relaunch.
+        self.assertEqual(sleeps, [5.0])
+
+    def test_transport_retries_follow_five_then_thirty(self) -> None:
+        # The pause never clears: two retries at 5s and 30s, launching three
+        # times total, then the exhausted pause is surfaced with recorded delay
+        # and classification.
+        status = _StatusScript([_status_payload(1)])
+        run = _RunScript([self._transport_pause(retry_at="2026-07-10T06:00:00Z")])
+        sleeps = []
+        result = self._supervise(status, run, sleeps, max_retries=2)
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["reason"], "paused")
+        self.assertEqual(run.chunks, [1, 2, 3])
+        self.assertEqual(sleeps, [5.0, 30.0])
+        retries = result["retries"]
+        self.assertEqual(retries["reason"], "transport-failed")
+        self.assertEqual(retries["count"], 2)
+        self.assertTrue(retries["exhausted"])
+        self.assertEqual(retries["delayed_seconds"], 35.0)
+        self.assertEqual(retries["classification"]["retry_at"], "2026-07-10T06:00:00Z")
+
+    def test_verify_failed_retry_does_not_back_off(self) -> None:
+        # Verification repair retries relaunch immediately (Session 10 revisits
+        # them); no backoff sleep is scheduled.
+        status = _StatusScript([
+            _status_payload(1),
+            _status_payload(1),
+            _status_payload(0),
+        ])
+        run = _RunScript([
+            {
+                "ok": False,
+                "paused": True,
+                "reason": "verify-failed",
+                "pause_reason": "verify-failed",
+            },
+            {"ok": True, "paused": False, "reason": "all-complete"},
+        ])
+        sleeps = []
+        result = self._supervise(status, run, sleeps)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "complete")
+        self.assertEqual(sleeps, [])
+
+    def test_retry_accounting_survives_interleaved_attach(self) -> None:
+        # A transport retry, an attach poll (someone else briefly holds the
+        # lock), then the same pause again: the retry budget keeps counting from
+        # where it left off rather than resetting after the attach.
+        status = _StatusScript([
+            _status_payload(1),                        # chunk 1 -> transport pause
+            _status_payload(1, lock=_active_lock()),   # attach wait
+            _status_payload(1),                        # chunk 2 -> transport pause
+            _status_payload(1),                        # chunk 3 -> transport pause
+        ])
+        run = _RunScript([self._transport_pause()])
+        result = autopilot.supervise_run(
+            {"plan_dir": "/tmp/plan", "argv": ["asl", "run", "/tmp/plan", "--json"]},
+            status_invoker=status,
+            run_invoker=run,
+            clock=_counter_clock(),
+            sleep=lambda *_: None,
+            heartbeat=lambda *_: None,
+            max_retries=2,
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["reason"], "paused")
+        # Three launches total; the attach poll did not reset the budget.
+        self.assertEqual(run.chunks, [1, 2, 3])
+        self.assertEqual(result["retries"]["count"], 2)
+        self.assertTrue(result["retries"]["exhausted"])
+        self.assertEqual(result["retries"]["delayed_seconds"], 35.0)
+
+
+class SuperviseRunUserRequiredHarnessTest(unittest.TestCase):
+    """Quota/auth/invalid-model pauses surface as user_required, launch once."""
+
+    def _supervise(self, run_payload, *, sleeps=None, **kwargs):
+        status = _StatusScript([_status_payload(1)])
+        run = _RunScript([run_payload])
+        result = autopilot.supervise_run(
+            {"plan_dir": "/tmp/plan", "argv": ["asl", "run", "/tmp/plan", "--json"]},
+            status_invoker=status,
+            run_invoker=run,
+            clock=_counter_clock(),
+            sleep=(sleeps.append if sleeps is not None else (lambda *_: None)),
+            heartbeat=lambda *_: None,
+            **kwargs,
+        )
+        return result, run
+
+    def _harness_pause(self, reason, *, retry_at=None):
+        return {
+            "ok": False,
+            "paused": True,
+            "reason": reason,
+            "pause_reason": reason,
+            "pause_message": f"session paused: {reason}",
+            "pause_details": {
+                "failure_classification": {
+                    "reason": reason,
+                    "retryable": False,
+                    "retry_at": retry_at,
+                }
+            },
+        }
+
+    def test_quota_exhaustion_is_user_required_and_launches_once(self) -> None:
+        sleeps = []
+        result, run = self._supervise(
+            self._harness_pause("quota-exhausted", retry_at="2026-07-10T06:00:00Z"),
+            sleeps=sleeps,
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "user_required")
+        # Launched exactly once, never retried, never backed off.
+        self.assertEqual(run.chunks, [1])
+        self.assertEqual(sleeps, [])
+        retries = result["retries"]
+        self.assertEqual(retries["reason"], "quota-exhausted")
+        self.assertFalse(retries["exhausted"])
+        self.assertEqual(retries["delayed_seconds"], 0.0)
+        # Reset information travels with the result for the operator.
+        self.assertEqual(retries["classification"]["retry_at"], "2026-07-10T06:00:00Z")
+
+    def test_auth_and_invalid_model_are_user_required(self) -> None:
+        for reason in ("auth-failed", "invalid-model"):
+            result, run = self._supervise(self._harness_pause(reason))
+            self.assertEqual(result["reason"], "user_required", reason)
+            self.assertEqual(run.chunks, [1], reason)
 
 
 class SuperviseRunAttachHeartbeatTest(unittest.TestCase):
@@ -1318,29 +1604,9 @@ class RunAutopilotReviewTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "review_findings")
         self.assertEqual(result["review"]["total_findings"], 1)
-        self.assertEqual(
-            result["review_fix"]["max_generated_follow_up_plans"],
-            autopilot.DEFAULT_MAX_REVIEW_FIX_PLANS,
-        )
-
-    def test_findings_carry_configured_review_fix_plan_limit(self) -> None:
-        verdict = {
-            "ok": True,
-            "outcome": "findings",
-            "status_line": "Status: 1 Findings (0 high, 1 med, 0 low)",
-            "total_findings": 1,
-            "findings_by_severity": {"high": 0, "med": 1, "low": 0},
-            "review_output_path": "/tmp/plan/final-review.md",
-            "summary": "…",
-        }
-        result = autopilot.run_autopilot(
-            self._args("asl run /tmp/plan --review-harness codex --max-review-fix-plans 7"),
-            supervisor=self._complete_supervisor,
-            review_reader=lambda parsed: verdict,
-        )
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["reason"], "review_findings")
-        self.assertEqual(result["review_fix"]["max_generated_follow_up_plans"], 7)
+        # The runner owns repair cycles now; the helper attaches no follow-up
+        # fix-plan guidance.
+        self.assertNotIn("review_fix", result)
 
     def test_all_clear_stays_complete_with_review_attached(self) -> None:
         verdict = {

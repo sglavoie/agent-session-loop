@@ -8,7 +8,7 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 
 ## Purpose
 
-Research the actual codebase to validate and expand claims in session files produced by `session-split`. For each session, verify that referenced file paths exist, function/struct/class names are correct, code patterns match reality, and inter-session dependencies are satisfiable. Validate each session's `## Completion Contract` against the schema enforced by `agent_session_loop.contracts.parse_completion_contract`, re-resolve referenced paths/commands against the live codebase, record a manifest readiness snapshot for operator visibility, then run final preflight with `--mark-loop-ready` so clean expanded plans are ready for `session-run`. Write a concise annotations file alongside each session with findings, corrections, concrete details (line numbers, exact signatures, patterns to reuse), and contract issues when the contract is malformed or its references are stale. Optionally fix factual issues in the session files.
+Research the actual codebase to validate and expand claims in session files produced by `session-split`. For each session, verify that referenced file paths exist, function/struct/class names are correct, code patterns match reality, and inter-session dependencies are satisfiable. Validate each session's `## Completion Contract` against the schema enforced by `agent_session_loop.contracts.parse_completion_contract`, re-resolve referenced paths/commands against the live codebase, record a manifest readiness snapshot for operator visibility, then run final preflight with `--mark-loop-ready` so clean expanded plans are ready for `session-run`. This skill is a thin expert/manual wrapper over `agent_session_loop.prepare`: the research findings are assembled into a versioned validator result JSON that the module parses fail-closed, stores in the derived `prepare-validation.json` aggregate, renders into a concise annotations file alongside each session (findings, concrete details, patterns to reuse, contract issues), and uses to apply exact factual corrections to session files — malformed or incomplete findings can never mutate the plan.
 
 This skill is sequential-by-design. It does not extract, validate, or generate parallel-safety metadata, and it does not write `parallel-validation.md`. Legacy `## Parallel Metadata` blocks in split sessions and any pre-existing `parallel-validation.md` on disk are ignored.
 
@@ -216,11 +216,90 @@ For each session, find existing codebase patterns that the implementation should
 
 Include the file path and line range for each pattern.
 
-### Step 6: Write Annotation Files
+### Step 6: Emit Validator Output and Render Annotations
 
-For each session file `session-<ID>.md`, write `session-<ID>.expand.md` in the same directory. Preserve the exact dotted ID from the source filename in annotation filenames, headings, dependency references, and blockquotes.
+Do not hand-write `session-<ID>.expand.md` files and do not hand-edit session files to apply corrections. All validation, rendering, and plan mutation flows through `agent_session_loop.prepare` — the versioned validator schema and expansion renderer shared with the autonomous preparation pipeline. This skill is the thin expert/manual wrapper over that module: the LLM researches (Steps 2-5) and supplies structured findings; Python validates them fail-closed and owns every file write.
 
-**File structure**:
+Assemble the findings for each session into a validator result JSON payload (schema version `prepare.PREPARE_VALIDATION_VERSION` = 1):
+
+```json
+{
+  "version": 1,
+  "codebase_root": "<codebase root from Step 1>",
+  "sessions": [
+    {
+      "session_id": "<ID>",
+      "title": "<session title>",
+      "claims": [{"claim": "...", "claim_type": "P|S|F|D|B|N", "location": "path/to/file.go", "line": 42, "to_be_created": false}],
+      "issues": [{"issue_type": "path-missing|signature-mismatch|field-missing|dependency-missing|behavior-incorrect|name-missing", "summary": "...", "session_ref": "<quoted text from session>", "actual": "...", "fix": "..."}],
+      "details": [{"path": "path/to/file.go", "notes": ["Lines X-Y: ..."]}],
+      "patterns": [{"name": "...", "location": "file:line-range", "reason": "..."}],
+      "dependencies": [{"direction": "requires|provides", "session_id": "<ID>", "description": "..."}],
+      "contract_checked": true,
+      "contract_problems": [{"message": "<verbatim SCHEMA:/factual finding from Step 3>", "suggested_fix": "..."}],
+      "corrections": [{"expected_text": "<exact original text>", "replacement_text": "<exact corrected text>", "reason": "..."}]
+    }
+  ]
+}
+```
+
+Schema rules the parser enforces fail-closed (`PlanError`, nothing written):
+
+- Unknown keys, empty required strings, unknown `claim_type`/`issue_type`/`direction` values, invalid or duplicate session ids, and more than 3 `patterns` per session are all rejected.
+- Claims about code to be _created_ set `"to_be_created": true` (no `line`); they render as "N/A — to be created" rather than being flagged as issues.
+- `contract_problems` requires `contract_checked: true`. Feed the Step 3 `SCHEMA:`/`MISSING`/factual contract findings here verbatim.
+- `corrections` are exact factual text replacements only (wrong paths, names, signatures) with `expected_text != replacement_text`. Never propose design changes, plan restructuring, or contract-body edits as corrections — report those as `issues` or `contract_problems` instead.
+
+Process sessions in bounded batches (`prepare.DEFAULT_VALIDATION_BATCH_SIZE` = 4 sessions per payload; use `prepare.batch_sessions` semantics) and feed each batch through the module with a `Bash` heredoc that loads the package the same way the contract-validation heredoc does:
+
+```bash
+EXPAND_PLAN_DIR="<plan-dir>" \
+EXPAND_BATCH_FILE="<batch-payload>.json" \
+python3 - <<'PY'
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+asl_path = shutil.which("asl")
+if asl_path is not None:
+    repo_root = Path(asl_path).resolve().parents[3]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+from agent_session_loop import prepare
+
+plan_dir = Path(os.environ["EXPAND_PLAN_DIR"])
+payload = json.loads(
+    Path(os.environ["EXPAND_BATCH_FILE"]).read_text(encoding="utf-8")
+)
+
+aggregate = prepare.ingest_validator_output(plan_dir, payload)
+written = prepare.write_expansions(plan_dir, aggregate)
+outcomes = prepare.apply_corrections(plan_dir, aggregate)
+
+print(
+    json.dumps(
+        {
+            "sessions": list(aggregate.session_ids),
+            "files": [str(path) for path in written],
+            "corrections": [outcome.to_dict() for outcome in outcomes],
+        },
+        sort_keys=True,
+    )
+)
+PY
+```
+
+Behavior notes:
+
+- `ingest_validator_output` parses the payload fail-closed **before** any disk write, merges it into `prepare-validation.json` (the derived aggregate store; excluded from the stable readiness hash by construction), and saves atomically. Malformed or incomplete validator output cannot mutate the plan.
+- `write_expansions` renders every validated session's `session-<ID>.expand.md` from validated data only and inserts the `> **Expansion notes**:` reference line into `session-<ID>.md` idempotently, committing all files in one atomic transaction. Re-running a batch is a no-op for already-rendered content.
+- `apply_corrections` applies each proposed replacement only when its `expected_text` matches exactly once outside the `## Completion Contract` and `## Handoff` sections. Every other outcome is reported as `blocked` with a stable reason (`not-found`, `ambiguous`, `contract-body`, `handoff-body`, `structural`) and left unapplied. Re-runs report `already-applied` and change nothing.
+- Collect the printed `corrections` outcomes for the Step 7 report: `applied` entries are the fixes; `blocked` entries are surfaced to the user as blockers requiring manual judgment.
+
+**Rendered file structure** (produced by `prepare.render_expansion`; shown for reference — never hand-write it):
 
 ```markdown
 # Session <ID> Expansion: <title>
@@ -285,24 +364,18 @@ For each session file `session-<ID>.md`, write `session-<ID>.expand.md` in the s
 _no contract issues found_
 ```
 
-Use one bullet per issue in the form `<session-id>: <issue>: <suggested fix>`. When there are zero issues, replace the bullet list with the literal italic line `_no contract issues found_` so downstream readers can distinguish "checked and clean" from "not checked".
+The renderer emits one bullet per contract problem in the form `<session-id>: <issue>: <suggested fix>`. When `contract_checked` is true and `contract_problems` is empty, it emits the literal italic line `_no contract issues found_` so downstream readers can distinguish "checked and clean" from "not checked"; when `contract_checked` is false the section is omitted entirely.
 
 Do not emit a `## Parallel Safety` section in expansion files. Do not write a `parallel-validation.md` file in any mode; this skill no longer participates in parallel scheduling, so the artifact would be misleading. If `parallel-validation.md` already exists on disk from an older expansion run, leave it untouched — it is ignored by `session-run` and by `agent_session_loop.plans.stable_readiness_sha256`.
 
-**After writing each annotation file**, edit the corresponding `session-<ID>.md` to add a reference. Insert a new blockquote line immediately after the `> **Before starting**:` line:
-
-```
-> **Expansion notes**: Read `session-<ID>.expand.md` for verified line numbers, corrected paths, and patterns to reuse.
-```
-
-Use the actual session ID from the filename. If the line already exists with the same expansion filename (idempotence), skip the edit for that file.
+The `> **Expansion notes**:` reference line in each `session-<ID>.md` (inserted immediately after the `> **Before starting**:` line, idempotently) is written by `prepare.write_expansions` as part of the same atomic transaction — never insert it by hand.
 
 Rules:
 
-- Only include claims that were checked and confirmed in the Verified Claims table. Do not list every trivial claim.
-- The Concrete Details section should provide just enough information that the executor can work without re-reading source files — include only what is needed.
-- Claims about code to be _created_ (new files, new functions) should be marked "N/A — to be created" in the Verified Claims table, not flagged as issues. Only flag them if they conflict with something already existing (e.g., a function name already taken with a different signature).
-- Omit empty sections entirely (e.g., if no issues, omit `## Issues`; if no dependencies, omit `## Session Dependencies`).
+- Only include claims in the payload's `claims` list that were checked and confirmed against the codebase. Do not list every trivial claim; the renderer emits exactly what the validated payload contains.
+- The `details` entries should provide just enough information that the executor can work without re-reading source files — include only what is needed.
+- Claims about code to be _created_ (new files, new functions) set `to_be_created: true`, not an issue. Only flag them as issues if they conflict with something already existing (e.g., a function name already taken with a different signature).
+- Empty sections are omitted from the rendered markdown automatically; supply empty lists rather than placeholder content.
 - Do not edit `manifest.md` by hand. The only allowed manifest readiness mutation is the final `asl preflight --mark-loop-ready` command in Step 7.
 
 ### Step 7: Report and Offer Fixes
@@ -335,10 +408,10 @@ Print a concise summary:
 
 **If issues were found**:
 
-- Use `Edit` to immediately fix factual errors (wrong paths, incorrect signatures, wrong names) in the session `.md` files — do not ask the user first
-- Only correct factual claims — never alter implementation logic, plan structure, or approach
-- Report the corrections that were applied alongside the issue list
-- Do **not** auto-edit contract bodies. Contract issues are emitted as suggestions in the "Contract Issues" section of each expansion file; the user must repair them by re-running `session-split` Step 9a, editing the contract by hand, or using `<skill-prefix>plan-preflight-iterate <plan-dir>` before final preflight can mark the plan loop-ready.
+- Factual errors (wrong paths, incorrect signatures, wrong names) are fixed exclusively through the `corrections` entries applied by `prepare.apply_corrections` in Step 6 — do not ask the user first, and do not bypass the module with direct `Edit` calls on session files
+- Only correct factual claims — never alter implementation logic, plan structure, or approach; the module additionally blocks any correction whose expected text is ambiguous, missing, heading-changing, or inside the contract/handoff sections
+- Report the `applied` correction outcomes alongside the issue list, and surface every `blocked` outcome with its reason (`not-found`, `ambiguous`, `contract-body`, `handoff-body`, `structural`) as a blocker requiring the user's judgment
+- Do **not** auto-edit contract bodies. Contract issues are emitted as suggestions in the "Contract Issues" section of each expansion file (from the payload's `contract_problems`); the user must repair them by re-running `session-split` Step 9a, editing the contract by hand, or using `<skill-prefix>plan-preflight-iterate <plan-dir>` before final preflight can mark the plan loop-ready.
 
 **If zero issues**:
 
@@ -349,11 +422,11 @@ Print a concise summary:
 Only when final preflight succeeds with `ok: true` and readiness is `loop-ready`, end by printing both ready-to-paste next-step commands so the user can proceed directly to execution without switching context:
 
 - `<skill-prefix>session-run <plan-directory>/` — run the next pending session in the current conversation, one session at a time (the default when the operator wants to stay in the loop between sessions).
-- `<skill-prefix>asl asl run <plan-directory>/ --harness claude --review-harness codex [--max-review-fix-plans N]` — hand the whole run to the `asl` autopilot, which supervises `asl run` end to end with Claude for implementation turns and Codex for final review, pausing only for human decisions it cannot resolve. Omit the optional cap to use the `asl` skill default.
+- `<skill-prefix>asl asl run <plan-directory>/ --harness claude --review-harness codex [--max-review-fix-cycles N]` — hand the whole run to the `asl` autopilot, which supervises `asl run` end to end with Claude for implementation turns and Codex for final review, pausing only for human decisions it cannot resolve. Omit the optional cap to use the runner default of 2 automatic repair/rereview cycles (`--max-review-fix-plans` is a deprecated alias).
 
-When printing an `asl run` next-step command from this skill, default to including `--harness claude --review-harness codex` unless the user explicitly requested different harnesses, and append the optional placeholder `[--max-review-fix-plans N]` whenever a `--review-harness` is present so operators know the review-fix loop cap is configurable. Do not append these flags to the `session-run` skill invocation; `session-run` accepts only the plan directory and runs in the current conversation's active harness.
+When printing an `asl run` next-step command from this skill, default to including `--harness claude --review-harness codex` unless the user explicitly requested different harnesses, and append the optional placeholder `[--max-review-fix-cycles N]` whenever a `--review-harness` is present so operators know the automatic repair/rereview cycle cap is configurable. Do not append these flags to the `session-run` skill invocation; `session-run` accepts only the plan directory and runs in the current conversation's active harness.
 
-Otherwise, end with the ready-to-paste `<skill-prefix>plan-preflight-iterate <plan-directory>/` command. Note that `asl run <plan-directory>/ --harness claude --review-harness codex [--max-review-fix-plans N]` self-heals stale/missing `progress.md` and recomputable `manifest.md` readiness metadata before pausing (surfaced via `readiness_gate_repair` in the run JSON), so the iterate skill is only required when a non-derived blocker (contracts, paths, locks, etc.) remains.
+Otherwise, end with the ready-to-paste `<skill-prefix>plan-preflight-iterate <plan-directory>/` command. Note that `asl run <plan-directory>/ --harness claude --review-harness codex [--max-review-fix-cycles N]` self-heals stale/missing `progress.md` and recomputable `manifest.md` readiness metadata before pausing (surfaced via `readiness_gate_repair` in the run JSON), so the iterate skill is only required when a non-derived blocker (contracts, paths, locks, etc.) remains.
 
 ## Important Notes
 
@@ -364,7 +437,8 @@ Otherwise, end with the ready-to-paste `<skill-prefix>plan-preflight-iterate <pl
 - Legacy `parallel-validation.md`, `## Parallel Execution`, `### Dependency Waves`, `### Session Ownership`, `### Parallel Worker Commands`, `### Worker Prompts`, `### Serial Blockers`, and per-session `## Parallel Metadata` blocks may still exist on disk for older plans; read them only as context if helpful, never as authoritative scheduling guidance, and never regenerate them.
 - New code claims (files or functions to be created) are valid and should not be flagged unless they conflict with existing code
 - If the codebase root is a different repository from the current working directory, `cd` to it before running Glob/Grep/Read operations
-- When applying fixes to session files, only correct factual errors — never rewrite implementation logic, change the approach, or restructure the plan
+- All expansion writes, reference-line insertions, and factual fixes flow through `agent_session_loop.prepare` (`ingest_validator_output`, `write_expansions`, `apply_corrections`) — never hand-write `.expand.md` files or `Edit` session files directly. Corrections only correct factual errors and apply only on an exact single match outside the contract/handoff sections; ambiguous, design-changing, or contract-body corrections surface as blockers.
+- `prepare-validation.json` is a derived aggregate of validated findings. It is excluded from the stable readiness hash by construction, safe to regenerate, and never authoritative over the session files themselves.
 - Prefer `Grep` with `output_mode: "content"` and line numbers for signature verification — this gives the executor exact references
 - Contract validation calls `agent_session_loop.contracts.parse_completion_contract` directly — never re-implement schema rules in this skill. Surface `PlanError` messages verbatim under "Contract Issues" so the wording stays aligned with `asl preflight` and `asl verify`.
 - Contract issues are advisory: surface them in the `.expand.md` file's `## Contract Issues` section, but do **not** auto-edit contract bodies or default skeleton placeholders. The user repairs these and re-runs this skill or `<skill-prefix>plan-preflight-iterate <plan-dir>` so final preflight can clear the findings and mark loop-ready.

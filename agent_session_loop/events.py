@@ -14,6 +14,10 @@ import threading
 from typing import Any
 
 
+# Schema version stamped on every event record. Readers must treat the
+# absence of a ``version`` key as v1 and accept v2 records that carry it.
+EVENT_SCHEMA_VERSION = 2
+
 RUNNER_STATUS_PREFIX = "Runner status:"
 RUNNER_PAUSE_PREFIX = "RUNNER_PAUSE:"
 RUN_PAUSED_EVENT = "run_paused"
@@ -23,6 +27,7 @@ COMMIT_STARTED_EVENT = "commit_started"
 COMMIT_FINISHED_EVENT = "commit_finished"
 RUN_CONTROL_EVENT = "run_control"
 REVIEW_SESSION_CREATED_EVENT = "review_session_created"
+REVIEW_CYCLE_EVENT = "review_cycle"
 REPLY_PROVIDED_EVENT = "reply_provided"
 VERIFICATION_STARTED_EVENT = "verification_started"
 VERIFICATION_CHECK_STARTED_EVENT = "verification_check_started"
@@ -46,8 +51,31 @@ RUN_CONTROL_ACTIONS: tuple[str, ...] = (
     RUN_CONTROL_ACTION_TAIL_DISABLED,
     RUN_CONTROL_ACTION_HARNESS_SELECTED,
 )
+# Stable, evidence-based harness-failure categories produced by
+# ``agent_session_loop.runner.classify_harness_failure``. A nonzero harness
+# exit is classified into exactly one of these; ``nonzero-exit`` remains the
+# fail-closed fallback for unrecognized (and legacy) failures. Keep these in
+# sync with the classifier and with the supervisor's recoverable-pause set in
+# ``skills/asl/scripts/asl_autopilot.py``.
+PAUSE_REASON_NONZERO_EXIT = "nonzero-exit"
+PAUSE_REASON_QUOTA_EXHAUSTED = "quota-exhausted"
+PAUSE_REASON_AUTH_FAILED = "auth-failed"
+PAUSE_REASON_INVALID_MODEL = "invalid-model"
+PAUSE_REASON_TRANSPORT_FAILED = "transport-failed"
+PAUSE_REASON_INTERRUPTED = "interrupted"
+# Review repair-cycle materialization could not produce safe repair sessions
+# (see ``agent_session_loop.review_repair.REVIEW_REPAIR_REASON_MALFORMED``).
+PAUSE_REASON_MALFORMED_REVIEW_REPAIR = "malformed-review-repair"
+
+# The subset of harness-failure categories that a supervisor may safely retry
+# by relaunching the same session. Quota, authentication, invalid-model, and
+# unclassified (fail-closed ``nonzero-exit``) failures are never in this set.
+RETRYABLE_HARNESS_FAILURE_REASONS: tuple[str, ...] = (
+    PAUSE_REASON_TRANSPORT_FAILED,
+)
+
 PAUSE_REASONS: tuple[str, ...] = (
-    "nonzero-exit",
+    PAUSE_REASON_NONZERO_EXIT,
     "timeout",
     "no-status-change",
     "multiple-status-changes",
@@ -68,9 +96,14 @@ PAUSE_REASONS: tuple[str, ...] = (
     "verify-failed",
     "no-contract",
     "malformed-contract",
-    "interrupted",
+    PAUSE_REASON_INTERRUPTED,
     "review-harness-required",
     "review-mutated-worktree",
+    PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
+    PAUSE_REASON_QUOTA_EXHAUSTED,
+    PAUSE_REASON_AUTH_FAILED,
+    PAUSE_REASON_INVALID_MODEL,
+    PAUSE_REASON_TRANSPORT_FAILED,
 )
 _EVENT_WRITE_LOCK = threading.Lock()
 
@@ -84,12 +117,14 @@ class Event:
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
+    version: int = EVENT_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "created_at": self.created_at,
             "name": self.name,
             "payload": self.payload,
+            "version": self.version,
         }
 
 

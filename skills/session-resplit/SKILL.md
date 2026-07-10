@@ -101,11 +101,11 @@ Never infer by modifying or reading the original source plan outside the split p
 
 ## Instructions
 
-### Step 1: Discover Helpers
+### Step 1: Discover the Helper
 
-If `skills/session-resplit/scripts/resplit-session.py` exists, prefer using that deterministic helper for parsing, lock acquisition, archival, child generation, and ledger updates. Read the script interface before running it.
+All resplit mutations go through `skills/session-resplit/scripts/resplit-session.py` (also reachable through the installed skill directory). The helper owns parsing, lock acquisition, archival, child generation, contract allocation, ledger updates, and readiness refresh by delegating to `agent_session_loop.authoring` — the same rendering, table-mutation, transaction, and readiness API used by `session-split`. Do not hand-write child session files, hand-edit manifest tables, or reimplement any of its schemas in this skill; if the helper is missing, stop with a clear error instead of performing the contract manually.
 
-If no helper exists, perform the contract manually. Keep edits scoped to the selected plan directory and `skills/session-resplit/` only when improving this skill.
+This skill's job is the semantic work the helper cannot do: choosing good child boundaries, writing child instructions, and allocating the parent's completion contract across children (Step 5). Everything mechanical belongs to Python.
 
 ### Step 2: Inspect the Plan
 
@@ -178,80 +178,32 @@ Strip any `## Parallel Metadata` block from the parent body before partitioning 
 
 Create child sessions that are useful execution units, not arbitrary slices. Prefer boundaries based on files, subsystems, phases, tests, or explicit deliverables. When a compact parent paragraph lists deliverables after a colon or in bullets, split on those deliverables before falling back to generic phases.
 
-Default child metadata:
+The helper renders each child file deterministically (heading, context/previous-session references, `## Lineage`, `## Parent Scope`, `## Child Scope`, `## Completion Contract`, `## Handoff`) via `agent_session_loop.authoring.render_session_file`. Do not author child markdown by hand; supply semantics through `--child-spec`.
 
-- Child IDs are `<PARENT_ID>.1`, `<PARENT_ID>.2`, ..., `<PARENT_ID>.<N>`.
-- Child files are `session-<CHILD_ID>.md`.
-- The first child inherits the parent's previous-session reference. If the parent did not have one, fall back to the session that immediately precedes the parent in dotted numeric order.
-- Each later child's previous-session reference points to the prior child file.
-
-Each child session must include:
-
-```
-# Session <CHILD_ID>: <child title>
-
-> **Before starting**: Read `context.md` in this directory for shared project context.
-> **Previous session**: Read the **Handoff** section at the bottom of `<previous-session-file>`.
-
-## Lineage
-
-- **Split from**: `session-<PARENT_ID>.md`
-- **Parent title**: <parent title>
-- **Child session**: <CHILD_ID>
-- **Parent archive**: `<archive-path>`
-- **Archived parent expansion**: historical context only; rerun `<skill-prefix>session-expand` for current facts. <!-- include only when the parent had an expansion file -->
-
----
-
-## Parent Scope
-
-- Full parent instructions are archived at `<archive-path>/session-<PARENT_ID>.md`.
-- Preserve the archived parent implementation intent while completing only this child scope.
-- Archived parent expansion notes are at `<archive-path>/session-<PARENT_ID>.expand.md`; use them as historical context until `<skill-prefix>session-expand` regenerates current notes. <!-- include only when the parent had an expansion file -->
-
-## Child Scope
-
-<child-specific instructions>
-
----
-
-## Completion Contract
-
-### Done when
-
-- <child title> is implemented as described in the child scope above.
-
-### Verify
+**Child spec schema** (`--child-spec <file>` takes a JSON list, or an object with a `children` list; one entry per child, in child-ID order):
 
 ```json
 {
-  "session": "<CHILD_ID>",
-  "checks": [
-    {
-      "type": "command",
-      "argv": ["python3", "-m", "unittest", "-q"],
-      "timeout_seconds": 60
-    }
-  ]
+  "title": "<child title>",
+  "instructions": "<child-scope instructions markdown>",
+  "done_when": ["<explicit exit criterion>", "..."],
+  "inherit_checks": ["<parent check name>", "..."],
+  "checks": [{"name": "...", "type": "command|file_exists|regex_in_file", "...": "..."}]
 }
 ```
 
----
+Contract allocation rules (enforced by the helper; violations fail closed before any file is touched):
 
-## Handoff
+- Every child must state explicit `done_when` criteria and allocate at least one verification check via `inherit_checks` (parent check names) and/or `checks` (explicit replacement check objects, same JSON shape as contract checks).
+- When any child inherits parent checks, **every** parent check must be inherited by at least one child; leaving a parent check unallocated is rejected as `ambiguous-contract`.
+- When no child inherits, every child must carry its own `checks` — that is the explicit replacement of the parent recipe.
+- `inherit_checks` naming a check the parent contract does not define, legacy `{title, instructions}`-only specs, and empty allocations are all rejected (`ambiguous-contract`). Unknown spec keys are rejected (`ambiguous-input`).
 
-<!-- Fill this section when the session is complete -->
+Without `--child-spec`, the helper derives every child contract from the parent's own `## Completion Contract`: each child inherits the parent's full verify recipe, and the last child additionally inherits the parent's `Done when` criteria. A parent without a parseable contract is rejected with `no-contract` — the helper never inserts a `python3 -m unittest` placeholder. Prefer explicit specs whenever the parent's checks can be split meaningfully.
 
-- **Status**: pending
-- **Files modified**: (none yet)
-- **Key decisions**: (none yet)
-- **Blockers for next session**: (none)
-- **Notes**:
-```
+Child IDs are `<PARENT_ID>.1` through `<PARENT_ID>.<N>`; the first child inherits the parent's previous-session reference (or the session immediately preceding the parent), and each later child points at the prior child. The helper handles all of this.
 
-The `## Completion Contract` block is required so `asl verify` and `asl run` enforce the same gate on generated children that the rest of the plan uses. The default `Verify` recipe runs `python3 -m unittest -q` as a placeholder; rerun `session-expand` afterwards to refine the recipe against the actual codebase.
-
-If the parent had expansion notes, do not copy stale line numbers into child instructions as authoritative facts. Instead, place a short lineage note saying the archived parent expansion may contain historical context and that `session-expand` must be rerun.
+If the parent had expansion notes, do not copy stale line numbers into child instructions as authoritative facts. The helper's lineage section already marks the archived parent expansion as historical context pending a `session-expand` rerun.
 
 ### Step 6: Archive the Parent
 
@@ -274,24 +226,19 @@ Do not touch `parallel-validation.md` if it exists. It is a legacy artifact from
 
 ### Step 7: Write Children and Update Ledgers
 
-Write all child `session-<CHILD_ID>.md` files in the plan root.
+The helper performs all writes in one atomic transaction (`authoring.PlanTransaction`): child files, downstream previous-session reference repair, and derived ledger updates land together or not at all, and a failed commit rolls the parent archive back too. It then refreshes the manifest readiness metadata to `draft` with a recomputed stable SHA (`authoring.refresh_readiness_metadata`), since the plan content changed.
 
-Update `manifest.md` as derived bookkeeping:
+Ledger behavior (owned by `authoring.replace_session_status_rows` / `replace_manifest_sessions_count`):
 
-- Update the top-level `**Sessions**:` count when present.
-- In the primary `## Sessions` table, replace the parent row with child rows in child-ID order.
-- Keep non-status cells intact where practical, but set each child status to `pending` and file to `session-<CHILD_ID>.md`.
-- Append a `## Resplit Notes` section to `manifest.md` describing which parent was split, which child files were created, and the archive directory used.
-
-Do not edit legacy dependency-wave or ownership tables left in `manifest.md`. Those tables are not maintained by the serial workflow; leave their rows untouched even when they reference the resplit parent.
-
-Update `context.md` only when it contains a clear markdown session-status table with both a session ID column and a `Status` column. Do not rewrite prose, checklists, ambiguous tables, or unrelated uses of `pending`.
+- `manifest.md`: the `**Sessions**:` count is updated, the parent row in every recognized session-status table is replaced with child rows (`pending`, child titles/files), and a `## Resplit Notes` section records the split and archive path.
+- `context.md`: only clear session-status tables (session ID column plus `Status` column) are rewritten; prose, checklists, and ambiguous tables are untouched.
+- Legacy dependency-wave and ownership tables are never edited, even when they reference the resplit parent.
 
 If the selected parent was the first pending session, the first generated child becomes the next session that `session-run` should execute.
 
 ### Step 8: Regenerate Expansion Guidance
 
-After a successful resplit, any parent expansion file is stale by definition and the generated child contracts use placeholder verify recipes. The report must instruct the user to rerun `session-expand` against the plan directory before continuing execution so child expansion notes are written and the verify recipes can be refined.
+After a successful resplit, any parent expansion file is stale by definition and the plan readiness state has been reset to `draft`. The report must instruct the user to rerun `session-expand` against the plan directory before continuing execution so child expansion notes are written, the derived child contracts can be refined against the actual codebase, and the plan can be re-marked loop-ready.
 
 Ready-to-paste command:
 
@@ -328,9 +275,9 @@ RESPLIT_STATUS: paused
 RESPLIT_PAUSE: <reason> - <short detail>
 ```
 
-Prefer stable reasons such as `malformed-plan`, `unknown-status`, `lock-contention`, `blocked`, `collision`, `cannot-split`, or `ambiguous-input`.
+Prefer stable reasons such as `malformed-plan`, `unknown-status`, `lock-contention`, `blocked`, `collision`, `cannot-split`, `ambiguous-input`, `no-contract`, or `ambiguous-contract`. The last two come from the helper's contract-allocation gate: `no-contract` means the parent has no completion contract to derive children from (supply `--child-spec` with explicit contracts), and `ambiguous-contract` means the child specs left the parent's checks partially allocated or a child without explicit criteria/checks.
 
-End every successful report with exactly one `Next command:` line. Because resplitting invalidates the parent expansion file and leaves generated children with placeholder verify recipes, the next command should normally be:
+End every successful report with exactly one `Next command:` line. Because resplitting invalidates the parent expansion file and resets readiness to `draft`, the next command should normally be:
 
 ```
 Next command: $session-expand <plan-dir>/
@@ -357,4 +304,6 @@ Use a trailing slash for displayed plan directories.
 - Do not emit `## Parallel Metadata` blocks in generated children. Generated children are serial work units; each must include a parseable `## Completion Contract` block instead.
 - Do not read or rewrite `parallel-validation.md`. It is a legacy artifact that both this skill and `session-run` ignore.
 - Do not touch legacy dependency-wave or ownership tables in `manifest.md`. Leave their rows intact even when they reference the resplit parent.
-- After resplitting, rerun `session-expand` before `session-run` so child expansion notes are written and child verify recipes can be refined past the default placeholder.
+- Never author child files, manifest tables, or contracts by hand — the helper and `agent_session_loop.authoring` own those schemas and mutation rules. This skill supplies boundaries, instructions, and contract allocation only.
+- Child contracts are never placeholders: they are derived from the parent contract or supplied explicitly per child. Ambiguous allocation fails closed (`no-contract` / `ambiguous-contract`) instead of inserting `python3 -m unittest`.
+- After resplitting, rerun `session-expand` before `session-run` so child expansion notes are written, derived child contracts are refined, and the `draft` readiness state can be advanced back to loop-ready.

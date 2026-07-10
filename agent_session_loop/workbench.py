@@ -2101,6 +2101,17 @@ GENERIC_RECOVERY_PAUSE_REASONS: tuple[str, ...] = (
     "interrupted",
     "review-harness-required",
     "review-mutated-worktree",
+    # Review repair-cycle materialization failed closed (Session 18); the
+    # review artifacts or plan structure need inspection, not a reply.
+    "malformed-review-repair",
+    # Harness-failure classification categories (Session 5). These are
+    # inspect/relaunch-from-the-workbench failures rather than reply-needed
+    # question pauses; quota/auth/invalid-model are non-retryable and surface
+    # generic recovery guidance, transport-failed is retryable upstream.
+    "quota-exhausted",
+    "auth-failed",
+    "invalid-model",
+    "transport-failed",
 )
 
 
@@ -3055,6 +3066,46 @@ def _verification_check_evidence(
     return tuple(rows)
 
 
+_VERIFICATION_ARTIFACT_STREAMS: tuple[tuple[str, str], ...] = (
+    ("stdout_artifact_path", "stdout"),
+    ("stderr_artifact_path", "stderr"),
+)
+
+
+def _verification_check_artifacts(
+    verification: Mapping[str, Any] | None,
+) -> tuple[RecoveryArtifactReference, ...]:
+    """Follow v2 ``*_artifact_path`` references on failed verification checks.
+
+    Schema v2 checks reference the full failed-command output as a gzip
+    artifact instead of embedding it. Surfacing those paths lets the Recovery
+    Center point operators at the recoverable evidence (readable through the
+    bounded gzip-aware log API) rather than only the turn-level logs.
+    """
+    if verification is None:
+        return ()
+    refs: list[RecoveryArtifactReference] = []
+    for check in _payload_mappings(verification, "checks"):
+        if check.get("status") == "pass" and not _payload_str(
+            check, "failure_reason"
+        ):
+            continue
+        name = _payload_str(check, "name") or "check"
+        for key, stream in _VERIFICATION_ARTIFACT_STREAMS:
+            path = _coerce_path_value(check.get(key))
+            if path is None:
+                continue
+            refs.append(
+                RecoveryArtifactReference(
+                    label=f"Check {name} {stream}",
+                    path=path,
+                    kind="verification-output",
+                    source="verification-check",
+                )
+            )
+    return tuple(refs)
+
+
 def _harness_config_artifacts(
     details: Mapping[str, Any],
 ) -> tuple[RecoveryArtifactReference, ...]:
@@ -3448,10 +3499,14 @@ def _build_verification_failure_recovery(
             reason=reason,
         )
     )
-    artifacts = context.base_artifacts + _artifact_references_from_payload(
-        selected_turn,
-        source="failed-turn",
-        label_prefix="Failed turn",
+    artifacts = (
+        context.base_artifacts
+        + _artifact_references_from_payload(
+            selected_turn,
+            source="failed-turn",
+            label_prefix="Failed turn",
+        )
+        + _verification_check_artifacts(verification)
     )
     return _build_context_recovery_payload(
         context,

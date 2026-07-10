@@ -1,0 +1,1141 @@
+"""Workbench registry, archive, and discovery tests.
+
+Split from tests/test_agent_session_loop.py."""
+
+from __future__ import annotations
+
+import argparse
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+import dataclasses
+from datetime import datetime, timezone
+import errno
+import hashlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import pty
+import select
+import shlex
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import urllib.parse
+from unittest import mock
+
+from agent_session_loop import (
+    artifacts,
+    authoring,
+    baseline,
+    baseline_cache,
+    cli,
+    compact_state,
+    config,
+    contracts,
+    control_queue,
+    events,
+    harnesses,
+    install_verify,
+    plans,
+    preflight,
+    prepare,
+    progress_cli,
+    progress_repair,
+    qna,
+    review,
+    review_repair,
+    run_control,
+    runner,
+    state,
+    tail,
+    verification,
+    workbench,
+    workbench_server,
+)
+from agent_session_loop.formatting import (
+    format_duration_seconds,
+    format_turn_finished_message,
+    format_turn_started_message,
+)
+from tests.support import (
+    patched_env,
+    _write_plan_dir,
+    _seed_archivable_plan,
+)
+
+
+class WorkbenchRegistryTests(unittest.TestCase):
+    def test_default_registry_path_uses_xdg_config_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            xdg = Path(tmp) / "config"
+            with patched_env(XDG_CONFIG_HOME=str(xdg)):
+                path = workbench.default_registry_path()
+            self.assertEqual(
+                path,
+                xdg.resolve() / config.APP_NAME / workbench.REGISTRY_FILE_NAME,
+            )
+
+    def test_load_returns_empty_registry_when_file_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / workbench.REGISTRY_FILE_NAME
+
+            registry = workbench.load_registry(registry_path)
+
+            self.assertEqual(workbench.REGISTRY_SCHEMA_VERSION, registry.schema_version)
+            self.assertEqual((), registry.pins)
+            self.assertEqual((), registry.plan_roots)
+            self.assertEqual((), registry.warnings)
+            self.assertEqual(registry_path.resolve(), registry.path)
+
+    def test_load_parses_pins_roots_and_profile_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
+            plan_root = tmp_path / "plans"
+            registry_path = tmp_path / workbench.REGISTRY_FILE_NAME
+            payload = {
+                "schema_version": workbench.REGISTRY_SCHEMA_VERSION,
+                "pins": [
+                    {
+                        "plan_dir": str(plan_dir),
+                        "label": "Alpha plan",
+                        "profile": {
+                            "cwd": str(tmp_path),
+                            "harness": "claude",
+                            "model": "claude-sonnet",
+                            "effort": "high",
+                            "timeout": 1200,
+                            "commit_mode": "per-session",
+                            "review_harness": "codex",
+                            "unsafe_bypass": True,
+                            "allow_not_loop_ready": False,
+                            "note": "ship soon",
+                        },
+                    },
+                    {"plan_dir": str(plan_dir / "missing-but-canonical")},
+                ],
+                "plan_roots": [str(plan_root)],
+            }
+            registry_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            registry = workbench.load_registry(registry_path)
+
+            self.assertEqual((), registry.warnings)
+            self.assertEqual(2, len(registry.pins))
+            first, second = registry.pins
+            self.assertEqual(str(plan_dir), first.plan_dir)
+            self.assertEqual("Alpha plan", first.label)
+            self.assertEqual("claude", first.profile.harness)
+            self.assertEqual("codex", first.profile.review_harness)
+            self.assertTrue(first.profile.unsafe_bypass)
+            self.assertFalse(first.profile.allow_not_loop_ready)
+            self.assertEqual("per-session", first.profile.commit_mode)
+            self.assertEqual(1200, first.profile.timeout)
+            self.assertIsNone(second.label)
+            self.assertEqual(workbench.LaunchProfile(), second.profile)
+            self.assertEqual((str(plan_root),), registry.plan_roots)
+
+    def test_load_warns_on_malformed_entries_without_failing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
+            registry_path = tmp_path / workbench.REGISTRY_FILE_NAME
+            payload = {
+                "schema_version": "not-a-number",
+                "pins": [
+                    "not-an-object",
+                    {"label": "missing plan_dir"},
+                    {
+                        "plan_dir": str(plan_dir),
+                        "profile": {
+                            "harness": "bogus",
+                            "commit_mode": "bogus",
+                            "review_harness": "bogus",
+                        },
+                    },
+                    {"plan_dir": str(plan_dir)},
+                ],
+                "plan_roots": "not-a-list",
+            }
+            registry_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            registry = workbench.load_registry(registry_path)
+
+            self.assertEqual(1, len(registry.pins))
+            self.assertEqual((), registry.plan_roots)
+            self.assertEqual(workbench.REGISTRY_SCHEMA_VERSION, registry.schema_version)
+            joined_warnings = "\n".join(registry.warnings)
+            self.assertIn("schema_version", joined_warnings)
+            self.assertIn("entry must be an object", joined_warnings)
+            self.assertIn("missing or invalid plan_dir", joined_warnings)
+            self.assertIn("unsupported harness 'bogus'", joined_warnings)
+            self.assertIn("unsupported commit_mode 'bogus'", joined_warnings)
+            self.assertIn("duplicate plan_dir", joined_warnings)
+            self.assertIn("plan_roots: must be a list", joined_warnings)
+
+    def test_load_raises_on_invalid_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / workbench.REGISTRY_FILE_NAME
+            registry_path.write_text("not json", encoding="utf-8")
+
+            with self.assertRaises(workbench.WorkbenchError):
+                workbench.load_registry(registry_path)
+
+    def test_load_warns_when_schema_version_is_newer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / workbench.REGISTRY_FILE_NAME
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": workbench.REGISTRY_SCHEMA_VERSION + 5,
+                        "pins": [],
+                        "plan_roots": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            registry = workbench.load_registry(registry_path)
+
+            self.assertEqual(
+                workbench.REGISTRY_SCHEMA_VERSION + 5, registry.schema_version
+            )
+            joined_warnings = "\n".join(registry.warnings)
+            self.assertIn("newer than supported", joined_warnings)
+
+    def test_save_round_trip_through_upsert_and_remove(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
+            other_dir = _write_plan_dir(tmp_path / "plans" / "beta")
+            registry_path = tmp_path / "config" / workbench.REGISTRY_FILE_NAME
+
+            registry = workbench.load_registry(registry_path)
+            self.assertEqual((), registry.pins)
+
+            registry = workbench.upsert_pin(
+                registry,
+                plan_dir,
+                label="Alpha",
+                profile=workbench.LaunchProfile(harness="codex", timeout=600),
+            )
+            registry = workbench.upsert_pin(registry, other_dir)
+            workbench.save_registry(registry, registry_path)
+            self.assertTrue(registry_path.is_file())
+
+            reloaded = workbench.load_registry(registry_path)
+            self.assertEqual(2, len(reloaded.pins))
+            alpha_pin = next(
+                pin for pin in reloaded.pins if pin.plan_dir == str(plan_dir)
+            )
+            self.assertEqual("Alpha", alpha_pin.label)
+            self.assertEqual("codex", alpha_pin.profile.harness)
+            self.assertEqual(600, alpha_pin.profile.timeout)
+
+            updated = workbench.upsert_pin(
+                reloaded, plan_dir, label="Renamed alpha"
+            )
+            self.assertEqual(2, len(updated.pins))
+            renamed_pin = next(
+                pin for pin in updated.pins if pin.plan_dir == str(plan_dir)
+            )
+            self.assertEqual("Renamed alpha", renamed_pin.label)
+            self.assertEqual(workbench.LaunchProfile(), renamed_pin.profile)
+
+            after_remove = workbench.remove_pin(updated, plan_dir)
+            self.assertEqual(1, len(after_remove.pins))
+            self.assertEqual(str(other_dir), after_remove.pins[0].plan_dir)
+
+
+class WorkbenchArchiveRetentionTests(unittest.TestCase):
+    def test_missing_retention_defaults_without_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / workbench.REGISTRY_FILE_NAME
+            registry_path.write_text(
+                json.dumps({"schema_version": 1, "pins": [], "plan_roots": []}),
+                encoding="utf-8",
+            )
+
+            registry = workbench.load_registry(registry_path)
+
+            self.assertEqual(
+                workbench.DEFAULT_ARCHIVE_RETENTION_DAYS,
+                registry.archive_retention_days,
+            )
+            self.assertEqual((), registry.warnings)
+
+    def test_invalid_retention_coerces_to_default_with_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / workbench.REGISTRY_FILE_NAME
+            registry_path.write_text(
+                json.dumps({"archive_retention_days": 0}), encoding="utf-8"
+            )
+
+            registry = workbench.load_registry(registry_path)
+
+            self.assertEqual(
+                workbench.DEFAULT_ARCHIVE_RETENTION_DAYS,
+                registry.archive_retention_days,
+            )
+            self.assertTrue(
+                any("archive_retention_days" in w for w in registry.warnings)
+            )
+
+    def test_retention_round_trips_through_save(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / workbench.REGISTRY_FILE_NAME
+            registry = workbench.load_registry(registry_path)
+            registry = workbench.set_archive_retention_days(registry, 7)
+
+            workbench.save_registry(registry, registry_path)
+            reloaded = workbench.load_registry(registry_path)
+
+            self.assertEqual(7, reloaded.archive_retention_days)
+            self.assertEqual((), reloaded.warnings)
+
+    def test_set_retention_rejects_non_positive(self) -> None:
+        registry = workbench.WorkbenchRegistry()
+        with self.assertRaises(workbench.WorkbenchError):
+            workbench.set_archive_retention_days(registry, 0)
+        with self.assertRaises(workbench.WorkbenchError):
+            workbench.set_archive_retention_days(registry, True)
+
+
+class WorkbenchArchiveStorageTests(unittest.TestCase):
+    def _metadata(self, tmp_path: Path, archive_id: str) -> workbench.ArchiveMetadata:
+        return workbench.ArchiveMetadata(
+            archive_id=archive_id,
+            original_plan_dir=str(tmp_path / "plans" / "alpha"),
+            archived_at="2026-07-03T12:00:00+00:00",
+            expires_at="2026-08-02T12:00:00+00:00",
+            summary="alpha plan snapshot",
+            pin=workbench.RegistryPin(
+                plan_dir=str(tmp_path / "plans" / "alpha"),
+                label="Alpha",
+                profile=workbench.LaunchProfile(harness="codex"),
+            ),
+            plan_archived=True,
+            state_archived=False,
+        )
+
+    def test_new_archive_id_is_valid_and_unique(self) -> None:
+        first = workbench.new_archive_id()
+        second = workbench.new_archive_id()
+        self.assertNotEqual(first, second)
+        self.assertNotIn("/", first)
+        self.assertTrue(first)
+
+    def test_archive_paths_live_under_state_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "state"
+            root = workbench.archive_root(state_root)
+            entry_dir = workbench.archive_entry_dir("abc123", state_root)
+
+            self.assertEqual(
+                state.state_root(state_root) / workbench.ARCHIVE_DIR_NAME, root
+            )
+            self.assertEqual(root / "abc123", entry_dir)
+            self.assertEqual(
+                entry_dir / workbench.ARCHIVE_PLAN_DIR_NAME,
+                workbench.archive_plan_path("abc123", state_root),
+            )
+
+    def test_invalid_archive_id_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "state"
+            for bad in ("", "..", "a/b", "a\\b"):
+                with self.assertRaises(workbench.WorkbenchError):
+                    workbench.archive_entry_dir(bad, state_root)
+
+    def test_save_and_load_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_root = tmp_path / "state"
+            metadata = self._metadata(tmp_path, "20260703T120000Z-abcdef123456")
+
+            meta_path = workbench.save_archive_metadata(metadata, state_root)
+            self.assertTrue(meta_path.is_file())
+
+            loaded = workbench.load_archive_metadata(metadata.archive_id, state_root)
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(metadata.archive_id, loaded.archive_id)
+            self.assertEqual(metadata.original_plan_dir, loaded.original_plan_dir)
+            self.assertTrue(loaded.plan_archived)
+            self.assertFalse(loaded.state_archived)
+            self.assertEqual("alpha plan snapshot", loaded.summary)
+            self.assertIsNotNone(loaded.pin)
+            assert loaded.pin is not None
+            self.assertEqual("Alpha", loaded.pin.label)
+            self.assertEqual(
+                workbench.archive_entry_dir(metadata.archive_id, state_root),
+                loaded.archive_dir,
+            )
+            self.assertEqual(
+                workbench.archive_plan_path(metadata.archive_id, state_root),
+                loaded.plan_path,
+            )
+            self.assertEqual((), loaded.warnings)
+
+    def test_load_missing_entry_returns_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "state"
+            self.assertIsNone(
+                workbench.load_archive_metadata("nope", state_root)
+            )
+
+    def test_list_skips_malformed_entry_with_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_root = tmp_path / "state"
+            good = self._metadata(tmp_path, "20260703T120000Z-goodgoodgood")
+            workbench.save_archive_metadata(good, state_root)
+
+            bad_dir = workbench.archive_root(state_root) / "20260703T130000Z-bad"
+            bad_dir.mkdir(parents=True)
+            (bad_dir / workbench.ARCHIVE_METADATA_FILE_NAME).write_text(
+                "{ not json", encoding="utf-8"
+            )
+
+            listing = workbench.list_archive_entries(state_root)
+
+            self.assertEqual(1, len(listing.entries))
+            self.assertEqual(good.archive_id, listing.entries[0].archive_id)
+            self.assertTrue(listing.warnings)
+
+    def test_list_missing_root_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "state"
+            listing = workbench.list_archive_entries(state_root)
+            self.assertEqual((), listing.entries)
+            self.assertEqual((), listing.warnings)
+
+    def test_remove_archive_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_root = tmp_path / "state"
+            metadata = self._metadata(tmp_path, "20260703T120000Z-removeme1234")
+            workbench.save_archive_metadata(metadata, state_root)
+
+            self.assertTrue(
+                workbench.remove_archive_entry(metadata.archive_id, state_root)
+            )
+            self.assertFalse(
+                workbench.archive_entry_dir(
+                    metadata.archive_id, state_root
+                ).exists()
+            )
+            self.assertFalse(
+                workbench.remove_archive_entry(metadata.archive_id, state_root)
+            )
+
+    def test_compute_expires_at_adds_retention_days(self) -> None:
+        expires = workbench.compute_expires_at(
+            "2026-07-03T12:00:00+00:00", 30
+        )
+        self.assertEqual("2026-08-02T12:00:00+00:00", expires)
+
+    def test_archived_entries_excluded_from_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_root = tmp_path / "state"
+            archive_id = "20260703T120000Z-hiddenplan12"
+            archived_plan = workbench.archive_plan_path(archive_id, state_root)
+            _write_plan_dir(archived_plan)
+            metadata = self._metadata(tmp_path, archive_id)
+            workbench.save_archive_metadata(metadata, state_root)
+
+            with patched_env(AGENT_PLANS_DIR=None):
+                result = workbench.discover_plans(
+                    state_root=state_root,
+                    include_default_dirs=False,
+                )
+
+            self.assertEqual((), result.plans)
+
+
+class WorkbenchArchivePlanTests(unittest.TestCase):
+    def test_archive_moves_plan_state_and_captures_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir, registry_path, canonical = _seed_archivable_plan(tmp_path)
+            plan_state = state.plan_state_dir(canonical, state_dir)
+
+            result = workbench.archive_plan(
+                canonical,
+                state_dir=state_dir,
+                registry_path=registry_path,
+                include_default_dirs=False,
+            )
+
+            self.assertTrue(result.plan_archived)
+            self.assertTrue(result.state_archived)
+            self.assertTrue(result.pin_archived)
+            self.assertFalse(canonical.exists())
+            self.assertFalse(plan_state.exists())
+
+            entry = workbench.archive_entry_dir(result.archive_id, state_dir)
+            self.assertTrue(
+                workbench.archive_plan_path(result.archive_id, state_dir).is_dir()
+            )
+            self.assertTrue(
+                workbench.archive_state_path(result.archive_id, state_dir).is_dir()
+            )
+            self.assertTrue(
+                (entry / workbench.ARCHIVE_METADATA_FILE_NAME).is_file()
+            )
+            self.assertIsNotNone(result.metadata.pin)
+            assert result.metadata.pin is not None
+            self.assertEqual("Alpha", result.metadata.pin.label)
+            self.assertEqual((), workbench.load_registry(registry_path).pins)
+
+    def test_archive_sets_expiry_from_retention(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir, registry_path, canonical = _seed_archivable_plan(
+                tmp_path, with_pin=False
+            )
+            registry = workbench.set_archive_retention_days(
+                workbench.load_registry(registry_path), 7
+            )
+            workbench.save_registry(registry, registry_path)
+
+            result = workbench.archive_plan(
+                canonical,
+                state_dir=state_dir,
+                registry_path=registry_path,
+                include_default_dirs=False,
+            )
+
+            self.assertEqual(
+                workbench.compute_expires_at(result.metadata.archived_at, 7),
+                result.metadata.expires_at,
+            )
+
+    def test_archive_rejects_active_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir, registry_path, canonical = _seed_archivable_plan(tmp_path)
+            plan_state = state.plan_state_dir(canonical, state_dir)
+            (plan_state / state.LOCK_FILE_NAME).write_text(
+                json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "plan_dir": str(canonical),
+                        "created_at": "2026-07-03T00:00:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(workbench.ArchiveError) as ctx:
+                workbench.archive_plan(
+                    canonical,
+                    state_dir=state_dir,
+                    registry_path=registry_path,
+                    include_default_dirs=False,
+                )
+
+            self.assertEqual("active-lock", ctx.exception.reason)
+            self.assertEqual(409, ctx.exception.status)
+            self.assertTrue(canonical.exists())
+            self.assertEqual(
+                1, len(workbench.load_registry(registry_path).pins)
+            )
+
+    def test_archive_rejects_non_plan_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir = tmp_path / "state"
+            registry_path = tmp_path / workbench.REGISTRY_FILE_NAME
+            target = tmp_path / "not-a-plan"
+            target.mkdir()
+
+            with self.assertRaises(workbench.ArchiveError) as ctx:
+                workbench.archive_plan(
+                    target,
+                    state_dir=state_dir,
+                    registry_path=registry_path,
+                    include_default_dirs=False,
+                )
+
+            self.assertEqual("invalid-plan", ctx.exception.reason)
+            self.assertTrue(target.exists())
+
+    def test_archive_missing_plan_dir_archives_state_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir, registry_path, canonical = _seed_archivable_plan(
+                tmp_path, create_plan=False
+            )
+            plan_state = state.plan_state_dir(canonical, state_dir)
+
+            result = workbench.archive_plan(
+                canonical,
+                state_dir=state_dir,
+                registry_path=registry_path,
+                include_default_dirs=False,
+            )
+
+            self.assertFalse(result.plan_archived)
+            self.assertTrue(result.state_archived)
+            self.assertTrue(result.pin_archived)
+            self.assertFalse(plan_state.exists())
+            self.assertFalse(
+                workbench.archive_plan_path(result.archive_id, state_dir).exists()
+            )
+            self.assertTrue(
+                workbench.archive_state_path(result.archive_id, state_dir).is_dir()
+            )
+            self.assertEqual((), workbench.load_registry(registry_path).pins)
+
+
+class WorkbenchRestoreArchiveTests(unittest.TestCase):
+    def _archive(self, tmp_path: Path) -> tuple[Path, Path, Path, str]:
+        state_dir, registry_path, canonical = _seed_archivable_plan(tmp_path)
+        result = workbench.archive_plan(
+            canonical,
+            state_dir=state_dir,
+            registry_path=registry_path,
+            include_default_dirs=False,
+        )
+        return state_dir, registry_path, canonical, result.archive_id
+
+    def test_restore_returns_plan_state_and_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir, registry_path, canonical, archive_id = self._archive(
+                tmp_path
+            )
+            plan_state = state.plan_state_dir(canonical, state_dir)
+
+            result = workbench.restore_archive(
+                archive_id, state_dir=state_dir, registry_path=registry_path
+            )
+
+            self.assertTrue(result.plan_restored)
+            self.assertTrue(result.state_restored)
+            self.assertTrue(result.pin_restored)
+            self.assertTrue(canonical.is_dir())
+            self.assertTrue((canonical / "manifest.md").is_file())
+            self.assertTrue(plan_state.is_dir())
+            self.assertFalse(
+                workbench.archive_entry_dir(archive_id, state_dir).exists()
+            )
+            pins = workbench.load_registry(registry_path).pins
+            self.assertEqual(1, len(pins))
+            self.assertEqual("Alpha", pins[0].label)
+            self.assertEqual("codex", pins[0].profile.harness)
+
+    def test_restore_missing_entry_raises_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir = tmp_path / "state"
+            with self.assertRaises(workbench.ArchiveError) as ctx:
+                workbench.restore_archive(
+                    "20260703T120000Z-doesnotexist", state_dir=state_dir
+                )
+            self.assertEqual("not-found", ctx.exception.reason)
+            self.assertEqual(404, ctx.exception.status)
+
+    def test_restore_conflict_on_existing_plan_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir, registry_path, canonical, archive_id = self._archive(
+                tmp_path
+            )
+            _write_plan_dir(canonical)
+
+            with self.assertRaises(workbench.ArchiveError) as ctx:
+                workbench.restore_archive(
+                    archive_id, state_dir=state_dir, registry_path=registry_path
+                )
+
+            self.assertEqual("restore-conflict", ctx.exception.reason)
+            self.assertEqual(409, ctx.exception.status)
+            self.assertTrue(
+                workbench.archive_entry_dir(archive_id, state_dir).exists()
+            )
+
+    def test_restore_conflict_on_existing_state_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir, registry_path, canonical, archive_id = self._archive(
+                tmp_path
+            )
+            plan_state = state.plan_state_dir(canonical, state_dir)
+            plan_state.mkdir(parents=True, exist_ok=True)
+
+            with self.assertRaises(workbench.ArchiveError) as ctx:
+                workbench.restore_archive(
+                    archive_id, state_dir=state_dir, registry_path=registry_path
+                )
+
+            self.assertEqual("restore-conflict", ctx.exception.reason)
+            self.assertFalse(canonical.exists())
+            self.assertTrue(
+                workbench.archive_entry_dir(archive_id, state_dir).exists()
+            )
+
+
+class WorkbenchPurgeArchiveTests(unittest.TestCase):
+    def _metadata(
+        self, tmp_path: Path, archive_id: str, archived_at: str
+    ) -> workbench.ArchiveMetadata:
+        return workbench.ArchiveMetadata(
+            archive_id=archive_id,
+            original_plan_dir=str(tmp_path / "plans" / archive_id),
+            archived_at=archived_at,
+            expires_at=workbench.compute_expires_at(archived_at, 30),
+            summary=None,
+            pin=None,
+            plan_archived=False,
+            state_archived=False,
+        )
+
+    def test_purge_single_and_missing_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir = tmp_path / "state"
+            archive_id = "20260703T120000Z-purgeme12345"
+            workbench.save_archive_metadata(
+                self._metadata(tmp_path, archive_id, "2026-07-03T12:00:00+00:00"),
+                state_dir,
+            )
+
+            result = workbench.purge_archive_entries([archive_id], state_dir=state_dir)
+            self.assertEqual(1, result.removed_count)
+            self.assertEqual(0, result.failed_count)
+            self.assertTrue(result.outcomes[0].removed)
+            self.assertFalse(
+                workbench.archive_entry_dir(archive_id, state_dir).exists()
+            )
+
+            again = workbench.purge_archive_entries([archive_id], state_dir=state_dir)
+            self.assertFalse(again.outcomes[0].removed)
+            self.assertIsNone(again.outcomes[0].error)
+
+    def test_purge_bulk_reports_per_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir = tmp_path / "state"
+            good_a = "20260703T120000Z-aaaaaaaaaaaa"
+            good_b = "20260703T130000Z-bbbbbbbbbbbb"
+            for archive_id in (good_a, good_b):
+                workbench.save_archive_metadata(
+                    self._metadata(
+                        tmp_path, archive_id, "2026-07-03T12:00:00+00:00"
+                    ),
+                    state_dir,
+                )
+
+            result = workbench.purge_archive_entries(
+                [good_a, "../escape", good_b], state_dir=state_dir
+            )
+
+            by_id = {o.archive_id: o for o in result.outcomes}
+            self.assertTrue(by_id[good_a].removed)
+            self.assertTrue(by_id[good_b].removed)
+            self.assertIsNotNone(by_id["../escape"].error)
+            self.assertEqual(2, result.removed_count)
+            self.assertEqual(1, result.failed_count)
+
+    def test_maintain_purges_expired_and_keeps_recent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir = tmp_path / "state"
+            registry_path = tmp_path / workbench.REGISTRY_FILE_NAME
+            old_id = "20260524T120000Z-oldoldold123"
+            new_id = "20260701T120000Z-newnewnew123"
+            workbench.save_archive_metadata(
+                self._metadata(tmp_path, old_id, "2026-05-24T12:00:00+00:00"),
+                state_dir,
+            )
+            workbench.save_archive_metadata(
+                self._metadata(tmp_path, new_id, "2026-07-01T12:00:00+00:00"),
+                state_dir,
+            )
+            now = datetime(2026, 7, 3, 12, 0, 0, tzinfo=timezone.utc)
+
+            result = workbench.maintain_archive(
+                state_dir=state_dir, registry_path=registry_path, now=now
+            )
+
+            self.assertEqual(1, result.removed_count)
+            self.assertEqual(old_id, result.outcomes[0].archive_id)
+            self.assertFalse(
+                workbench.archive_entry_dir(old_id, state_dir).exists()
+            )
+            self.assertTrue(
+                workbench.archive_entry_dir(new_id, state_dir).exists()
+            )
+
+    def test_maintain_respects_shortened_retention(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_dir = tmp_path / "state"
+            registry_path = tmp_path / workbench.REGISTRY_FILE_NAME
+            registry = workbench.set_archive_retention_days(
+                workbench.load_registry(registry_path), 1
+            )
+            workbench.save_registry(registry, registry_path)
+            archive_id = "20260701T120000Z-shortretain1"
+            workbench.save_archive_metadata(
+                self._metadata(tmp_path, archive_id, "2026-07-01T12:00:00+00:00"),
+                state_dir,
+            )
+            now = datetime(2026, 7, 3, 12, 0, 0, tzinfo=timezone.utc)
+
+            result = workbench.maintain_archive(
+                state_dir=state_dir, registry_path=registry_path, now=now
+            )
+
+            self.assertEqual(1, result.removed_count)
+            self.assertFalse(
+                workbench.archive_entry_dir(archive_id, state_dir).exists()
+            )
+
+
+class WorkbenchDiscoveryTests(unittest.TestCase):
+    def test_discovers_plans_from_state_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_root = tmp_path / "state"
+            plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
+            plan_state_dir = state_root / plans.path_sha256(plan_dir)
+            plan_state_dir.mkdir(parents=True)
+            (plan_state_dir / "state.json").write_text(
+                json.dumps({"plan_dir": str(plan_dir)}, sort_keys=True),
+                encoding="utf-8",
+            )
+
+            with patched_env(AGENT_PLANS_DIR=None):
+                result = workbench.discover_plans(
+                    state_root=state_root,
+                    include_default_dirs=False,
+                )
+
+            self.assertEqual(1, len(result.plans))
+            discovered = result.plans[0]
+            self.assertEqual(plan_dir, discovered.plan_dir)
+            self.assertEqual(("state",), discovered.sources)
+            self.assertTrue(discovered.exists)
+            self.assertIsNone(discovered.label)
+            self.assertIsNone(discovered.profile)
+            self.assertEqual((), result.warnings)
+
+    def test_discovers_plans_from_registry_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
+            missing_dir = tmp_path / "plans" / "ghost"
+            registry = workbench.WorkbenchRegistry(
+                pins=(
+                    workbench.RegistryPin(
+                        plan_dir=str(plan_dir),
+                        label="Alpha",
+                        profile=workbench.LaunchProfile(harness="claude"),
+                    ),
+                    workbench.RegistryPin(plan_dir=str(missing_dir)),
+                ),
+            )
+
+            result = workbench.discover_plans(
+                state_root=tmp_path / "state-empty",
+                registry=registry,
+                include_default_dirs=False,
+            )
+
+            self.assertEqual(2, len(result.plans))
+            by_path = {plan.plan_dir: plan for plan in result.plans}
+            alpha = by_path[plan_dir]
+            self.assertEqual(("registry",), alpha.sources)
+            self.assertEqual("Alpha", alpha.label)
+            self.assertEqual("claude", alpha.profile.harness)
+            self.assertTrue(alpha.exists)
+            ghost = by_path[missing_dir]
+            self.assertFalse(ghost.exists)
+            self.assertEqual(("registry",), ghost.sources)
+
+    def test_discovers_plans_from_explicit_plan_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_root = tmp_path / "plans"
+            plan_root.mkdir()
+            real_plan = _write_plan_dir(plan_root / "alpha")
+            (plan_root / "bare-file").write_text("ignored", encoding="utf-8")
+            (plan_root / "incomplete").mkdir()
+            (plan_root / "incomplete" / "manifest.md").write_text(
+                "no context", encoding="utf-8"
+            )
+
+            result = workbench.discover_plans(
+                state_root=tmp_path / "state-empty",
+                plan_roots=[plan_root],
+                include_default_dirs=False,
+            )
+
+            self.assertEqual(1, len(result.plans))
+            self.assertEqual(real_plan, result.plans[0].plan_dir)
+            self.assertEqual(("plan-root",), result.plans[0].sources)
+
+    def test_discovers_hash_only_plan_directory_names(self) -> None:
+        # Regression: hash-only split-plan output directories (named
+        # <content-hash-prefix>-<source-fingerprint-prefix>) must be discovered
+        # exactly like slug-prefixed ones. Discovery keys on manifest.md +
+        # context.md, not on the directory basename format.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_root = tmp_path / "plans"
+            plan_root.mkdir()
+            hash_only_plan = _write_plan_dir(plan_root / "9e3ab88dedcf-7d2caa1117db")
+            agent_dir = tmp_path / "agent-plans"
+            agent_dir.mkdir()
+            default_hash_only = _write_plan_dir(
+                agent_dir / "9e3ab88dedcf-7d2caa1117db"
+            )
+
+            with patched_env(
+                AGENT_PLANS_DIR=str(agent_dir),
+                HOME=str(tmp_path / "home-overridden"),
+            ):
+                result = workbench.discover_plans(
+                    state_root=tmp_path / "state-empty",
+                    plan_roots=[plan_root],
+                    include_default_dirs=True,
+                )
+
+            paths_to_sources = {
+                plan.plan_dir: plan.sources for plan in result.plans
+            }
+            self.assertIn(hash_only_plan, paths_to_sources)
+            self.assertEqual(("plan-root",), paths_to_sources[hash_only_plan])
+            self.assertIn(default_hash_only, paths_to_sources)
+            self.assertEqual(
+                ("agent-plans-dir",), paths_to_sources[default_hash_only]
+            )
+
+    def test_discovers_plans_from_environment_default_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            agent_dir = tmp_path / "agent-plans"
+            agent_dir.mkdir()
+            plan_a = _write_plan_dir(agent_dir / "alpha")
+            tmp_default = tmp_path / "tmp-root"
+            tmp_default.mkdir()
+            (tmp_default / "agent-plans").mkdir()
+            plan_b = _write_plan_dir(tmp_default / "agent-plans" / "beta")
+            share_default = tmp_path / "share-root"
+            share_default.mkdir()
+            (share_default / "agent-plans").mkdir()
+            plan_c = _write_plan_dir(share_default / "agent-plans" / "gamma")
+
+            with patched_env(
+                AGENT_PLANS_DIR=str(agent_dir),
+                TMPDIR=str(tmp_default),
+                XDG_DATA_HOME=str(share_default),
+                HOME=str(tmp_path / "home-overridden"),
+            ):
+                result = workbench.discover_plans(
+                    state_root=tmp_path / "state-empty",
+                    include_default_dirs=True,
+                )
+
+            paths_to_sources = {
+                plan.plan_dir: plan.sources for plan in result.plans
+            }
+            self.assertIn(plan_a, paths_to_sources)
+            self.assertIn(plan_b, paths_to_sources)
+            self.assertIn(plan_c, paths_to_sources)
+            self.assertEqual(("agent-plans-dir",), paths_to_sources[plan_a])
+            self.assertEqual(("tmp-default",), paths_to_sources[plan_b])
+            self.assertEqual(("share-default",), paths_to_sources[plan_c])
+
+    def test_dedupes_across_sources_and_records_each_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            state_root = tmp_path / "state"
+            plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
+            plan_state_dir = state_root / plans.path_sha256(plan_dir)
+            plan_state_dir.mkdir(parents=True)
+            (plan_state_dir / "state.json").write_text(
+                json.dumps({"plan_dir": str(plan_dir)}, sort_keys=True),
+                encoding="utf-8",
+            )
+            registry = workbench.WorkbenchRegistry(
+                pins=(
+                    workbench.RegistryPin(
+                        plan_dir=str(plan_dir),
+                        label="Alpha",
+                        profile=workbench.LaunchProfile(harness="codex"),
+                    ),
+                ),
+            )
+
+            result = workbench.discover_plans(
+                state_root=state_root,
+                registry=registry,
+                plan_roots=[tmp_path / "plans"],
+                include_default_dirs=False,
+            )
+
+            self.assertEqual(1, len(result.plans))
+            discovered = result.plans[0]
+            self.assertEqual(plan_dir, discovered.plan_dir)
+            self.assertEqual(
+                ("state", "registry", "plan-root"), discovered.sources
+            )
+            self.assertEqual("Alpha", discovered.label)
+            self.assertEqual("codex", discovered.profile.harness)
+
+    def test_discovers_plans_from_registry_plan_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_root = tmp_path / "registry-roots"
+            plan_root.mkdir()
+            real_plan = _write_plan_dir(plan_root / "alpha")
+            registry = workbench.WorkbenchRegistry(
+                plan_roots=(str(plan_root),),
+            )
+
+            result = workbench.discover_plans(
+                state_root=tmp_path / "state-empty",
+                registry=registry,
+                include_default_dirs=False,
+            )
+
+            self.assertEqual(1, len(result.plans))
+            discovered = result.plans[0]
+            self.assertEqual(real_plan, discovered.plan_dir)
+            self.assertEqual(("plan-root",), discovered.sources)
+            self.assertTrue(discovered.exists)
+
+    def test_dedupes_registry_and_cli_plan_roots_into_single_plan_root_source(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            registry_root = tmp_path / "registry-roots"
+            registry_root.mkdir()
+            cli_root = tmp_path / "cli-roots"
+            cli_root.mkdir()
+            shared_plan = _write_plan_dir(registry_root / "alpha")
+            cli_only_plan = _write_plan_dir(cli_root / "beta")
+            # Symlink the same plan into both roots so a single plan is
+            # surfaced by both registry roots and CLI roots.
+            (cli_root / "alpha").symlink_to(shared_plan)
+
+            registry = workbench.WorkbenchRegistry(
+                plan_roots=(str(registry_root),),
+            )
+
+            result = workbench.discover_plans(
+                state_root=tmp_path / "state-empty",
+                registry=registry,
+                plan_roots=[cli_root],
+                include_default_dirs=False,
+            )
+
+            by_path = {plan.plan_dir: plan for plan in result.plans}
+            self.assertIn(shared_plan, by_path)
+            self.assertIn(cli_only_plan, by_path)
+            self.assertEqual(("plan-root",), by_path[shared_plan].sources)
+            self.assertEqual(("plan-root",), by_path[cli_only_plan].sources)
+            # Order: registry roots scanned first, so shared_plan precedes
+            # the CLI-only plan in the discovery list.
+            ordered = [plan.plan_dir for plan in result.plans]
+            self.assertEqual([shared_plan, cli_only_plan], ordered)
+
+    def test_registry_pin_and_registry_root_merge_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_root = tmp_path / "registry-roots"
+            plan_root.mkdir()
+            plan_dir = _write_plan_dir(plan_root / "alpha")
+            registry = workbench.WorkbenchRegistry(
+                pins=(
+                    workbench.RegistryPin(
+                        plan_dir=str(plan_dir),
+                        label="Alpha",
+                        profile=workbench.LaunchProfile(harness="codex"),
+                    ),
+                ),
+                plan_roots=(str(plan_root),),
+            )
+
+            result = workbench.discover_plans(
+                state_root=tmp_path / "state-empty",
+                registry=registry,
+                include_default_dirs=False,
+            )
+
+            self.assertEqual(1, len(result.plans))
+            discovered = result.plans[0]
+            self.assertEqual(plan_dir, discovered.plan_dir)
+            self.assertEqual(("registry", "plan-root"), discovered.sources)
+            self.assertEqual("Alpha", discovered.label)
+            self.assertEqual("codex", discovered.profile.harness)
+
+    def test_missing_directories_and_invalid_inputs_become_warnings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            not_a_dir = tmp_path / "not-a-dir"
+            not_a_dir.write_text("file not directory", encoding="utf-8")
+
+            result = workbench.discover_plans(
+                state_root=tmp_path / "state-empty",
+                plan_roots=[tmp_path / "missing", not_a_dir],
+                include_default_dirs=False,
+            )
+
+            self.assertEqual((), result.plans)
+            joined = "\n".join(result.warnings)
+            self.assertIn("is not a directory", joined)
+
+    def test_registry_plan_root_missing_emits_no_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            missing_root = tmp_path / "missing-registry-root"
+            registry = workbench.WorkbenchRegistry(
+                plan_roots=(str(missing_root),),
+            )
+
+            result = workbench.discover_plans(
+                state_root=tmp_path / "state-empty",
+                registry=registry,
+                include_default_dirs=False,
+            )
+
+            self.assertEqual((), result.plans)
+            self.assertEqual((), result.warnings)
+
+    def test_registry_plan_root_warns_when_not_a_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            not_a_dir = tmp_path / "registry-root-file"
+            not_a_dir.write_text("file not directory", encoding="utf-8")
+            registry = workbench.WorkbenchRegistry(
+                plan_roots=(str(not_a_dir),),
+            )
+
+            result = workbench.discover_plans(
+                state_root=tmp_path / "state-empty",
+                registry=registry,
+                include_default_dirs=False,
+            )
+
+            self.assertEqual((), result.plans)
+            joined = "\n".join(result.warnings)
+            self.assertIn("registry_plan_root[0]", joined)
+            self.assertIn("is not a directory", joined)
+
+
+if __name__ == "__main__":
+    unittest.main()

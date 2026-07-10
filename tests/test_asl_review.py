@@ -1,0 +1,1493 @@
+"""Structured review artifact, repair materialization, and cycle tests.
+
+Split from tests/test_agent_session_loop.py."""
+
+from __future__ import annotations
+
+import argparse
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+import dataclasses
+from datetime import datetime, timezone
+import errno
+import hashlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import pty
+import select
+import shlex
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import urllib.parse
+from unittest import mock
+
+from agent_session_loop import (
+    artifacts,
+    authoring,
+    baseline,
+    baseline_cache,
+    cli,
+    compact_state,
+    config,
+    contracts,
+    control_queue,
+    events,
+    harnesses,
+    install_verify,
+    plans,
+    preflight,
+    prepare,
+    progress_cli,
+    progress_repair,
+    qna,
+    review,
+    review_repair,
+    run_control,
+    runner,
+    state,
+    tail,
+    verification,
+    workbench,
+    workbench_server,
+)
+from agent_session_loop.formatting import (
+    format_duration_seconds,
+    format_turn_finished_message,
+    format_turn_started_message,
+)
+from tests.support import (
+    REPO_ROOT,
+    write_plan,
+    write_plan_with_ids,
+    install_fake_codex,
+    install_fake_harness,
+    init_git_repo,
+    read_jsonl,
+    _contract_block,
+    _structured_review_finding,
+    _load_script_module,
+)
+
+
+class StructuredReviewArtifactTests(unittest.TestCase):
+    """Shared review module: verdict grammar, final-review.json, consistency."""
+
+    def _artifact(self, **overrides: object) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "version": review.REVIEW_ARTIFACT_VERSION,
+            "outcome": "findings",
+            "findings": [_structured_review_finding()],
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_parse_review_artifact_accepts_complete_findings(self) -> None:
+        artifact = review.parse_review_artifact(json.dumps(self._artifact()))
+
+        self.assertEqual(review.REVIEW_ARTIFACT_VERSION, artifact["version"])
+        self.assertEqual("findings", artifact["outcome"])
+        self.assertEqual(1, artifact["total_findings"])
+        self.assertEqual(
+            {"high": 1, "med": 0, "low": 0}, artifact["findings_by_severity"]
+        )
+        self.assertEqual("F1", artifact["findings"][0]["id"])
+        self.assertEqual(
+            "run_loop", artifact["findings"][0]["evidence"][0]["symbol"]
+        )
+
+    def test_parse_review_artifact_accepts_all_clear(self) -> None:
+        artifact = review.parse_review_artifact(
+            json.dumps(self._artifact(outcome="all-clear", findings=[]))
+        )
+
+        self.assertEqual("all-clear", artifact["outcome"])
+        self.assertEqual(0, artifact["total_findings"])
+        self.assertEqual([], artifact["findings"])
+
+    def test_parse_review_artifact_rejects_unsupported_version(self) -> None:
+        for version in (None, 1, 3, "2"):
+            with self.assertRaisesRegex(
+                review.ReviewArtifactError, "'version' must be"
+            ):
+                review.parse_review_artifact(
+                    json.dumps(self._artifact(version=version))
+                )
+
+    def test_parse_review_artifact_rejects_invalid_json_and_shape(self) -> None:
+        with self.assertRaisesRegex(review.ReviewArtifactError, "is empty"):
+            review.parse_review_artifact("   \n")
+        with self.assertRaisesRegex(
+            review.ReviewArtifactError, "not valid JSON"
+        ):
+            review.parse_review_artifact("{not json")
+        with self.assertRaisesRegex(
+            review.ReviewArtifactError, "top-level JSON object"
+        ):
+            review.parse_review_artifact("[]")
+        with self.assertRaisesRegex(review.ReviewArtifactError, "unknown keys"):
+            review.parse_review_artifact(
+                json.dumps(self._artifact(extra="nope"))
+            )
+        with self.assertRaisesRegex(
+            review.ReviewArtifactError, "'outcome' must be one of"
+        ):
+            review.parse_review_artifact(
+                json.dumps(self._artifact(outcome="mixed"))
+            )
+
+    def test_parse_review_artifact_rejects_incomplete_findings(self) -> None:
+        for missing_key in review.FINDING_REQUIRED_KEYS:
+            finding = _structured_review_finding()
+            del finding[missing_key]
+            with self.assertRaisesRegex(
+                review.ReviewArtifactError, "missing required keys"
+            ):
+                review.parse_review_artifact(
+                    json.dumps(self._artifact(findings=[finding]))
+                )
+
+    def test_parse_review_artifact_rejects_invalid_finding_values(self) -> None:
+        cases = (
+            ({"severity": "critical"}, "'severity' must be one of"),
+            ({"title": "  "}, "'title' must be a non-empty string"),
+            ({"evidence": []}, "'evidence' must be a non-empty list"),
+            (
+                {"evidence": [{"symbol": "f"}]},
+                "'path' must be a non-empty string",
+            ),
+            (
+                {"evidence": [{"path": "a.py", "line": 3}]},
+                "unknown keys",
+            ),
+            ({"done_criteria": []}, "'done_criteria' must be a non-empty list"),
+            (
+                {"verification_checks": [{"type": "bogus"}]},
+                "verification check #1 is invalid",
+            ),
+            (
+                {
+                    "verification_checks": [
+                        {
+                            "type": "command",
+                            "name": "dup",
+                            "argv": ["python3", "-c", "pass"],
+                        },
+                        {
+                            "type": "command",
+                            "name": "dup",
+                            "argv": ["python3", "-c", "pass"],
+                        },
+                    ]
+                },
+                "is duplicated",
+            ),
+        )
+        for overrides, expected in cases:
+            with self.assertRaisesRegex(review.ReviewArtifactError, expected):
+                review.parse_review_artifact(
+                    json.dumps(
+                        self._artifact(
+                            findings=[_structured_review_finding(**overrides)]
+                        )
+                    )
+                )
+
+    def test_parse_review_artifact_rejects_duplicate_finding_ids(self) -> None:
+        artifact = self._artifact(
+            findings=[
+                _structured_review_finding(finding_id="F1"),
+                _structured_review_finding(finding_id="F1", severity="low"),
+            ]
+        )
+        with self.assertRaisesRegex(
+            review.ReviewArtifactError, "finding id 'F1' is duplicated"
+        ):
+            review.parse_review_artifact(json.dumps(artifact))
+
+    def test_parse_review_artifact_rejects_outcome_findings_mismatch(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            review.ReviewArtifactError, "contradicts a non-empty findings list"
+        ):
+            review.parse_review_artifact(
+                json.dumps(self._artifact(outcome="all-clear"))
+            )
+        with self.assertRaisesRegex(
+            review.ReviewArtifactError, "requires a non-empty findings list"
+        ):
+            review.parse_review_artifact(
+                json.dumps(self._artifact(findings=[]))
+            )
+
+    def test_ensure_review_consistency_detects_contradictions(self) -> None:
+        artifact = review.parse_review_artifact(json.dumps(self._artifact()))
+        matching = review.parse_review_verdict(
+            "body\nStatus: 1 Findings (1 high, 0 med, 0 low)\n"
+        )
+        review.ensure_review_consistency(matching, artifact)
+
+        all_clear = review.parse_review_verdict(
+            f"body\n{review.REVIEW_STATUS_ALL_CLEAR}\n"
+        )
+        with self.assertRaisesRegex(
+            review.ReviewConsistencyError, "contradicts the final-review.md"
+        ):
+            review.ensure_review_consistency(all_clear, artifact)
+
+        wrong_severity = review.parse_review_verdict(
+            "body\nStatus: 1 Findings (0 high, 1 med, 0 low)\n"
+        )
+        with self.assertRaisesRegex(
+            review.ReviewConsistencyError, "severity totals"
+        ):
+            review.ensure_review_consistency(wrong_severity, artifact)
+
+    def test_review_session_marker_versions(self) -> None:
+        self.assertIsNone(review.review_session_marker_version("# Session 1"))
+        self.assertEqual(
+            1,
+            review.review_session_marker_version(
+                f"# Review\n{review.REVIEW_SESSION_MARKER}\n"
+            ),
+        )
+        self.assertEqual(
+            2,
+            review.review_session_marker_version(
+                f"# Review\n{review.review_session_version_marker()}\n"
+            ),
+        )
+        self.assertTrue(
+            review.contains_review_session_marker(
+                review.review_session_version_marker()
+            )
+        )
+
+    def test_load_review_verdict_markdown_only_stays_compatible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            (plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
+                f"body\n{review.REVIEW_STATUS_ALL_CLEAR}\n", encoding="utf-8"
+            )
+
+            verdict = review.load_review_verdict(plan_dir)
+
+            self.assertTrue(verdict["ok"], verdict)
+            self.assertEqual("all-clear", verdict["outcome"])
+            self.assertNotIn("findings", verdict)
+            self.assertNotIn("artifact_version", verdict)
+
+    def test_load_review_verdict_requires_artifact_for_v2(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            (plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
+                f"body\n{review.REVIEW_STATUS_ALL_CLEAR}\n", encoding="utf-8"
+            )
+
+            verdict = review.load_review_verdict(
+                plan_dir, require_artifact=True
+            )
+
+            self.assertFalse(verdict["ok"])
+            self.assertEqual("missing-review-artifact", verdict["reason"])
+            self.assertIn("review_artifact_path", verdict)
+
+    def test_load_review_verdict_fails_closed_on_bad_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            (plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
+                "body\nStatus: 1 Findings (1 high, 0 med, 0 low)\n",
+                encoding="utf-8",
+            )
+            artifact_path = plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME
+
+            artifact_path.write_text("{not json", encoding="utf-8")
+            malformed = review.load_review_verdict(plan_dir)
+            self.assertFalse(malformed["ok"])
+            self.assertEqual("malformed-review-artifact", malformed["reason"])
+
+            artifact_path.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "outcome": "findings",
+                        "findings": [
+                            _structured_review_finding(severity="low")
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            contradictory = review.load_review_verdict(plan_dir)
+            self.assertFalse(contradictory["ok"])
+            self.assertEqual(
+                "contradictory-review-artifact", contradictory["reason"]
+            )
+
+    def test_load_review_verdict_merges_valid_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            (plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
+                "body\nStatus: 1 Findings (1 high, 0 med, 0 low)\n",
+                encoding="utf-8",
+            )
+            (plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+                json.dumps(self._artifact()), encoding="utf-8"
+            )
+
+            verdict = review.load_review_verdict(
+                plan_dir, require_artifact=True
+            )
+
+            self.assertTrue(verdict["ok"], verdict)
+            self.assertEqual(
+                review.REVIEW_ARTIFACT_VERSION, verdict["artifact_version"]
+            )
+            self.assertEqual("F1", verdict["findings"][0]["id"])
+            self.assertEqual(
+                str(plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME),
+                verdict["review_artifact_path"],
+            )
+
+    def test_runner_and_autopilot_report_same_verdict_payload(self) -> None:
+        autopilot = _load_script_module(
+            "asl_autopilot_review_parity",
+            "skills",
+            "asl",
+            "scripts",
+            "asl_autopilot.py",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            (plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
+                "body\nStatus: 1 Findings (1 high, 0 med, 0 low)\n",
+                encoding="utf-8",
+            )
+            (plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+                json.dumps(self._artifact()), encoding="utf-8"
+            )
+
+            runner_verdict = runner._read_review_verdict(
+                plan_dir, require_artifact=True
+            )
+            autopilot_verdict = autopilot._read_review_verdict(
+                {"plan_dir": str(plan_dir)}
+            )
+
+            summary = autopilot_verdict.pop("summary")
+            self.assertIn("Status: 1 Findings", summary)
+            self.assertEqual(runner_verdict, autopilot_verdict)
+            self.assertIs(
+                autopilot.parse_review_verdict, review.parse_review_verdict
+            )
+
+    def test_generated_review_session_body_is_versioned_v2(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            session_id = plans.SessionId((7,))
+
+            body = runner.build_generated_review_session_body(
+                session_id,
+                review_harness="claude",
+                plan_dir=plan_dir,
+            )
+
+            self.assertIn(runner.REVIEW_SESSION_MARKER, body)
+            self.assertIn(review.review_session_version_marker(), body)
+            self.assertIn(runner.FINAL_REVIEW_ARTIFACT_FILENAME, body)
+            self.assertEqual(
+                review.GENERATED_REVIEW_SESSION_VERSION,
+                review.review_session_marker_version(body),
+            )
+            contract = contracts.parse_completion_contract(
+                body, session_id=session_id
+            )
+            self.assertEqual(
+                [
+                    "final-review-output-evidence-based",
+                    "final-review-artifact-consistent",
+                ],
+                [check.name for check in contract.verify.checks],
+            )
+
+    def test_generated_artifact_contract_check_gates_consistency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            session_id = plans.SessionId((7,))
+            body = runner.build_generated_review_session_body(
+                session_id,
+                review_harness="claude",
+                plan_dir=plan_dir,
+            )
+            contract = contracts.parse_completion_contract(
+                body, session_id=session_id
+            )
+            artifact_check = contract.verify.checks[1]
+            md_path = plan_dir / review.FINAL_REVIEW_FILENAME
+            artifact_path = plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME
+            md_path.write_text(
+                "## Findings\n"
+                "- One issue in agent_session_loop/runner.py.\n"
+                "Status: 1 Findings (1 high, 0 med, 0 low)\n",
+                encoding="utf-8",
+            )
+
+            def run_check() -> int:
+                return subprocess.run(
+                    list(artifact_check.argv),
+                    cwd=plan_dir,
+                    capture_output=True,
+                    check=False,
+                ).returncode
+
+            # Missing artifact fails.
+            self.assertEqual(1, run_check())
+            # Consistent artifact passes.
+            artifact_path.write_text(
+                json.dumps(self._artifact()), encoding="utf-8"
+            )
+            self.assertEqual(0, run_check())
+            # Contradictory severity totals fail.
+            artifact_path.write_text(
+                json.dumps(
+                    self._artifact(
+                        findings=[_structured_review_finding(severity="low")]
+                    )
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(1, run_check())
+            # Incomplete findings fail.
+            incomplete = _structured_review_finding()
+            del incomplete["repair_group"]
+            artifact_path.write_text(
+                json.dumps(self._artifact(findings=[incomplete])),
+                encoding="utf-8",
+            )
+            self.assertEqual(1, run_check())
+
+
+class ReviewRepairMaterializationTests(unittest.TestCase):
+    """Materialize validated review findings into serial repair children."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+
+    def _finding(
+        self,
+        finding_id: str,
+        repair_group: str,
+        *,
+        severity: str = "high",
+        **overrides: object,
+    ) -> dict[str, object]:
+        defaults: dict[str, object] = {
+            "repair_group": repair_group,
+            "title": f"Fix {finding_id}",
+            "evidence": [{"path": f"pkg/{finding_id}.py", "symbol": "target"}],
+            "explanation": f"{finding_id} is broken.",
+            "done_criteria": [f"{finding_id} is fixed and tested."],
+            "verification_checks": [
+                {
+                    "type": "command",
+                    "name": f"verify-{finding_id}",
+                    "argv": ["python3", "-c", "pass"],
+                }
+            ],
+        }
+        defaults.update(overrides)
+        return _structured_review_finding(
+            finding_id=finding_id, severity=severity, **defaults
+        )
+
+    def _status_line(self, findings: list[dict[str, object]]) -> str:
+        if not findings:
+            return review.REVIEW_STATUS_ALL_CLEAR
+        high = sum(1 for f in findings if f["severity"] == "high")
+        med = sum(1 for f in findings if f["severity"] == "med")
+        low = sum(1 for f in findings if f["severity"] == "low")
+        return (
+            f"Status: {len(findings)} Findings "
+            f"({high} high, {med} med, {low} low)"
+        )
+
+    def _write_plan(
+        self,
+        findings: list[dict[str, object]],
+        *,
+        with_manifest_table: bool = True,
+        review_status: str = "complete",
+        session_one_contract: str | None = None,
+        outcome: str = "findings",
+    ) -> None:
+        self.plan_dir.mkdir(parents=True, exist_ok=True)
+        (self.plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
+
+        if with_manifest_table:
+            sessions = (
+                authoring.ManifestSession(
+                    plans.parse_session_id("1"), "One", "complete"
+                ),
+                authoring.ManifestSession(
+                    plans.parse_session_id("2"), "Review", "complete"
+                ),
+            )
+            manifest = authoring.render_manifest(
+                authoring.ManifestSpec(
+                    plan_title="Test Plan",
+                    source_path="/src/plan.md",
+                    output_dir=str(self.plan_dir),
+                    plan_id="pid",
+                    source_fingerprint="fp",
+                    content_sha256="csha",
+                    sessions=sessions,
+                    split_date="2026-01-01",
+                    readiness=plans.ReadinessMetadata(
+                        "draft", "sha", "2026-01-01T00:00:00Z"
+                    ),
+                )
+            )
+        else:
+            manifest = "# Manifest\n\n**Sessions**: 2\n"
+        (self.plan_dir / "manifest.md").write_text(manifest, encoding="utf-8")
+
+        session_one = [
+            "# Session 1: One",
+            "",
+            "## Instructions",
+            "",
+            "Do the first thing.",
+            "",
+        ]
+        if session_one_contract:
+            session_one.extend([session_one_contract, ""])
+        session_one.extend(
+            [
+                "## Handoff",
+                "",
+                "- **Status**: complete",
+                "- **Files modified**: (none)",
+                "- **Key decisions**: (none)",
+                "- **Blockers for next session**: (none)",
+                "- **Notes**:",
+                "",
+            ]
+        )
+        (self.plan_dir / "session-1.md").write_text(
+            "\n".join(session_one), encoding="utf-8"
+        )
+
+        review_body = runner.build_generated_review_session_body(
+            plans.parse_session_id("2"),
+            review_harness="codex",
+            plan_dir=self.plan_dir,
+        ).replace("- **Status**: pending", f"- **Status**: {review_status}")
+        (self.plan_dir / "session-2.md").write_text(
+            review_body, encoding="utf-8"
+        )
+
+        (self.plan_dir / "final-review.md").write_text(
+            "# Review\n\n## Findings\n\n"
+            "See pkg/a.py and pkg/b.py and README.md.\n\n"
+            f"{self._status_line(findings)}\n",
+            encoding="utf-8",
+        )
+        (self.plan_dir / "final-review.json").write_text(
+            json.dumps(
+                {"version": 2, "outcome": outcome, "findings": findings}
+            ),
+            encoding="utf-8",
+        )
+
+    def _materialize(self, **kwargs: object) -> review_repair.ReviewRepairResult:
+        return review_repair.materialize_review_repair_sessions(
+            self.plan_dir, state_dir=self.state_dir, **kwargs
+        )
+
+    def test_materializes_one_child_per_repair_group(self) -> None:
+        self._write_plan(
+            [
+                self._finding("F1", "runner"),
+                self._finding("F2", "runner", severity="med"),
+                self._finding("F3", "workbench", severity="low"),
+            ]
+        )
+        result = self._materialize()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(review_repair.REVIEW_REPAIR_REASON_OK, result.reason)
+        self.assertEqual("2", result.review_session_id.value)
+        self.assertEqual(
+            ["2.1", "2.2"],
+            [child.session_id.value for child in result.children],
+        )
+        self.assertEqual(
+            ["runner", "workbench"],
+            [child.repair_group for child in result.children],
+        )
+        self.assertEqual(("F1", "F2"), result.children[0].finding_ids)
+        self.assertEqual(("F3",), result.children[1].finding_ids)
+        for child in result.children:
+            self.assertTrue(child.path.is_file())
+            status = plans.read_session_status(
+                plans.SessionFile(child.session_id, child.path)
+            )
+            self.assertEqual("pending", status.status)
+
+    def test_child_contract_merges_checks_and_done_criteria(self) -> None:
+        self._write_plan(
+            [
+                self._finding("F1", "runner"),
+                self._finding("F2", "runner", severity="med"),
+            ]
+        )
+        result = self._materialize()
+
+        contract = contracts.read_completion_contract(self.plan_dir, "2.1")
+        self.assertIsNotNone(contract)
+        self.assertEqual(
+            ["verify-F1", "verify-F2"],
+            [check.name for check in contract.verify.checks],
+        )
+        self.assertEqual(
+            ("F1 is fixed and tested.", "F2 is fixed and tested."),
+            contract.done_when,
+        )
+
+    def test_no_finding_is_omitted_or_assigned_twice(self) -> None:
+        findings = [
+            self._finding("F1", "a"),
+            self._finding("F2", "b"),
+            self._finding("F3", "a"),
+            self._finding("F4", "c"),
+        ]
+        self._write_plan(findings)
+        result = self._materialize()
+
+        assigned = [fid for child in result.children for fid in child.finding_ids]
+        self.assertEqual(sorted(assigned), ["F1", "F2", "F3", "F4"])
+        self.assertEqual(len(assigned), len(set(assigned)))
+        # First-appearance group ordering: a, b, c.
+        self.assertEqual(
+            ["a", "b", "c"],
+            [child.repair_group for child in result.children],
+        )
+        self.assertEqual(("F1", "F3"), result.children[0].finding_ids)
+
+    def test_children_carry_review_repair_marker(self) -> None:
+        self._write_plan([self._finding("F1", "runner")])
+        result = self._materialize()
+
+        body = result.children[0].path.read_text(encoding="utf-8")
+        self.assertTrue(
+            review_repair.contains_review_repair_session_marker(body)
+        )
+        self.assertEqual(
+            1, review_repair.review_repair_session_marker_version(body)
+        )
+        self.assertTrue(
+            review_repair.is_generated_review_repair_session_file(
+                result.children[0].path
+            )
+        )
+        # A repair child must not masquerade as a generated review session.
+        self.assertFalse(review.contains_review_session_marker(body))
+
+    def test_children_chain_previous_session_references(self) -> None:
+        self._write_plan(
+            [self._finding("F1", "a"), self._finding("F2", "b")]
+        )
+        result = self._materialize()
+
+        first = result.children[0].path.read_text(encoding="utf-8")
+        second = result.children[1].path.read_text(encoding="utf-8")
+        self.assertIn("`session-2.md`", first)
+        self.assertIn("`session-2.1.md`", second)
+
+    def test_manifest_table_and_count_refreshed(self) -> None:
+        self._write_plan(
+            [self._finding("F1", "a"), self._finding("F2", "b")]
+        )
+        self._materialize()
+
+        manifest = (self.plan_dir / "manifest.md").read_text(encoding="utf-8")
+        self.assertIn("| 2.1 | Review repair: a | pending | session-2.1.md |", manifest)
+        self.assertIn("| 2.2 | Review repair: b | pending | session-2.2.md |", manifest)
+        self.assertIn("**Sessions**: 4", manifest)
+
+    def test_missing_manifest_table_still_materializes(self) -> None:
+        self._write_plan(
+            [self._finding("F1", "a")], with_manifest_table=False
+        )
+        result = self._materialize()
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.children[0].path.is_file())
+        manifest = (self.plan_dir / "manifest.md").read_text(encoding="utf-8")
+        self.assertIn("**Sessions**: 3", manifest)
+
+    def test_auto_detects_generated_review_session(self) -> None:
+        self._write_plan([self._finding("F1", "a")])
+        result = self._materialize()
+        self.assertEqual("2", result.review_session_id.value)
+
+    def test_explicit_review_session_id(self) -> None:
+        self._write_plan([self._finding("F1", "a")])
+        result = self._materialize(review_session_id="2")
+        self.assertTrue(result.ok)
+        self.assertEqual("2", result.review_session_id.value)
+
+    def test_over_eight_groups_pauses_malformed(self) -> None:
+        findings = [self._finding(f"F{i}", f"g{i}") for i in range(9)]
+        self._write_plan(findings)
+        result = self._materialize()
+
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            review_repair.REVIEW_REPAIR_REASON_MALFORMED, result.reason
+        )
+        self.assertIn("exceed the maximum of 8", result.error)
+        self.assertEqual([], sorted(self.plan_dir.glob("session-2.*.md")))
+
+    def test_existing_children_pause_malformed(self) -> None:
+        self._write_plan([self._finding("F1", "a")])
+        first = self._materialize()
+        self.assertTrue(first.ok)
+        original = first.children[0].path.read_text(encoding="utf-8")
+
+        second = self._materialize()
+        self.assertFalse(second.ok)
+        self.assertEqual(
+            review_repair.REVIEW_REPAIR_REASON_MALFORMED, second.reason
+        )
+        self.assertIn("already exist", second.error)
+        # Existing child left untouched.
+        self.assertEqual(
+            original, first.children[0].path.read_text(encoding="utf-8")
+        )
+
+    def test_missing_artifact_pauses_malformed(self) -> None:
+        self._write_plan([self._finding("F1", "a")])
+        (self.plan_dir / "final-review.json").unlink()
+        result = self._materialize()
+
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            review_repair.REVIEW_REPAIR_REASON_MALFORMED, result.reason
+        )
+        self.assertEqual(
+            review.REVIEW_REASON_MISSING_ARTIFACT, result.detail
+        )
+
+    def test_conflicting_merged_check_names_pause_malformed(self) -> None:
+        clash = {
+            "type": "command",
+            "name": "shared",
+            "argv": ["python3", "-c", "pass"],
+        }
+        clash_other = {
+            "type": "command",
+            "name": "shared",
+            "argv": ["python3", "-c", "print(1)"],
+        }
+        self._write_plan(
+            [
+                self._finding("F1", "runner", verification_checks=[clash]),
+                self._finding(
+                    "F2", "runner", verification_checks=[clash_other]
+                ),
+            ]
+        )
+        result = self._materialize()
+
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            review_repair.REVIEW_REPAIR_REASON_MALFORMED, result.reason
+        )
+        self.assertIn("conflicting", result.error)
+        self.assertEqual([], sorted(self.plan_dir.glob("session-2.*.md")))
+
+    def test_all_clear_is_noop(self) -> None:
+        self._write_plan([], outcome="all-clear")
+        result = self._materialize()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(
+            review_repair.REVIEW_REPAIR_REASON_NO_FINDINGS, result.reason
+        )
+        self.assertEqual((), result.children)
+        self.assertEqual([], sorted(self.plan_dir.glob("session-2.*.md")))
+
+    def test_commit_failure_rolls_back_atomically(self) -> None:
+        self._write_plan(
+            [self._finding("F1", "a"), self._finding("F2", "b")]
+        )
+        manifest_before = (self.plan_dir / "manifest.md").read_text(
+            encoding="utf-8"
+        )
+        with mock.patch.object(
+            review_repair.PlanTransaction,
+            "commit",
+            side_effect=plans.PlanError("boom"),
+        ):
+            result = self._materialize()
+
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            review_repair.REVIEW_REPAIR_REASON_MALFORMED, result.reason
+        )
+        self.assertEqual([], sorted(self.plan_dir.glob("session-2.*.md")))
+        self.assertEqual(
+            manifest_before,
+            (self.plan_dir / "manifest.md").read_text(encoding="utf-8"),
+        )
+
+    def test_without_cwd_leaves_children_draft(self) -> None:
+        self._write_plan([self._finding("F1", "a")])
+        result = self._materialize()
+
+        self.assertTrue(result.ok)
+        self.assertFalse(result.loop_ready)
+        manifest = (self.plan_dir / "manifest.md").read_text(encoding="utf-8")
+        self.assertIn("**Readiness**: draft", manifest)
+
+    def test_active_lock_pauses_malformed(self) -> None:
+        self._write_plan([self._finding("F1", "a")])
+        state.acquire_lock(self.plan_dir, self.state_dir)
+        self.addCleanup(state.release_lock, self.plan_dir, self.state_dir)
+        result = self._materialize()
+
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            review_repair.REVIEW_REPAIR_REASON_MALFORMED, result.reason
+        )
+        self.assertIn("lock", result.error)
+        # Holding the lock externally, hold_lock=False still works.
+        result_held = self._materialize(hold_lock=False)
+        self.assertTrue(result_held.ok)
+
+    def test_cwd_gate_marks_plan_loop_ready(self) -> None:
+        repo = self.tmp_path / "repo"
+        init_git_repo(repo)
+        (repo / "README.md").write_text("readme\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "-A"], check=True
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "user.email=a@b.c",
+                "-c",
+                "user.name=x",
+                "commit",
+                "-q",
+                "-m",
+                "readme",
+            ],
+            check=True,
+        )
+        contract_one = _contract_block(
+            '{"type": "file_exists", "path": "README.md", "name": "readme-1"}',
+            session="1",
+        )
+        finding = _structured_review_finding(
+            finding_id="F1",
+            repair_group="docs",
+            evidence=[{"path": "README.md"}],
+            done_criteria=["README stays present."],
+            verification_checks=[
+                {
+                    "type": "file_exists",
+                    "name": "readme-present",
+                    "path": "README.md",
+                }
+            ],
+        )
+        self._write_plan([finding], session_one_contract=contract_one)
+        progress_repair.repair_progress_journal(self.plan_dir)
+
+        result = self._materialize(cwd=repo)
+
+        self.assertTrue(result.ok, msg=str(result.blockers))
+        self.assertTrue(result.loop_ready, msg=str(result.blockers))
+        self.assertEqual(review_repair.REVIEW_REPAIR_REASON_OK, result.reason)
+        manifest = (self.plan_dir / "manifest.md").read_text(encoding="utf-8")
+        self.assertIn("**Readiness**: loop-ready", manifest)
+
+
+class ReviewRepairCycleTests(unittest.TestCase):
+    """Automatic repair/rereview cycles: fingerprints, caps, dispositions."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+        self.repo_root = self.tmp_path / "repo"
+        self.config_home = self.tmp_path / "config"
+        init_git_repo(self.repo_root)
+        self.fake_codex = install_fake_codex(self.tmp_path)
+        self.fake_claude = install_fake_harness(self.tmp_path, "claude")
+        config_path = (
+            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        )
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps(
+                {
+                    "codex": {"executable": str(self.fake_codex)},
+                    "claude": {"executable": str(self.fake_claude)},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    # ------------------------------------------------------------------
+    # Finding fingerprints
+    # ------------------------------------------------------------------
+
+    def test_finding_fingerprint_ignores_line_number_drift(self) -> None:
+        original = _structured_review_finding(
+            title="Unbounded retry loop at runner.py:100",
+            evidence=[
+                {
+                    "path": "agent_session_loop/runner.py:100",
+                    "symbol": "supervise_run",
+                }
+            ],
+        )
+        drifted = _structured_review_finding(
+            finding_id="F1-redetected",
+            title="Unbounded retry loop at runner.py:250",
+            evidence=[
+                {
+                    "path": "agent_session_loop/runner.py:250:8",
+                    "symbol": "supervise_run",
+                }
+            ],
+            explanation="Re-detected on the second review.",
+        )
+
+        self.assertEqual(
+            review.finding_fingerprint(original),
+            review.finding_fingerprint(drifted),
+        )
+        self.assertTrue(
+            review.finding_fingerprint(original).startswith("finding:")
+        )
+
+    def test_finding_fingerprint_normalizes_title_and_evidence_order(
+        self,
+    ) -> None:
+        one = _structured_review_finding(
+            title="  Retry Loop   is unbounded (see lines 12-34)",
+            evidence=[
+                {"path": "pkg/a.py", "symbol": "alpha"},
+                {"path": "pkg/b.py:9"},
+            ],
+        )
+        two = _structured_review_finding(
+            title="retry loop is unbounded (see line 99)",
+            evidence=[
+                {"path": "pkg/b.py"},
+                {"path": "pkg/a.py:44", "symbol": "alpha"},
+            ],
+        )
+
+        self.assertEqual(
+            review.finding_fingerprint(one), review.finding_fingerprint(two)
+        )
+
+    def test_finding_fingerprint_changes_with_identity_fields(self) -> None:
+        base = _structured_review_finding()
+        for overrides in (
+            {"severity": "low"},
+            {"title": "A different defect"},
+            {"evidence": [{"path": "pkg/other.py", "symbol": "run_loop"}]},
+            {
+                "evidence": [
+                    {
+                        "path": "agent_session_loop/runner.py",
+                        "symbol": "other_symbol",
+                    }
+                ]
+            },
+        ):
+            changed = _structured_review_finding(**overrides)
+            self.assertNotEqual(
+                review.finding_fingerprint(base),
+                review.finding_fingerprint(changed),
+                overrides,
+            )
+
+    def test_finding_fingerprints_handles_missing_findings(self) -> None:
+        self.assertIsNone(review.finding_fingerprints(None))
+        self.assertEqual((), review.finding_fingerprints([]))
+        fingerprints = review.finding_fingerprints(
+            [_structured_review_finding()]
+        )
+        self.assertEqual(1, len(fingerprints))
+
+    # ------------------------------------------------------------------
+    # Flag resolution
+    # ------------------------------------------------------------------
+
+    def _run_args(self, **overrides: object) -> argparse.Namespace:
+        defaults: dict[str, object] = {
+            "cwd": str(self.repo_root),
+            "timeout": None,
+            "max_sessions": None,
+            "max_pending_sessions": None,
+            "commit_mode": None,
+            "harness": "codex",
+            "review_harness": None,
+            "max_review_fix_cycles": None,
+            "max_review_fix_plans": None,
+        }
+        defaults.update(overrides)
+        return argparse.Namespace(**defaults)
+
+    def test_max_review_fix_cycles_resolution_and_alias(self) -> None:
+        self.assertEqual(
+            runner.DEFAULT_MAX_REVIEW_FIX_CYCLES,
+            runner._max_review_fix_cycles(self._run_args()),
+        )
+        self.assertEqual(
+            0,
+            runner._max_review_fix_cycles(
+                self._run_args(max_review_fix_cycles=0)
+            ),
+        )
+        self.assertEqual(
+            5,
+            runner._max_review_fix_cycles(
+                self._run_args(max_review_fix_plans=5)
+            ),
+        )
+        self.assertEqual(
+            1,
+            runner._max_review_fix_cycles(
+                self._run_args(max_review_fix_cycles=1, max_review_fix_plans=9)
+            ),
+        )
+
+    def test_run_input_validation_for_review_fix_flags(self) -> None:
+        runner._validate_run_inputs(
+            self._run_args(max_review_fix_cycles=0)
+        )
+        runner._validate_run_inputs(self._run_args(max_review_fix_plans=0))
+        with self.assertRaisesRegex(
+            runner.RunError, "--max-review-fix-cycles must be zero"
+        ):
+            runner._validate_run_inputs(
+                self._run_args(max_review_fix_cycles=-1)
+            )
+        with self.assertRaisesRegex(
+            runner.RunError, "--max-review-fix-plans must be zero"
+        ):
+            runner._validate_run_inputs(
+                self._run_args(max_review_fix_plans=-2)
+            )
+        with self.assertRaisesRegex(runner.RunError, "deprecated alias"):
+            runner._validate_run_inputs(
+                self._run_args(max_review_fix_cycles=2, max_review_fix_plans=2)
+            )
+
+    # ------------------------------------------------------------------
+    # Cross-process cycle state
+    # ------------------------------------------------------------------
+
+    def test_review_cycle_state_reads_prior_events(self) -> None:
+        event_path = self.tmp_path / "events.jsonl"
+        self.assertEqual(
+            {
+                "cycle": 1,
+                "repairs_materialized": 0,
+                "previous_fingerprints": (),
+            },
+            runner._review_cycle_state(event_path),
+        )
+        records = [
+            {
+                "name": events.REVIEW_CYCLE_EVENT,
+                "payload": {
+                    "cycle": 1,
+                    "disposition": runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+                    "fingerprints": ["finding:aaaa", "finding:bbbb"],
+                },
+            },
+            {"name": "turn_finished", "payload": {}},
+            {
+                "name": events.REVIEW_CYCLE_EVENT,
+                "payload": {
+                    "cycle": 2,
+                    "disposition": (
+                        runner.REVIEW_CYCLE_DISPOSITION_ALL_CLEAR
+                    ),
+                    "fingerprints": [],
+                },
+            },
+        ]
+        event_path.write_text(
+            "\n".join(json.dumps(record) for record in records) + "\n",
+            encoding="utf-8",
+        )
+
+        state_payload = runner._review_cycle_state(event_path)
+        self.assertEqual(3, state_payload["cycle"])
+        self.assertEqual(1, state_payload["repairs_materialized"])
+        self.assertEqual((), state_payload["previous_fingerprints"])
+
+    def test_advance_review_cycle_pauses_on_malformed_repair(self) -> None:
+        # Pre-existing children trip the materializer's idempotency guard,
+        # which is one of the fail-closed malformed-review-repair paths.
+        finding = _structured_review_finding()
+        write_plan_with_ids(
+            self.plan_dir,
+            (("1", "complete"), ("2.1", "pending")),
+        )
+        review_body = runner.build_generated_review_session_body(
+            plans.parse_session_id("2"),
+            review_harness="claude",
+            plan_dir=self.plan_dir,
+        ).replace("- **Status**: pending", "- **Status**: complete")
+        (self.plan_dir / "session-2.md").write_text(
+            review_body, encoding="utf-8"
+        )
+        (self.plan_dir / "final-review.md").write_text(
+            "## Findings\n"
+            "- High issue in agent_session_loop/runner.py.\n"
+            "- Context in tests/test_agent_session_loop.py.\n"
+            "- Context in docs/agent-session-loop.md.\n"
+            "Status: 1 Findings (1 high, 0 med, 0 low)\n",
+            encoding="utf-8",
+        )
+        (self.plan_dir / "final-review.json").write_text(
+            json.dumps(
+                {"version": 2, "outcome": "findings", "findings": [finding]}
+            ),
+            encoding="utf-8",
+        )
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        event_path = self.state_dir / "events.jsonl"
+        payload: dict[str, object] = {
+            "run_id": "run-1",
+            "run_dir": str(self.tmp_path / "run"),
+            "review_cycles": [],
+        }
+        turn_payload = {
+            "review_verdict": {
+                "passed": True,
+                "outcome": "findings",
+                "total_findings": 1,
+                "findings": [finding],
+            }
+        }
+        snapshot = plans.inspect_plan(self.plan_dir)
+
+        action, after = runner._advance_review_cycle(
+            event_path=event_path,
+            payload=payload,
+            persistence=runner._RunPersistence(),
+            args=argparse.Namespace(
+                state_dir=str(self.state_dir), allow_not_loop_ready=False
+            ),
+            cwd=self.repo_root,
+            session_id="2",
+            session_label="session 2",
+            session_details={"session": "2"},
+            snapshot=snapshot,
+            turn_payload=turn_payload,
+            max_review_fix_cycles=2,
+        )
+
+        self.assertEqual("paused", action)
+        self.assertIs(snapshot, after)
+        self.assertEqual(
+            "malformed-review-repair", payload["pause_reason"]
+        )
+        cycles = payload["review_cycles"]
+        self.assertEqual(1, len(cycles))
+        self.assertEqual(
+            runner.REVIEW_CYCLE_DISPOSITION_MALFORMED,
+            cycles[0]["disposition"],
+        )
+        self.assertEqual(
+            runner.REVIEW_CYCLE_DISPOSITION_MALFORMED,
+            payload["review_fix_disposition"],
+        )
+        event_names = [record["name"] for record in read_jsonl(event_path)]
+        self.assertIn(events.REVIEW_CYCLE_EVENT, event_names)
+        self.assertIn(events.RUN_PAUSED_EVENT, event_names)
+
+    # ------------------------------------------------------------------
+    # End-to-end cycles through the fake harness
+    # ------------------------------------------------------------------
+
+    def _write_plan(self) -> None:
+        contracts_by_id = {
+            "1": _contract_block(
+                '{"type": "file_exists", "path": "README.md", '
+                '"name": "readme-1"}',
+                session="1",
+            )
+        }
+        write_plan(self.plan_dir, ("pending",), contracts_by_id=contracts_by_id)
+        sha = plans.stable_readiness_sha256(self.plan_dir)
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=sha,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+
+    def _run_cycles(
+        self,
+        *,
+        review_outcomes: str,
+        extra_args: list[str] | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+        argv = [
+            sys.executable,
+            "-m",
+            "agent_session_loop",
+            "run",
+            str(self.plan_dir),
+            "--cwd",
+            str(self.repo_root),
+            "--harness",
+            "codex",
+            "--review-harness",
+            "claude",
+            "--state-dir",
+            str(self.state_dir),
+            "--json",
+            *(extra_args or []),
+        ]
+        env = os.environ.copy()
+        env.update(
+            {
+                "XDG_CONFIG_HOME": str(self.config_home),
+                "FAKE_CODEX_MODE": "success-with-review",
+                "FAKE_CODEX_REVIEW_OUTCOMES": review_outcomes,
+                "PYTHONPATH": str(REPO_ROOT)
+                + os.pathsep
+                + env.get("PYTHONPATH", ""),
+            }
+        )
+        completed = subprocess.run(
+            argv,
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+        return completed, json.loads(completed.stdout)
+
+    def _events_path(self) -> Path:
+        plan_state = self.state_dir / plans.path_sha256(
+            plans.canonicalize_path(self.plan_dir)
+        )
+        return plan_state / events.EVENTS_FILE_NAME
+
+    def _review_cycle_events(self) -> list[dict[str, object]]:
+        return [
+            record["payload"]
+            for record in read_jsonl(self._events_path())
+            if record["name"] == events.REVIEW_CYCLE_EVENT
+        ]
+
+    def test_findings_repairs_all_clear_completes_in_one_invocation(
+        self,
+    ) -> None:
+        self._write_plan()
+
+        completed, payload = self._run_cycles(
+            review_outcomes="findings,all-clear"
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual("all-clear", payload["review_fix_disposition"])
+        # Turn order: impl 1, review 2 (findings), repair 2.1, review 3.
+        self.assertEqual(
+            ["1", "2", "2.1", "3"],
+            [turn["session_id"] for turn in payload["turns"]],
+        )
+        self.assertEqual(
+            [
+                runner.SESSION_KIND_IMPLEMENTATION,
+                runner.SESSION_KIND_REVIEW,
+                runner.SESSION_KIND_IMPLEMENTATION,
+                runner.SESSION_KIND_REVIEW,
+            ],
+            [turn["session_kind"] for turn in payload["turns"]],
+        )
+        cycles = payload["review_cycles"]
+        self.assertEqual(2, len(cycles))
+        self.assertEqual(1, cycles[0]["cycle"])
+        self.assertEqual("2", cycles[0]["review_session_id"])
+        self.assertEqual("findings", cycles[0]["outcome"])
+        self.assertEqual(
+            runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+            cycles[0]["disposition"],
+        )
+        self.assertEqual(["2.1"], cycles[0]["repair_session_ids"])
+        self.assertEqual(
+            cycles[0]["fingerprints"], cycles[0]["introduced_findings"]
+        )
+        self.assertEqual(2, cycles[1]["cycle"])
+        self.assertEqual("3", cycles[1]["review_session_id"])
+        self.assertEqual("all-clear", cycles[1]["outcome"])
+        self.assertEqual(
+            runner.REVIEW_CYCLE_DISPOSITION_ALL_CLEAR,
+            cycles[1]["disposition"],
+        )
+        self.assertEqual(
+            cycles[0]["fingerprints"], cycles[1]["closed_findings"]
+        )
+        child_path = self.plan_dir / "session-2.1.md"
+        self.assertTrue(child_path.is_file())
+        self.assertTrue(
+            review_repair.is_generated_review_repair_session_file(child_path)
+        )
+        self.assertEqual(2, len(self._review_cycle_events()))
+        self.assertEqual(
+            ["1", "2", "2.1", "3"], payload["completed_session_ids"]
+        )
+
+    def test_repeated_findings_stop_without_new_cycle(self) -> None:
+        self._write_plan()
+
+        # The second review re-detects the same finding with drifted line
+        # numbers; the normalized fingerprint must match and stop the loop.
+        completed, payload = self._run_cycles(
+            review_outcomes="findings,findings-drift"
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual(
+            runner.REVIEW_CYCLE_DISPOSITION_REPEATED,
+            payload["review_fix_disposition"],
+        )
+        cycles = payload["review_cycles"]
+        self.assertEqual(2, len(cycles))
+        self.assertEqual(
+            runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+            cycles[0]["disposition"],
+        )
+        self.assertEqual(
+            runner.REVIEW_CYCLE_DISPOSITION_REPEATED,
+            cycles[1]["disposition"],
+        )
+        self.assertEqual(
+            cycles[0]["fingerprints"], cycles[1]["repeated_findings"]
+        )
+        self.assertEqual([], cycles[1]["repair_session_ids"])
+        # One repair generation only: 2.1 exists, review 3 has no children.
+        self.assertTrue((self.plan_dir / "session-2.1.md").is_file())
+        self.assertFalse((self.plan_dir / "session-3.1.md").exists())
+
+    def test_zero_cycles_reviews_but_creates_no_repairs(self) -> None:
+        self._write_plan()
+
+        completed, payload = self._run_cycles(
+            review_outcomes="findings",
+            extra_args=["--max-review-fix-cycles", "0"],
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual(0, payload["max_review_fix_cycles"])
+        self.assertEqual(
+            runner.REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED,
+            payload["review_fix_disposition"],
+        )
+        cycles = payload["review_cycles"]
+        self.assertEqual(1, len(cycles))
+        self.assertEqual([], cycles[0]["repair_session_ids"])
+        self.assertEqual(["1", "2"], payload["completed_session_ids"])
+        self.assertFalse((self.plan_dir / "session-2.1.md").exists())
+        # The findings verdict is still recorded for the operator.
+        self.assertEqual("findings", payload["review_verdict"]["outcome"])
+
+    def test_cycle_cap_stops_after_configured_cycles(self) -> None:
+        self._write_plan()
+
+        # Cycle 1 repairs; the rereview finds a *different* defect, but the
+        # cap of 1 materialization is already spent.
+        completed, payload = self._run_cycles(
+            review_outcomes="findings,findings-new",
+            extra_args=["--max-review-fix-cycles", "1"],
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual(
+            runner.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
+            payload["review_fix_disposition"],
+        )
+        cycles = payload["review_cycles"]
+        self.assertEqual(2, len(cycles))
+        self.assertEqual(
+            runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+            cycles[0]["disposition"],
+        )
+        self.assertEqual(
+            runner.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
+            cycles[1]["disposition"],
+        )
+        # The new finding is introduced, not repeated.
+        self.assertEqual([], cycles[1]["repeated_findings"])
+        self.assertEqual(
+            cycles[1]["fingerprints"], cycles[1]["introduced_findings"]
+        )
+        self.assertTrue((self.plan_dir / "session-2.1.md").is_file())
+        self.assertFalse((self.plan_dir / "session-3.1.md").exists())
+
+    def test_deprecated_alias_flag_maps_to_cycles(self) -> None:
+        self._write_plan()
+
+        completed, payload = self._run_cycles(
+            review_outcomes="findings",
+            extra_args=["--max-review-fix-plans", "0"],
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual(0, payload["max_review_fix_cycles"])
+        self.assertEqual(
+            runner.REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED,
+            payload["review_fix_disposition"],
+        )
+        self.assertFalse((self.plan_dir / "session-2.1.md").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

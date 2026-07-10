@@ -1,0 +1,491 @@
+"""Workbench launch tests.
+
+Split from tests/test_agent_session_loop.py."""
+
+from __future__ import annotations
+
+import argparse
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+import dataclasses
+from datetime import datetime, timezone
+import errno
+import hashlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import pty
+import select
+import shlex
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import urllib.parse
+from unittest import mock
+
+from agent_session_loop import (
+    artifacts,
+    authoring,
+    baseline,
+    baseline_cache,
+    cli,
+    compact_state,
+    config,
+    contracts,
+    control_queue,
+    events,
+    harnesses,
+    install_verify,
+    plans,
+    preflight,
+    prepare,
+    progress_cli,
+    progress_repair,
+    qna,
+    review,
+    review_repair,
+    run_control,
+    runner,
+    state,
+    tail,
+    verification,
+    workbench,
+    workbench_server,
+)
+from agent_session_loop.formatting import (
+    format_duration_seconds,
+    format_turn_finished_message,
+    format_turn_started_message,
+)
+from tests.support import (
+    REPO_ROOT,
+    write_plan,
+    install_fake_codex,
+    _FakePopen,
+    _BrokenStdinFakePopen,
+)
+
+
+class WorkbenchLaunchTests(unittest.TestCase):
+    """Cover build_launch_argv, validation, and Popen-based launch behavior."""
+
+    def _seed_launchable_plan(self, tmp_path: Path) -> Path:
+        plan_dir = tmp_path / "plan"
+        write_plan(plan_dir, ("pending", "pending"))
+        return plans.canonicalize_path(plan_dir)
+
+    def test_build_launch_argv_maps_profile_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            profile = workbench.LaunchProfile(
+                cwd="/tmp/repo",
+                harness="codex",
+                model="o4-mini",
+                effort="high",
+                timeout=900,
+                commit_mode="per-session",
+                review_harness="claude",
+                unsafe_bypass=True,
+                allow_not_loop_ready=True,
+                note="launch note",
+            )
+
+            argv = workbench.build_launch_argv(
+                plan_dir,
+                profile=profile,
+                state_dir=tmp_path / "state",
+                python_executable="/usr/bin/python3-pinned",
+            )
+
+            self.assertEqual(argv[0], "/usr/bin/python3-pinned")
+            self.assertEqual(argv[1:4], ["-m", "agent_session_loop", "run"])
+            self.assertEqual(argv[4], str(plan_dir))
+            self.assertIn("--cwd", argv)
+            self.assertEqual(argv[argv.index("--cwd") + 1], "/tmp/repo")
+            self.assertIn("--harness", argv)
+            self.assertEqual(argv[argv.index("--harness") + 1], "codex")
+            self.assertIn("--review-harness", argv)
+            self.assertEqual(argv[argv.index("--review-harness") + 1], "claude")
+            self.assertIn("--model", argv)
+            self.assertEqual(argv[argv.index("--model") + 1], "o4-mini")
+            self.assertIn("--effort", argv)
+            self.assertEqual(argv[argv.index("--effort") + 1], "high")
+            self.assertIn("--timeout", argv)
+            self.assertEqual(argv[argv.index("--timeout") + 1], "900")
+            self.assertIn("--commit-per-session", argv)
+            self.assertNotIn("--commit-at-end", argv)
+            self.assertIn("--unsafe-bypass", argv)
+            self.assertNotIn("--no-unsafe-bypass", argv)
+            self.assertIn("--allow-not-loop-ready", argv)
+            self.assertIn("--note", argv)
+            self.assertEqual(argv[argv.index("--note") + 1], "launch note")
+            self.assertIn("--state-dir", argv)
+            self.assertEqual(
+                argv[argv.index("--state-dir") + 1], str(tmp_path / "state")
+            )
+            self.assertIn("--json", argv)
+            self.assertNotIn("--reply", argv)
+            self.assertNotIn("--reply-stdin", argv)
+
+    def test_build_launch_argv_handles_commit_at_end_and_no_unsafe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            profile = workbench.LaunchProfile(
+                commit_mode="end",
+                unsafe_bypass=False,
+            )
+
+            argv = workbench.build_launch_argv(
+                plan_dir,
+                profile=profile,
+                reply_via_stdin=True,
+                json_output=False,
+            )
+
+            self.assertIn("--commit-at-end", argv)
+            self.assertNotIn("--commit-per-session", argv)
+            self.assertIn("--no-unsafe-bypass", argv)
+            self.assertNotIn("--unsafe-bypass", argv)
+            self.assertNotIn("--json", argv)
+            self.assertIn("--reply-stdin", argv)
+            self.assertNotIn("--reply", argv)
+
+    def test_build_launch_argv_empty_profile_uses_minimal_argv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+
+            argv = workbench.build_launch_argv(plan_dir)
+
+            self.assertEqual(argv[1:4], ["-m", "agent_session_loop", "run"])
+            self.assertEqual(argv[4], str(plan_dir))
+            for unexpected in (
+                "--cwd",
+                "--harness",
+                "--model",
+                "--effort",
+                "--timeout",
+                "--commit-per-session",
+                "--commit-at-end",
+                "--allow-not-loop-ready",
+                "--note",
+                "--state-dir",
+                "--reply",
+                "--reply-stdin",
+            ):
+                self.assertNotIn(unexpected, argv)
+            self.assertIn("--json", argv)
+
+    def test_invalid_plan_dir_missing_raises_invalid_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "absent"
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.build_launch_argv(missing)
+
+            self.assertEqual(workbench.LAUNCH_REASON_INVALID_PLAN, ctx.exception.reason)
+
+    def test_invalid_plan_dir_missing_manifest_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            broken = tmp_path / "broken"
+            broken.mkdir()
+            (broken / "context.md").write_text("# Context\n", encoding="utf-8")
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.build_launch_argv(broken)
+
+            self.assertEqual(workbench.LAUNCH_REASON_INVALID_PLAN, ctx.exception.reason)
+            self.assertIn("manifest.md", ctx.exception.message)
+
+    def test_invalid_plan_dir_missing_context_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            broken = tmp_path / "broken"
+            broken.mkdir()
+            (broken / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.build_launch_argv(broken)
+
+            self.assertEqual(workbench.LAUNCH_REASON_INVALID_PLAN, ctx.exception.reason)
+            self.assertIn("context.md", ctx.exception.message)
+
+    def test_invalid_profile_harness_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            profile = workbench.LaunchProfile(harness="bogus")
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.build_launch_argv(plan_dir, profile=profile)
+
+            self.assertEqual(
+                workbench.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
+            )
+
+    def test_invalid_profile_review_harness_matches_harness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            profile = workbench.LaunchProfile(harness="codex", review_harness="codex")
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.build_launch_argv(plan_dir, profile=profile)
+
+            self.assertEqual(
+                workbench.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
+            )
+
+    def test_invalid_profile_commit_mode_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            profile = workbench.LaunchProfile(commit_mode="weekly")  # type: ignore[arg-type]
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.build_launch_argv(plan_dir, profile=profile)
+
+            self.assertEqual(
+                workbench.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
+            )
+
+    def test_invalid_profile_non_positive_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            profile = workbench.LaunchProfile(timeout=0)
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.build_launch_argv(plan_dir, profile=profile)
+
+            self.assertEqual(
+                workbench.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
+            )
+
+    def test_launch_plan_records_metadata_without_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            captured: list[_FakePopen] = []
+
+            def factory(argv, **kwargs):
+                proc = _FakePopen(argv, **kwargs)
+                captured.append(proc)
+                return proc
+
+            result = workbench.launch_plan(
+                plan_dir,
+                profile=workbench.LaunchProfile(harness="codex", timeout=42),
+                state_dir=tmp_path / "state",
+                popen_factory=factory,
+            )
+
+            self.assertEqual(1, len(captured))
+            spawned = captured[0]
+            self.assertFalse(result.reply_provided)
+            self.assertIsNone(result.reply_length)
+            self.assertIsNone(result.reply_origin)
+            self.assertEqual(spawned.pid, result.pid)
+            self.assertEqual(tuple(spawned.argv), result.argv)
+            self.assertIn("--harness", result.argv)
+            self.assertNotIn("--reply-stdin", result.argv)
+            self.assertNotIn("--reply", result.argv)
+            self.assertEqual(plan_dir, result.plan_dir)
+            self.assertEqual(
+                (tmp_path / "state").resolve(), result.state_dir
+            )
+            payload = result.to_payload()
+            self.assertEqual("codex", payload["profile"]["harness"])
+            self.assertEqual(42, payload["profile"]["timeout"])
+            self.assertFalse(payload["reply_provided"])
+            self.assertIsNone(payload["reply_origin"])
+
+    def test_launch_plan_streams_reply_through_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            captured: list[_FakePopen] = []
+
+            def factory(argv, **kwargs):
+                proc = _FakePopen(argv, **kwargs)
+                captured.append(proc)
+                return proc
+
+            reply = "answer is 1a"
+            result = workbench.launch_plan(
+                plan_dir,
+                reply_text=reply,
+                popen_factory=factory,
+            )
+
+            self.assertEqual(1, len(captured))
+            spawned = captured[0]
+            self.assertTrue(result.reply_provided)
+            self.assertEqual(len(reply), result.reply_length)
+            self.assertEqual("stdin", result.reply_origin)
+            self.assertIn("--reply-stdin", spawned.argv)
+            self.assertNotIn("--reply", spawned.argv)
+            for token in spawned.argv:
+                self.assertNotIn(reply, token)
+            self.assertEqual(reply, spawned.stdin_text)
+            self.assertTrue(spawned.stdin.closed)
+
+    def test_launch_plan_resume_helper_streams_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            captured: list[_FakePopen] = []
+
+            def factory(argv, **kwargs):
+                proc = _FakePopen(argv, **kwargs)
+                captured.append(proc)
+                return proc
+
+            result = workbench.resume_plan_with_reply(
+                plan_dir,
+                reply_text="resume with option B",
+                popen_factory=factory,
+            )
+
+            self.assertTrue(result.reply_provided)
+            self.assertEqual("stdin", result.reply_origin)
+            self.assertEqual(1, len(captured))
+            self.assertEqual("resume with option B", captured[0].stdin_text)
+
+    def test_launch_plan_empty_reply_raises_empty_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            captured: list[_FakePopen] = []
+
+            def factory(argv, **kwargs):
+                proc = _FakePopen(argv, **kwargs)
+                captured.append(proc)
+                return proc
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.launch_plan(
+                    plan_dir,
+                    reply_text="   \n  ",
+                    popen_factory=factory,
+                )
+
+            self.assertEqual(workbench.LAUNCH_REASON_EMPTY_REPLY, ctx.exception.reason)
+            self.assertEqual(0, len(captured), "process must not be spawned")
+
+    def test_launch_plan_propagates_popen_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+
+            def factory(argv, **kwargs):
+                raise OSError("permission denied")
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.launch_plan(plan_dir, popen_factory=factory)
+
+            self.assertEqual(
+                workbench.LAUNCH_REASON_PROCESS_FAILED, ctx.exception.reason
+            )
+
+    def test_launch_plan_stdin_failure_kills_child(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            captured: list[_BrokenStdinFakePopen] = []
+
+            def factory(argv, **kwargs):
+                proc = _BrokenStdinFakePopen(argv, **kwargs)
+                captured.append(proc)
+                return proc
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.launch_plan(
+                    plan_dir,
+                    reply_text="oops",
+                    popen_factory=factory,
+                )
+
+            self.assertEqual(
+                workbench.LAUNCH_REASON_PROCESS_FAILED, ctx.exception.reason
+            )
+            self.assertEqual(1, len(captured))
+            self.assertEqual(-9, captured[0].returncode)
+
+    def test_launch_plan_fake_harness_creates_normal_asl_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            state_dir = tmp_path / "state"
+            config_home = tmp_path / "config"
+            harness_config_path = (
+                config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+            )
+            harness_config_path.parent.mkdir(parents=True, exist_ok=True)
+            fake_codex = install_fake_codex(tmp_path)
+            harness_config_path.write_text(
+                json.dumps({"codex": {"executable": str(fake_codex)}}),
+                encoding="utf-8",
+            )
+
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(config_home)
+            env["FAKE_CODEX_MODE"] = "success"
+            env["FAKE_CODEX_SLEEP"] = "0"
+            env["PYTHONPATH"] = (
+                str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+            )
+
+            profile = workbench.LaunchProfile(
+                cwd=str(REPO_ROOT),
+                harness="codex",
+                allow_not_loop_ready=True,
+            )
+
+            captured: list[subprocess.Popen] = []
+
+            def factory(argv, **kwargs):
+                proc = subprocess.Popen(argv, **kwargs)
+                captured.append(proc)
+                return proc
+
+            result = workbench.launch_plan(
+                plan_dir,
+                profile=profile,
+                state_dir=state_dir,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                popen_factory=factory,
+            )
+
+            self.assertEqual(1, len(captured))
+            child = captured[0]
+            try:
+                returncode = child.wait(timeout=120)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+                self.fail("launched subprocess did not exit within timeout")
+
+            self.assertEqual(0, returncode)
+            self.assertEqual(child.pid, result.pid)
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            self.assertTrue((plan_state / events.STATE_FILE_NAME).exists())
+            self.assertTrue((plan_state / events.EVENTS_FILE_NAME).exists())
+            self.assertEqual(plan_dir, result.plan_dir)
+            self.assertFalse(result.reply_provided)
+
+
+if __name__ == "__main__":
+    unittest.main()
