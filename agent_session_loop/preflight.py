@@ -10,7 +10,8 @@ Session 5 covers the core checks that run against the durable plan files
 alone: plan structure validation, canonical session-id filenames, manifest
 readiness metadata (state + stable SHA-256), per-session completion
 contracts, ambiguity sentinels in session bodies, and lightweight path
-hygiene on contract ``path`` fields. Session 6 adds environment-aware
+hygiene on contract ``path`` fields plus a scope lint for overly broad
+verification commands. Session 6 adds environment-aware
 checks that depend on the runtime working directory, the requested
 harness, the active commit mode, and the operational lock state: repo
 root, git worktree/dirty status, harness executable availability, ``spec``
@@ -67,7 +68,7 @@ from .plans import (
     stable_readiness_sha256,
     write_readiness_metadata,
 )
-from .verification import diagnose_command
+from .verification import diagnose_command, diagnose_command_scope
 
 
 PreflightSeverity = Literal["red", "yellow", "green"]
@@ -79,6 +80,7 @@ PreflightCategory = Literal[
     "malformed-contract",
     "ambiguity-sentinel",
     "path-reference",
+    "verification-scope",
     "command-not-runnable",
     "progress-journal-missing",
     "baseline-missing",
@@ -103,6 +105,7 @@ PREFLIGHT_CATEGORIES: tuple[PreflightCategory, ...] = (
     "malformed-contract",
     "ambiguity-sentinel",
     "path-reference",
+    "verification-scope",
     "command-not-runnable",
     "progress-journal-missing",
     "baseline-missing",
@@ -292,6 +295,21 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
         question_template=(
             "Session {session_id} contract path is not repo-relative ({detail}). "
             "Rewrite it?"
+        ),
+        fix_category="plan-edit",
+    ),
+    "verification-scope": RepairHint(
+        category="verification-scope",
+        check_id="verification-scope.narrow",
+        severity_hint="red",
+        message=(
+            "Narrow the verification recipe so it targets only the package(s) "
+            "this session actually changes; ASL session verification must not "
+            "run repo-wide `./operator health` commands."
+        ),
+        question_template=(
+            "Session {session_id} contains an overly broad verification "
+            "command ({detail}). Should I narrow the recipe?"
         ),
         fix_category="plan-edit",
     ),
@@ -729,6 +747,20 @@ RUNTIME_REPAIR_HINTS: dict[str, RepairHint] = {
         question_template=(
             "Verification command could not be executed. "
             "Should I diagnose the OS error?"
+        ),
+        fix_category="session-recipe-edit",
+    ),
+    "verify-failed.command-overbroad": RepairHint(
+        category="verify-failed",
+        check_id="runtime.verify-failed.command-overbroad",
+        severity_hint="red",
+        message=(
+            "Narrow the verification command to package-scoped checks before "
+            "retrying; ASL refuses repo-wide `./operator health` gates."
+        ),
+        question_template=(
+            "Verification command is too broad for ASL session execution. "
+            "Should I narrow the recipe?"
         ),
         fix_category="session-recipe-edit",
     ),
@@ -1248,6 +1280,35 @@ def _check_path_references(
     return tuple(findings)
 
 
+def _check_verification_scope(
+    contracts_by_session: dict[str, CompletionContract],
+) -> tuple[PreflightFinding, ...]:
+    findings: list[PreflightFinding] = []
+
+    for session_id in sorted(contracts_by_session):
+        contract = contracts_by_session[session_id]
+        for check in contract.verify.checks:
+            if not isinstance(check, CommandCheck):
+                continue
+            diagnostic = diagnose_command_scope(check)
+            if diagnostic is None:
+                continue
+            findings.append(
+                _finding(
+                    "red",
+                    "verification-scope",
+                    (
+                        f"session {session_id} check {check.name!r} "
+                        "verification command is overly broad"
+                    ),
+                    session_id=session_id,
+                    detail=diagnostic.detail,
+                )
+            )
+
+    return tuple(findings)
+
+
 def _check_command_runnability(
     contracts_by_session: dict[str, CompletionContract],
     cwd: str | Path | None,
@@ -1570,7 +1631,8 @@ def run_core_preflight(plan_dir: str | Path) -> PreflightReport:
     missing or unreadable, only a ``plan-structure`` finding is returned. When
     structure validates, the report also includes canonical session-id checks,
     manifest readiness metadata, per-session completion contracts, ambiguity
-    sentinels, and lightweight contract path-reference checks. Severity is
+    sentinels, lightweight contract path-reference checks, and verification
+    scope linting. Severity is
     surfaced via ``PreflightFinding.severity``; ``PreflightReport.ok`` is
     ``True`` only when every finding is green.
     """
@@ -1605,6 +1667,7 @@ def run_core_preflight(plan_dir: str | Path) -> PreflightReport:
 
     findings.extend(_check_ambiguity_sentinels(snapshot))
     findings.extend(_check_path_references(contracts_by_session))
+    findings.extend(_check_verification_scope(contracts_by_session))
     findings.extend(_check_progress_journal(snapshot))
 
     return PreflightReport(

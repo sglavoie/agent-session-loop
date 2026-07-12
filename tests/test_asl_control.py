@@ -66,6 +66,7 @@ from agent_session_loop.formatting import (
 )
 from tests.support import (
     TTYText,
+    agent_mux_notify_enabled,
     patched_env,
     read_jsonl,
 )
@@ -737,7 +738,18 @@ class RunControlTests(unittest.TestCase):
         )
 
 
-class FinishNotificationTests(unittest.TestCase):
+class AgentMuxNotificationIntegrationTests(unittest.TestCase):
+    """Notifier-specific coverage for AgentMux hook delivery.
+
+    The suite-wide default (``tests/support.py``) forces
+    ``ASL_AGENT_MUX_NOTIFY=off`` so no other test can reach a live daemon;
+    every test here that expects delivery re-enables it explicitly and
+    substitutes the executable lookup / subprocess layer with fakes.
+    """
+
+    def setUp(self) -> None:
+        self.enterContext(agent_mux_notify_enabled())
+
     def finish_payload(self, tmp_dir: Path) -> dict[str, object]:
         return {
             "run_id": "run-123",
@@ -948,6 +960,9 @@ class FinishNotificationTests(unittest.TestCase):
                 kwargs["timeout"],
             )
             self.assertFalse(kwargs["check"])
+            hook_payload = json.loads(kwargs["input"])
+            emitted_time = hook_payload.pop("emitted_time")
+            self.assertTrue(emitted_time.isdigit())
             self.assertEqual(
                 {
                     "source": "agent_session_loop",
@@ -958,10 +973,11 @@ class FinishNotificationTests(unittest.TestCase):
                     "state_path": payload["state_path"],
                     "kitty_window_id": 42,
                     "harness": "codex",
+                    "phase": "finished",
                     "run_started_at": "2026-06-11T12:00:00Z",
                     "run_finished_at": "2026-06-11T12:00:03Z",
                 },
-                json.loads(kwargs["input"]),
+                hook_payload,
             )
 
     def test_finish_notification_skips_when_amx_is_missing(self) -> None:
@@ -1012,7 +1028,7 @@ class FinishNotificationTests(unittest.TestCase):
             ) as notify:
                 runner._finish_run(event_path, payload)
 
-            notify.assert_called_once_with(payload)
+            notify.assert_called_once_with(payload, mock.ANY)
             self.assertIsNotNone(payload["run_finished_at"])
             self.assertIsNone(payload["active_turn"])
             self.assertTrue(Path(payload["state_path"]).exists())
@@ -1022,6 +1038,273 @@ class FinishNotificationTests(unittest.TestCase):
                 payload["run_finished_at"],
                 records[0]["payload"]["run_finished_at"],
             )
+
+    def test_notify_env_off_disables_delivery_before_executable_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self.finish_payload(Path(tmp))
+            with (
+                patched_env(ASL_AGENT_MUX_NOTIFY="off"),
+                mock.patch.object(runner.shutil, "which") as which,
+                mock.patch.object(runner.subprocess, "run") as run,
+            ):
+                runner._notify_agent_mux_loop_finished(payload)
+
+            which.assert_not_called()
+            run.assert_not_called()
+
+    def test_notify_env_unknown_value_behaves_as_auto(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["/opt/amx", "hook-indicator", "AgentSessionLoopFinished"],
+            0,
+            stdout="",
+            stderr="",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self.finish_payload(Path(tmp))
+            for raw in ("banana", "ON", " Auto ", ""):
+                with self.subTest(raw=raw):
+                    with (
+                        patched_env(ASL_AGENT_MUX_NOTIFY=raw),
+                        mock.patch.object(
+                            runner.shutil, "which", return_value="/opt/amx"
+                        ),
+                        mock.patch.object(
+                            runner.subprocess, "run", return_value=completed
+                        ) as run,
+                    ):
+                        runner._notify_agent_mux_loop_finished(payload)
+                    run.assert_called_once()
+
+    def test_lifecycle_notifications_carry_phase_sequence_and_identity(
+        self,
+    ) -> None:
+        completed = subprocess.CompletedProcess(
+            ["/opt/amx"], 0, stdout="", stderr=""
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            payload = self.finish_payload(tmp_dir)
+            payload["run_finished_at"] = None
+            payload["agent_mux_sequence"] = 0
+            payload["pause_reason"] = "verify-failed"
+            payload["pause_message"] = "check exploded"
+            persistence = runner._RunPersistence()
+            active_turn = {
+                "harness": "claude",
+                "turn_index": 1,
+                "session": 1,
+                "session_id": "1",
+                "total_sessions": 2,
+                "artifact_dir": str(tmp_dir / "turn"),
+                "stdout_path": str(tmp_dir / "stdout.log"),
+                "stderr_path": str(tmp_dir / "stderr.log"),
+                "last_message_path": str(tmp_dir / "last-message.txt"),
+                "result_path": str(tmp_dir / "result.json"),
+                "started_at": "2026-06-11T12:01:00Z",
+                "heartbeat_count": 3,
+                "last_activity_at": "2026-06-11T12:01:30Z",
+            }
+
+            with (
+                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.subprocess, "run", return_value=completed
+                ) as run,
+            ):
+                runner._notify_agent_mux_loop_started(payload, persistence)
+                runner._notify_agent_mux_loop_turn_started(
+                    payload, active_turn, persistence
+                )
+                runner._notify_agent_mux_loop_turn_heartbeat(
+                    payload, active_turn, persistence
+                )
+                runner._notify_agent_mux_loop_turn_finished(
+                    payload, active_turn, persistence
+                )
+                runner._notify_agent_mux_loop_paused(payload, persistence)
+                runner._notify_agent_mux_loop_finished(payload, persistence)
+
+            events_seen = [call.args[0][-1] for call in run.call_args_list]
+            self.assertEqual(
+                [
+                    "AgentSessionLoopStarted",
+                    "AgentSessionLoopTurnStarted",
+                    "AgentSessionLoopTurnHeartbeat",
+                    "AgentSessionLoopTurnFinished",
+                    "AgentSessionLoopPaused",
+                    "AgentSessionLoopFinished",
+                ],
+                events_seen,
+            )
+            hook_payloads = [
+                json.loads(call.kwargs["input"]) for call in run.call_args_list
+            ]
+            self.assertEqual(
+                ["between", "turn", "turn", "between", "paused", "finished"],
+                [hook_payload["phase"] for hook_payload in hook_payloads],
+            )
+            # The persisted per-run counter is monotonic across every event
+            # and both ordering fields are string-encoded for the daemon.
+            self.assertEqual(
+                [str(index) for index in range(1, 7)],
+                [hook_payload["source_sequence"] for hook_payload in hook_payloads],
+            )
+            self.assertEqual(
+                [f"run-123:{index}" for index in range(1, 7)],
+                [hook_payload["source_event_id"] for hook_payload in hook_payloads],
+            )
+            for hook_payload in hook_payloads:
+                self.assertEqual("run-123", hook_payload["run_id"])
+                self.assertTrue(hook_payload["emitted_time"].isdigit())
+            # Turn-scoped events carry the turn identity, heartbeat count,
+            # and activity recency the daemon consumes.
+            heartbeat_payload = hook_payloads[2]
+            self.assertEqual(1, heartbeat_payload["turn_index"])
+            self.assertEqual("1", heartbeat_payload["session_id"])
+            self.assertEqual(3, heartbeat_payload["heartbeat_count"])
+            self.assertEqual(
+                "2026-06-11T12:01:30Z", heartbeat_payload["last_output_at"]
+            )
+            # Paused carries the attention-mapping reason for the daemon.
+            paused_payload = hook_payloads[4]
+            self.assertEqual("verify-failed", paused_payload["pause_reason"])
+            self.assertEqual("check exploded", paused_payload["pause_message"])
+            # The allocated counter is durable in state.json.
+            state_payload = json.loads(
+                Path(str(payload["state_path"])).read_text(encoding="utf-8")
+            )
+            self.assertEqual(6, state_payload["agent_mux_sequence"])
+            self.assertEqual(6, payload["agent_mux_sequence"])
+
+    def test_pause_run_emits_paused_and_finish_run_skips_finished(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["/opt/amx"], 0, stdout="", stderr=""
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            event_path = tmp_dir / "events.jsonl"
+            payload = self.finish_payload(tmp_dir)
+            payload["run_finished_at"] = None
+            payload["agent_mux_sequence"] = 0
+            persistence = runner._RunPersistence()
+
+            with (
+                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.subprocess, "run", return_value=completed
+                ) as run,
+            ):
+                runner._pause_run(
+                    event_path,
+                    payload,
+                    reason="question",
+                    message="need input",
+                    persistence=persistence,
+                )
+                runner._finish_run(
+                    event_path, payload, persistence=persistence
+                )
+
+            events_seen = [call.args[0][-1] for call in run.call_args_list]
+            self.assertEqual(["AgentSessionLoopPaused"], events_seen)
+            hook_payload = json.loads(run.call_args_list[0].kwargs["input"])
+            self.assertEqual("paused", hook_payload["phase"])
+            self.assertEqual("question", hook_payload["pause_reason"])
+            self.assertEqual("need input", hook_payload["pause_message"])
+            # The run still finalized normally on disk.
+            self.assertIsNotNone(payload["run_finished_at"])
+            self.assertTrue(payload["paused"])
+
+    def test_unpaused_finish_run_emits_finished(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["/opt/amx"], 0, stdout="", stderr=""
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            event_path = tmp_dir / "events.jsonl"
+            payload = self.finish_payload(tmp_dir)
+            payload["run_finished_at"] = None
+            payload["agent_mux_sequence"] = 0
+            persistence = runner._RunPersistence()
+
+            with (
+                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.subprocess, "run", return_value=completed
+                ) as run,
+            ):
+                runner._finish_run(
+                    event_path, payload, persistence=persistence
+                )
+
+            events_seen = [call.args[0][-1] for call in run.call_args_list]
+            self.assertEqual(["AgentSessionLoopFinished"], events_seen)
+            hook_payload = json.loads(run.call_args_list[0].kwargs["input"])
+            self.assertEqual("finished", hook_payload["phase"])
+            self.assertEqual("1", hook_payload["source_sequence"])
+
+    def test_cancelled_recheck_skips_emission_without_allocating_sequence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self.finish_payload(Path(tmp))
+            payload["agent_mux_sequence"] = 0
+            persistence = runner._RunPersistence()
+
+            with (
+                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(runner.subprocess, "run") as run,
+            ):
+                runner._notify_agent_mux_loop(
+                    runner.AGENT_MUX_TURN_HEARTBEAT_EVENT,
+                    payload,
+                    reason=runner.AGENT_MUX_TURN_HEARTBEAT_REASON,
+                    persistence=persistence,
+                    cancelled=lambda: True,
+                )
+
+            run.assert_not_called()
+            self.assertEqual(0, payload["agent_mux_sequence"])
+
+    def test_missing_amx_skips_delivery_without_allocating_sequence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self.finish_payload(Path(tmp))
+            payload["agent_mux_sequence"] = 0
+            persistence = runner._RunPersistence()
+
+            with (
+                mock.patch.object(runner.shutil, "which", return_value=None),
+                mock.patch.object(runner.subprocess, "run") as run,
+            ):
+                runner._notify_agent_mux_loop_finished(payload, persistence)
+
+            run.assert_not_called()
+            self.assertEqual(0, payload["agent_mux_sequence"])
+
+
+class AgentMuxSuiteIsolationTests(unittest.TestCase):
+    """Lock in the suite-wide default: no live AgentMux delivery."""
+
+    def test_suite_environment_forces_notification_off(self) -> None:
+        # tests/support.py exports the kill switch at import time; every
+        # nested ASL subprocess inherits it, so the full suite produces zero
+        # live lifecycle events even with a real amx on PATH.
+        self.assertEqual(
+            runner.AGENT_MUX_NOTIFY_OFF,
+            os.environ.get(runner.AGENT_MUX_NOTIFY_ENV_VAR),
+        )
+        self.assertFalse(runner._agent_mux_notify_enabled())
+
+    def test_notify_helpers_short_circuit_under_suite_default(self) -> None:
+        with (
+            mock.patch.object(runner.shutil, "which") as which,
+            mock.patch.object(runner.subprocess, "run") as run,
+        ):
+            runner._notify_agent_mux_loop_started({"run_id": "run-x"})
+            runner._notify_agent_mux_loop_finished({"run_id": "run-x"})
+
+        which.assert_not_called()
+        run.assert_not_called()
 
 
 if __name__ == "__main__":

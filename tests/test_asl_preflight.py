@@ -612,6 +612,67 @@ class PreflightCoreTests(unittest.TestCase):
             self.assertEqual("yellow", path_findings[0].severity)
             self.assertIn("escapes", path_findings[0].message)
 
+    def test_verification_scope_flags_unscoped_operator_health_as_red(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            contract = _contract_block(
+                '{"type": "command", "argv": ["./operator", "health", "check-ts"], '
+                '"timeout_seconds": 30, "name": "check-ts"}',
+                session="1",
+            )
+            write_plan(
+                plan_dir, ("pending",), contracts_by_id={"1": contract}
+            )
+            plans.write_readiness_metadata(
+                plan_dir,
+                plans.ReadinessMetadata(
+                    state="loop-ready",
+                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    checked_at="2026-06-19T00:00:00Z",
+                ),
+            )
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            scope_findings = [
+                finding
+                for finding in report.findings
+                if finding.category == "verification-scope"
+            ]
+            self.assertEqual(1, len(scope_findings))
+            self.assertEqual("red", scope_findings[0].severity)
+            self.assertIn("overly broad", scope_findings[0].message)
+            self.assertFalse(report.ok)
+
+    def test_verification_scope_allows_scoped_operator_health(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            contract = _contract_block(
+                '{"type": "command", "argv": ["./operator", "health", "lint", '
+                '"--core-oidc"], "timeout_seconds": 30, "name": "lint"}',
+                session="1",
+            )
+            write_plan(
+                plan_dir, ("pending",), contracts_by_id={"1": contract}
+            )
+            plans.write_readiness_metadata(
+                plan_dir,
+                plans.ReadinessMetadata(
+                    state="loop-ready",
+                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    checked_at="2026-06-19T00:00:00Z",
+                ),
+            )
+
+            report = preflight.run_core_preflight(plan_dir)
+
+            scope_findings = [
+                finding
+                for finding in report.findings
+                if finding.category == "verification-scope"
+            ]
+            self.assertEqual([], scope_findings)
+
     def test_report_ok_only_when_no_red_or_yellow_findings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
@@ -1507,6 +1568,7 @@ class PreflightRepairHintTests(unittest.TestCase):
             "command-timeout",
             "command-not-found",
             "command-error",
+            "command-overbroad",
             "file-missing",
             "file-error",
             "regex-not-matched",

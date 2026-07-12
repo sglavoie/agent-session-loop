@@ -66,8 +66,10 @@ from agent_session_loop.formatting import (
 )
 from tests.support import (
     REPO_ROOT,
+    agent_mux_notify_enabled,
     patched_env,
     write_plan,
+    install_fake_amx,
     install_fake_codex,
     init_git_repo,
     read_jsonl,
@@ -1266,6 +1268,168 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
         self.assertEqual("1", entries[0].session_id.value)
         self.assertEqual("complete", entries[0].status)
         self.assertTrue(payload["turns"][0]["progress_appended"])
+
+    def test_agent_mux_notifications_describe_the_same_phase_sequence(
+        self,
+    ) -> None:
+        """The AgentMux notification stream must mirror the persisted
+        lifecycle: same phase transitions as state/events, one monotonic
+        per-run sequence, and verification heartbeats carrying check
+        identity — the daemon-side contract from the reliability plan."""
+        _fake_amx, amx_log = install_fake_amx(self.tmp_path)
+        sleep_argv = [
+            sys.executable,
+            "-c",
+            "import time; time.sleep(0.3)",
+        ]
+        check_payload = (
+            '{"type": "command", "name": "long-sleep", '
+            f'"argv": {json.dumps(sleep_argv)}, "timeout_seconds": 30}}'
+        )
+        contract = _contract_block(check_payload, session="1")
+        write_plan(
+            self.plan_dir, ("pending",), contracts_by_id={"1": contract}
+        )
+
+        real_enforce = runner._enforce_session_verification
+
+        def short_heartbeat_enforce(**kwargs: object) -> bool:
+            kwargs["heartbeat_interval"] = 0.05
+            return real_enforce(**kwargs)
+
+        with (
+            agent_mux_notify_enabled(),
+            patched_env(
+                PATH=str(self.tmp_path)
+                + os.pathsep
+                + os.environ.get("PATH", ""),
+                FAKE_AMX_LOG=str(amx_log),
+                # Slow interpreter start under parallel-shard load must not
+                # silently drop a notification record.
+                ASL_AGENT_MUX_NOTIFY_TIMEOUT_SECONDS="30",
+            ),
+            mock.patch.object(
+                runner,
+                "_enforce_session_verification",
+                new=short_heartbeat_enforce,
+            ),
+        ):
+            exit_code, payload = self._invoke_run_locked()
+
+        self.assertEqual(0, exit_code)
+        self.assertTrue(payload["ok"])
+
+        amx_records = read_jsonl(amx_log)
+        notified_events = [record["argv"][-1] for record in amx_records]
+        hook_payloads = [
+            json.loads(str(record["stdin"])) for record in amx_records
+        ]
+
+        # At least one verification heartbeat notification fired inside the
+        # synthetic 0.3s check window (0.05s interval).
+        verification_heartbeats = [
+            hook_payload
+            for event, hook_payload in zip(notified_events, hook_payloads)
+            if event == runner.AGENT_MUX_VERIFICATION_HEARTBEAT_EVENT
+        ]
+        self.assertGreaterEqual(
+            len(verification_heartbeats),
+            1,
+            f"expected verification heartbeat notifications; got: "
+            f"{notified_events}",
+        )
+
+        # The notification stream, with consecutive same-event runs
+        # collapsed, is exactly the documented lifecycle order.
+        collapsed_events = [
+            event
+            for index, event in enumerate(notified_events)
+            if index == 0 or event != notified_events[index - 1]
+        ]
+        self.assertEqual(
+            [
+                runner.AGENT_MUX_START_EVENT,
+                runner.AGENT_MUX_TURN_START_EVENT,
+                runner.AGENT_MUX_TURN_FINISH_EVENT,
+                runner.AGENT_MUX_VERIFICATION_START_EVENT,
+                runner.AGENT_MUX_VERIFICATION_HEARTBEAT_EVENT,
+                runner.AGENT_MUX_VERIFICATION_FINISH_EVENT,
+                runner.AGENT_MUX_FINISH_EVENT,
+            ],
+            collapsed_events,
+        )
+
+        # Every notification carries the run identity, the daemon phase for
+        # its event, and one strictly monotonic string-encoded sequence.
+        run_id = payload["run_id"]
+        for event, hook_payload in zip(notified_events, hook_payloads):
+            self.assertEqual(run_id, hook_payload["run_id"])
+            self.assertEqual(
+                runner.AGENT_MUX_PHASE_BY_EVENT[event],
+                hook_payload["phase"],
+            )
+            self.assertEqual(
+                f"{run_id}:{hook_payload['source_sequence']}",
+                hook_payload["source_event_id"],
+            )
+            self.assertTrue(hook_payload["emitted_time"].isdigit())
+        sequences = [
+            int(hook_payload["source_sequence"])
+            for hook_payload in hook_payloads
+        ]
+        self.assertEqual(list(range(1, len(sequences) + 1)), sequences)
+
+        # The persisted counter in state.json matches the last emission.
+        state_payload = json.loads(
+            Path(str(payload["state_path"])).read_text(encoding="utf-8")
+        )
+        self.assertEqual(len(sequences), state_payload["agent_mux_sequence"])
+
+        # Verification heartbeats carry the check identity, heartbeat count,
+        # and recency fields the daemon consumes.
+        for heartbeat_payload in verification_heartbeats:
+            self.assertEqual("long-sleep", heartbeat_payload["check_name"])
+            self.assertEqual("command", heartbeat_payload["check_kind"])
+            self.assertGreaterEqual(heartbeat_payload["heartbeat_count"], 1)
+            self.assertIn("last_heartbeat_at", heartbeat_payload)
+            self.assertEqual("1", heartbeat_payload["session_id"])
+
+        # The notification phase transitions equal the phase transitions
+        # derivable from the persisted events.jsonl — the "same phase
+        # sequence" completion contract.
+        event_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir)
+            / events.EVENTS_FILE_NAME
+        )
+        internal_phase_by_event = {
+            "turn_started": "turn",
+            events.TURN_HEARTBEAT_EVENT: "turn",
+            "turn_finished": "between",
+            events.VERIFICATION_STARTED_EVENT: "verification",
+            events.VERIFICATION_HEARTBEAT_EVENT: "verification",
+            events.VERIFICATION_FINISHED_EVENT: "between",
+            "run_finished": "finished",
+        }
+        internal_phases = ["between"] + [
+            internal_phase_by_event[record["name"]]
+            for record in read_jsonl(event_path)
+            if record["name"] in internal_phase_by_event
+        ]
+        collapse = lambda values: [  # noqa: E731
+            value
+            for index, value in enumerate(values)
+            if index == 0 or value != values[index - 1]
+        ]
+        self.assertEqual(
+            collapse(internal_phases),
+            collapse(
+                [hook_payload["phase"] for hook_payload in hook_payloads]
+            ),
+        )
+
+        # `active_verification.last_heartbeat_at` was persisted while the
+        # check ran; the final state clears the block entirely.
+        self.assertIsNone(state_payload["active_verification"])
 
     def test_historical_state_without_active_verification_renders_cleanly(
         self,

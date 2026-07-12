@@ -71,6 +71,22 @@ from agent_session_loop.formatting import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+# The whole test suite runs with real AgentMux notification disabled so no
+# test — nor any nested `python -m agent_session_loop` subprocess it spawns,
+# which inherits this environment — can reach a live daemon through a real
+# `amx` binary on PATH. Notifier-specific tests opt back in with
+# `agent_mux_notify_enabled()` and point delivery at a fake executable or a
+# mocked subprocess layer.
+os.environ[runner.AGENT_MUX_NOTIFY_ENV_VAR] = runner.AGENT_MUX_NOTIFY_OFF
+
+
+@contextmanager
+def agent_mux_notify_enabled(mode: str = "auto"):
+    """Re-enable AgentMux notification inside a notifier-specific test."""
+    with patched_env(**{runner.AGENT_MUX_NOTIFY_ENV_VAR: mode}):
+        yield
+
+
 FAKE_CODEX_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "fake_codex.py"
 
 

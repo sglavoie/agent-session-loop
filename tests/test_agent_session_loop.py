@@ -63,7 +63,8 @@ from tests.test_asl_control import (
     ControlQueueTests,
     ControlQueueDrainInRunnerTests,
     RunControlTests,
-    FinishNotificationTests,
+    AgentMuxNotificationIntegrationTests,
+    AgentMuxSuiteIsolationTests,
 )
 from tests.test_asl_harness_integration import (
     FakeHarnessIntegrationTests,

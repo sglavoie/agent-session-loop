@@ -404,7 +404,10 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         def read_state_payload(payload: dict[str, object]) -> dict[str, object]:
             return json.loads(Path(str(payload["state_path"])).read_text(encoding="utf-8"))
 
-        def notify_started(payload: dict[str, object]) -> None:
+        def notify_started(
+            payload: dict[str, object],
+            persistence: object = None,
+        ) -> None:
             state_payload = read_state_payload(payload)
             observed.append(("started", state_payload["active_turn"]))
             self.assertEqual(payload["run_id"], state_payload["run_id"])
@@ -414,6 +417,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         def notify_turn_started(
             payload: dict[str, object],
             active_turn: dict[str, object],
+            persistence: object = None,
         ) -> None:
             state_payload = read_state_payload(payload)
             state_turn = state_payload["active_turn"]
@@ -423,7 +427,10 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertEqual(active_turn["turn_index"], state_turn["turn_index"])
             self.assertEqual("codex", state_turn["harness"])
 
-        def notify_finished(payload: dict[str, object]) -> None:
+        def notify_finished(
+            payload: dict[str, object],
+            persistence: object = None,
+        ) -> None:
             state_payload = read_state_payload(payload)
             observed.append(("finished", state_payload["run_finished_at"]))
             self.assertEqual(payload["run_finished_at"], state_payload["run_finished_at"])
@@ -496,6 +503,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     "FAKE_CODEX_MODE": "success",
                     "FAKE_CODEX_SLEEP": "5",
                     "FAKE_AMX_LOG": str(amx_log),
+                    # The suite environment forces notification off; this
+                    # test exercises real delivery against the fake amx.
+                    runner.AGENT_MUX_NOTIFY_ENV_VAR: "auto",
                     # Under parallel-shard load the fake amx interpreter can
                     # take longer than the 1s production timeout to start,
                     # which silently drops the notification record.
@@ -544,6 +554,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 [
                     runner.AGENT_MUX_START_EVENT,
                     runner.AGENT_MUX_TURN_START_EVENT,
+                    runner.AGENT_MUX_TURN_FINISH_EVENT,
                     runner.AGENT_MUX_FINISH_EVENT,
                 ],
                 [record["argv"][-1] for record in amx_records],
@@ -560,9 +571,23 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 [
                     runner.AGENT_MUX_START_REASON,
                     runner.AGENT_MUX_TURN_START_REASON,
+                    runner.AGENT_MUX_TURN_FINISH_REASON,
                     runner.AGENT_MUX_FINISH_REASON,
                 ],
                 [hook_payload["reason"] for hook_payload in hook_payloads],
+            )
+            self.assertEqual(
+                ["between", "turn", "between", "finished"],
+                [hook_payload["phase"] for hook_payload in hook_payloads],
+            )
+            # A nested ASL subprocess allocates and persists the per-run
+            # sequence: strings, starting at 1, monotonic across the run.
+            self.assertEqual(
+                ["1", "2", "3", "4"],
+                [
+                    hook_payload["source_sequence"]
+                    for hook_payload in hook_payloads
+                ],
             )
             for hook_payload in hook_payloads:
                 self.assertEqual("agent_session_loop", hook_payload["source"])
@@ -571,6 +596,11 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 self.assertEqual(payload["plan_dir"], hook_payload["plan_dir"])
                 self.assertEqual(payload["state_path"], hook_payload["state_path"])
                 self.assertEqual(payload["run_id"], hook_payload["run_id"])
+                self.assertEqual(
+                    f"{payload['run_id']}:{hook_payload['source_sequence']}",
+                    hook_payload["source_event_id"],
+                )
+                self.assertTrue(hook_payload["emitted_time"].isdigit())
                 self.assertTrue(Path(str(hook_payload["state_path"])).exists())
 
             turn_payload = hook_payloads[1]
@@ -581,11 +611,11 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 str(payload["turns"][0]["artifact_dir"]),
                 turn_payload["artifact_dir"],
             )
-            self.assertIsNone(
-                json.loads(Path(payload["state_path"]).read_text(encoding="utf-8"))[
-                    "active_turn"
-                ]
+            final_state = json.loads(
+                Path(payload["state_path"]).read_text(encoding="utf-8")
             )
+            self.assertIsNone(final_state["active_turn"])
+            self.assertEqual(4, final_state["agent_mux_sequence"])
 
     def test_harness_switch_updates_agent_mux_turn_notification_harness(self) -> None:
         hook_payloads: list[dict[str, object]] = []
@@ -594,6 +624,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         def notify_turn_started(
             payload: dict[str, object],
             active_turn: dict[str, object],
+            persistence: object = None,
         ) -> None:
             hook_payloads.append(
                 runner._agent_mux_loop_payload(
@@ -603,7 +634,10 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 )
             )
 
-        def notify_finished(payload: dict[str, object]) -> None:
+        def notify_finished(
+            payload: dict[str, object],
+            persistence: object = None,
+        ) -> None:
             finish_payloads.append(
                 runner._agent_mux_loop_payload(
                     payload,

@@ -45,6 +45,7 @@ FailureReason = Literal[
     "command-timeout",
     "command-not-found",
     "command-error",
+    "command-overbroad",
     "file-missing",
     "file-error",
     "regex-not-matched",
@@ -250,6 +251,15 @@ def _run_command_check(
     artifact_dir: Path | None = None,
 ) -> CheckResult:
     cwd = repo_root if check.cwd is None else _resolve_under_root(repo_root, check.cwd)
+    scope_diagnostic = diagnose_command_scope(check)
+    if scope_diagnostic is not None:
+        return CheckResult(
+            name=check.name,
+            kind=check.kind,
+            status="fail",
+            failure_reason="command-overbroad",
+            detail=scope_diagnostic.detail,
+        )
     start = time.monotonic()
     try:
         process = subprocess.Popen(
@@ -378,9 +388,17 @@ def _run_command_check(
 
 
 CommandDiagnosticReason = Literal["executable-not-found", "module-not-importable"]
+CommandScopeDiagnosticReason = Literal[
+    "operator-health-check-all",
+    "operator-health-unscoped",
+]
 
 _PYTHON_BASENAME_PATTERN = re.compile(r"python(\d+(\.\d+)?)?\Z")
 _MODULE_PROBE_TIMEOUT_SECONDS = 15.0
+_OPERATOR_HEALTH_SCOPED_SUBCOMMANDS = frozenset(("check-ts", "lint", "test"))
+_OPERATOR_HEALTH_NON_SELECTOR_FLAGS = frozenset(
+    ("--failed-only", "--resume", "--help")
+)
 
 
 @dataclass(frozen=True)
@@ -398,10 +416,34 @@ class CommandDiagnostic:
     detail: str
 
 
+@dataclass(frozen=True)
+class CommandScopeDiagnostic:
+    """Why a completion-contract command is too broad for ASL verification."""
+
+    reason: CommandScopeDiagnosticReason
+    detail: str
+
+
 def _has_path_separator(value: str) -> bool:
     if os.sep in value:
         return True
     return os.altsep is not None and os.altsep in value
+
+
+def _is_operator_health_command(argv: tuple[str, ...]) -> bool:
+    if len(argv) < 3:
+        return False
+    return Path(argv[0]).name == "operator" and argv[1] == "health"
+
+
+def _has_operator_health_target_flag(argv_tail: tuple[str, ...]) -> bool:
+    for arg in argv_tail:
+        if not arg.startswith("--"):
+            continue
+        if arg in _OPERATOR_HEALTH_NON_SELECTOR_FLAGS:
+            continue
+        return True
+    return False
 
 
 def _is_module_invocation(argv: tuple[str, ...]) -> bool:
@@ -502,6 +544,48 @@ def diagnose_command(
                     f"module not importable by {executable}: {module}"
                 ),
             )
+
+    return None
+
+
+def diagnose_command_scope(
+    check: CommandCheck,
+) -> CommandScopeDiagnostic | None:
+    """Diagnose whether a command is overly broad for ASL session verification.
+
+    ASL session verification must stay focused on the packages actually touched
+    by the session. Repository-wide ``./operator health`` commands are too broad
+    because, when no package flags are supplied, the operator CLI fans out
+    across every workspace package and may start shared services.
+    """
+    argv = check.argv
+    if not _is_operator_health_command(argv):
+        return None
+
+    subcommand = argv[2]
+    rendered = " ".join(argv)
+    if subcommand == "check-all":
+        return CommandScopeDiagnostic(
+            reason="operator-health-check-all",
+            detail=(
+                "overly broad verification command: "
+                f"{rendered}; `./operator health check-all` is forbidden in "
+                "ASL session verification"
+            ),
+        )
+
+    if (
+        subcommand in _OPERATOR_HEALTH_SCOPED_SUBCOMMANDS
+        and not _has_operator_health_target_flag(argv[3:])
+    ):
+        return CommandScopeDiagnostic(
+            reason="operator-health-unscoped",
+            detail=(
+                "overly broad verification command: "
+                f"{rendered}; add one or more package target flags such as "
+                "`--core-oidc` so the ASL verification stays session-scoped"
+            ),
+        )
 
     return None
 

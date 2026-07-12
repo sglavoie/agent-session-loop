@@ -145,6 +145,22 @@ class VerificationExecutorTests(unittest.TestCase):
             self.assertEqual("command-not-found", result.failure_reason)
             self.assertIn("definitely-not-a-real-binary-xyz", result.detail)
 
+    def test_command_check_refuses_overly_broad_operator_health(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            check = contracts.CommandCheck(
+                name="repo-wide-health",
+                argv=("./operator", "health", "check-ts"),
+                timeout_seconds=5.0,
+            )
+
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("fail", result.status)
+            self.assertEqual("command-overbroad", result.failure_reason)
+            self.assertIn("overly broad verification command", result.detail)
+            self.assertIsNone(result.returncode)
+
     def test_command_check_resolves_cwd_under_repo_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
@@ -670,6 +686,35 @@ class VerificationExecutorTests(unittest.TestCase):
         diagnostic = verification.diagnose_command(
             check, repo_root=None, which=lambda _name: None
         )
+
+        self.assertIsNone(diagnostic)
+
+    def test_diagnose_command_scope_flags_check_all(self) -> None:
+        check = self._command(("./operator", "health", "check-all"))
+
+        diagnostic = verification.diagnose_command_scope(check)
+
+        self.assertIsNotNone(diagnostic)
+        assert diagnostic is not None
+        self.assertEqual("operator-health-check-all", diagnostic.reason)
+        self.assertIn("forbidden", diagnostic.detail)
+
+    def test_diagnose_command_scope_flags_unscoped_health(self) -> None:
+        check = self._command(("./operator", "health", "test", "--resume"))
+
+        diagnostic = verification.diagnose_command_scope(check)
+
+        self.assertIsNotNone(diagnostic)
+        assert diagnostic is not None
+        self.assertEqual("operator-health-unscoped", diagnostic.reason)
+        self.assertIn("package target flags", diagnostic.detail)
+
+    def test_diagnose_command_scope_allows_scoped_health(self) -> None:
+        check = self._command(
+            ("./operator", "health", "lint", "--core-oidc", "--resume")
+        )
+
+        diagnostic = verification.diagnose_command_scope(check)
 
         self.assertIsNone(diagnostic)
 
