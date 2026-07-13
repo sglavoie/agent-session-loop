@@ -150,7 +150,7 @@ ACTIVITY_LABEL_BY_STATE: dict[PrimaryState, str] = {
 
 
 REGISTRY_FILE_NAME = "workbench.json"
-REGISTRY_SCHEMA_VERSION = 1
+REGISTRY_SCHEMA_VERSION = 2
 DEFAULT_PLANS_DIR_NAME = "agent-plans"
 
 # Archive storage lives under the active Workbench state root so archived
@@ -226,11 +226,12 @@ class LaunchProfile:
 
     cwd: str | None = None
     harness: str | None = None
-    model: str | None = None
+    harness_model: str | None = None
     effort: str | None = None
     timeout: int | None = None
     commit_mode: CommitMode | None = None
     review_harness: str | None = None
+    review_harness_model: str | None = None
     unsafe_bypass: bool | None = None
     allow_not_loop_ready: bool | None = None
     note: str | None = None
@@ -239,11 +240,12 @@ class LaunchProfile:
         return {
             "cwd": self.cwd,
             "harness": self.harness,
-            "model": self.model,
+            "harness_model": self.harness_model,
             "effort": self.effort,
             "timeout": self.timeout,
             "commit_mode": self.commit_mode,
             "review_harness": self.review_harness,
+            "review_harness_model": self.review_harness_model,
             "unsafe_bypass": self.unsafe_bypass,
             "allow_not_loop_ready": self.allow_not_loop_ready,
             "note": self.note,
@@ -594,19 +596,29 @@ def _coerce_commit_mode(
 
 
 def _coerce_profile(
-    raw: Any, *, warnings: list[str], context: str
+    raw: Any,
+    *,
+    schema_version: int,
+    warnings: list[str],
+    context: str,
 ) -> LaunchProfile:
     if raw is None:
         return LaunchProfile()
     if not isinstance(raw, Mapping):
         warnings.append(f"{context}: profile must be an object; ignoring")
         return LaunchProfile()
+    if "model" in raw and "harness_model" not in raw:
+        warnings.append(
+            f"{context}: ignoring legacy profile.model from registry schema "
+            f"v{schema_version}; "
+            "use harness_model and review_harness_model"
+        )
     return LaunchProfile(
         cwd=_coerce_optional_str(raw.get("cwd")),
         harness=_coerce_harness(
             raw.get("harness"), warnings=warnings, context=context
         ),
-        model=_coerce_optional_str(raw.get("model")),
+        harness_model=_coerce_optional_str(raw.get("harness_model")),
         effort=_coerce_optional_str(raw.get("effort")),
         timeout=_coerce_optional_int(raw.get("timeout")),
         commit_mode=_coerce_commit_mode(
@@ -615,13 +627,16 @@ def _coerce_profile(
         review_harness=_coerce_harness(
             raw.get("review_harness"), warnings=warnings, context=context
         ),
+        review_harness_model=_coerce_optional_str(raw.get("review_harness_model")),
         unsafe_bypass=_coerce_optional_bool(raw.get("unsafe_bypass")),
         allow_not_loop_ready=_coerce_optional_bool(raw.get("allow_not_loop_ready")),
         note=_coerce_optional_str(raw.get("note")),
     )
 
 
-def _coerce_pin(raw: Any, *, warnings: list[str], index: int) -> RegistryPin | None:
+def _coerce_pin(
+    raw: Any, *, schema_version: int, warnings: list[str], index: int
+) -> RegistryPin | None:
     context = f"pin[{index}]"
     if not isinstance(raw, Mapping):
         warnings.append(f"{context}: entry must be an object; skipping")
@@ -631,7 +646,12 @@ def _coerce_pin(raw: Any, *, warnings: list[str], index: int) -> RegistryPin | N
         warnings.append(f"{context}: missing or invalid plan_dir; skipping")
         return None
     label = _coerce_optional_str(raw.get("label"))
-    profile = _coerce_profile(raw.get("profile"), warnings=warnings, context=context)
+    profile = _coerce_profile(
+        raw.get("profile"),
+        schema_version=schema_version,
+        warnings=warnings,
+        context=context,
+    )
     return RegistryPin(plan_dir=plan_dir, label=label, profile=profile)
 
 
@@ -746,7 +766,12 @@ def load_registry(path: str | Path | None = None) -> WorkbenchRegistry:
     pins: list[RegistryPin] = []
     seen_plan_dirs: set[str] = set()
     for index, raw_pin in enumerate(raw_pins):
-        pin = _coerce_pin(raw_pin, warnings=warnings, index=index)
+        pin = _coerce_pin(
+            raw_pin,
+            schema_version=schema_version,
+            warnings=warnings,
+            index=index,
+        )
         if pin is None:
             continue
         if pin.plan_dir in seen_plan_dirs:
@@ -1465,7 +1490,15 @@ def _coerce_archive_metadata(
     summary = _coerce_optional_str(raw.get("summary"))
     pin_raw = raw.get("pin")
     pin = (
-        _coerce_pin(pin_raw, warnings=warnings, index=0)
+        _coerce_pin(
+            pin_raw,
+            # Archive metadata does not carry a registry schema version.  Its
+            # embedded pin is written from the current in-memory profile, so
+            # decode it as the current profile shape.
+            schema_version=REGISTRY_SCHEMA_VERSION,
+            warnings=warnings,
+            index=0,
+        )
         if pin_raw is not None
         else None
     )
@@ -4545,6 +4578,11 @@ def _validate_launch_profile(profile: LaunchProfile | None) -> LaunchProfile:
             LAUNCH_REASON_INVALID_PROFILE,
             "review_harness must differ from harness",
         )
+    if profile.review_harness_model is not None and profile.review_harness is None:
+        raise LaunchError(
+            LAUNCH_REASON_INVALID_PROFILE,
+            "review_harness_model requires review_harness",
+        )
     if profile.commit_mode is not None and profile.commit_mode not in COMMIT_MODES:
         raise LaunchError(
             LAUNCH_REASON_INVALID_PROFILE,
@@ -4585,8 +4623,10 @@ def build_launch_argv(
         argv.extend(["--harness", validated.harness])
     if validated.review_harness is not None:
         argv.extend(["--review-harness", validated.review_harness])
-    if validated.model is not None:
-        argv.extend(["--model", validated.model])
+    if validated.harness_model is not None:
+        argv.extend(["--harness-model", validated.harness_model])
+    if validated.review_harness_model is not None:
+        argv.extend(["--review-harness-model", validated.review_harness_model])
     if validated.effort is not None:
         argv.extend(["--effort", validated.effort])
     if validated.timeout is not None:

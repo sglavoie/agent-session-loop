@@ -1658,7 +1658,9 @@ def _format_run_command(
     *,
     cwd: Path,
     harness_name: str,
+    harness_model: str | None,
     review_harness: str | None,
+    review_harness_model: str | None,
 ) -> str:
     argv = [
         "asl",
@@ -1669,8 +1671,12 @@ def _format_run_command(
         "--harness",
         harness_name,
     ]
+    if harness_model:
+        argv.extend(["--harness-model", harness_model])
     if review_harness:
         argv.extend(["--review-harness", review_harness])
+    if review_harness_model:
+        argv.extend(["--review-harness-model", review_harness_model])
     return shlex.join(argv)
 
 
@@ -1679,8 +1685,10 @@ def _format_resume_command(
     *,
     cwd: Path,
     harness_name: str,
+    harness_model: str | None,
     validator_harness: str,
     review_harness: str | None,
+    review_harness_model: str | None,
 ) -> str:
     argv = [
         "asl",
@@ -1694,8 +1702,12 @@ def _format_resume_command(
         "--validator-harness",
         validator_harness,
     ]
+    if harness_model:
+        argv.extend(["--harness-model", harness_model])
     if review_harness:
         argv.extend(["--review-harness", review_harness])
+    if review_harness_model:
+        argv.extend(["--review-harness-model", review_harness_model])
     return shlex.join(argv)
 
 
@@ -1704,8 +1716,10 @@ def prepare_plan(
     *,
     cwd: str | Path,
     harness: str = "codex",
+    harness_model: str | None = None,
     validator_harness: str = "codex",
     review_harness: str | None = None,
+    review_harness_model: str | None = None,
     base_dir: str | Path | None = None,
     resume_plan_dir: str | Path | None = None,
     validator: ValidatorRunner | None = None,
@@ -1834,8 +1848,10 @@ def prepare_plan(
         plan_dir,
         cwd=canonical_cwd,
         harness_name=harness,
+        harness_model=harness_model,
         validator_harness=validator_harness,
         review_harness=review_harness,
+        review_harness_model=review_harness_model,
     )
 
     def _failed(
@@ -2025,7 +2041,9 @@ def prepare_plan(
             plan_dir,
             cwd=canonical_cwd,
             harness_name=harness,
+            harness_model=harness_model,
             review_harness=review_harness,
+            review_harness_model=review_harness_model,
         ),
         resume_command=resume_command,
     )
@@ -2075,14 +2093,18 @@ def prepare_from_args(args: Any) -> int:
     plan_arg = str(args.plan)
     resume = bool(args.resume)
     harness_name = args.harness
+    harness_model = args.harness_model
     validator_harness = args.validator_harness
     review_harness = args.review_harness
+    review_harness_model = args.review_harness_model
     common_fields = {
         "plan": plan_arg,
         "cwd": str(args.cwd),
         "harness": harness_name,
+        "harness_model": harness_model,
         "validator_harness": validator_harness,
         "review_harness": review_harness,
+        "review_harness_model": review_harness_model,
         "resume": resume,
         "base_dir": str(args.base_dir) if args.base_dir else None,
     }
@@ -2106,6 +2128,11 @@ def prepare_from_args(args: Any) -> int:
         return _emit_input_error(
             PREPARE_EXIT_REASON_INPUT_ERROR,
             "--review-harness must differ from --harness",
+        )
+    if review_harness_model is not None and review_harness is None:
+        return _emit_input_error(
+            PREPARE_EXIT_REASON_INPUT_ERROR,
+            "--review-harness-model requires --review-harness",
         )
     cwd_path = Path(os.path.expanduser(str(args.cwd)))
     if not cwd_path.is_dir():
@@ -2138,8 +2165,10 @@ def prepare_from_args(args: Any) -> int:
             None if resume else plan_path,
             cwd=args.cwd,
             harness=harness_name,
+            harness_model=harness_model,
             validator_harness=validator_harness,
             review_harness=review_harness,
+            review_harness_model=review_harness_model,
             base_dir=args.base_dir,
             resume_plan_dir=plan_path if resume else None,
             unsafe_bypass=getattr(args, "unsafe_bypass", True),

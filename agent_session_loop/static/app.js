@@ -3537,7 +3537,7 @@
     setInputValue(form, "label", pin ? pin.label || "" : plan.label || "");
     setInputValue(form, "cwd", profile.cwd || "");
     setInputValue(form, "harness", profile.harness || "");
-    setInputValue(form, "model", profile.model || "");
+    setInputValue(form, "harness_model", profile.harness_model || "");
     setInputValue(form, "effort", profile.effort || "");
     setInputValue(
       form,
@@ -3548,6 +3548,11 @@
     );
     setInputValue(form, "commit_mode", profile.commit_mode || "");
     setInputValue(form, "review_harness", profile.review_harness || "");
+    setInputValue(
+      form,
+      "review_harness_model",
+      profile.review_harness_model || ""
+    );
     setTriStateValue(form, "unsafe_bypass", profile.unsafe_bypass);
     setTriStateValue(
       form,
@@ -3607,12 +3612,16 @@
       cwd: (form.elements.namedItem("cwd").value || "").trim() || null,
       harness:
         (form.elements.namedItem("harness").value || "").trim() || null,
-      model: (form.elements.namedItem("model").value || "").trim() || null,
+      harness_model:
+        (form.elements.namedItem("harness_model").value || "").trim() || null,
       effort: (form.elements.namedItem("effort").value || "").trim() || null,
       commit_mode:
         (form.elements.namedItem("commit_mode").value || "").trim() || null,
       review_harness:
         (form.elements.namedItem("review_harness").value || "").trim() || null,
+      review_harness_model:
+        (form.elements.namedItem("review_harness_model").value || "").trim() ||
+        null,
       unsafe_bypass: readTriStateValue(form, "unsafe_bypass"),
       allow_not_loop_ready: readTriStateValue(form, "allow_not_loop_ready"),
       note: (form.elements.namedItem("note").value || "").trim() || null,
@@ -3640,6 +3649,12 @@
       HARNESS_NAMES.indexOf(payload.profile.review_harness) === -1
     ) {
       errors.push("review harness must be one of " + HARNESS_NAMES.join(", "));
+    }
+    if (
+      payload.profile.review_harness_model &&
+      !payload.profile.review_harness
+    ) {
+      errors.push("review model requires a review harness");
     }
     if (
       payload.profile.commit_mode &&

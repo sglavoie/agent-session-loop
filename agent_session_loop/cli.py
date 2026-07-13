@@ -194,8 +194,14 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         ),
     )
     run_parser.add_argument(
-        "--model",
-        help="Harness model to request",
+        "--harness-model",
+        dest="harness_model",
+        help="Implementation harness model to request",
+    )
+    run_parser.add_argument(
+        "--review-harness-model",
+        dest="review_harness_model",
+        help="Generated review harness model to request",
     )
     run_parser.add_argument(
         "--effort",
@@ -409,7 +415,8 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Agent harness to check",
     )
     doctor_parser.add_argument(
-        "--model",
+        "--harness-model",
+        dest="harness_model",
         help="Harness model to request",
     )
     doctor_parser.add_argument(
@@ -561,6 +568,16 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
             "Review harness for the resulting `asl run` command; "
             "must differ from --harness"
         ),
+    )
+    prepare_parser.add_argument(
+        "--harness-model",
+        dest="harness_model",
+        help="Implementation harness model for the resulting `asl run` command",
+    )
+    prepare_parser.add_argument(
+        "--review-harness-model",
+        dest="review_harness_model",
+        help="Review harness model for the resulting `asl run` command",
     )
     prepare_parser.add_argument(
         "--base-dir",

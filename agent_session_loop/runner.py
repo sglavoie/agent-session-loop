@@ -1063,14 +1063,42 @@ def _attach_interactive_help(
     return payload
 
 
+def _requested_model(
+    args: argparse.Namespace,
+    *,
+    harness: str,
+    is_review_turn: bool = False,
+) -> str | None:
+    """Return the raw model request appropriate for one harness turn.
+
+    Resolution for reporting is intentionally separate: a model omitted from
+    the CLI is still represented by its harness-native configured/default
+    value, but must not be forwarded to the harness subprocess. A live
+    implementation-harness switch also deliberately starts at that switched
+    harness's native default instead of inheriting the declared implementation
+    model.
+    """
+    if is_review_turn:
+        return getattr(args, "review_harness_model", None)
+    if harness != args.harness:
+        return None
+    return getattr(args, "harness_model", None)
+
+
 def _selected_model_effort_payload(
     args: argparse.Namespace,
     *,
     harness: str | None = None,
+    is_review_turn: bool = False,
 ) -> dict[str, str | None]:
+    selected_harness = args.harness if harness is None else harness
     return config.model_effort_payload(
-        args.harness if harness is None else harness,
-        model=getattr(args, "model", None),
+        selected_harness,
+        model=_requested_model(
+            args,
+            harness=selected_harness,
+            is_review_turn=is_review_turn,
+        ),
         effort=getattr(args, "effort", None),
     )
 
@@ -1550,6 +1578,11 @@ def _validate_run_inputs(
             "--review-harness must differ from --harness "
             f"(both set to {args.harness!r})"
         )
+    if (
+        getattr(args, "review_harness_model", None) is not None
+        and review_harness is None
+    ):
+        raise RunError("--review-harness-model requires --review-harness")
 
     cycles = getattr(args, "max_review_fix_cycles", None)
     legacy_cycles = getattr(args, "max_review_fix_plans", None)
@@ -5679,7 +5712,6 @@ def _dry_run_payload(
     reply_context: qna.QnAContext | None = None,
     reply_origin: str = REPLY_ORIGIN_ARGV,
 ) -> dict[str, Any]:
-    model_effort = _selected_model_effort_payload(args)
     review_harness = getattr(args, "review_harness", None)
     review_requested = review_harness is not None
     review_output_path = (
@@ -5689,6 +5721,7 @@ def _dry_run_payload(
     )
     next_pending = snapshot.next_pending
     if next_pending is None:
+        model_effort = _selected_model_effort_payload(args)
         return {
             "next_pending": None,
             "next_pending_id": None,
@@ -5703,10 +5736,24 @@ def _dry_run_payload(
             **model_effort,
         }
 
+    is_review_session = is_generated_review_session_file(next_pending.path)
+    turn_harness = args.review_harness if is_review_session else args.harness
+    if turn_harness is None:
+        raise RunError("--review-harness is required for a review session")
+    model_effort = _selected_model_effort_payload(
+        args,
+        harness=turn_harness,
+        is_review_turn=is_review_session,
+    )
+    requested_model = _requested_model(
+        args,
+        harness=turn_harness,
+        is_review_turn=is_review_session,
+    )
     paths = _turn_paths(run_dir, turn_index=1, session_id=next_pending.id)
     if reply_context is not None and reply_text is not None:
         prompt = build_reply_prompt(
-            args.harness,
+            turn_harness,
             snapshot.plan_dir,
             reply=reply_text,
             context=reply_context,
@@ -5722,17 +5769,17 @@ def _dry_run_payload(
             "origin": reply_origin,
         }
     else:
-        prompt = build_session_prompt(args.harness, snapshot.plan_dir)
+        prompt = build_session_prompt(turn_harness, snapshot.plan_dir)
         prompt_kind = "session"
         resolver_prompt = None
         reply_source = None
     invocation = build_harness_invocation(
-        args.harness,
+        turn_harness,
         cwd=cwd,
         plan_dir=snapshot.plan_dir,
         unsafe_bypass=_unsafe_bypass(args),
         last_message_path=paths["last_message"],
-        model=args.model,
+        model=requested_model,
         effort=args.effort,
         prompt=prompt,
     )
@@ -6332,9 +6379,17 @@ def _run_locked(
                 )
                 with run_control_lock:
                     turn_harness = _selected_future_harness(args, control_payload)
+            if turn_harness is None:
+                raise RunError("--review-harness is required for a review session")
             turn_model_effort = _selected_model_effort_payload(
                 args,
                 harness=turn_harness,
+                is_review_turn=is_review_session,
+            )
+            requested_model = _requested_model(
+                args,
+                harness=turn_harness,
+                is_review_turn=is_review_session,
             )
             preflight_failure = _harness_preflight_failure(
                 turn_harness,
@@ -6516,7 +6571,7 @@ def _run_locked(
                     last_message_path=paths["last_message"],
                     timeout=timeout,
                     stream_callback=stream_callback,
-                    model=args.model,
+                    model=requested_model,
                     effort=args.effort,
                 )
             except KeyboardInterrupt:
@@ -6526,7 +6581,7 @@ def _run_locked(
                     plan_dir=before.plan_dir,
                     unsafe_bypass=_unsafe_bypass(args),
                     last_message_path=paths["last_message"],
-                    model=args.model,
+                    model=requested_model,
                     effort=args.effort,
                 )
                 result = harnesses.HarnessResult(
@@ -7445,7 +7500,7 @@ def doctor_from_args(args: argparse.Namespace) -> int:
             plan_dir=snapshot.plan_dir,
             unsafe_bypass=_unsafe_bypass(args),
             last_message_path=last_message_path,
-            model=args.model,
+            model=_requested_model(args, harness=args.harness),
             effort=args.effort,
         )
     except config.ConfigError as error:

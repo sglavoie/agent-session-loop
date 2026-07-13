@@ -194,8 +194,11 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         mode: str = "success",
         harness: str = "codex",
         review_harness: str | None = None,
+        harness_model: str | None = None,
+        review_harness_model: str | None = None,
         max_sessions: int | None = None,
         allow_not_loop_ready: bool = False,
+        dry_run: bool = False,
         timeout: int | None = None,
         json_mode: bool = True,
         fake_codex_sleep: str = "5",
@@ -219,6 +222,12 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             argv.append("--json")
         if review_harness is not None:
             argv.extend(["--review-harness", review_harness])
+        if harness_model is not None:
+            argv.extend(["--harness-model", harness_model])
+        if review_harness_model is not None:
+            argv.extend(["--review-harness-model", review_harness_model])
+        if dry_run:
+            argv.append("--dry-run")
         if allow_not_loop_ready:
             argv.append("--allow-not-loop-ready")
         if max_sessions is not None:
@@ -383,6 +392,82 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual("claude", turns[1]["harness"])
         self.assertEqual(1, turns[0]["total_sessions"])
         self.assertEqual(2, turns[1]["total_sessions"])
+
+    def test_role_specific_models_reach_only_their_matching_turns(self) -> None:
+        self._write_plan(("pending",), readiness="loop-ready")
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        self._precreate_final_review()
+
+        completed, payload = self._run(
+            review_harness="claude",
+            harness_model="gpt-5",
+            review_harness_model="claude-opus-4",
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        assert payload is not None
+        turns = payload["turns"]
+        self.assertEqual("gpt-5", turns[0]["model"])
+        self.assertEqual(config.MODEL_SOURCE_FLAG, turns[0]["model_source"])
+        self.assertEqual("claude-opus-4", turns[1]["model"])
+        self.assertEqual(config.MODEL_SOURCE_FLAG, turns[1]["model_source"])
+        self.assertEqual(
+            "gpt-5", turns[0]["argv"][turns[0]["argv"].index("--model") + 1]
+        )
+        self.assertEqual(
+            "claude-opus-4",
+            turns[1]["argv"][turns[1]["argv"].index("--model") + 1],
+        )
+
+        turn_started = [
+            event["payload"]
+            for event in self._read_events()
+            if event["name"] == "turn_started"
+        ]
+        self.assertEqual(
+            ["gpt-5", "claude-opus-4"],
+            [event["model"] for event in turn_started],
+        )
+
+    def test_omitted_role_specific_models_leave_native_defaults_unforwarded(
+        self,
+    ) -> None:
+        self._write_plan(("pending",), readiness="loop-ready")
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        self._precreate_final_review()
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        assert payload is not None
+        turns = payload["turns"]
+        self.assertNotIn("--model", turns[0]["argv"])
+        self.assertNotIn("--model", turns[1]["argv"])
+        self.assertNotEqual(config.MODEL_SOURCE_FLAG, turns[0]["model_source"])
+        self.assertNotEqual(config.MODEL_SOURCE_FLAG, turns[1]["model_source"])
+
+    def test_dry_run_existing_review_uses_review_harness_model(self) -> None:
+        self._write_plan(("complete",), readiness="complete")
+        self._write_pending_review_session()
+
+        completed, payload = self._run(
+            review_harness="claude",
+            harness_model="gpt-5",
+            review_harness_model="claude-opus-4",
+            dry_run=True,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        assert payload is not None
+        planned = payload["planned"]
+        invocation = planned["invocation"]
+        self.assertEqual("claude", invocation["name"])
+        self.assertEqual("claude-opus-4", planned["model"])
+        self.assertEqual(config.MODEL_SOURCE_FLAG, planned["model_source"])
+        self.assertEqual(
+            "claude-opus-4",
+            invocation["argv"][invocation["argv"].index("--model") + 1],
+        )
 
     def test_review_runs_when_plan_starts_already_complete(self) -> None:
         # Author the plan as complete from the start, with readiness=complete

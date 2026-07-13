@@ -711,8 +711,10 @@ class PrepareCliTests(unittest.TestCase):
         self.assertFalse(args.resume)
         self.assertEqual(".", args.cwd)
         self.assertEqual("codex", args.harness)
+        self.assertIsNone(args.harness_model)
         self.assertEqual("codex", args.validator_harness)
         self.assertIsNone(args.review_harness)
+        self.assertIsNone(args.review_harness_model)
         self.assertIsNone(args.base_dir)
         self.assertIsNone(args.state_dir)
         self.assertTrue(args.unsafe_bypass)
@@ -737,6 +739,23 @@ class PrepareCliTests(unittest.TestCase):
         self.assertEqual("prepare", payload["command"])
         self.assertEqual("input-error", payload["reason"])
         self.assertIn("must differ", payload["error"])
+
+    def test_review_harness_model_requires_review_harness(self) -> None:
+        source = self._write_source()
+        code, stdout, _stderr = self._run_cli(
+            str(source),
+            "--cwd",
+            str(self.repo),
+            "--review-harness-model",
+            "claude-opus-4",
+            "--json",
+        )
+
+        self.assertEqual(1, code)
+        payload = json.loads(stdout)
+        self.assertEqual("input-error", payload["reason"])
+        self.assertEqual("claude-opus-4", payload["review_harness_model"])
+        self.assertIn("requires --review-harness", payload["error"])
 
     def test_missing_source_file_is_input_error(self) -> None:
         code, stdout, _stderr = self._run_cli(
@@ -849,10 +868,14 @@ class PrepareCliTests(unittest.TestCase):
                 str(self.repo),
                 "--harness",
                 "codex",
+                "--harness-model",
+                "gpt-5",
                 "--validator-harness",
                 "claude",
                 "--review-harness",
                 "claude",
+                "--review-harness-model",
+                "claude-opus-4",
                 "--base-dir",
                 str(self.base_dir),
                 "--state-dir",
@@ -864,6 +887,8 @@ class PrepareCliTests(unittest.TestCase):
         response = json.loads(stdout)
         self.assertTrue(response["ok"])
         self.assertEqual("ok", response["reason"])
+        self.assertEqual("gpt-5", response["harness_model"])
+        self.assertEqual("claude-opus-4", response["review_harness_model"])
         self.assertTrue(response["marked_loop_ready"])
         self.assertEqual(1, run_mock.call_count)
         plan_dir = Path(response["plan_dir"])
@@ -881,11 +906,20 @@ class PrepareCliTests(unittest.TestCase):
                     str(canonical_repo),
                     "--harness",
                     "codex",
+                    "--harness-model",
+                    "gpt-5",
                     "--review-harness",
                     "claude",
+                    "--review-harness-model",
+                    "claude-opus-4",
                 ]
             ),
             response["run_command"],
+        )
+        self.assertIn("--harness-model gpt-5", response["resume_command"])
+        self.assertIn(
+            "--review-harness-model claude-opus-4",
+            response["resume_command"],
         )
 
     def test_text_output_reports_resume_command_on_validator_failure(self) -> None:
@@ -907,6 +941,12 @@ class PrepareCliTests(unittest.TestCase):
                 str(source),
                 "--cwd",
                 str(self.repo),
+                "--harness-model",
+                "gpt-5",
+                "--review-harness",
+                "claude",
+                "--review-harness-model",
+                "claude-opus-4",
                 "--base-dir",
                 str(self.base_dir),
                 "--state-dir",
@@ -915,6 +955,9 @@ class PrepareCliTests(unittest.TestCase):
 
         self.assertEqual(1, code)
         self.assertIn("Resume with: asl prepare --resume", stdout)
+        self.assertIn("--harness-model gpt-5", stdout)
+        self.assertIn("--review-harness claude", stdout)
+        self.assertIn("--review-harness-model claude-opus-4", stdout)
         self.assertIn("agent-session-loop prepare:", stderr)
         # The failed preparation directory is preserved as draft.
         plan_dirs = list(self.base_dir.iterdir())
@@ -952,8 +995,10 @@ class PrepareEndToEndTests(unittest.TestCase):
         options: dict[str, object] = {
             "cwd": self.repo,
             "harness": "codex",
+            "harness_model": "gpt-5",
             "validator_harness": "claude",
             "review_harness": "claude",
+            "review_harness_model": "claude-opus-4",
             "base_dir": self.base_dir,
             "validator": validator,
             "state_dir": self.state_dir,
@@ -1004,11 +1049,22 @@ class PrepareEndToEndTests(unittest.TestCase):
                     str(canonical_repo),
                     "--harness",
                     "codex",
+                    "--harness-model",
+                    "gpt-5",
                     "--review-harness",
                     "claude",
+                    "--review-harness-model",
+                    "claude-opus-4",
                 ]
             ),
             result.run_command,
+        )
+        assert result.resume_command is not None
+        self.assertIn("--validator-harness claude", result.resume_command)
+        self.assertIn("--harness-model gpt-5", result.resume_command)
+        self.assertIn("--review-harness claude", result.resume_command)
+        self.assertIn(
+            "--review-harness-model claude-opus-4", result.resume_command
         )
         self.assertEqual(
             ["ok", "ok", "ok", "ok", "ok", "ok"],

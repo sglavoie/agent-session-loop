@@ -677,6 +677,71 @@ class CommandAndConfigTests(unittest.TestCase):
 
         self.assertIsNone(args.review_harness)
 
+    def test_run_parser_uses_role_specific_model_attributes(self) -> None:
+        parser = cli.build_parser()
+
+        args = parser.parse_args(
+            [
+                "run",
+                "/tmp/plan",
+                "--harness-model",
+                "gpt-5",
+                "--review-harness-model",
+                "claude-opus-4",
+            ]
+        )
+
+        self.assertEqual("gpt-5", args.harness_model)
+        self.assertEqual("claude-opus-4", args.review_harness_model)
+        self.assertFalse(hasattr(args, "model"))
+
+    def test_run_parser_rejects_legacy_model_flag(self) -> None:
+        parser = cli.build_parser()
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            parser.parse_args(["run", "/tmp/plan", "--model", "gpt-5"])
+
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("unrecognized arguments: --model", stderr.getvalue())
+
+    def test_prepare_parser_reserves_role_specific_model_forwarding(self) -> None:
+        parser = cli.build_parser()
+
+        args = parser.parse_args(
+            [
+                "prepare",
+                "/tmp/plan.md",
+                "--harness-model",
+                "gpt-5",
+                "--review-harness-model",
+                "claude-opus-4",
+            ]
+        )
+
+        self.assertEqual("gpt-5", args.harness_model)
+        self.assertEqual("claude-opus-4", args.review_harness_model)
+
+    def test_doctor_parser_rejects_legacy_model_flag(self) -> None:
+        parser = cli.build_parser()
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            parser.parse_args(
+                [
+                    "doctor",
+                    "--harness",
+                    "codex",
+                    "--plan-dir",
+                    "/tmp/plan",
+                    "--model",
+                    "gpt-5",
+                ]
+            )
+
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("unrecognized arguments: --model", stderr.getvalue())
+
     def test_run_parser_accepts_review_harness_choices(self) -> None:
         parser = cli.build_parser()
 
@@ -737,6 +802,28 @@ class CommandAndConfigTests(unittest.TestCase):
             self.assertIsNone(timeout)
             self.assertIsNone(max_sessions)
             self.assertIsNone(commit_mode)
+
+    def test_validate_run_inputs_requires_review_harness_for_review_model(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(
+                cwd=tmp,
+                harness="codex",
+                review_harness=None,
+                review_harness_model="claude-opus-4",
+                timeout=None,
+                max_sessions=None,
+                commit_mode=None,
+            )
+
+            with self.assertRaises(runner.RunError) as raised:
+                runner._validate_run_inputs(args)
+
+        self.assertEqual(
+            "--review-harness-model requires --review-harness",
+            str(raised.exception),
+        )
 
     def test_validate_run_inputs_allows_missing_review_harness_attribute(
         self,
@@ -1239,7 +1326,7 @@ class JsonCliTests(unittest.TestCase):
                     str(state_dir),
                     "--dry-run",
                     "--json",
-                    "--model",
+                    "--harness-model",
                     "gpt-5",
                     "--effort",
                     "high",
@@ -1662,7 +1749,7 @@ class JsonCliTests(unittest.TestCase):
                     "doctor",
                     "--harness",
                     "codex",
-                    "--model",
+                    "--harness-model",
                     "gpt-5",
                     "--effort",
                     "high",
@@ -1792,7 +1879,7 @@ class JsonCliTests(unittest.TestCase):
                     "doctor",
                     "--harness",
                     "codex",
-                    "--model",
+                    "--harness-model",
                     "gpt-5",
                     "--effort",
                     "high",

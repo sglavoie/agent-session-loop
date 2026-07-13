@@ -1552,11 +1552,12 @@ class WorkbenchServerTests(unittest.TestCase):
         full_profile_body = {
             "cwd": "/tmp/cwd",
             "harness": "codex",
-            "model": "o3-mini",
+            "harness_model": "o3-mini",
             "effort": "medium",
             "timeout": 1234,
             "commit_mode": "per-session",
             "review_harness": "claude",
+            "review_harness_model": "claude-sonnet",
             "unsafe_bypass": True,
             "allow_not_loop_ready": True,
             "note": "scratch profile",
@@ -1589,6 +1590,7 @@ class WorkbenchServerTests(unittest.TestCase):
                 profile.get(key),
                 msg=f"profile field {key!r} did not round-trip",
             )
+        self.assertNotIn("model", profile)
 
     def test_registry_pin_round_trip_preserves_nullable_boolean_states(
         self,

@@ -359,6 +359,31 @@ class HarnessDocsRegressionTests(unittest.TestCase):
         self.assertNotIn("--allow-all-tools", safe_block)
         self.assertNotIn("--allow-all-paths", safe_block)
 
+    def test_docs_expose_only_role_specific_asl_model_flags(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        commands = docs.split("## Commands", 1)[1].split("\n## ", 1)[0]
+
+        self.assertIn("[--harness-model MODEL]", commands)
+        self.assertIn("[--review-harness-model MODEL]", commands)
+        self.assertNotIn("[--model MODEL]", commands)
+        self.assertIn(
+            "ASL's `--harness-model` is forwarded only to turns using the "
+            "implementation",
+            docs,
+        )
+        self.assertIn(
+            "`--review-harness-model` is forwarded only to\n"
+            "generated review turns",
+            docs,
+        )
+        self.assertIn("`--effort` remains shared", docs)
+        self.assertIn("deliberately has no validator-model flag", docs)
+        self.assertIn(
+            "--harness-model gpt-5 --review-harness claude "
+            "--review-harness-model claude-opus-4 --dry-run",
+            docs,
+        )
+
 
 class WorkbenchDocsRegressionTests(unittest.TestCase):
     """Lock the documentation against regressing Workbench review findings.
@@ -481,6 +506,30 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             "  `--no-unsafe-bypass` argv",
             docs,
         )
+
+    def test_docs_describe_v2_role_specific_launch_profiles(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        profile_docs = docs.split(
+            "### Registry, pins, launch profiles", 1
+        )[1].split("\n### ", 1)[0]
+
+        self.assertIn("Schema version `2`", profile_docs)
+        self.assertIn("`harness_model`", profile_docs)
+        self.assertIn("`review_harness_model`", profile_docs)
+        self.assertNotIn("`harness`, `model`,", profile_docs)
+        self.assertIn("legacy `profile.model` is ignored", profile_docs)
+        self.assertIn("never forwarded to `asl run`", profile_docs)
+        self.assertIn("next pin/profile save writes schema v2", profile_docs)
+
+    def test_docs_workbench_smoke_checks_model_profile_migration(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        smoke = docs.split("Workbench browser workflow:", 1)[1]
+
+        self.assertIn("implementation harness/model, review", smoke)
+        self.assertIn("argv uses `--harness-model`", smoke)
+        self.assertIn("schema-v1 registry pin containing `profile.model`", smoke)
+        self.assertIn("global\n  warnings area", smoke)
+        self.assertIn("`review_harness_model` model-routing fields", smoke)
 
     def test_docs_describe_state_endpoint_session_payload(self) -> None:
         docs = self._read("docs/agent-session-loop.md")

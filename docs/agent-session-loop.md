@@ -305,17 +305,17 @@ without running the final `--commit-at-end` commit.
 ## Commands
 
 ```text
-asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--review-harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--max-pending-sessions N] [--max-review-fix-cycles N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--allow-not-loop-ready] [--reply TEXT|--reply-stdin] [--json] [--dry-run]
+asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--review-harness codex|claude|copilot] [--review-harness-model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--max-pending-sessions N] [--max-review-fix-cycles N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--allow-not-loop-ready] [--reply TEXT|--reply-stdin] [--json] [--dry-run]
 asl preflight PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--max-pending-sessions N] [--mark-loop-ready] [--json]
 asl verify PLAN_DIR --session ID [--cwd REPO_ROOT] [--artifact-dir DIR] [--json]
 asl baseline PLAN_DIR [--cwd REPO_ROOT] [--per-check-timeout SECONDS] [--total-timeout SECONDS] [--json]
-asl prepare PLAN.md [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--validator-harness H] [--review-harness H] [--base-dir DIR] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--json]
+asl prepare PLAN.md [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--validator-harness H] [--review-harness H] [--review-harness-model MODEL] [--base-dir DIR] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--json]
 asl prepare --resume PLAN_DIR [...]
 asl status PLAN_DIR [--state-dir DIR] [--json]
 asl questions PLAN_DIR [--state-dir DIR] [--json]
 asl tail PLAN_DIR [--state-dir DIR] [--lines N] [--no-follow]
 asl sessions [--running] [--recent] [--limit N] [--state-dir DIR] [--verbose] [--json]
-asl doctor --harness codex|claude|copilot [--model MODEL] [--effort EFFORT] [--cwd REPO_ROOT] --plan-dir PLAN_DIR [--unsafe-bypass|--no-unsafe-bypass] [--json]
+asl doctor --harness codex|claude|copilot [--harness-model MODEL] [--effort EFFORT] [--cwd REPO_ROOT] --plan-dir PLAN_DIR [--unsafe-bypass|--no-unsafe-bypass] [--json]
 asl unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
 asl compact-state PLAN_DIR [--state-dir DIR] [--apply] [--json]
 asl metrics [--since-days N] [--state-dir DIR] [--json]
@@ -570,6 +570,11 @@ command; success prints the exact `asl run` command. `--resume` reruns
 validation only for sessions missing from the stored
 `prepare-validation.json` aggregate and reuses recorded baseline evidence
 whose repository fingerprint still matches; it never creates another split.
+`--harness-model` and `--review-harness-model` are preserved in JSON payloads
+and forwarded into both the emitted `asl run` command and any emitted
+`asl prepare --resume` command. `--review-harness-model` requires
+`--review-harness`. Preparation deliberately has no validator-model flag:
+`--validator-harness` always uses that harness's native or configured default.
 Stable JSON reasons: `ok`, `needs-plan-iteration`, `validation-failed`,
 `baseline-unsatisfied`, `not-loop-ready`, `input-error`, `cwd-error`, and
 `plan-structure`.
@@ -669,14 +674,18 @@ Codex writes a last-message file with `-o`. Claude streams JSONL in print mode;
 the adapter renders that stream as concise `claude ...` stdout log lines for
 live tailing and keeps the final `result` text as the last message. Copilot does
 not use a last-message file, so its last-message capture falls back to stdout.
-`--model` and `--effort` are passed to every selected harness only when
-supplied. Omitting `--model` preserves each harness CLI default; reporting uses
-per-turn best-effort metadata from Codex `~/.codex/config.toml`, Copilot
-`~/.copilot/settings.json`, or `native CLI default` with source `unresolved`
-when the default cannot be read. If a text TTY run switches harnesses with `1`,
-`2`, or `3`, later turns recompute native model and effort metadata for the
-selected harness. Explicit `--model` and `--effort` values carry over to later
-selected harnesses.
+ASL's `--harness-model` is forwarded only to turns using the implementation
+harness declared by `--harness`. `--review-harness-model` is forwarded only to
+generated review turns and requires `--review-harness`; it never affects
+implementation turns. Omitting either model flag preserves the corresponding
+harness CLI default. Reporting still uses per-turn best-effort metadata from
+Codex `~/.codex/config.toml`, Copilot `~/.copilot/settings.json`, or
+`native CLI default` with source `unresolved` when the default cannot be read.
+If a text TTY run switches implementation harnesses with `1`, `2`, or `3`, the
+switched harness uses its native or configured default rather than inheriting
+`--harness-model`. `--effort` remains shared and carries across implementation
+and review turns, including later harness switches. `doctor --harness-model`
+checks the selected harness/model pairing without adding a review role.
 
 ## Safety Modes
 
@@ -1146,7 +1155,7 @@ asl status ~/.local/share/agent-plans/example-plan/ --json
 Preview the next command without invoking the harness:
 
 ```bash
-asl run ~/.local/share/agent-plans/example-plan/ --harness codex --dry-run --model gpt-5 --effort high
+asl run ~/.local/share/agent-plans/example-plan/ --harness codex --harness-model gpt-5 --review-harness claude --review-harness-model claude-opus-4 --dry-run --effort high
 ```
 
 Inspect the most recent artifacts named in `state.json` or the JSON output:
@@ -1391,7 +1400,7 @@ after a restart.
 
 The Workbench registry is a JSON file stored at
 `$XDG_CONFIG_HOME/agent-session-loop/workbench.json` (default
-`~/.config/agent-session-loop/workbench.json`). Schema version `1`. The
+`~/.config/agent-session-loop/workbench.json`). Schema version `2`. The
 file is hand-editable; malformed pin or root entries become recoverable
 warnings on the loaded registry rather than failing the server.
 
@@ -1400,11 +1409,17 @@ Pins record:
 - `plan_dir` — canonical absolute path (deduplicated).
 - `label` — optional human-readable name shown in the UI.
 - `profile` — optional `LaunchProfile` defaulting all fields to `null`.
-  Recognized fields mirror `asl run` flags: `cwd`, `harness`, `model`,
-  `effort`, `timeout`, `commit_mode` (`per-session` or `end`),
-  `review_harness`, `unsafe_bypass`, `allow_not_loop_ready`, and `note`.
-  `null` means "no preference"; the workbench falls back to the runner
-  default. `review_harness` must differ from `harness`.
+  Recognized fields mirror `asl run` flags: `cwd`, `harness`,
+  `harness_model`, `effort`, `timeout`, `commit_mode` (`per-session` or
+  `end`), `review_harness`, `review_harness_model`, `unsafe_bypass`,
+  `allow_not_loop_ready`, and `note`. `null` means "no preference"; the
+  workbench falls back to the runner default. `review_harness` must differ
+  from `harness`, and `review_harness_model` requires `review_harness`.
+
+Schema-v1 registries remain readable, but a legacy `profile.model` is ignored
+and surfaced as a recoverable warning; it is never forwarded to `asl run`.
+The next pin/profile save writes schema v2 with `harness_model` and
+`review_harness_model` only, permanently dropping the legacy shared field.
 
   The nullable booleans (`unsafe_bypass`, `allow_not_loop_ready`) are
   surfaced in the UI as tri-state `<select>` controls with literal
@@ -2287,10 +2302,17 @@ Workbench browser workflow:
   state-backed plans, registry pins, and any `--plan-root` children.
   Pin one extra plan from the UI and confirm `workbench.json` gains the
   entry.
-- Edit a pin's launch profile (harness, model, commit mode), launch the
+- Edit a pin's launch profile (implementation harness/model, review
+  harness/model, commit mode), launch the
   plan from the UI under a fake harness, watch the row transition from
   `ready` → `running` → `complete`, and confirm the spawned child is a
-  detached `asl run` process (not a child of the server).
+  detached `asl run` process (not a child of the server). Confirm the captured
+  argv uses `--harness-model` and `--review-harness-model` and contains no
+  legacy shared ASL model flag.
+- Load a schema-v1 registry pin containing `profile.model`, confirm the global
+  warnings area reports that the legacy value was ignored, then save the
+  profile and confirm `workbench.json` is schema v2 with only `harness_model`
+  and `review_harness_model` model-routing fields.
 - Start `asl run <plan-dir>` from a terminal while the Workbench is
   running. Confirm the Workbench attaches to that lock and surfaces the
   same active turn — both terminal and Workbench should observe the

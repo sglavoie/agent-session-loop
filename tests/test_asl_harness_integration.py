@@ -169,7 +169,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         listener: FakeRunControlListener,
         cwd: Path | None = None,
         commit_mode: str | None = None,
-        model: str | None = None,
+        harness_model: str | None = None,
         effort: str | None = None,
         note: str | None = None,
         extra_env: dict[str, str] | None = None,
@@ -196,7 +196,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             timeout=None,
             max_sessions=None,
             commit_mode=commit_mode,
-            model=model,
+            harness_model=harness_model,
             effort=effort,
             note=note,
             allow_not_loop_ready=True,
@@ -241,7 +241,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
     def run_with_mocked_harness_switch(
         self,
         *,
-        model: str | None = None,
+        harness_model: str | None = None,
         effort: str | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> tuple[int, dict[str, object], list[dict[str, object]], Path, Path]:
@@ -288,7 +288,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     mode="success",
                     statuses=("pending", "pending"),
                     listener=listener,
-                    model=model,
+                    harness_model=harness_model,
                     effort=effort,
                     extra_env=extra_env,
                     harness_config_overrides={"claude": sys.executable},
@@ -307,7 +307,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         timeout: int | None = None,
         max_sessions: int | None = None,
         commit_mode: str | None = None,
-        model: str | None = None,
+        harness_model: str | None = None,
         effort: str | None = None,
         note: str | None = None,
         extra_env: dict[str, str] | None = None,
@@ -338,8 +338,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             command.append("--commit-at-end")
         elif commit_mode is not None:
             raise ValueError(f"unsupported commit_mode: {commit_mode}")
-        if model is not None:
-            command.extend(["--model", model])
+        if harness_model is not None:
+            command.extend(["--harness-model", harness_model])
         if effort is not None:
             command.extend(["--effort", effort])
         if note is not None:
@@ -373,7 +373,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         timeout: int | None = None,
         max_sessions: int | None = None,
         commit_mode: str | None = None,
-        model: str | None = None,
+        harness_model: str | None = None,
         effort: str | None = None,
         note: str | None = None,
         extra_env: dict[str, str] | None = None,
@@ -390,7 +390,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             timeout=timeout,
             max_sessions=max_sessions,
             commit_mode=commit_mode,
-            model=model,
+            harness_model=harness_model,
             effort=effort,
             note=note,
             extra_env=extra_env,
@@ -705,7 +705,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         json_output: bool = False,
         max_sessions: int | None = None,
         commit_mode: str | None = None,
-        model: str | None = None,
+        harness_model: str | None = None,
         effort: str | None = None,
         note: str | None = None,
     ) -> list[str]:
@@ -732,8 +732,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             command.append("--commit-at-end")
         elif commit_mode is not None:
             raise ValueError(f"unsupported commit_mode: {commit_mode}")
-        if model is not None:
-            command.extend(["--model", model])
+        if harness_model is not None:
+            command.extend(["--harness-model", harness_model])
         if effort is not None:
             command.extend(["--effort", effort])
         if note is not None:
@@ -2034,7 +2034,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 timeout=None,
                 max_sessions=None,
                 commit_mode=None,
-                model=None,
+                harness_model=None,
                 effort=None,
                 note=None,
                 allow_not_loop_ready=True,
@@ -2168,7 +2168,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 timeout=None,
                 max_sessions=None,
                 commit_mode=None,
-                model=None,
+                harness_model=None,
                 effort=None,
                 note=None,
                 allow_not_loop_ready=True,
@@ -2292,7 +2292,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 timeout=None,
                 max_sessions=None,
                 commit_mode=None,
-                model=None,
+                harness_model=None,
                 effort=None,
                 note=None,
                 allow_not_loop_ready=True,
@@ -2404,21 +2404,26 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual(1, control_events[0]["session"])
         self.assertEqual(1, control_events[0]["turn_index"])
 
-    def test_harness_selection_carries_explicit_model_and_effort(self) -> None:
+    def test_harness_selection_does_not_carry_explicit_model_and_effort(self) -> None:
         exit_code, payload, calls, _plan_dir, _state_dir = (
-            self.run_with_mocked_harness_switch(model="gpt-5", effort="high")
+            self.run_with_mocked_harness_switch(
+                harness_model="gpt-5", effort="high"
+            )
         )
 
         self.assertEqual(0, exit_code)
         self.assertEqual(["codex", "claude"], [call["harness"] for call in calls])
-        self.assertEqual(["gpt-5", "gpt-5"], [call["model"] for call in calls])
+        self.assertEqual(["gpt-5", None], [call["model"] for call in calls])
         self.assertEqual(["high", "high"], [call["effort"] for call in calls])
 
         turns = payload["turns"]
         self.assertEqual(["codex", "claude"], [turn["harness"] for turn in turns])
-        self.assertEqual(["gpt-5", "gpt-5"], [turn["model"] for turn in turns])
         self.assertEqual(
-            [config.MODEL_SOURCE_FLAG, config.MODEL_SOURCE_FLAG],
+            ["gpt-5", config.NATIVE_MODEL_DEFAULT],
+            [turn["model"] for turn in turns],
+        )
+        self.assertEqual(
+            [config.MODEL_SOURCE_FLAG, config.MODEL_SOURCE_UNRESOLVED],
             [turn["model_source"] for turn in turns],
         )
         self.assertEqual(["high", "high"], [turn["effort"] for turn in turns])
@@ -2932,7 +2937,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             mode="success",
             statuses=("pending",),
             max_sessions=1,
-            model="gpt-5",
+            harness_model="gpt-5",
             effort="high",
         )
 
@@ -3665,7 +3670,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 dry_run=False,
                 review_harness=None,
                 harness="codex",
-                model=None,
+                harness_model=None,
                 effort=None,
                 unsafe_bypass=True,
                 note=None,

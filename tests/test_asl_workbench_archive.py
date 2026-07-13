@@ -109,11 +109,12 @@ class WorkbenchRegistryTests(unittest.TestCase):
                         "profile": {
                             "cwd": str(tmp_path),
                             "harness": "claude",
-                            "model": "claude-sonnet",
+                            "harness_model": "claude-haiku",
                             "effort": "high",
                             "timeout": 1200,
                             "commit_mode": "per-session",
                             "review_harness": "codex",
+                            "review_harness_model": "o4-mini",
                             "unsafe_bypass": True,
                             "allow_not_loop_ready": False,
                             "note": "ship soon",
@@ -133,7 +134,9 @@ class WorkbenchRegistryTests(unittest.TestCase):
             self.assertEqual(str(plan_dir), first.plan_dir)
             self.assertEqual("Alpha plan", first.label)
             self.assertEqual("claude", first.profile.harness)
+            self.assertEqual("claude-haiku", first.profile.harness_model)
             self.assertEqual("codex", first.profile.review_harness)
+            self.assertEqual("o4-mini", first.profile.review_harness_model)
             self.assertTrue(first.profile.unsafe_bypass)
             self.assertFalse(first.profile.allow_not_loop_ready)
             self.assertEqual("per-session", first.profile.commit_mode)
@@ -141,6 +144,89 @@ class WorkbenchRegistryTests(unittest.TestCase):
             self.assertIsNone(second.label)
             self.assertEqual(workbench.LaunchProfile(), second.profile)
             self.assertEqual((str(plan_root),), registry.plan_roots)
+
+    def test_load_v1_profile_ignores_legacy_model_and_warns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
+            registry_path = tmp_path / workbench.REGISTRY_FILE_NAME
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "pins": [
+                            {
+                                "plan_dir": str(plan_dir),
+                                "profile": {
+                                    "harness": "codex",
+                                    "model": "o3-mini",
+                                },
+                            }
+                        ],
+                        "plan_roots": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            registry = workbench.load_registry(registry_path)
+
+            self.assertEqual(1, registry.schema_version)
+            self.assertIsNone(registry.pins[0].profile.harness_model)
+            self.assertEqual(
+                (
+                    "pin[0]: ignoring legacy profile.model from registry schema v1; "
+                    "use harness_model and review_harness_model",
+                ),
+                registry.warnings,
+            )
+
+            workbench.save_registry(registry, registry_path)
+
+            saved = json.loads(registry_path.read_text(encoding="utf-8"))
+            self.assertEqual(2, saved["schema_version"])
+            saved_profile = saved["pins"][0]["profile"]
+            self.assertNotIn("model", saved_profile)
+            self.assertIn("harness_model", saved_profile)
+            self.assertIn("review_harness_model", saved_profile)
+
+    def test_load_profile_without_schema_warns_for_legacy_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            plan_dir = _write_plan_dir(tmp_path / "plans" / "alpha")
+            registry_path = tmp_path / workbench.REGISTRY_FILE_NAME
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "pins": [
+                            {
+                                "plan_dir": str(plan_dir),
+                                "profile": {
+                                    "harness": "codex",
+                                    "model": "o3-mini",
+                                },
+                            }
+                        ],
+                        "plan_roots": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            registry = workbench.load_registry(registry_path)
+
+            self.assertEqual(
+                workbench.REGISTRY_SCHEMA_VERSION, registry.schema_version
+            )
+            self.assertIsNone(registry.pins[0].profile.harness_model)
+            self.assertEqual(
+                (
+                    "schema_version: missing; assuming current version",
+                    "pin[0]: ignoring legacy profile.model from registry schema v2; "
+                    "use harness_model and review_harness_model",
+                ),
+                registry.warnings,
+            )
 
     def test_load_warns_on_malformed_entries_without_failing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

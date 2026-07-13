@@ -88,11 +88,12 @@ class WorkbenchLaunchTests(unittest.TestCase):
             profile = workbench.LaunchProfile(
                 cwd="/tmp/repo",
                 harness="codex",
-                model="o4-mini",
+                harness_model="o4-mini",
                 effort="high",
                 timeout=900,
                 commit_mode="per-session",
                 review_harness="claude",
+                review_harness_model="claude-sonnet",
                 unsafe_bypass=True,
                 allow_not_loop_ready=True,
                 note="launch note",
@@ -114,8 +115,13 @@ class WorkbenchLaunchTests(unittest.TestCase):
             self.assertEqual(argv[argv.index("--harness") + 1], "codex")
             self.assertIn("--review-harness", argv)
             self.assertEqual(argv[argv.index("--review-harness") + 1], "claude")
-            self.assertIn("--model", argv)
-            self.assertEqual(argv[argv.index("--model") + 1], "o4-mini")
+            self.assertIn("--harness-model", argv)
+            self.assertEqual(argv[argv.index("--harness-model") + 1], "o4-mini")
+            self.assertIn("--review-harness-model", argv)
+            self.assertEqual(
+                argv[argv.index("--review-harness-model") + 1], "claude-sonnet"
+            )
+            self.assertNotIn("--model", argv)
             self.assertIn("--effort", argv)
             self.assertEqual(argv[argv.index("--effort") + 1], "high")
             self.assertIn("--timeout", argv)
@@ -172,6 +178,8 @@ class WorkbenchLaunchTests(unittest.TestCase):
                 "--cwd",
                 "--harness",
                 "--model",
+                "--harness-model",
+                "--review-harness-model",
                 "--effort",
                 "--timeout",
                 "--commit-per-session",
@@ -244,6 +252,24 @@ class WorkbenchLaunchTests(unittest.TestCase):
 
             self.assertEqual(
                 workbench.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
+            )
+
+    def test_invalid_profile_review_model_requires_review_harness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            profile = workbench.LaunchProfile(
+                review_harness_model="claude-sonnet"
+            )
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.build_launch_argv(plan_dir, profile=profile)
+
+            self.assertEqual(
+                workbench.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
+            )
+            self.assertEqual(
+                "review_harness_model requires review_harness", ctx.exception.message
             )
 
     def test_invalid_profile_commit_mode_rejected(self) -> None:

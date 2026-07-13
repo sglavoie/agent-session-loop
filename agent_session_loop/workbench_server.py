@@ -1696,11 +1696,12 @@ def _coerce_profile_payload(raw: Any) -> workbench.LaunchProfile | None:
     return workbench.LaunchProfile(
         cwd=_coerce_optional_str(raw.get("cwd")),
         harness=_coerce_optional_str(raw.get("harness")),
-        model=_coerce_optional_str(raw.get("model")),
+        harness_model=_coerce_optional_str(raw.get("harness_model")),
         effort=_coerce_optional_str(raw.get("effort")),
         timeout=_coerce_optional_int(raw.get("timeout")),
         commit_mode=_coerce_optional_str(raw.get("commit_mode")),
         review_harness=_coerce_optional_str(raw.get("review_harness")),
+        review_harness_model=_coerce_optional_str(raw.get("review_harness_model")),
         unsafe_bypass=_coerce_optional_bool(raw.get("unsafe_bypass")),
         allow_not_loop_ready=_coerce_optional_bool(
             raw.get("allow_not_loop_ready")

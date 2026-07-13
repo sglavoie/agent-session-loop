@@ -33,13 +33,22 @@ fi
 # Collect shell scripts
 scripts=()
 
-# 1. Find all .sh files (excluding .git/)
+is_git_ignored() {
+    local path="$1"
+    local relative="${path#"$SCRIPT_DIR"/}"
+
+    git -C "$SCRIPT_DIR" check-ignore -q -- "$relative" 2>/dev/null
+}
+
+# 1. Find all .sh files (excluding .git/ and Git-ignored runtime files)
 while IFS= read -r -d '' f; do
+    is_git_ignored "$f" && continue
     scripts+=("$f")
 done < <(find "$SCRIPT_DIR" -path "$SCRIPT_DIR/.git" -prune -o -name '*.sh' -type f -print0)
 
-# 2. Find extensionless files with a bash/sh shebang (excluding .git/)
+# 2. Find extensionless files with a bash/sh shebang (same exclusions)
 while IFS= read -r -d '' f; do
+    is_git_ignored "$f" && continue
     # Skip files that already have an extension
     [[ "$(basename "$f")" == *.* ]] && continue
     # Check for shell shebang
