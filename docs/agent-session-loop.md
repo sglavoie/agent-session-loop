@@ -311,7 +311,7 @@ asl verify PLAN_DIR --session ID [--cwd REPO_ROOT] [--artifact-dir DIR] [--json]
 asl baseline PLAN_DIR [--cwd REPO_ROOT] [--per-check-timeout SECONDS] [--total-timeout SECONDS] [--json]
 asl prepare PLAN.md [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--validator-harness H] [--review-harness H] [--review-harness-model MODEL] [--base-dir DIR] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--json]
 asl prepare --resume PLAN_DIR [...]
-asl status PLAN_DIR [--state-dir DIR] [--json]
+asl status PLAN_DIR_OR_ID [--state-dir DIR] [--json]
 asl questions PLAN_DIR [--state-dir DIR] [--json]
 asl tail PLAN_DIR [--state-dir DIR] [--lines N] [--no-follow]
 asl sessions [--running] [--recent] [--limit N] [--state-dir DIR] [--verbose] [--json]
@@ -490,7 +490,19 @@ where stdin or stderr is not a TTY.
 
 `status` reads durable plan files and prints session counts, the next pending
 session, content hashes, state paths, lock state, and any active harness turn.
-Use `--json` for scripts.
+Use `--json` for scripts. Its positional argument, `PLAN_DIR_OR_ID`, accepts
+either an existing plan directory or the exact compact plan label printed after
+`plan` by `asl sessions`. This compact plan label identifies a whole plan; it
+is distinct from the dotted session identifier printed after `session` (for
+example `session 2.1`), which names one session inside a plan and is not
+accepted here. Existing absolute or relative directories always take
+precedence, and only a bare, nonexistent argument (no directory component)
+triggers a state-root lookup honoring `--state-dir`. Matching is exact and
+case-sensitive against existing plan directories: zero matches keep the current
+`malformed-plan` error, while multiple matches fail with `reason:
+ambiguous-plan`. Resolution is `status`-only; `run`, `tail`, `unlock`, and other
+plan-taking commands remain path-only. Successful text and JSON output continue
+to report the canonical resolved `plan_dir`.
 
 `tail` prints recent activity for the latest run and follows `events.jsonl`
 plus live harness and commit stdout/stderr logs until the observed run
@@ -511,7 +523,10 @@ harness, session ID, run ID, and plan. `--running` and `--recent` are
 independent filters; passing neither (or both) shows both sections. `--limit`
 must be non-negative, defaults to `20`, and truncates recent rows only. Text
 output uses compact plan-directory basenames; `--verbose` opts into full
-canonical paths; JSON always includes full paths. A missing state root returns
+canonical paths; JSON always includes full paths. The compact plan basename
+shown after `plan` can be passed directly to `asl status` as its
+`PLAN_DIR_OR_ID` argument; the dotted value after `session` remains a
+session identifier within a plan and is not a `status` argument. A missing state root returns
 success with empty arrays — only a catastrophic state-root error yields a
 nonzero exit with `reason: state-error`. Recent rows are sourced from immutable turn artifacts,
 so repeated runs for the same plan are not collapsed by the latest
@@ -936,7 +951,14 @@ block with `stale_unfinished` (boolean) and `stale_reason` (string or `null`).
 `run_finished_at` and no active lock guards it (no lock file, or a stale lock);
 `stale_reason` carries a short human-readable explanation. Text output prints
 `Run state: stale/orphaned (<reason>)` immediately under the regular
-`Run state:` line whenever the runner state is orphaned. `doctor
+`Run state:` line whenever the runner state is orphaned. `status --json` error
+payloads echo the original argument in `plan_dir`: an uninspectable plan (or an
+unresolved label) reports `reason: malformed-plan`, an unreadable state root
+reports `reason: state-error`, and a bare label matching more than one existing
+plan directory reports `reason: ambiguous-plan` with `details.state_root` and a
+sorted `details.candidates` list of canonical paths. In text mode an ambiguous
+label prints a concise stderr error instructing the operator to pass a full
+plan directory path. `doctor
 --json` reports the resolved harness executable, generated prompt, argv, and
 model/effort metadata without invoking the harness. Text `run` and `doctor`
 output print the selected model after `Harness:` and print effort only when an

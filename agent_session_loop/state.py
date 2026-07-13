@@ -8,6 +8,7 @@ record.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -21,10 +22,38 @@ from .formatting import format_duration_seconds
 
 
 LOCK_FILE_NAME = "lock.json"
+RUNS_DIR_NAME = "runs"
+RESULT_FILE_NAME = "result.json"
+TURN_DIR_PREFIX = "turn-"
 
 
 class StateError(Exception):
     """Raised when operational state cannot be read or updated safely."""
+
+
+class AmbiguousPlanError(StateError):
+    """Raised when a bare plan label matches multiple plan directories.
+
+    A subclass of :class:`StateError` so existing ``except StateError`` guards
+    keep working, while callers that need the ``ambiguous-plan`` reason can
+    catch this type first. Carries the sorted canonical candidates and the
+    resolved state root that produced them.
+    """
+
+    def __init__(
+        self,
+        label: str,
+        candidates: list[Path],
+        state_root: Path,
+    ) -> None:
+        self.label = label
+        self.candidates = sorted(candidates, key=str)
+        self.state_root = state_root
+        joined = ", ".join(str(candidate) for candidate in self.candidates)
+        super().__init__(
+            f"plan label {label!r} is ambiguous under {state_root}: "
+            f"matches {joined}"
+        )
 
 
 @dataclass(frozen=True)
@@ -68,6 +97,184 @@ def plan_state_dir(plan_dir: str | Path, state_dir: str | Path | None = None) ->
 
 def lock_path_for_plan(plan_dir: str | Path, state_dir: str | Path | None = None) -> Path:
     return plan_state_dir(plan_dir, state_dir) / LOCK_FILE_NAME
+
+
+def _is_bare_label(raw_value: str) -> bool:
+    """Return True when ``raw_value`` is a bare basename with no path parts.
+
+    Only bare labels trigger state lookup. Anything containing a directory
+    component (``foo/bar``, ``./foo``, ``/abs``) or the ``.``/``..`` relative
+    references retains the current path-only behavior.
+    """
+    if raw_value in ("", ".", ".."):
+        return False
+    head, tail = os.path.split(raw_value)
+    if head:
+        return False
+    return tail == raw_value
+
+
+def _read_json_object_safe(path: Path) -> dict[str, Any] | None:
+    """Best-effort read of a JSON object; None on any failure or non-object.
+
+    Tolerates malformed, unreadable, or concurrently removed files so one bad
+    metadata record cannot block discovery of other candidates.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _nonempty_str(value: Any) -> str | None:
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            return text
+    return None
+
+
+def _plan_dir_from_result(payload: dict[str, Any]) -> str | None:
+    """Recover a plan directory from a turn result, ``after`` before ``before``."""
+    for section_key in ("after", "before"):
+        section = payload.get(section_key)
+        if isinstance(section, dict):
+            value = _nonempty_str(section.get("plan_dir"))
+            if value:
+                return value
+    return None
+
+
+def _iter_result_paths(runs_dir: Path) -> Iterator[Path]:
+    """Yield ``runs/*/turn-*/result.json`` files under one state directory."""
+    try:
+        if not runs_dir.is_dir():
+            return
+        run_dirs = sorted(runs_dir.iterdir())
+    except OSError:
+        return
+    for run_dir in run_dirs:
+        try:
+            if not run_dir.is_dir():
+                continue
+            turn_dirs = sorted(run_dir.iterdir())
+        except OSError:
+            continue
+        for turn_dir in turn_dirs:
+            try:
+                if not turn_dir.name.startswith(TURN_DIR_PREFIX):
+                    continue
+                if not turn_dir.is_dir():
+                    continue
+                result_path = turn_dir / RESULT_FILE_NAME
+                if result_path.is_file():
+                    yield result_path
+            except OSError:
+                continue
+
+
+def _collect_plan_dir_strings(state_dir: Path) -> list[str]:
+    """Gather raw ``plan_dir`` strings from one per-plan state directory.
+
+    Sources, in order: ``state.json``, ``lock.json``, then every
+    ``runs/*/turn-*/result.json`` recovering ``after.plan_dir`` before
+    ``before.plan_dir``. Missing or malformed records are silently skipped.
+    """
+    results: list[str] = []
+    state_obj = _read_json_object_safe(state_dir / events.STATE_FILE_NAME)
+    if state_obj is not None:
+        value = _nonempty_str(state_obj.get("plan_dir"))
+        if value:
+            results.append(value)
+    lock_obj = _read_json_object_safe(state_dir / LOCK_FILE_NAME)
+    if lock_obj is not None:
+        value = _nonempty_str(lock_obj.get("plan_dir"))
+        if value:
+            results.append(value)
+    for result_path in _iter_result_paths(state_dir / RUNS_DIR_NAME):
+        result_obj = _read_json_object_safe(result_path)
+        if result_obj is None:
+            continue
+        value = _plan_dir_from_result(result_obj)
+        if value:
+            results.append(value)
+    return results
+
+
+def _iter_plan_state_dirs(state_root: Path) -> Iterator[Path]:
+    """Yield per-plan state directories under ``state_root``.
+
+    A missing root scans as an empty corpus. A root that exists but is not a
+    directory, or that cannot be enumerated, raises :class:`StateError`.
+    """
+    if not state_root.exists():
+        return
+    if not state_root.is_dir():
+        raise StateError(f"state root is not a directory: {state_root}")
+    try:
+        children = sorted(state_root.iterdir())
+    except OSError as error:
+        raise StateError(
+            f"could not scan state root {state_root}: {error}"
+        ) from error
+    for child in children:
+        try:
+            if child.is_dir():
+                yield child
+        except OSError:
+            continue
+
+
+def resolve_plan_reference(raw_value: str, state_root: Path) -> Path:
+    """Resolve a plan argument to a plan directory, honoring direct paths.
+
+    Existing directories always win and are returned canonicalized without any
+    state lookup. Path-like nonexistent arguments (those with a directory
+    component) also bypass lookup and return the canonicalized argument. Only a
+    bare, nonexistent label scans the state corpus under ``state_root``,
+    matching persisted ``plan_dir`` basenames exactly and case-sensitively
+    against existing plan directories.
+
+    Returns the sole matching plan directory, or the canonicalized argument
+    when nothing matches. Raises :class:`AmbiguousPlanError` when more than one
+    existing plan directory shares the requested basename. Discovery is
+    read-only and independent of process liveness.
+    """
+    original = plans.canonicalize_path(raw_value)
+    if original.is_dir():
+        return original
+    if not _is_bare_label(raw_value):
+        return original
+
+    matches: dict[str, Path] = {}
+    for state_dir in _iter_plan_state_dirs(state_root):
+        for raw_plan_dir in _collect_plan_dir_strings(state_dir):
+            try:
+                candidate = plans.canonicalize_path(raw_plan_dir)
+            except (OSError, ValueError):
+                continue
+            key = str(candidate)
+            if key in matches:
+                continue
+            if candidate.name != raw_value:
+                continue
+            try:
+                is_existing_dir = candidate.is_dir()
+            except OSError:
+                continue
+            if is_existing_dir:
+                matches[key] = candidate
+
+    if not matches:
+        return original
+    if len(matches) == 1:
+        return next(iter(matches.values()))
+    raise AmbiguousPlanError(raw_value, list(matches.values()), state_root)
 
 
 def is_pid_running(pid: int) -> bool:
@@ -584,10 +791,43 @@ def _print_text_status(payload: dict[str, Any]) -> None:
 
 
 def status_from_args(args: argparse.Namespace) -> int:
-    """Show parsed plan and runner status from CLI arguments."""
+    """Show parsed plan and runner status from CLI arguments.
+
+    ``args.plan_dir`` (advertised as ``PLAN_DIR_OR_ID``) may be either an
+    existing plan directory or a bare compact plan label printed after ``plan``
+    by ``asl sessions``. Labels are resolved through the state corpus before
+    inspection; direct paths always take precedence and never trigger a lookup.
+    """
     try:
-        snapshot = plans.inspect_plan(args.plan_dir)
+        resolved_plan_dir = resolve_plan_reference(
+            args.plan_dir, state_root(args.state_dir)
+        )
+        snapshot = plans.inspect_plan(resolved_plan_dir)
         payload = status_payload(snapshot, args.state_dir)
+    except AmbiguousPlanError as error:
+        if args.json:
+            responses.print_json(
+                responses.error_payload(
+                    "status",
+                    reason="ambiguous-plan",
+                    error=str(error),
+                    paused=False,
+                    details={
+                        "state_root": str(error.state_root),
+                        "candidates": [
+                            str(candidate) for candidate in error.candidates
+                        ],
+                    },
+                    plan_dir=str(args.plan_dir),
+                )
+            )
+        else:
+            print(
+                f"agent-session-loop status: {error}; "
+                "pass a full plan directory path to disambiguate",
+                file=sys.stderr,
+            )
+        return 1
     except (plans.PlanError, StateError) as error:
         if args.json:
             reason = (

@@ -331,7 +331,14 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         "status",
         help="Show session ID and operational runner status.",
     )
-    status_parser.add_argument("plan_dir", help="Split plan directory to inspect")
+    status_parser.add_argument(
+        "plan_dir",
+        metavar="PLAN_DIR_OR_ID",
+        help=(
+            "Split plan directory to inspect, or the compact plan label "
+            "printed after 'plan' by 'asl sessions'"
+        ),
+    )
     status_parser.add_argument(
         "--state-dir",
         help="Override operational state directory",

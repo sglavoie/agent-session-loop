@@ -2941,5 +2941,248 @@ class ParserAndStateTests(unittest.TestCase):
         self.assertEqual(1, payload["active_turn"]["session"])
 
 
+def _plan_state_dir(state_root: Path, plan_dir: Path) -> Path:
+    entry = state_root / plans.path_sha256(plan_dir)
+    entry.mkdir(parents=True, exist_ok=True)
+    return entry
+
+
+def _write_state_json_entry(state_root: Path, plan_dir: Path) -> Path:
+    entry = _plan_state_dir(state_root, plan_dir)
+    (entry / events.STATE_FILE_NAME).write_text(
+        json.dumps({"plan_dir": str(plan_dir)}, sort_keys=True),
+        encoding="utf-8",
+    )
+    return entry
+
+
+def _write_lock_json_entry(state_root: Path, plan_dir: Path) -> Path:
+    entry = _plan_state_dir(state_root, plan_dir)
+    (entry / state.LOCK_FILE_NAME).write_text(
+        json.dumps(
+            {"plan_dir": str(plan_dir), "pid": 1, "created_at": "x"},
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return entry
+
+
+def _write_result_json_entry(
+    state_root: Path,
+    plan_dir: Path,
+    *,
+    section: str = "after",
+    run_id: str = "run-1",
+    turn_label: str = "1",
+) -> Path:
+    entry = _plan_state_dir(state_root, plan_dir)
+    turn_dir = (
+        entry / state.RUNS_DIR_NAME / run_id / f"{state.TURN_DIR_PREFIX}{turn_label}"
+    )
+    turn_dir.mkdir(parents=True, exist_ok=True)
+    (turn_dir / state.RESULT_FILE_NAME).write_text(
+        json.dumps({section: {"plan_dir": str(plan_dir)}}, sort_keys=True),
+        encoding="utf-8",
+    )
+    return entry
+
+
+class ResolvePlanReferenceTests(unittest.TestCase):
+    """Focused tests for the read-only state-corpus plan-label resolver."""
+
+    def test_existing_direct_directory_wins_without_state_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan_dir = root / "compact-label"
+            plan_dir.mkdir()
+            # A non-directory state root would raise if scanned; the existing
+            # directory must short-circuit before any lookup happens.
+            not_a_dir = root / "state-file"
+            not_a_dir.write_text("not a dir", encoding="utf-8")
+
+            resolved = state.resolve_plan_reference(str(plan_dir), not_a_dir)
+
+            self.assertEqual(plans.canonicalize_path(plan_dir), resolved)
+
+    def test_unique_match_from_state_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_root = root / "state"
+            plan_dir = plans.canonicalize_path(root / "plans" / "abc123")
+            plan_dir.mkdir(parents=True)
+            _write_state_json_entry(state_root, plan_dir)
+
+            resolved = state.resolve_plan_reference("abc123", state_root)
+
+            self.assertEqual(plan_dir, resolved)
+
+    def test_unique_match_from_lock_only_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_root = root / "state"
+            plan_dir = plans.canonicalize_path(root / "plans" / "lock-label")
+            plan_dir.mkdir(parents=True)
+            _write_lock_json_entry(state_root, plan_dir)
+
+            resolved = state.resolve_plan_reference("lock-label", state_root)
+
+            self.assertEqual(plan_dir, resolved)
+
+    def test_unique_match_from_result_only_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_root = root / "state"
+            plan_dir = plans.canonicalize_path(root / "plans" / "res-label")
+            plan_dir.mkdir(parents=True)
+            _write_result_json_entry(state_root, plan_dir, section="after")
+
+            resolved = state.resolve_plan_reference("res-label", state_root)
+
+            self.assertEqual(plan_dir, resolved)
+
+    def test_result_before_plan_dir_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_root = root / "state"
+            plan_dir = plans.canonicalize_path(root / "plans" / "before-label")
+            plan_dir.mkdir(parents=True)
+            _write_result_json_entry(state_root, plan_dir, section="before")
+
+            resolved = state.resolve_plan_reference("before-label", state_root)
+
+            self.assertEqual(plan_dir, resolved)
+
+    def test_candidate_deduplication_across_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_root = root / "state"
+            plan_dir = plans.canonicalize_path(root / "plans" / "dedup")
+            plan_dir.mkdir(parents=True)
+            # Same plan referenced by all three sources in one state dir.
+            _write_state_json_entry(state_root, plan_dir)
+            _write_lock_json_entry(state_root, plan_dir)
+            _write_result_json_entry(state_root, plan_dir)
+
+            resolved = state.resolve_plan_reference("dedup", state_root)
+
+            self.assertEqual(plan_dir, resolved)
+
+    def test_case_sensitive_basename_matching_misses(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_root = root / "state"
+            plan_dir = plans.canonicalize_path(root / "plans" / "Alpha")
+            plan_dir.mkdir(parents=True)
+            _write_state_json_entry(state_root, plan_dir)
+
+            resolved = state.resolve_plan_reference("alpha", state_root)
+
+            # No case-insensitive match: falls back to the canonical argument.
+            self.assertEqual(plans.canonicalize_path("alpha"), resolved)
+
+    def test_path_like_nonexistent_argument_bypasses_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_root = root / "state"
+            plan_dir = plans.canonicalize_path(root / "plans" / "bar")
+            plan_dir.mkdir(parents=True)
+            _write_state_json_entry(state_root, plan_dir)
+
+            resolved = state.resolve_plan_reference("foo/bar", state_root)
+
+            # Directory component present: keep path-only behavior.
+            self.assertEqual(plans.canonicalize_path("foo/bar"), resolved)
+
+    def test_missing_state_root_retains_original(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "absent"
+
+            resolved = state.resolve_plan_reference("whatever", state_root)
+
+            self.assertEqual(plans.canonicalize_path("whatever"), resolved)
+
+    def test_unknown_label_retains_original(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_root = root / "state"
+            plan_dir = plans.canonicalize_path(root / "plans" / "known")
+            plan_dir.mkdir(parents=True)
+            _write_state_json_entry(state_root, plan_dir)
+
+            resolved = state.resolve_plan_reference("missing", state_root)
+
+            self.assertEqual(plans.canonicalize_path("missing"), resolved)
+
+    def test_nonexistent_candidate_plan_dir_is_discarded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_root = root / "state"
+            plan_dir = root / "plans" / "gone"
+            # Register metadata but never create the plan directory itself.
+            _write_state_json_entry(state_root, plans.canonicalize_path(plan_dir))
+
+            resolved = state.resolve_plan_reference("gone", state_root)
+
+            self.assertEqual(plans.canonicalize_path("gone"), resolved)
+
+    def test_ambiguous_matches_raise_sorted_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_root = root / "state"
+            first = plans.canonicalize_path(root / "b-parent" / "dup")
+            second = plans.canonicalize_path(root / "a-parent" / "dup")
+            first.mkdir(parents=True)
+            second.mkdir(parents=True)
+            _write_state_json_entry(state_root, first)
+            _write_lock_json_entry(state_root, second)
+
+            with self.assertRaises(state.AmbiguousPlanError) as caught:
+                state.resolve_plan_reference("dup", state_root)
+
+            error = caught.exception
+            self.assertIsInstance(error, state.StateError)
+            self.assertEqual("dup", error.label)
+            self.assertEqual(state_root, error.state_root)
+            self.assertEqual(sorted([first, second], key=str), error.candidates)
+
+    def test_malformed_individual_record_is_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_root = root / "state"
+            plan_dir = plans.canonicalize_path(root / "plans" / "good")
+            plan_dir.mkdir(parents=True)
+            # A malformed state.json in the same entry must not block the
+            # valid result.json fallback.
+            entry = _plan_state_dir(state_root, plan_dir)
+            (entry / events.STATE_FILE_NAME).write_text(
+                "{ not json", encoding="utf-8"
+            )
+            _write_result_json_entry(state_root, plan_dir)
+
+            resolved = state.resolve_plan_reference("good", state_root)
+
+            self.assertEqual(plan_dir, resolved)
+
+    def test_non_directory_state_root_raises_state_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "root-file"
+            state_root.write_text("not a directory", encoding="utf-8")
+
+            with self.assertRaises(state.StateError):
+                state.resolve_plan_reference("label", state_root)
+
+    def test_unenumerable_state_root_raises_state_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "state"
+            state_root.mkdir()
+
+            with mock.patch.object(
+                Path, "iterdir", side_effect=OSError("boom")
+            ):
+                with self.assertRaises(state.StateError):
+                    state.resolve_plan_reference("label", state_root)
+
+
 if __name__ == "__main__":
     unittest.main()
