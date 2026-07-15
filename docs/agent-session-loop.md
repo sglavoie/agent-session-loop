@@ -585,6 +585,35 @@ command; success prints the exact `asl run` command. `--resume` reruns
 validation only for sessions missing from the stored
 `prepare-validation.json` aggregate and reuses recorded baseline evidence
 whose repository fingerprint still matches; it never creates another split.
+
+Source-plan session headings use a tolerant, fence-aware grammar shared by
+`session-split`, `plan-iterate`, and `asl prepare`. Outside matching backtick or
+tilde fences, the parser accepts case-insensitive H2-H6 ATX headings with zero
+to three leading spaces, horizontal whitespace after the opening hashes, and a
+positive dotted-decimal ID after the `Session` token. Source components may be
+zero-padded. The ID may stand alone or introduce a non-empty title with `:`,
+`-`, `–`, or `—`; horizontal whitespace around that separator is optional, and
+whitespace-delimited ATX closing hashes are allowed. For example, all of these
+are explicit boundaries:
+
+```markdown
+## Session 01
+ ### session 02 - Add validation ###
+###### SESSION 03.004 — Ship docs
+```
+
+Accepted source headings remain verbatim: preparation does not require
+normalization approval or rewrite the source. Artifact identities are strict
+and canonical, however, so `Session 03.004` produces ID `3.4`,
+`session-3.4.md`, and unpadded manifest and completion-contract IDs. The
+general-purpose `SessionId` API remains strict; zero padding is tolerated only
+while parsing the source heading. An H2-H6 line outside a fence that begins
+with the `Session` token but has a zero component, unsupported or dangling
+separator, or another malformed suffix raises a line-specific `PlanError`.
+The grammar-neutral structure gate surfaces that diagnostic as
+`needs-plan-iteration` before authoring any output rather than treating the
+candidate as body text or as a plan with no boundaries.
+
 `--harness-model` and `--review-harness-model` are preserved in JSON payloads
 and forwarded into both the emitted `asl run` command and any emitted
 `asl prepare --resume` command. `--review-harness-model` requires

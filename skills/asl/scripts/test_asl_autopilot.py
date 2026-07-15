@@ -162,7 +162,8 @@ class ParseCommandTest(unittest.TestCase):
     def test_supported_flags_are_preserved(self) -> None:
         result = autopilot.parse_command(
             "asl run /tmp/plan --harness claude --review-harness codex "
-            "--model opus --effort high --timeout 600 --max-sessions 3 "
+            "--harness-model opus --review-harness-model gpt-5 "
+            "--effort high --timeout 600 --max-sessions 3 "
             "--max-pending-sessions 30 --commit-at-end --no-unsafe-bypass "
             "--allow-not-loop-ready"
         )
@@ -171,10 +172,28 @@ class ParseCommandTest(unittest.TestCase):
         self.assertIn("--harness", args)
         self.assertIn("claude", args)
         self.assertIn("--review-harness", args)
+        self.assertEqual(args[args.index("--harness-model") + 1], "opus")
+        self.assertEqual(args[args.index("--review-harness-model") + 1], "gpt-5")
         self.assertIn("--commit-at-end", args)
         self.assertIn("--no-unsafe-bypass", args)
         self.assertIn("--allow-not-loop-ready", args)
         self.assertEqual(args[args.index("--timeout") + 1], "600")
+
+    def test_rejects_legacy_model_flag(self) -> None:
+        result = autopilot.parse_command("asl run /tmp/plan --model opus")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "invalid-argument")
+
+    def test_review_harness_model_requires_review_harness(self) -> None:
+        result = autopilot.parse_command(
+            "asl run /tmp/plan --review-harness-model gpt-5"
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "invalid-argument")
+        self.assertEqual(
+            result["error"],
+            "--review-harness-model requires --review-harness",
+        )
 
     def test_review_fix_cycles_forwarded_to_child(self) -> None:
         result = autopilot.parse_command(

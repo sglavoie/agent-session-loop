@@ -814,8 +814,38 @@ class PrepareCliTests(unittest.TestCase):
         payload = json.loads(stdout)
         self.assertEqual("needs-plan-iteration", payload["reason"])
         self.assertIsNone(payload["plan_dir"])
-        self.assertIn("at least two", payload["blockers"][0]["message"])
+        message = payload["blockers"][0]["message"]
+        self.assertIn("supported H2-H6", message)
+        self.assertIn("'Session <id>' headings", message)
+        self.assertNotIn("'## Session <id>'", message)
         # The structure gate fails before any output directory is created.
+        self.assertFalse(self.base_dir.exists())
+
+    def test_malformed_session_heading_fails_structure_gate_atomically(self) -> None:
+        malformed = "#### Session 02 / Broken"
+        source = self._write_source(heading_by_id={"2": malformed})
+        source_lines = source.read_text(encoding="utf-8").splitlines()
+        line_number = source_lines.index(malformed) + 1
+
+        code, stdout, _stderr = self._run_cli(
+            str(source),
+            "--cwd",
+            str(self.repo),
+            "--base-dir",
+            str(self.base_dir),
+            "--json",
+        )
+
+        self.assertEqual(1, code)
+        payload = json.loads(stdout)
+        self.assertEqual("needs-plan-iteration", payload["reason"])
+        self.assertIsNone(payload["plan_dir"])
+        self.assertEqual(1, len(payload["blockers"]))
+        blocker = payload["blockers"][0]
+        self.assertEqual("structure", blocker["stage"])
+        self.assertIn(f"line {line_number}", blocker["message"])
+        self.assertIn("unsupported title separator", blocker["message"])
+        self.assertIn(malformed, blocker["message"])
         self.assertFalse(self.base_dir.exists())
 
     def test_missing_contract_returns_needs_plan_iteration(self) -> None:
@@ -1070,6 +1100,41 @@ class PrepareEndToEndTests(unittest.TestCase):
             ["ok", "ok", "ok", "ok", "ok", "ok"],
             [step.status for step in result.steps],
         )
+
+    def test_tolerant_headings_author_canonical_plan_artifacts(self) -> None:
+        source = self._write_source(
+            heading_by_id={
+                "1": " ### SeSsIoN 01 - Prime Setup ###   ",
+                "2": "###### SESSION 002 — Finalize ####",
+            }
+        )
+        calls: list[prepare.ValidationTaskPacket] = []
+
+        result = self._prepare(source, _recording_validator(calls))
+
+        self.assertTrue(result.ok, result)
+        self.assertEqual(("1", "2"), result.session_ids)
+        self.assertEqual(1, len(calls))
+        self.assertEqual(("1", "2"), calls[0].session_ids)
+        plan_dir = result.plan_dir
+        assert plan_dir is not None
+        self.assertTrue((plan_dir / "session-1.md").is_file())
+        self.assertTrue((plan_dir / "session-2.md").is_file())
+        self.assertFalse((plan_dir / "session-01.md").exists())
+        self.assertFalse((plan_dir / "session-002.md").exists())
+
+        session_one = (plan_dir / "session-1.md").read_text(encoding="utf-8")
+        session_two = (plan_dir / "session-2.md").read_text(encoding="utf-8")
+        self.assertTrue(session_one.startswith("# Session 1: Prime Setup\n"))
+        self.assertTrue(session_two.startswith("# Session 2: Finalize\n"))
+        self.assertIn('"session": "1"', session_one)
+        self.assertIn('"session": "2"', session_two)
+
+        manifest = (plan_dir / "manifest.md").read_text(encoding="utf-8")
+        self.assertIn("| 1 | Prime Setup | pending | session-1.md |", manifest)
+        self.assertIn("| 2 | Finalize | pending | session-2.md |", manifest)
+        self.assertNotIn("| 01 |", manifest)
+        self.assertNotIn("| 002 |", manifest)
 
     def test_validator_corrections_are_applied_to_session_files(self) -> None:
         source = self._write_source(

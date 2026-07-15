@@ -112,7 +112,14 @@ Report the captured source path in the final summary so the user can reuse it wi
 
 Read the entire plan file at `<plan-file>`.
 
-Canonical parsing is owned by `agent_session_loop.authoring.parse_plan_document`: it splits the plan into shared context lines plus per-session blocks using the `## Session <id>` / `### Session <id>` headings (case-insensitive, dotted IDs supported), treats headings inside ``` / ~~~ code fences as content rather than structure, and rejects duplicate session IDs. Step 8 runs this parser for the actual file generation, so do not re-derive the split by hand.
+Canonical parsing is owned by `agent_session_loop.authoring.parse_plan_document`. Use its source-only grammar for session detection:
+
+- Accept case-insensitive H2-H6 ATX headings with zero to three leading spaces and required horizontal whitespace after the opening hashes.
+- Require the `Session` token followed by a positive dotted-decimal ID. Source components may be zero-padded, but the parser canonicalizes them numerically (`Session 02.03` becomes ID `2.3`); a zero component is invalid.
+- Accept a bare ID or a non-empty title introduced by `:`, `-`, `–`, or `—`, with optional horizontal whitespace around the separator. Accept optional ATX closing hashes when horizontal whitespace precedes them.
+- Treat headings inside matching backtick or tilde fences as content. Outside fences, surface the parser's line-specific `PlanError` directly for any malformed H2-H6 candidate beginning with the `Session` token; do not reinterpret it as ordinary content or as a plan with no markers.
+
+The parser splits the plan into shared context lines plus per-session blocks and rejects duplicate canonical IDs. Step 8 runs it for actual file generation, so do not re-derive boundaries by hand. If existing headings match this grammar, proceed without asking for normalization approval and without rewriting the source plan merely to canonicalize their spelling, level, separator, or ID padding.
 
 For your own reasoning in Steps 4–5 (surface scan, boundary proposal), read the plan normally and note which session each piece of content belongs to; the parser is the source of truth for the final boundaries.
 
@@ -149,7 +156,7 @@ Record a tuple for each: `(path, lines | NEW, session_number)` — where `sessio
 
 ### Step 5: Handle Edge Cases
 
-**No session markers found**: Propose session boundaries using concrete data:
+**No session markers found**: Enter this workflow only when canonical parsing succeeds with zero explicit session headings. Parser errors are malformed-plan errors, not an invitation to propose boundaries. Propose session boundaries using concrete data:
 
 1. Group work items that share files or directories into one session (use surface scan data when available)
 2. Estimate session weight: plan text lines + files touched + existing LoC + subsystem spread
@@ -157,7 +164,7 @@ Record a tuple for each: `(path, lines | NEW, session_number)` — where `sessio
 4. Present the proposed session structure with per-session summaries: `<Title> -- <N> files, ~<L> existing lines, <subsystem(s)>`
 5. If surface scan was skipped (< 5 file references), fall back to heading/affinity grouping
 6. Ask the user for approval before proceeding
-7. Once approved, write the restructured plan — original content unchanged, but organized under `## Session N: <title>` headings — and capture it as a new durable source with `capture-inline-plan.py` (Step 2). Use that captured `source_path` as `<plan-file>` for Step 6 onward so the generated directory traces to a real source file.
+7. Once approved, write the restructured plan — original content unchanged, but organized under canonical `## Session N: <title>` headings — and capture it as a new durable source with `capture-inline-plan.py` (Step 2). Use that captured `source_path` as `<plan-file>` for Step 6 onward so the generated directory traces to a real source file.
 
 **Single session found**: Tell the user: "Only 1 session found — splitting is not needed." Stop.
 
@@ -238,7 +245,7 @@ Optionally, also write an analysis markdown file (`analysis_file`) holding the `
 
 ### Step 8: Generate the Plan Directory via the Authoring API
 
-All file generation is delegated to `agent_session_loop.authoring` — fence-aware parsing, dotted-ID canonicalization (`Session 02.03` becomes `session-2.3.md`, never with leading zeroes), heading normalization for `###`-level sessions, verbatim content preservation, previous-session references, contract rendering, the `progress.md` skeleton, the serial-only manifest, atomic multi-file commit, and the readiness refresh. Do not hand-write any generated file.
+All file generation is delegated to `agent_session_loop.authoring` — fence-aware parsing, dotted-ID canonicalization (`Session 02.03` becomes `session-2.3.md`, never with leading zeroes), body-heading normalization for accepted H3-H6 session headings, verbatim content preservation, previous-session references, contract rendering, the `progress.md` skeleton, the serial-only manifest, atomic multi-file commit, and the readiness refresh. Do not hand-write any generated file.
 
 ```bash
 generation_json="$(

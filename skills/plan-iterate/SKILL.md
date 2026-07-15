@@ -55,11 +55,13 @@ Parse the plan to identify:
 - **Title**: the `# H1` heading
 - **Sections**: all `## H2` and `### H3` headings with their content
 - **Line count**: approximate size of the plan
-- **Session markers**: any `## Session N` or `### Session N` headings
+- **Session markers**: boundaries accepted by `agent_session_loop.authoring.parse_plan_document`: case-insensitive H2-H6 ATX headings with zero to three leading spaces, required horizontal whitespace after the opening hashes, and a positive dotted-decimal ID after the `Session` token. Source ID components may be zero-padded and are canonicalized numerically. A heading may use the bare ID or add a non-empty title after `:`, `-`, `–`, or `—`, with optional horizontal whitespace around the separator and optional whitespace-delimited closing hashes.
 - **File references**: backtick paths like `src/foo/bar.go`, `internal/replay/replayer.go`
 - **Verification sections**: anything titled Verification, Testing, Test plan, or similar
 
 Track fenced code blocks (``` or ~~~) to avoid treating code content as plan structure.
+
+For H2-H6 lines outside fences whose content begins with the `Session` token, surface malformed-candidate parser errors directly; do not treat them as ordinary content or as an absence of markers. Existing headings accepted by the shared grammar count immediately without a normalization question or source rewrite. Reserve `session-split`'s boundary-proposal workflow for a plan that canonical parsing confirms has no explicit session headings.
 
 ### Step 2: Assess Completeness
 
@@ -347,10 +349,11 @@ Use the Edit tool to make the decisions durable in the plan file:
 
 The final plan must pass the `asl prepare` structure gate, which otherwise exits with reason `needs-plan-iteration` and per-session blockers before any output directory is created. Verify — and add or repair where missing — that:
 
-- The plan has **session boundaries**: at least two explicit `## Session <id>: Title` (or `### Session <id>`) headings outside code fences.
+- The plan has **session boundaries**: at least two explicit source headings accepted by the shared `parse_plan_document` H2-H6 grammar outside code fences. Preserve already accepted alternate levels, separators, and zero-padded source IDs; when adding or repairing a boundary, author the canonical `## Session <id>: Title` form.
 - Every session block carries an inline `## Completion Contract` section containing:
   - a `### Done when` bullet list stating that session's done criteria, and
   - a `### Verify` fenced ```json block parseable by `contracts.parse_completion_contract` giving the session's verification recipe.
+- Contract session IDs must use the canonical unpadded ID returned by the source-heading parser.
 - Contract checks carry `baseline_expectation` (`pass` or `fail`) where a meaningful pre-implementation baseline expectation exists; checks without it carry no baseline obligations.
 
 Derive done criteria and verification recipes from the plan content and the Step I2 research; ask the user (one AskUserQuestion round at most) only when a verification command is genuinely unknowable from the plan and codebase.

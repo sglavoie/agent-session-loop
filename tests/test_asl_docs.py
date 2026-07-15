@@ -96,6 +96,26 @@ class SkillInstructionTests(unittest.TestCase):
         self.assertIn("missing-contract", text)
         self.assertNotIn("session-contract", text)
 
+    def test_session_split_documents_shared_source_heading_grammar(self) -> None:
+        text = (REPO_ROOT / "skills/session-split/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("case-insensitive H2-H6 ATX headings", text)
+        self.assertIn("zero to three leading spaces", text)
+        self.assertIn("`:`, `-`, `–`, or `—`", text)
+        self.assertIn("without asking for normalization approval", text)
+        self.assertIn("line-specific `PlanError` directly", text)
+        self.assertIn(
+            "only when canonical parsing succeeds with zero explicit session headings",
+            text,
+        )
+        self.assertIn("canonical `## Session N: <title>` headings", text)
+        self.assertNotIn(
+            "using the `## Session <id>` / `### Session <id>` headings",
+            text,
+        )
+
     def test_session_run_documents_bounded_manual_auto_repair(self) -> None:
         text = (REPO_ROOT / "skills/session-run/SKILL.md").read_text(
             encoding="utf-8"
@@ -176,6 +196,27 @@ class PlanWorkflowDocsTests(unittest.TestCase):
         self.assertIn("contracts.parse_completion_contract", text)
         self.assertIn("baseline_expectation", text)
         self.assertIn("asl prepare <plan-path> --cwd <repo-root>", text)
+
+    def test_plan_iterate_uses_shared_source_heading_grammar(self) -> None:
+        text = self._plan_iterate_text()
+
+        self.assertIn("case-insensitive H2-H6 ATX headings", text)
+        self.assertIn("Source ID components may be zero-padded", text)
+        self.assertIn("surface malformed-candidate parser errors directly", text)
+        self.assertIn("without a normalization question or source rewrite", text)
+        self.assertIn(
+            "canonical parsing confirms has no explicit session headings",
+            text,
+        )
+        self.assertIn("author the canonical `## Session <id>: Title` form", text)
+        self.assertNotIn(
+            "any `## Session N` or `### Session N` headings",
+            text,
+        )
+        self.assertNotIn(
+            "at least two explicit `## Session <id>: Title` (or `### Session <id>`) headings",
+            text,
+        )
 
     def test_plan_iterate_preserves_default_mode_without_ideal_flag(
         self,

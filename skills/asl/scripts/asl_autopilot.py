@@ -208,7 +208,8 @@ def _build_run_parser() -> _RunArgumentParser:
     parser.add_argument("--cwd")
     parser.add_argument("--harness", choices=HARNESS_NAMES)
     parser.add_argument("--review-harness", dest="review_harness", choices=HARNESS_NAMES)
-    parser.add_argument("--model")
+    parser.add_argument("--harness-model", dest="harness_model")
+    parser.add_argument("--review-harness-model", dest="review_harness_model")
     parser.add_argument("--effort")
     parser.add_argument("--timeout", type=int)
     parser.add_argument("--max-sessions", dest="max_sessions", type=int)
@@ -399,6 +400,14 @@ def parse_command(command: str) -> dict:
             "--review-harness must differ from --harness "
             f"(both set to {namespace.harness!r})",
         )
+    if (
+        namespace.review_harness_model is not None
+        and namespace.review_harness is None
+    ):
+        return _parse_error(
+            "invalid-argument",
+            "--review-harness-model requires --review-harness",
+        )
 
     plan_dir = _expand_user_only(namespace.plan_dir)
     cwd = _expand_user_only(namespace.cwd) if namespace.cwd is not None else None
@@ -415,8 +424,10 @@ def parse_command(command: str) -> dict:
         child_args += ["--harness", namespace.harness]
     if namespace.review_harness is not None:
         child_args += ["--review-harness", namespace.review_harness]
-    if namespace.model is not None:
-        child_args += ["--model", namespace.model]
+    if namespace.harness_model is not None:
+        child_args += ["--harness-model", namespace.harness_model]
+    if namespace.review_harness_model is not None:
+        child_args += ["--review-harness-model", namespace.review_harness_model]
     if namespace.effort is not None:
         child_args += ["--effort", namespace.effort]
     if namespace.timeout is not None:

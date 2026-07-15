@@ -1399,8 +1399,8 @@ def _structure_blockers(
                 stage=PREPARE_STAGE_STRUCTURE,
                 message=(
                     f"plan defines {len(parsed.sessions)} explicit session "
-                    "heading(s); at least two '## Session <id>' sections are "
-                    "required"
+                    "heading(s); at least two supported H2-H6 "
+                    "'Session <id>' headings are required"
                 ),
             )
         )

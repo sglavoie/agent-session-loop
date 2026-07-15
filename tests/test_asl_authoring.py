@@ -193,24 +193,113 @@ class PlanAuthoringTests(unittest.TestCase):
         self.assertEqual("Nested", parsed.sessions[1].title)
 
     def test_parse_plan_document_ignores_headings_in_code_fences(self) -> None:
-        text = (
-            "Context\n\n## Session 1: Real\n\n"
-            "```\n## Session 99: fake\n```\n\nBody.\n"
-        )
-        parsed = authoring.parse_plan_document(text)
+        for fence in ("```", "~~~"):
+            with self.subTest(fence=fence):
+                text = (
+                    "Context\n\n## Session 1: Real\n\n"
+                    f"{fence}\n"
+                    "###### Session 009 — fake\n"
+                    "### Session nope / malformed\n"
+                    f"{fence}\n\nBody.\n"
+                )
+                parsed = authoring.parse_plan_document(text)
 
-        self.assertEqual(("1",), parsed.session_ids)
-        self.assertIn("## Session 99: fake", parsed.sessions[0].lines)
+                self.assertEqual(("1",), parsed.session_ids)
+                self.assertIn("###### Session 009 — fake", parsed.sessions[0].lines)
+                self.assertIn(
+                    "### Session nope / malformed", parsed.sessions[0].lines
+                )
 
     def test_parse_plan_document_rejects_duplicate_ids(self) -> None:
-        text = "## Session 1: A\n\nx\n\n## Session 1: B\n\ny\n"
-        with self.assertRaises(plans.PlanError):
+        text = "## Session 1: A\n\nx\n\n## Session 01: B\n\ny\n"
+        with self.assertRaises(plans.PlanError) as raised:
             authoring.parse_plan_document(text)
+        message = str(raised.exception)
+        self.assertIn("line 5", message)
+        self.assertIn("duplicate canonical session id '1'", message)
+        self.assertIn("first defined on line 1", message)
+        self.assertIn("## Session 01: B", message)
 
     def test_parse_plan_document_titleless_heading(self) -> None:
         parsed = authoring.parse_plan_document("## Session 3\n\nBody.\n")
         self.assertEqual(("3",), parsed.session_ids)
         self.assertIsNone(parsed.sessions[0].title)
+
+    def test_parse_plan_document_accepts_title_separators_and_padding(self) -> None:
+        cases = (
+            ("## Session 01: Colon", "1", "Colon"),
+            ("## Session 02-ASCII hyphen", "2", "ASCII hyphen"),
+            ("## Session 03 – En dash", "3", "En dash"),
+            ("## Session 04—Em dash", "4", "Em dash"),
+            ("## Session 005", "5", None),
+            ("## Session 006.007: Dotted", "6.7", "Dotted"),
+        )
+        for source, expected_id, expected_title in cases:
+            with self.subTest(source=source):
+                parsed = authoring.parse_plan_document(source + "\n")
+                self.assertEqual((expected_id,), parsed.session_ids)
+                self.assertEqual(expected_title, parsed.sessions[0].title)
+
+    def test_parse_plan_document_accepts_mixed_levels_case_and_formatting(self) -> None:
+        headings = (
+            "## Session 1: Two",
+            " ### session 2 - Three ###   ",
+            "  #### SESSION 3 – Four",
+            "   ##### SeSsIoN 4—Five\t#####",
+            "###### Session\t05\t:\tSix",
+        )
+        parsed = authoring.parse_plan_document("\n".join(headings) + "\n")
+
+        self.assertEqual(("1", "2", "3", "4", "5"), parsed.session_ids)
+        self.assertEqual(
+            (2, 3, 4, 5, 6),
+            tuple(session.heading_level for session in parsed.sessions),
+        )
+        self.assertEqual(
+            ("Two", "Three", "Four", "Five", "Six"),
+            tuple(session.title for session in parsed.sessions),
+        )
+
+    def test_parse_plan_document_only_strips_atx_closing_markers(self) -> None:
+        parsed = authoring.parse_plan_document(
+            "## Session 1: Attached###\n"
+            "## Session 2: Detached ###\n"
+        )
+        self.assertEqual("Attached###", parsed.sessions[0].title)
+        self.assertEqual("Detached", parsed.sessions[1].title)
+
+    def test_parse_plan_document_rejects_malformed_candidates_with_context(self) -> None:
+        cases = (
+            ("## Session nope: Bad id", "invalid session id"),
+            ("## Session 1..2: Bad id", "invalid session id"),
+            ("## Session 0: Zero", "zero-valued session id component"),
+            ("## Session 1.0: Zero", "zero-valued session id component"),
+            ("## Session 1:", "dangling title separator"),
+            ("## Session 1 -   ###", "dangling title separator"),
+            ("## Session 1 / Unsupported", "unsupported title separator"),
+            ("## Session 1 Missing punctuation", "punctuation-free title suffix"),
+        )
+        for source, reason in cases:
+            with self.subTest(source=source):
+                with self.assertRaises(plans.PlanError) as raised:
+                    authoring.parse_plan_document("context\n" + source + "\n")
+                message = str(raised.exception)
+                self.assertIn("line 2", message)
+                self.assertIn(reason, message)
+                self.assertIn(source, message)
+
+    def test_parse_plan_document_leaves_non_candidates_as_context(self) -> None:
+        lines = (
+            "# Session 1: H1",
+            "####### Session 2: H7",
+            "    ## Session 3: indented code",
+            "**Session 4: bold**",
+            "Session 5: plain",
+            "## Phase 6: phase",
+        )
+        parsed = authoring.parse_plan_document("\n".join(lines) + "\n")
+        self.assertEqual((), parsed.sessions)
+        self.assertEqual(lines, parsed.context_lines)
 
     # -- heading normalization ----------------------------------------------
 
@@ -311,9 +400,9 @@ class PlanAuthoringTests(unittest.TestCase):
         )
         self.assertIn("bottom of `session-1.md`.", rendered)
 
-    def test_render_session_file_normalizes_level_three_body(self) -> None:
+    def test_render_session_file_normalizes_deeper_accepted_heading(self) -> None:
         parsed = authoring.parse_plan_document(
-            "### Session 4: Deep\n\nIntro.\n\n#### Changes\n\n- item\n"
+            "##### Session 004 — Deep ###\n\nIntro.\n\n###### Changes\n\n- item\n"
         )
         session = parsed.sessions[0]
         rendered = authoring.render_session_file(
@@ -326,7 +415,7 @@ class PlanAuthoringTests(unittest.TestCase):
         )
         self.assertIn("# Session 4: Deep", rendered)
         self.assertIn("## Changes", rendered)
-        self.assertNotIn("#### Changes", rendered)
+        self.assertNotIn("###### Changes", rendered)
 
     def test_render_session_file_preserves_fenced_content(self) -> None:
         body = ["Run:", "```python", "x = 1  # not a heading", "```"]

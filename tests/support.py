@@ -876,12 +876,16 @@ def _write_prepare_source_plan(
     omit_contract_for: tuple[str, ...] = (),
     check_json_by_id: dict[str, dict] | None = None,
     body_by_id: dict[str, str] | None = None,
+    heading_by_id: dict[str, str] | None = None,
 ) -> Path:
     """Write a source plan file with explicit sessions and inline contracts."""
     lines = ["# Prepare Demo Plan", "", "Shared context for the demo plan.", ""]
     for number in range(1, session_count + 1):
         session_id = str(number)
-        lines.extend([f"## Session {session_id}: Step {session_id}", ""])
+        heading = (heading_by_id or {}).get(
+            session_id, f"## Session {session_id}: Step {session_id}"
+        )
+        lines.extend([heading, ""])
         body = (body_by_id or {}).get(
             session_id, f"Implement step {session_id} in `demo/module.py`."
         )

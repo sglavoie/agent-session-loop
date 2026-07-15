@@ -54,11 +54,31 @@ from .plans import (
 DEFAULT_AGENT_PLANS_DIR_NAME = "agent-plans"
 HASH_PREFIX_LENGTH = 12
 
-#: Matches ``## Session 1: Title``/``### Session 2.1`` outside code fences.
+#: Matches the bounded source-plan session-heading grammar after any optional
+#: ATX closing marker has been removed. Source IDs are intentionally broader
+#: than :data:`plans.SESSION_ID_PATTERN`; they are canonicalized privately
+#: before a strict :class:`SessionId` is constructed.
 SESSION_HEADING_RE = re.compile(
-    rf"^(#{{2,3}})\s+Session\s+({plans.SESSION_ID_PATTERN})\b\s*(?::\s*(.*?))?\s*$",
+    r"^ {0,3}(?P<hashes>#{2,6})[ \t]+Session[ \t]+"
+    r"(?P<session_id>[0-9]+(?:\.[0-9]+)*)"
+    r"(?:[ \t]*(?P<separator>[:–—-])[ \t]*(?P<title>.*?))?"
+    r"[ \t]*$",
     re.IGNORECASE,
 )
+#: Detects H2--H6 ATX lines whose content begins with the ``Session`` token.
+#: A detected line that does not match ``SESSION_HEADING_RE`` is malformed,
+#: rather than ordinary plan content.
+_SESSION_HEADING_CANDIDATE_RE = re.compile(
+    r"^ {0,3}#{2,6}[ \t]+Session\b",
+    re.IGNORECASE,
+)
+_SESSION_HEADING_PREFIX_RE = re.compile(
+    r"^ {0,3}#{2,6}[ \t]+Session(?P<rest>.*)$",
+    re.IGNORECASE,
+)
+_SOURCE_SESSION_ID_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*$")
+_ATX_CLOSING_MARKER_RE = re.compile(r"[ \t]+#+[ \t]*$")
+_TITLE_SEPARATORS = frozenset((":", "-", "–", "—"))
 #: Matches an opening/closing fenced-code delimiter (``` or ~~~, 3+ chars).
 _FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 
@@ -295,7 +315,7 @@ class ParsedSession:
 
     ``lines`` includes every source line from the session heading (exclusive of
     the heading itself) up to the next session heading or end of file, verbatim.
-    ``heading_level`` is 2 for ``## Session`` and 3 for ``### Session``.
+    ``heading_level`` is 2 through 6 for accepted ``Session`` headings.
     """
 
     session_id: SessionId
@@ -328,12 +348,147 @@ def _fence_delimiter(line: str) -> str | None:
     return match.group(1)[0] * 3  # normalize to the 3-char family marker
 
 
+def _source_heading_error(line_number: int, reason: str, line: str) -> PlanError:
+    """Build a line-specific malformed source-heading error."""
+    return PlanError(f"line {line_number}: {reason}; source line: {line!r}")
+
+
+def _canonicalize_source_session_id(
+    raw_id: str, *, line_number: int, line: str
+) -> SessionId:
+    """Canonicalize a source-only, optionally padded dotted session ID."""
+    if _SOURCE_SESSION_ID_RE.fullmatch(raw_id) is None:
+        raise _source_heading_error(
+            line_number,
+            f"invalid session id {raw_id!r}; expected dotted decimal components",
+            line,
+        )
+
+    components = tuple(int(component) for component in raw_id.split("."))
+    if any(component == 0 for component in components):
+        raise _source_heading_error(
+            line_number,
+            f"zero-valued session id component in {raw_id!r}; components must be positive",
+            line,
+        )
+    return SessionId(components)
+
+
+def _raise_malformed_session_heading(line: str, line_number: int) -> None:
+    """Raise the most specific diagnostic for a detected malformed candidate."""
+    without_closing_marker = _ATX_CLOSING_MARKER_RE.sub("", line)
+    prefix = _SESSION_HEADING_PREFIX_RE.match(without_closing_marker)
+    if prefix is None:  # Defensive: callers first use the candidate detector.
+        raise _source_heading_error(
+            line_number, "malformed session heading", line
+        )
+
+    after_token = prefix.group("rest")
+    if not after_token or after_token[0] not in " \t":
+        raise _source_heading_error(
+            line_number,
+            "invalid session id; expected whitespace and a positive dotted decimal id",
+            line,
+        )
+
+    payload = after_token.lstrip(" \t")
+    if not payload:
+        raise _source_heading_error(
+            line_number, "invalid session id; session id is missing", line
+        )
+
+    numeric_prefix = re.match(r"[0-9.]+", payload)
+    if numeric_prefix is None:
+        raw_id = re.split(r"[ \t:–—-]", payload, maxsplit=1)[0]
+        raise _source_heading_error(
+            line_number,
+            f"invalid session id {raw_id!r}; expected dotted decimal components",
+            line,
+        )
+
+    raw_id = numeric_prefix.group(0)
+    suffix = payload[numeric_prefix.end() :]
+    if suffix and suffix[0] not in " \t" and suffix[0].isalnum():
+        malformed_token = re.split(r"[ \t:–—-]", payload, maxsplit=1)[0]
+        raise _source_heading_error(
+            line_number,
+            f"invalid session id {malformed_token!r}; expected dotted decimal components",
+            line,
+        )
+
+    _canonicalize_source_session_id(
+        raw_id, line_number=line_number, line=line
+    )
+    suffix = suffix.lstrip(" \t")
+    if not suffix:
+        # A valid bare ID would have matched. This path is only reachable for
+        # defensive completeness if the valid matcher and diagnostic parser
+        # diverge.
+        raise _source_heading_error(
+            line_number, "malformed session heading after session id", line
+        )
+
+    separator = suffix[0]
+    if separator in _TITLE_SEPARATORS:
+        if not suffix[1:].strip(" \t"):
+            raise _source_heading_error(
+                line_number,
+                f"dangling title separator {separator!r}; a non-empty title is required",
+                line,
+            )
+        raise _source_heading_error(
+            line_number, "malformed session title", line
+        )
+
+    if separator.isalnum():
+        raise _source_heading_error(
+            line_number,
+            "punctuation-free title suffix; use ':', '-', '–', or '—' before the title",
+            line,
+        )
+    raise _source_heading_error(
+        line_number,
+        f"unsupported title separator {separator!r}; use ':', '-', '–', or '—'",
+        line,
+    )
+
+
+def _parse_source_session_heading(
+    line: str, line_number: int
+) -> tuple[SessionId, str | None, int] | None:
+    """Return canonical ID, title, and level for a source session heading."""
+    if _SESSION_HEADING_CANDIDATE_RE.match(line) is None:
+        return None
+
+    without_closing_marker = _ATX_CLOSING_MARKER_RE.sub("", line)
+    heading = SESSION_HEADING_RE.fullmatch(without_closing_marker)
+    if heading is None:
+        _raise_malformed_session_heading(line, line_number)
+        raise AssertionError("malformed session heading did not raise")
+
+    raw_id = heading.group("session_id")
+    session_id = _canonicalize_source_session_id(
+        raw_id, line_number=line_number, line=line
+    )
+    separator = heading.group("separator")
+    raw_title = heading.group("title")
+    if separator is not None and not (raw_title or "").strip(" \t"):
+        raise _source_heading_error(
+            line_number,
+            f"dangling title separator {separator!r}; a non-empty title is required",
+            line,
+        )
+    title = (raw_title or "").strip(" \t") or None
+    return session_id, title, len(heading.group("hashes"))
+
+
 def parse_plan_document(text: str) -> ParsedPlan:
     """Split a plan into shared context and per-session blocks (fence-aware).
 
-    Session headings (`## Session <id>` / `### Session <id>`) found inside a
-    fenced code block are treated as content, never as structure. Duplicate
-    session IDs raise :class:`PlanError`.
+    Case-insensitive H2--H6 ATX ``Session`` headings found inside a fenced code
+    block are treated as content, never as structure. Malformed candidates and
+    duplicate canonical session IDs raise :class:`PlanError` with source-line
+    diagnostics.
     """
     lines = text.splitlines()
     context: list[str] = []
@@ -341,7 +496,7 @@ def parse_plan_document(text: str) -> ParsedPlan:
 
     current: dict | None = None
     fence: str | None = None
-    seen_ids: set[str] = set()
+    first_id_lines: dict[str, int] = {}
 
     def _flush(end: int) -> None:
         if current is None:
@@ -365,24 +520,32 @@ def parse_plan_document(text: str) -> ParsedPlan:
                 fence = None
             # A different fence family inside an open fence is content; ignore.
 
-        heading = None if fence is not None else SESSION_HEADING_RE.match(line)
+        heading = (
+            None
+            if fence is not None
+            else _parse_source_session_heading(line, index + 1)
+        )
         if heading is None:
             if current is None:
                 context.append(line)
             continue
 
-        _flush(index)
-        session_id = parse_session_id(heading.group(2))
-        if session_id.value in seen_ids:
-            raise PlanError(
-                f"duplicate session heading for id {session_id.value!r}"
+        session_id, title, heading_level = heading
+        first_line = first_id_lines.get(session_id.value)
+        if first_line is not None:
+            raise _source_heading_error(
+                index + 1,
+                f"duplicate canonical session id {session_id.value!r}; "
+                f"first defined on line {first_line}",
+                line,
             )
-        seen_ids.add(session_id.value)
-        raw_title = (heading.group(3) or "").strip()
+        first_id_lines[session_id.value] = index + 1
+
+        _flush(index)
         current = {
             "session_id": session_id,
-            "title": raw_title or None,
-            "heading_level": len(heading.group(1)),
+            "title": title,
+            "heading_level": heading_level,
             "body_start": index + 1,
         }
 
