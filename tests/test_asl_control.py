@@ -31,6 +31,7 @@ import urllib.parse
 from unittest import mock
 
 from agent_session_loop import (
+    agent_mux_delivery,
     artifacts,
     authoring,
     baseline,
@@ -749,6 +750,27 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.enterContext(agent_mux_notify_enabled())
+        agent_mux_delivery.reset_legacy_cache()
+        self.addCleanup(agent_mux_delivery.reset_legacy_cache)
+
+    @staticmethod
+    def accepted_delivery(
+        trace_id: str = "trace-test",
+    ) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            ["/opt/amx"],
+            0,
+            stdout=json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "accepted",
+                    "retryable": False,
+                    "reason": "accepted",
+                    "trace_id": trace_id,
+                }
+            ),
+            stderr="",
+        )
 
     def finish_payload(self, tmp_dir: Path) -> dict[str, object]:
         return {
@@ -799,12 +821,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
     def test_notification_subprocess_uses_env_timeout_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             payload = self.finish_payload(Path(tmp))
-            completed = subprocess.CompletedProcess(
-                ["/opt/amx", "hook-indicator", "AgentSessionLoopFinished"],
-                0,
-                stdout="",
-                stderr="",
-            )
+            completed = self.accepted_delivery()
 
             with (
                 patched_env(ASL_AGENT_MUX_NOTIFY_TIMEOUT_SECONDS="30"),
@@ -872,12 +889,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                 "result_path": str(tmp_dir / "result.json"),
                 "started_at": "2026-06-11T12:01:00Z",
             }
-            completed = subprocess.CompletedProcess(
-                ["/opt/amx", "hook-indicator", "AgentSessionLoopStarted"],
-                0,
-                stdout="",
-                stderr="",
-            )
+            completed = self.accepted_delivery()
 
             with (
                 mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
@@ -893,14 +905,13 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             self.assertEqual(2, run.call_count)
             start_args, start_kwargs = run.call_args_list[0]
             turn_args, turn_kwargs = run.call_args_list[1]
-            self.assertEqual(
-                ["/opt/amx", "hook-indicator", "AgentSessionLoopStarted"],
-                start_args[0],
-            )
-            self.assertEqual(
-                ["/opt/amx", "hook-indicator", "AgentSessionLoopTurnStarted"],
-                turn_args[0],
-            )
+            self.assertEqual("AgentSessionLoopStarted", start_args[0][-1])
+            self.assertEqual("AgentSessionLoopTurnStarted", turn_args[0][-1])
+            for command in (start_args[0], turn_args[0]):
+                self.assertIn("--harness", command)
+                self.assertIn("--request-id", command)
+                self.assertIn("--json", command)
+                self.assertIn("--strict", command)
             self.assertEqual(
                 runner.AGENT_MUX_NOTIFY_TIMEOUT_SECONDS,
                 start_kwargs["timeout"],
@@ -924,12 +935,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
     def test_finish_notification_builds_agent_mux_command_and_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             payload = self.finish_payload(Path(tmp))
-            completed = subprocess.CompletedProcess(
-                ["/opt/amx", "hook-indicator", "AgentSessionLoopFinished"],
-                0,
-                stdout="",
-                stderr="",
-            )
+            completed = self.accepted_delivery()
 
             with (
                 mock.patch.object(
@@ -948,10 +954,14 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             which.assert_called_once_with("amx")
             run.assert_called_once()
             args, kwargs = run.call_args
+            self.assertEqual("AgentSessionLoopFinished", args[0][-1])
+            self.assertEqual("codex", args[0][args[0].index("--harness") + 1])
+            request_id = args[0][args[0].index("--request-id") + 1]
             self.assertEqual(
-                ["/opt/amx", "hook-indicator", "AgentSessionLoopFinished"],
-                args[0],
+                agent_mux_delivery.stable_request_id("run-123:1"), request_id
             )
+            self.assertIn("--json", args[0])
+            self.assertIn("--strict", args[0])
             self.assertTrue(kwargs["text"])
             self.assertEqual(subprocess.PIPE, kwargs["stdout"])
             self.assertEqual(subprocess.PIPE, kwargs["stderr"])
@@ -976,6 +986,8 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     "phase": "finished",
                     "run_started_at": "2026-06-11T12:00:00Z",
                     "run_finished_at": "2026-06-11T12:00:03Z",
+                    "source_sequence": "1",
+                    "source_event_id": "run-123:1",
                 },
                 hook_payload,
             )
@@ -1011,6 +1023,9 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                             runner.subprocess,
                             "run",
                             side_effect=failure,
+                        ),
+                        mock.patch.object(
+                            agent_mux_delivery, "retry_sleep", return_value=None
                         ),
                     ):
                         runner._notify_agent_mux_loop_finished(payload)
@@ -1053,12 +1068,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             run.assert_not_called()
 
     def test_notify_env_unknown_value_behaves_as_auto(self) -> None:
-        completed = subprocess.CompletedProcess(
-            ["/opt/amx", "hook-indicator", "AgentSessionLoopFinished"],
-            0,
-            stdout="",
-            stderr="",
-        )
+        completed = self.accepted_delivery()
         with tempfile.TemporaryDirectory() as tmp:
             payload = self.finish_payload(Path(tmp))
             for raw in ("banana", "ON", " Auto ", ""):
@@ -1078,9 +1088,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
     def test_lifecycle_notifications_carry_phase_sequence_and_identity(
         self,
     ) -> None:
-        completed = subprocess.CompletedProcess(
-            ["/opt/amx"], 0, stdout="", stderr=""
-        )
+        completed = self.accepted_delivery()
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             payload = self.finish_payload(tmp_dir)
@@ -1176,10 +1184,232 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             self.assertEqual(6, state_payload["agent_mux_sequence"])
             self.assertEqual(6, payload["agent_mux_sequence"])
 
-    def test_pause_run_emits_paused_and_finish_run_skips_finished(self) -> None:
-        completed = subprocess.CompletedProcess(
+    def test_retryable_delivery_reuses_request_id_and_records_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            payload = self.finish_payload(tmp_dir)
+            payload["events_path"] = str(tmp_dir / "events.jsonl")
+            payload["agent_mux_sequence"] = 0
+            persistence = runner._RunPersistence()
+            retryable = subprocess.CompletedProcess(
+                ["/opt/amx"],
+                75,
+                stdout=json.dumps(
+                    {
+                        "status": "retryable_failure",
+                        "retryable": True,
+                        "reason": "daemon_unavailable",
+                        "trace_id": "trace-attempt-1",
+                    }
+                ),
+                stderr="",
+            )
+            accepted = self.accepted_delivery("trace-attempt-3")
+
+            with (
+                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.subprocess,
+                    "run",
+                    side_effect=[
+                        retryable,
+                        subprocess.TimeoutExpired(["/opt/amx"], 1),
+                        accepted,
+                    ],
+                ) as run,
+                mock.patch.object(
+                    agent_mux_delivery, "retry_sleep", return_value=None
+                ) as retry_sleep,
+            ):
+                runner._notify_agent_mux_loop_finished(payload, persistence)
+
+            self.assertEqual(3, run.call_count)
+            retry_sleep.assert_has_calls([mock.call(0.1), mock.call(0.3)])
+            commands = [call.args[0] for call in run.call_args_list]
+            request_ids = [
+                command[command.index("--request-id") + 1]
+                for command in commands
+            ]
+            self.assertEqual(1, len(set(request_ids)))
+            self.assertEqual(
+                agent_mux_delivery.stable_request_id("run-123:1"),
+                request_ids[0],
+            )
+            hook_payloads = [
+                json.loads(call.kwargs["input"]) for call in run.call_args_list
+            ]
+            self.assertEqual(
+                {"run-123:1"},
+                {hook_payload["source_event_id"] for hook_payload in hook_payloads},
+            )
+            records = read_jsonl(Path(str(payload["events_path"])))
+            self.assertEqual(1, len(records))
+            outcome = records[0]["payload"]
+            self.assertEqual("accepted", outcome["final_status"])
+            self.assertEqual("trace-attempt-3", outcome["trace_id"])
+            self.assertEqual(3, outcome["attempt_count"])
+            self.assertEqual(
+                [
+                    "retryable_failure",
+                    "retryable_failure",
+                    "accepted",
+                ],
+                [attempt["status"] for attempt in outcome["attempts"]],
+            )
+
+    def test_duplicate_acknowledgement_is_success_without_retry(self) -> None:
+        duplicate = subprocess.CompletedProcess(
+            ["/opt/amx"],
+            0,
+            stdout=json.dumps(
+                {
+                    "status": "duplicate",
+                    "retryable": False,
+                    "reason": "duplicate",
+                    "trace_id": "trace-duplicate",
+                }
+            ),
+            stderr="",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            payload = self.finish_payload(tmp_dir)
+            payload["events_path"] = str(tmp_dir / "events.jsonl")
+            with (
+                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.subprocess, "run", return_value=duplicate
+                ) as run,
+            ):
+                runner._notify_agent_mux_loop_finished(
+                    payload, runner._RunPersistence()
+                )
+            run.assert_called_once()
+            outcome = read_jsonl(Path(str(payload["events_path"])))[0]["payload"]
+            self.assertTrue(outcome["acknowledged"])
+            self.assertEqual("duplicate", outcome["final_status"])
+
+    def test_permanent_delivery_failure_is_sanitized_and_not_retried(self) -> None:
+        permanent = subprocess.CompletedProcess(
+            ["/opt/amx"],
+            2,
+            stdout=json.dumps(
+                {
+                    "status": "permanent_failure",
+                    "retryable": False,
+                    "reason": "secret /Users/example/private",
+                    "trace_id": "trace-permanent",
+                }
+            ),
+            stderr="sensitive diagnostic detail",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            payload = self.finish_payload(tmp_dir)
+            payload["events_path"] = str(tmp_dir / "events.jsonl")
+            with (
+                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.subprocess, "run", return_value=permanent
+                ) as run,
+            ):
+                runner._notify_agent_mux_loop_finished(
+                    payload, runner._RunPersistence()
+                )
+            run.assert_called_once()
+            event_text = Path(str(payload["events_path"])).read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn("/Users/example", event_text)
+            self.assertNotIn("sensitive diagnostic", event_text)
+            outcome = json.loads(event_text)["payload"]
+            self.assertEqual("permanent_failure", outcome["final_status"])
+            self.assertEqual("unspecified", outcome["reason"])
+            self.assertEqual("permanent_outcome", outcome["error_classification"])
+
+    def test_legacy_binary_falls_back_once_and_caches_capability(self) -> None:
+        unsupported = subprocess.CompletedProcess(
+            ["/opt/amx"],
+            1,
+            stdout="",
+            stderr="unknown flag: --request-id",
+        )
+        legacy = subprocess.CompletedProcess(
             ["/opt/amx"], 0, stdout="", stderr=""
         )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            payload = self.finish_payload(tmp_dir)
+            payload["events_path"] = str(tmp_dir / "events.jsonl")
+            persistence = runner._RunPersistence()
+            with (
+                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.subprocess,
+                    "run",
+                    side_effect=[unsupported, legacy, legacy],
+                ) as run,
+            ):
+                runner._notify_agent_mux_loop_started(payload, persistence)
+                runner._notify_agent_mux_loop_finished(payload, persistence)
+
+            self.assertEqual(3, run.call_count)
+            self.assertIn("--strict", run.call_args_list[0].args[0])
+            self.assertEqual(
+                ["/opt/amx", "hook-indicator", runner.AGENT_MUX_START_EVENT],
+                run.call_args_list[1].args[0],
+            )
+            self.assertEqual(
+                ["/opt/amx", "hook-indicator", runner.AGENT_MUX_FINISH_EVENT],
+                run.call_args_list[2].args[0],
+            )
+            outcomes = [record["payload"] for record in read_jsonl(
+                Path(str(payload["events_path"]))
+            )]
+            self.assertEqual(2, len(outcomes))
+            self.assertEqual(
+                ["legacy_unacknowledged", "legacy_unacknowledged"],
+                [outcome["final_status"] for outcome in outcomes],
+            )
+            self.assertEqual([2, 1], [outcome["attempt_count"] for outcome in outcomes])
+
+    def test_exhausted_delivery_is_recorded_without_raising(self) -> None:
+        retryable = subprocess.CompletedProcess(
+            ["/opt/amx"],
+            75,
+            stdout=json.dumps(
+                {
+                    "status": "retryable_failure",
+                    "retryable": True,
+                    "reason": "daemon_unavailable",
+                    "trace_id": "trace-retryable",
+                }
+            ),
+            stderr="",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            payload = self.finish_payload(tmp_dir)
+            payload["events_path"] = str(tmp_dir / "events.jsonl")
+            with (
+                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.subprocess, "run", return_value=retryable
+                ) as run,
+                mock.patch.object(
+                    agent_mux_delivery, "retry_sleep", return_value=None
+                ),
+            ):
+                runner._notify_agent_mux_loop_finished(
+                    payload, runner._RunPersistence()
+                )
+            self.assertEqual(3, run.call_count)
+            outcome = read_jsonl(Path(str(payload["events_path"])))[0]["payload"]
+            self.assertEqual("retryable_exhausted", outcome["final_status"])
+            self.assertFalse(outcome["acknowledged"])
+
+    def test_pause_run_emits_paused_and_finish_run_skips_finished(self) -> None:
+        completed = self.accepted_delivery()
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             event_path = tmp_dir / "events.jsonl"
@@ -1216,9 +1446,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             self.assertTrue(payload["paused"])
 
     def test_unpaused_finish_run_emits_finished(self) -> None:
-        completed = subprocess.CompletedProcess(
-            ["/opt/amx"], 0, stdout="", stderr=""
-        )
+        completed = self.accepted_delivery()
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             event_path = tmp_dir / "events.jsonl"
@@ -1266,9 +1494,11 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             run.assert_not_called()
             self.assertEqual(0, payload["agent_mux_sequence"])
 
-    def test_missing_amx_skips_delivery_without_allocating_sequence(self) -> None:
+    def test_missing_amx_records_outcome_and_preserves_source_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            payload = self.finish_payload(Path(tmp))
+            tmp_dir = Path(tmp)
+            payload = self.finish_payload(tmp_dir)
+            payload["events_path"] = str(tmp_dir / "events.jsonl")
             payload["agent_mux_sequence"] = 0
             persistence = runner._RunPersistence()
 
@@ -1279,7 +1509,14 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                 runner._notify_agent_mux_loop_finished(payload, persistence)
 
             run.assert_not_called()
-            self.assertEqual(0, payload["agent_mux_sequence"])
+            self.assertEqual(1, payload["agent_mux_sequence"])
+            records = read_jsonl(Path(str(payload["events_path"])))
+            self.assertEqual(1, len(records))
+            self.assertEqual(events.AGENT_MUX_DELIVERY_EVENT, records[0]["name"])
+            outcome = records[0]["payload"]
+            self.assertEqual("run-123:1", outcome["source_event_id"])
+            self.assertEqual("unavailable", outcome["final_status"])
+            self.assertEqual("missing_binary", outcome["error_classification"])
 
 
 class AgentMuxSuiteIsolationTests(unittest.TestCase):

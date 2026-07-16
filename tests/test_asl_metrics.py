@@ -98,6 +98,7 @@ class MetricsCollectionTests(unittest.TestCase):
         self.assertEqual(0, report.state_dirs_scanned)
         self.assertEqual(0, report.turns["total"])
         self.assertEqual(0, report.pauses["total"])
+        self.assertEqual(0, report.agent_mux_delivery["total"])
         self.assertIsNone(report.first_pass["first_pass_rate"])
         self.assertIsNone(report.verification_repair["repair_success_rate"])
 
@@ -227,6 +228,44 @@ class MetricsCollectionTests(unittest.TestCase):
         )
         self.assertEqual(1, report.pauses["classified_never_retry"])
         self.assertEqual(1, report.pauses["classified_retryable"])
+
+    def test_agent_mux_failures_are_visible_without_changing_lifecycle_metrics(
+        self,
+    ) -> None:
+        state_dir = _make_state_dir(self.state_root, self.tmp_path / "plan-delivery")
+        for hours_ago, status, acknowledged, classification in (
+            (3, "accepted", True, "none"),
+            (2, "retryable_exhausted", False, "retryable_outcome"),
+            (1, "legacy_unacknowledged", False, "legacy_binary"),
+        ):
+            _append_event(
+                state_dir,
+                created_at=_iso(self.now, hours_ago=hours_ago),
+                name="agent_mux_delivery",
+                payload={
+                    "run_id": "run-1",
+                    "final_status": status,
+                    "acknowledged": acknowledged,
+                    "error_classification": classification,
+                },
+            )
+
+        report = self._collect()
+        delivery = report.agent_mux_delivery
+        self.assertEqual(3, delivery["total"])
+        self.assertEqual(1, delivery["acknowledged"])
+        self.assertEqual(1, delivery["failed"])
+        self.assertEqual(1, delivery["legacy_unacknowledged"])
+        self.assertEqual(
+            {
+                "accepted": 1,
+                "legacy_unacknowledged": 1,
+                "retryable_exhausted": 1,
+            },
+            delivery["by_status"],
+        )
+        self.assertEqual(0, report.turns["total"])
+        self.assertEqual(0, report.pauses["total"])
 
     def test_verification_repair_success_tracks_later_completion(self) -> None:
         state_dir = _make_state_dir(self.state_root, self.tmp_path / "plan-e")

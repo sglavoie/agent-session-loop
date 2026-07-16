@@ -176,6 +176,25 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         self.assertIsNotNone(content_type)
         self.assertIn("javascript", content_type)
 
+    def test_static_events_highlight_agent_mux_delivery_health(self) -> None:
+        server = self._start_server()
+        status, js_body, _ = _http_request_raw(
+            self._base_url(server) + "/static/app.js"
+        )
+        self.assertEqual(200, status)
+        script = js_body.decode("utf-8")
+        self.assertIn('event.name === "agent_mux_delivery"', script)
+        self.assertIn("wb-event-row--delivery-failure", script)
+        self.assertIn("wb-event-row--delivery-degraded", script)
+
+        status, css_body, _ = _http_request_raw(
+            self._base_url(server) + "/static/styles.css"
+        )
+        self.assertEqual(200, status)
+        stylesheet = css_body.decode("utf-8")
+        self.assertIn(".wb-event-row--delivery-failure", stylesheet)
+        self.assertIn(".wb-event-row--delivery-degraded", stylesheet)
+
     def test_static_missing_returns_json_not_found(self) -> None:
         server = self._start_server()
         status, body, _ = _http_request(

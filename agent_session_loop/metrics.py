@@ -65,6 +65,7 @@ class MetricsReport:
     pauses: dict[str, Any]
     verification_repair: dict[str, Any]
     review_cycles: dict[str, Any]
+    agent_mux_delivery: dict[str, Any]
     artifacts: dict[str, Any]
     compaction: dict[str, Any]
 
@@ -83,6 +84,7 @@ class MetricsReport:
             "pauses": self.pauses,
             "verification_repair": self.verification_repair,
             "review_cycles": self.review_cycles,
+            "agent_mux_delivery": self.agent_mux_delivery,
             "artifacts": self.artifacts,
             "compaction": self.compaction,
         }
@@ -190,6 +192,13 @@ def collect_metrics(
     findings_closed = 0
     findings_repeated = 0
     repairs_materialized = 0
+
+    agent_mux_deliveries = 0
+    agent_mux_acknowledged = 0
+    agent_mux_failed = 0
+    agent_mux_legacy = 0
+    agent_mux_status_counts: dict[str, int] = {}
+    agent_mux_error_counts: dict[str, int] = {}
 
     artifact_total_bytes = 0
     artifact_grown_bytes = 0
@@ -304,6 +313,30 @@ def collect_metrics(
                 repair_ids = payload.get("repair_session_ids")
                 if isinstance(repair_ids, list) and repair_ids:
                     repairs_materialized += 1
+            elif name == events.AGENT_MUX_DELIVERY_EVENT:
+                active = True
+                agent_mux_deliveries += 1
+                status = payload.get("final_status")
+                status = status if isinstance(status, str) and status else "unknown"
+                agent_mux_status_counts[status] = (
+                    agent_mux_status_counts.get(status, 0) + 1
+                )
+                error_classification = payload.get("error_classification")
+                error_classification = (
+                    error_classification
+                    if isinstance(error_classification, str)
+                    and error_classification
+                    else "unknown"
+                )
+                agent_mux_error_counts[error_classification] = (
+                    agent_mux_error_counts.get(error_classification, 0) + 1
+                )
+                if payload.get("acknowledged") is True:
+                    agent_mux_acknowledged += 1
+                elif status == "legacy_unacknowledged":
+                    agent_mux_legacy += 1
+                else:
+                    agent_mux_failed += 1
 
         total_bytes, grown_bytes, grown_files = _directory_sizes(
             plan_state_dir, cutoff
@@ -398,6 +431,14 @@ def collect_metrics(
             "findings_closed": findings_closed,
             "findings_repeated": findings_repeated,
         },
+        agent_mux_delivery={
+            "total": agent_mux_deliveries,
+            "acknowledged": agent_mux_acknowledged,
+            "failed": agent_mux_failed,
+            "legacy_unacknowledged": agent_mux_legacy,
+            "by_status": dict(sorted(agent_mux_status_counts.items())),
+            "by_error_classification": dict(sorted(agent_mux_error_counts.items())),
+        },
         artifacts={
             "total_bytes": artifact_total_bytes,
             "grown_bytes": artifact_grown_bytes,
@@ -486,6 +527,15 @@ def _print_report(report: MetricsReport) -> None:
     )
     for disposition, count in cycles["by_disposition"].items():
         print(f"  {disposition}: {count}")
+    delivery = report.agent_mux_delivery
+    print("\nAgentMux delivery:")
+    print(
+        f"  total {delivery['total']}, acknowledged {delivery['acknowledged']}, "
+        f"failed {delivery['failed']}, "
+        f"legacy unacknowledged {delivery['legacy_unacknowledged']}"
+    )
+    for status, count in delivery["by_status"].items():
+        print(f"  {status}: {count}")
     artifacts_section = report.artifacts
     print("\nArtifacts:")
     print(

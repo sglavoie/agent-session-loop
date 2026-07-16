@@ -95,6 +95,23 @@ class TailFollowerTests(unittest.TestCase):
         with path.open("a", encoding="utf-8") as log_file:
             log_file.write(text)
 
+    def test_agent_mux_delivery_failures_have_a_correlation_summary(self) -> None:
+        message = tail._event_message(
+            events.AGENT_MUX_DELIVERY_EVENT,
+            {
+                "agent_mux_event": "AgentSessionLoopTurnStarted",
+                "source_event_id": "run-1:2",
+                "attempt_count": 3,
+                "final_status": "retryable_exhausted",
+                "trace_id": "trace-3",
+                "error_classification": "retryable_outcome",
+            },
+        )
+        self.assertIn("AgentMux delivery retryable_exhausted", message)
+        self.assertIn("source run-1:2", message)
+        self.assertIn("attempts 3", message)
+        self.assertIn("trace trace-3", message)
+
     def cleanup_follower(self, follower: tail.TailFollower) -> None:
         follower.stop()
         follower.join(1.0)

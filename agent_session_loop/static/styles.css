@@ -1246,6 +1246,20 @@ a:hover {
   color: var(--wb-accent);
 }
 
+.wb-event-row--delivery-success {
+  border-left: 3px solid var(--wb-success);
+}
+
+.wb-event-row--delivery-degraded {
+  border-left: 3px solid var(--wb-warning);
+  background: var(--wb-warning-soft);
+}
+
+.wb-event-row--delivery-failure {
+  border-left: 3px solid var(--wb-danger);
+  background: var(--wb-danger-soft);
+}
+
 .wb-event-row__payload {
   margin: 0;
   white-space: pre-wrap;

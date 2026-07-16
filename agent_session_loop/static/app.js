@@ -3308,6 +3308,19 @@
       const li = fragment.querySelector("li");
       setField(li, "created_at", event.created_at || "");
       setField(li, "name", event.name || "(unnamed)");
+      if (li && event.name === "agent_mux_delivery") {
+        const payload = event.payload || {};
+        const status = String(payload.final_status || "unknown");
+        li.classList.add("wb-event-row--agent-mux");
+        li.dataset.deliveryStatus = status;
+        if (status === "accepted" || status === "duplicate") {
+          li.classList.add("wb-event-row--delivery-success");
+        } else if (status === "legacy_unacknowledged") {
+          li.classList.add("wb-event-row--delivery-degraded");
+        } else {
+          li.classList.add("wb-event-row--delivery-failure");
+        }
+      }
       const payloadEl = li.querySelector('[data-field="payload"]');
       if (payloadEl) {
         payloadEl.textContent = event.payload

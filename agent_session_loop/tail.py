@@ -302,6 +302,18 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
             f"reason {reason}, "
             f"duration {format_duration_seconds(payload.get('duration_seconds'))})"
         )
+    if name == events.AGENT_MUX_DELIVERY_EVENT:
+        status = payload.get("final_status") or "unknown"
+        event_name = payload.get("agent_mux_event") or "unknown"
+        source_event_id = payload.get("source_event_id") or "unknown"
+        attempts = payload.get("attempt_count", "unknown")
+        trace_id = payload.get("trace_id") or "none"
+        error_classification = payload.get("error_classification") or "unknown"
+        return (
+            f"AgentMux delivery {status}: {event_name} "
+            f"(source {source_event_id}, attempts {attempts}, "
+            f"trace {trace_id}, error {error_classification})"
+        )
     if name == events.RUN_PAUSED_EVENT:
         detail = payload.get("message")
         suffix = "" if not detail else f": {detail}"

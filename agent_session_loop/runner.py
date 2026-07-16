@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from . import (
+    agent_mux_delivery,
     config,
     contracts,
     control_queue,
@@ -105,44 +106,40 @@ RUN_CONTROL_EVENT_MESSAGES: dict[str, str] = {
     "tail-disabled": "live tail disabled",
     "harness-selected": "next harness selected",
 }
-AGENT_MUX_START_EVENT = "AgentSessionLoopStarted"
-AGENT_MUX_TURN_START_EVENT = "AgentSessionLoopTurnStarted"
-AGENT_MUX_TURN_HEARTBEAT_EVENT = "AgentSessionLoopTurnHeartbeat"
-AGENT_MUX_TURN_FINISH_EVENT = "AgentSessionLoopTurnFinished"
-AGENT_MUX_VERIFICATION_START_EVENT = "AgentSessionLoopVerificationStarted"
-AGENT_MUX_VERIFICATION_HEARTBEAT_EVENT = "AgentSessionLoopVerificationHeartbeat"
-AGENT_MUX_VERIFICATION_FINISH_EVENT = "AgentSessionLoopVerificationFinished"
-AGENT_MUX_PAUSE_EVENT = "AgentSessionLoopPaused"
-AGENT_MUX_FINISH_EVENT = "AgentSessionLoopFinished"
-AGENT_MUX_SOURCE = "agent_session_loop"
+AGENT_MUX_START_EVENT = agent_mux_delivery.START_EVENT
+AGENT_MUX_TURN_START_EVENT = agent_mux_delivery.TURN_START_EVENT
+AGENT_MUX_TURN_HEARTBEAT_EVENT = agent_mux_delivery.TURN_HEARTBEAT_EVENT
+AGENT_MUX_TURN_FINISH_EVENT = agent_mux_delivery.TURN_FINISH_EVENT
+AGENT_MUX_VERIFICATION_START_EVENT = agent_mux_delivery.VERIFICATION_START_EVENT
+AGENT_MUX_VERIFICATION_HEARTBEAT_EVENT = (
+    agent_mux_delivery.VERIFICATION_HEARTBEAT_EVENT
+)
+AGENT_MUX_VERIFICATION_FINISH_EVENT = agent_mux_delivery.VERIFICATION_FINISH_EVENT
+AGENT_MUX_PAUSE_EVENT = agent_mux_delivery.PAUSE_EVENT
+AGENT_MUX_FINISH_EVENT = agent_mux_delivery.FINISH_EVENT
+AGENT_MUX_SOURCE = agent_mux_delivery.SOURCE
 AGENT_MUX_FINISH_SOURCE = AGENT_MUX_SOURCE
-AGENT_MUX_START_REASON = "run_started"
-AGENT_MUX_TURN_START_REASON = "turn_started"
-AGENT_MUX_TURN_HEARTBEAT_REASON = "turn_heartbeat"
-AGENT_MUX_TURN_FINISH_REASON = "turn_finished"
-AGENT_MUX_VERIFICATION_START_REASON = "verification_started"
-AGENT_MUX_VERIFICATION_HEARTBEAT_REASON = "verification_heartbeat"
-AGENT_MUX_VERIFICATION_FINISH_REASON = "verification_finished"
-AGENT_MUX_PAUSE_REASON = "run_paused"
-AGENT_MUX_FINISH_REASON = "run_finished"
+AGENT_MUX_START_REASON = agent_mux_delivery.START_REASON
+AGENT_MUX_TURN_START_REASON = agent_mux_delivery.TURN_START_REASON
+AGENT_MUX_TURN_HEARTBEAT_REASON = agent_mux_delivery.TURN_HEARTBEAT_REASON
+AGENT_MUX_TURN_FINISH_REASON = agent_mux_delivery.TURN_FINISH_REASON
+AGENT_MUX_VERIFICATION_START_REASON = agent_mux_delivery.VERIFICATION_START_REASON
+AGENT_MUX_VERIFICATION_HEARTBEAT_REASON = (
+    agent_mux_delivery.VERIFICATION_HEARTBEAT_REASON
+)
+AGENT_MUX_VERIFICATION_FINISH_REASON = (
+    agent_mux_delivery.VERIFICATION_FINISH_REASON
+)
+AGENT_MUX_PAUSE_REASON = agent_mux_delivery.PAUSE_REASON
+AGENT_MUX_FINISH_REASON = agent_mux_delivery.FINISH_REASON
 # Phase vocabulary must match the AgentMux daemon's event mapping
 # (internal/daemon/normalize.go::aslPhaseForEvent).
-AGENT_MUX_PHASE_BY_EVENT: dict[str, str] = {
-    AGENT_MUX_START_EVENT: "between",
-    AGENT_MUX_TURN_START_EVENT: "turn",
-    AGENT_MUX_TURN_HEARTBEAT_EVENT: "turn",
-    AGENT_MUX_TURN_FINISH_EVENT: "between",
-    AGENT_MUX_VERIFICATION_START_EVENT: "verification",
-    AGENT_MUX_VERIFICATION_HEARTBEAT_EVENT: "verification",
-    AGENT_MUX_VERIFICATION_FINISH_EVENT: "between",
-    AGENT_MUX_PAUSE_EVENT: "paused",
-    AGENT_MUX_FINISH_EVENT: "finished",
-}
-AGENT_MUX_NOTIFY_TIMEOUT_SECONDS = 1.0
+AGENT_MUX_PHASE_BY_EVENT = agent_mux_delivery.PHASE_BY_EVENT
+AGENT_MUX_NOTIFY_TIMEOUT_SECONDS = agent_mux_delivery.NOTIFY_TIMEOUT_SECONDS
 AGENT_MUX_FINISH_NOTIFY_TIMEOUT_SECONDS = AGENT_MUX_NOTIFY_TIMEOUT_SECONDS
-AGENT_MUX_NOTIFY_TIMEOUT_ENV_VAR = "ASL_AGENT_MUX_NOTIFY_TIMEOUT_SECONDS"
-AGENT_MUX_NOTIFY_ENV_VAR = "ASL_AGENT_MUX_NOTIFY"
-AGENT_MUX_NOTIFY_OFF = "off"
+AGENT_MUX_NOTIFY_TIMEOUT_ENV_VAR = agent_mux_delivery.NOTIFY_TIMEOUT_ENV_VAR
+AGENT_MUX_NOTIFY_ENV_VAR = agent_mux_delivery.NOTIFY_ENV_VAR
+AGENT_MUX_NOTIFY_OFF = agent_mux_delivery.NOTIFY_OFF
 INLINE_TAIL_JOIN_TIMEOUT_SECONDS = 1.0
 INLINE_TAIL_INITIAL_LOG_LINES = 40
 
@@ -2541,22 +2538,7 @@ def _loop_harness(
     payload: dict[str, Any],
     active_turn: dict[str, Any] | None = None,
 ) -> str | None:
-    if active_turn is not None:
-        turn_harness = active_turn.get("harness")
-        if isinstance(turn_harness, str) and turn_harness.strip():
-            return turn_harness
-    turns = payload.get("turns")
-    if isinstance(turns, list):
-        for turn in reversed(turns):
-            if not isinstance(turn, dict):
-                continue
-            turn_harness = turn.get("harness")
-            if isinstance(turn_harness, str) and turn_harness.strip():
-                return turn_harness
-    payload_harness = payload.get("harness")
-    if isinstance(payload_harness, str) and payload_harness.strip():
-        return payload_harness
-    return None
+    return agent_mux_delivery.loop_harness(payload, active_turn)
 
 
 def _agent_mux_loop_payload(
@@ -2569,58 +2551,15 @@ def _agent_mux_loop_payload(
     emitted_at: datetime | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    hook_payload: dict[str, Any] = {
-        "source": AGENT_MUX_SOURCE,
-        "reason": reason,
-        "run_id": payload.get("run_id"),
-        "plan_dir": payload.get("plan_dir"),
-        "cwd": payload.get("cwd"),
-        "state_path": payload.get("state_path"),
-        "harness": _loop_harness(payload, active_turn),
-    }
-    if event_name is not None:
-        phase = AGENT_MUX_PHASE_BY_EVENT.get(event_name)
-        if phase is not None:
-            hook_payload["phase"] = phase
-    if sequence is not None:
-        # The daemon parses both fields from strings; a per-run monotonic
-        # sequence orders events and the event id deduplicates redeliveries.
-        hook_payload["source_sequence"] = str(int(sequence))
-        hook_payload["source_event_id"] = (
-            f"{payload.get('run_id')}:{int(sequence)}"
-        )
-    if emitted_at is not None:
-        hook_payload["emitted_time"] = str(int(emitted_at.timestamp()))
-    if payload.get("kitty_window_id") is not None:
-        hook_payload["kitty_window_id"] = payload.get("kitty_window_id")
-    if payload.get("run_started_at") is not None:
-        hook_payload["run_started_at"] = payload.get("run_started_at")
-    if payload.get("run_finished_at") is not None:
-        hook_payload["run_finished_at"] = payload.get("run_finished_at")
-    if active_turn is not None:
-        for key in (
-            "turn_index",
-            "session",
-            "session_id",
-            "session_number",
-            "total_sessions",
-            "artifact_dir",
-            "stdout_path",
-            "stderr_path",
-            "last_message_path",
-            "result_path",
-            "started_at",
-            "heartbeat_count",
-        ):
-            if active_turn.get(key) is not None:
-                hook_payload[key] = active_turn.get(key)
-        if active_turn.get("last_activity_at") is not None:
-            hook_payload["last_output_at"] = active_turn.get("last_activity_at")
-    if extra:
-        for key, value in extra.items():
-            if value is not None:
-                hook_payload[key] = value
-    return hook_payload
+    return agent_mux_delivery.build_loop_payload(
+        payload,
+        reason=reason,
+        active_turn=active_turn,
+        event_name=event_name,
+        sequence=sequence,
+        emitted_at=emitted_at,
+        extra=extra,
+    )
 
 
 def _agent_mux_notify_timeout() -> float:
@@ -2631,16 +2570,7 @@ def _agent_mux_notify_timeout() -> float:
     :data:`AGENT_MUX_NOTIFY_TIMEOUT_SECONDS` so a bad override can never hang
     or break notifications.
     """
-    raw = os.environ.get(AGENT_MUX_NOTIFY_TIMEOUT_ENV_VAR)
-    if raw is None:
-        return AGENT_MUX_NOTIFY_TIMEOUT_SECONDS
-    try:
-        value = float(raw.strip())
-    except ValueError:
-        return AGENT_MUX_NOTIFY_TIMEOUT_SECONDS
-    if not 0 < value < float("inf"):
-        return AGENT_MUX_NOTIFY_TIMEOUT_SECONDS
-    return value
+    return agent_mux_delivery.notify_timeout()
 
 
 def _agent_mux_notify_enabled() -> bool:
@@ -2650,17 +2580,14 @@ def _agent_mux_notify_enabled() -> bool:
     explicit ``off`` (case-insensitive) disables notification. Any other
     value behaves as ``auto`` so a typo can never silently kill delivery.
     """
-    raw = os.environ.get(AGENT_MUX_NOTIFY_ENV_VAR)
-    if raw is None:
-        return True
-    return raw.strip().lower() != AGENT_MUX_NOTIFY_OFF
+    return agent_mux_delivery.notify_enabled()
 
 
 # Serializes sequence allocation with subprocess dispatch so notifications
 # leave this process in source_sequence order even when the turn/verification
 # heartbeat threads race the main loop; the daemon treats a lower sequence
 # arriving after a higher one as reordered and drops it.
-_AGENT_MUX_EMIT_LOCK = threading.Lock()
+_AGENT_MUX_EMIT_LOCK = agent_mux_delivery.EMIT_LOCK
 
 
 def _allocate_agent_mux_sequence(
@@ -2689,45 +2616,41 @@ def _notify_agent_mux_loop(
     persistence: _RunPersistence | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> None:
-    if not _agent_mux_notify_enabled():
-        return
-    amx_path = shutil.which("amx")
-    if amx_path is None:
-        return
+    def allocate_sequence() -> int:
+        if persistence is not None:
+            return _allocate_agent_mux_sequence(payload, persistence)
+        sequence = int(payload.get("agent_mux_sequence") or 0) + 1
+        payload["agent_mux_sequence"] = sequence
+        return sequence
 
-    with _AGENT_MUX_EMIT_LOCK:
-        # Re-checked under the emit lock: a heartbeat that passed its outer
-        # stop check but lost the lock race to the finish notification must
-        # not emit a turn/verification phase with a higher sequence than the
-        # finish — the daemon would treat it as the run resuming.
-        if cancelled is not None and cancelled():
+    def record_outcome(outcome: dict[str, Any]) -> None:
+        raw_event_path = payload.get("events_path") or payload.get("event_path")
+        if not isinstance(raw_event_path, (str, Path)) or not str(raw_event_path):
             return
-        sequence = (
-            _allocate_agent_mux_sequence(payload, persistence)
-            if persistence is not None
-            else None
-        )
-        hook_payload = _agent_mux_loop_payload(
-            payload,
-            reason=reason,
-            active_turn=active_turn,
-            event_name=event_name,
-            sequence=sequence,
-            emitted_at=_utc_now(),
-            extra=extra,
-        )
-        try:
-            subprocess.run(
-                [amx_path, "hook-indicator", event_name],
-                input=json.dumps(hook_payload, separators=(",", ":")),
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=_agent_mux_notify_timeout(),
-                check=False,
+        event_path = Path(raw_event_path)
+        if persistence is not None:
+            persistence.append_event(
+                event_path, events.AGENT_MUX_DELIVERY_EVENT, outcome
             )
-        except (OSError, subprocess.SubprocessError):
-            return
+        else:
+            _append_event(event_path, events.AGENT_MUX_DELIVERY_EVENT, outcome)
+
+    agent_mux_delivery.notify(
+        event_name,
+        payload,
+        reason=reason,
+        active_turn=active_turn,
+        extra=extra,
+        enabled=_agent_mux_notify_enabled(),
+        timeout=_agent_mux_notify_timeout(),
+        allocate_sequence=allocate_sequence,
+        record_outcome=record_outcome,
+        resolve_binary=shutil.which,
+        run_command=subprocess.run,
+        sleep=agent_mux_delivery.retry_sleep,
+        emitted_at=_utc_now,
+        cancelled=cancelled,
+    )
 
 
 def _notify_agent_mux_loop_started(
