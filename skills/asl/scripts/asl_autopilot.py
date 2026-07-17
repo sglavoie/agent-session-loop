@@ -13,8 +13,8 @@ match, clears only stale locks, and relaunches capped runs (``--max-sessions``)
 until the plan completes or the run pauses. On top of that loop the helper
 handles recoverable-pause retries, reply resume, and — for runs that use
 ``--review-harness`` — classifies the ``final-review.md`` verdict so a run that
-completes with review findings surfaces as ``review_findings`` for a follow-up
-fix cycle.
+completes with review findings surfaces as ``review_findings`` with any
+same-plan continuation guidance reported by the runner.
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from agent_session_loop import review as _review  # noqa: E402
+from agent_session_loop import review_continuation as _review_continuation  # noqa: E402
 
 HELPER_NAME = "asl-autopilot"
 HELPER_DESCRIPTION = (
@@ -898,6 +899,63 @@ def _pending_count(status: dict) -> int:
     return sum(1 for entry in sessions if entry.get("status") == "pending")
 
 
+def _review_resume_payload(payload: Optional[dict]) -> Optional[dict]:
+    """Return a payload's additive ``review_resume`` projection, if present."""
+    if not isinstance(payload, dict):
+        return None
+    review_resume = payload.get("review_resume")
+    return review_resume if isinstance(review_resume, dict) else None
+
+
+def _should_launch_for_status(parsed: dict, status: dict, pending: int) -> bool:
+    """Decide whether an unlocked status needs another ``asl run`` chunk.
+
+    Pending sessions retain the historical launch behavior.  An all-complete
+    plan only relaunches when a review harness was requested and the additive
+    ``review_resume`` projection explicitly asks for an initial review, repair
+    materialization, or rereview.  Repair materialization is gated against the
+    *current command's* effective absolute cap, not the cap persisted by a
+    previous run.  Rereview consumes no materialization budget, so an eligible
+    rereview launches regardless of that cap.  Missing projections preserve
+    compatibility with older ``asl status`` payloads by keeping the old
+    all-complete stop behavior.
+    """
+    if pending > 0:
+        return True
+    if not parsed.get("review_harness"):
+        return False
+
+    review_resume = _review_resume_payload(status)
+    if review_resume is None:
+        return False
+
+    action = review_resume.get("action")
+    if action == "initial-review":
+        return True
+    if action == "rereview":
+        return review_resume.get("eligible") is True
+    if action != "materialize-repairs":
+        return False
+
+    minimum_cap = review_resume.get("minimum_required_cap")
+    effective_cap = parsed.get(
+        "max_review_fix_cycles", DEFAULT_MAX_REVIEW_FIX_CYCLES
+    )
+    if (
+        type(minimum_cap) is not int
+        or minimum_cap < 0
+        or type(effective_cap) is not int
+        or effective_cap < minimum_cap
+    ):
+        return False
+
+    if review_resume.get("eligible") is True:
+        return True
+    # Read-only status evaluates against the most recently recorded cap.  A
+    # newly raised command cap satisfies that one blocker prospectively.
+    return review_resume.get("blocker") == "higher-cap-required"
+
+
 def _classify_lock(parsed: dict, status: dict) -> str:
     """Decide how to treat the current lock: clear/stale/attach/mismatch.
 
@@ -954,6 +1012,12 @@ def _run_result(
         result["run"] = run
     if retries is not None:
         result["retries"] = retries
+    # Runner JSON is the freshest projection after a chunk; status is the
+    # durable source when no chunk launched.  Expose either at the top level so
+    # callers do not have to know which supervision path produced the result.
+    review_resume = _review_resume_payload(run) or _review_resume_payload(status)
+    if review_resume is not None:
+        result["review_resume"] = review_resume
     return result
 
 
@@ -1030,9 +1094,15 @@ def supervise_run(
 
     - a status probe failure stops with ``status-error``;
     - an active lock for a different run stops with ``user_required``;
-    - zero pending sessions stops with ``complete``;
     - an active matching lock means another run is driving the plan, so the
-      supervisor sleeps ``poll_interval`` and re-polls (attach);
+      supervisor sleeps ``poll_interval`` and re-polls (attach), even when the
+      transient status snapshot reports zero pending sessions;
+    - without a lock, pending sessions launch normally, while an all-complete
+      plan launches only a ``review_resume`` initial-review requested by the
+      command's review harness, a materialize-repairs action allowed by the
+      effective absolute cap, or an eligible cap-free rereview; only repair
+      materialization is cap-gated, and terminal/ineligible continuations stop
+      with ``complete``;
     - otherwise it starts one ``asl run`` chunk. A recoverable same-session
       pause (``verify-failed``, ``transport-failed``, ``timeout``,
       ``no-status-change``) is relaunched up to ``max_retries`` times per
@@ -1118,9 +1188,6 @@ def supervise_run(
             )
 
         pending = _pending_count(status)
-        if pending == 0:
-            return _run_result(True, "complete", status=status, chunks=chunks)
-
         if disposition == "attach":
             attach_polls += 1
             if attach_polls > max_chunks:
@@ -1158,6 +1225,9 @@ def supervise_run(
             sleep(poll_interval)
             continue
 
+        if not _should_launch_for_status(parsed, status, pending):
+            return _run_result(True, "complete", status=status, chunks=chunks)
+
         # disposition in ("clear", "stale") -> start one chunk ourselves.
         if chunks >= max_chunks:
             return _run_result(
@@ -1167,7 +1237,7 @@ def supervise_run(
                 chunks=chunks,
                 error=(
                     f"reached max supervision chunks ({max_chunks}) with "
-                    f"{pending} pending session(s) remaining"
+                    f"{pending} pending session(s) or a review continuation remaining"
                 ),
             )
         chunks += 1
@@ -1355,6 +1425,13 @@ def _attach_review_context(result: dict, parsed: dict, reader) -> dict:
     mid-run, so reaching a clean ``complete`` with an unreadable file is not
     expected.
     """
+    if "review_resume" not in result:
+        review_resume = _review_resume_payload(result.get("run")) or (
+            _review_resume_payload(result.get("status"))
+        )
+        if review_resume is not None:
+            result["review_resume"] = review_resume
+
     verdict = reader(parsed)
     if not verdict.get("ok"):
         result["review_error"] = verdict
@@ -1395,11 +1472,11 @@ def run_autopilot(
     since no reply can clear it — so the caller can surface the reset info. A
     run that completes after using ``--review-harness`` has its
     ``final-review.md`` verdict parsed: findings re-tag the result as
-    ``review_findings`` so the caller can hand the unresolved findings to the
-    user (the runner already exhausted its own bounded repair/rereview
-    cycles). ``supervisor``, ``questioner``, ``review_reader``, and ``stdin``
-    are injectable so tests can drive the seam without spawning real
-    subprocesses.
+    ``review_findings`` so the caller can hand the unresolved findings and any
+    ``review_resume`` cap/artifact guidance to the user (no automatic
+    continuation supported by the current command remains). ``supervisor``,
+    ``questioner``, ``review_reader``, and ``stdin`` are injectable so tests can
+    drive the seam without spawning real subprocesses.
     """
     parsed = parse_command(args.command)
     if not parsed.get("ok"):
@@ -1434,18 +1511,78 @@ def run_autopilot(
     return result
 
 
+def _review_resume_guidance(result: dict) -> Optional[str]:
+    """Return concise operator guidance from a surfaced review projection."""
+    review_resume = _review_resume_payload(result)
+    if review_resume is None:
+        return None
+    command = result.get("command")
+    needs_review_harness = not (
+        isinstance(command, dict) and command.get("review_harness")
+    )
+    blocker = review_resume.get("blocker")
+    if blocker == "higher-cap-required":
+        minimum = review_resume.get("minimum_required_cap")
+        if type(minimum) is int:
+            requirements = []
+            if needs_review_harness:
+                requirements.append("a review harness")
+            requirements.append(f"--max-review-fix-cycles {minimum} or higher")
+            return "resume the same plan with " + " and ".join(requirements)
+    if blocker == "artifact-invalid":
+        artifact_error = review_resume.get("artifact_error")
+        detail = f": {artifact_error}" if artifact_error else ""
+        guidance = f"correct the review artifact{detail}"
+        if needs_review_harness:
+            guidance += ", then resume the same plan with a review harness"
+        return guidance
+    if review_resume.get("action") == "terminal" and blocker:
+        if blocker in _review_continuation.TERMINAL_REVIEW_DISPOSITIONS:
+            return None
+        return f"no automatic continuation ({blocker})"
+    if review_resume.get("eligible") is True:
+        action = review_resume.get("action") or "review"
+        minimum = review_resume.get("minimum_required_cap")
+        cap_guidance = (
+            f" and --max-review-fix-cycles {minimum} or higher"
+            if action == "materialize-repairs" and type(minimum) is int
+            else ""
+        )
+        command_guidance = (
+            "resume the same plan with a review harness"
+            if needs_review_harness
+            else "rerun the same review-enabled command"
+        )
+        return (
+            f"{command_guidance}{cap_guidance} "
+            f"to run the eligible {action} continuation"
+        )
+    return None
+
+
 def _human_summary(result: dict) -> str:
     """One-line human summary for non-JSON output."""
     reason = result.get("reason", "unknown")
     if reason == "review_findings":
+        guidance = _review_resume_guidance(result)
         review = result.get("review") or {}
         status_line = review.get("status_line", "review reported findings")
-        return f"stopped: review_findings - {status_line}"
+        summary = f"stopped: review_findings - {status_line}"
+        return f"{summary}; {guidance}" if guidance else summary
+    guidance = None
+    if reason == "complete":
+        guidance = _review_resume_guidance(result)
+    elif reason == "blocked":
+        review_resume = _review_resume_payload(result)
+        if review_resume is not None and review_resume.get("action") == "terminal":
+            guidance = _review_resume_guidance(result)
     detail = result.get("error") or result.get("detail")
     verdict = "ok" if result.get("ok") else "stopped"
     if detail:
-        return f"{verdict}: {reason} - {detail}"
-    return f"{verdict}: {reason}"
+        summary = f"{verdict}: {reason} - {detail}"
+    else:
+        summary = f"{verdict}: {reason}"
+    return f"{summary}; {guidance}" if guidance else summary
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

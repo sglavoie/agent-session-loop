@@ -94,6 +94,7 @@ class WorkbenchLaunchTests(unittest.TestCase):
                 commit_mode="per-session",
                 review_harness="claude",
                 review_harness_model="claude-sonnet",
+                max_review_fix_cycles=3,
                 unsafe_bypass=True,
                 allow_not_loop_ready=True,
                 note="launch note",
@@ -126,6 +127,10 @@ class WorkbenchLaunchTests(unittest.TestCase):
             self.assertEqual(argv[argv.index("--effort") + 1], "high")
             self.assertIn("--timeout", argv)
             self.assertEqual(argv[argv.index("--timeout") + 1], "900")
+            self.assertIn("--max-review-fix-cycles", argv)
+            self.assertEqual(
+                argv[argv.index("--max-review-fix-cycles") + 1], "3"
+            )
             self.assertIn("--commit-per-session", argv)
             self.assertNotIn("--commit-at-end", argv)
             self.assertIn("--unsafe-bypass", argv)
@@ -180,6 +185,7 @@ class WorkbenchLaunchTests(unittest.TestCase):
                 "--model",
                 "--harness-model",
                 "--review-harness-model",
+                "--max-review-fix-cycles",
                 "--effort",
                 "--timeout",
                 "--commit-per-session",
@@ -296,6 +302,52 @@ class WorkbenchLaunchTests(unittest.TestCase):
 
             self.assertEqual(
                 workbench.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
+            )
+
+    def test_invalid_profile_negative_review_fix_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            profile = workbench.LaunchProfile(max_review_fix_cycles=-1)
+
+            with self.assertRaises(workbench.LaunchError) as ctx:
+                workbench.build_launch_argv(plan_dir, profile=profile)
+
+            self.assertEqual(
+                workbench.LAUNCH_REASON_INVALID_PROFILE, ctx.exception.reason
+            )
+
+    def test_registry_loader_drops_negative_review_fix_cap_with_warning(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            registry_path = tmp_path / workbench.REGISTRY_FILE_NAME
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": workbench.REGISTRY_SCHEMA_VERSION,
+                        "pins": [
+                            {
+                                "plan_dir": str(plan_dir),
+                                "profile": {"max_review_fix_cycles": -1},
+                            }
+                        ],
+                        "plan_roots": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            registry = workbench.load_registry(registry_path)
+
+            self.assertIsNone(registry.pins[0].profile.max_review_fix_cycles)
+            self.assertEqual(
+                (
+                    "pin[0]: ignoring negative max_review_fix_cycles -1",
+                ),
+                registry.warnings,
             )
 
     def test_launch_plan_records_metadata_without_reply(self) -> None:

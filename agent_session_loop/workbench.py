@@ -31,7 +31,18 @@ import sys
 import tempfile
 from typing import Any, Literal
 
-from . import config, events, harnesses, plans, preflight, qna, responses, state
+from . import (
+    config,
+    events,
+    harnesses,
+    plans,
+    preflight,
+    qna,
+    responses,
+    review_continuation,
+    runner,
+    state,
+)
 
 
 FINAL_REVIEW_FILE_NAME = "final-review.md"
@@ -149,6 +160,12 @@ ACTIVITY_LABEL_BY_STATE: dict[PrimaryState, str] = {
 }
 
 
+# ``recent`` also represents an eligible review continuation after all of its
+# repair sessions have completed.  Its normal label would incorrectly imply
+# that the queue still contains pending sessions in that zero-pending case.
+REVIEW_CONTINUATION_ACTIVITY_LABEL = "Review continuation ready"
+
+
 REGISTRY_FILE_NAME = "workbench.json"
 REGISTRY_SCHEMA_VERSION = 2
 DEFAULT_PLANS_DIR_NAME = "agent-plans"
@@ -232,6 +249,7 @@ class LaunchProfile:
     commit_mode: CommitMode | None = None
     review_harness: str | None = None
     review_harness_model: str | None = None
+    max_review_fix_cycles: int | None = None
     unsafe_bypass: bool | None = None
     allow_not_loop_ready: bool | None = None
     note: str | None = None
@@ -246,6 +264,7 @@ class LaunchProfile:
             "commit_mode": self.commit_mode,
             "review_harness": self.review_harness,
             "review_harness_model": self.review_harness_model,
+            "max_review_fix_cycles": self.max_review_fix_cycles,
             "unsafe_bypass": self.unsafe_bypass,
             "allow_not_loop_ready": self.allow_not_loop_ready,
             "note": self.note,
@@ -573,6 +592,19 @@ def _coerce_optional_int(value: Any) -> int | None:
     return None
 
 
+def _coerce_max_review_fix_cycles(
+    value: Any, *, warnings: list[str], context: str
+) -> int | None:
+    """Return a persisted review-fix cap only when it is non-negative."""
+    cap = _coerce_optional_int(value)
+    if cap is not None and cap < 0:
+        warnings.append(
+            f"{context}: ignoring negative max_review_fix_cycles {cap!r}"
+        )
+        return None
+    return cap
+
+
 def _coerce_harness(value: Any, *, warnings: list[str], context: str) -> str | None:
     text = _coerce_optional_str(value)
     if text is None:
@@ -628,6 +660,9 @@ def _coerce_profile(
             raw.get("review_harness"), warnings=warnings, context=context
         ),
         review_harness_model=_coerce_optional_str(raw.get("review_harness_model")),
+        max_review_fix_cycles=_coerce_max_review_fix_cycles(
+            raw.get("max_review_fix_cycles"), warnings=warnings, context=context
+        ),
         unsafe_bypass=_coerce_optional_bool(raw.get("unsafe_bypass")),
         allow_not_loop_ready=_coerce_optional_bool(raw.get("allow_not_loop_ready")),
         note=_coerce_optional_str(raw.get("note")),
@@ -2020,6 +2055,7 @@ class WorkbenchSummary:
     concise_reason: str = ""
     searchable_text: str = ""
     recovery: dict[str, Any] = field(default_factory=dict)
+    review_resume: dict[str, Any] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
 
     def to_payload(self) -> dict[str, Any]:
@@ -2043,6 +2079,7 @@ class WorkbenchSummary:
             "completed_at": self.completed_at,
             "searchable_text": self.searchable_text,
             "recovery": dict(self.recovery),
+            "review_resume": dict(self.review_resume),
             "detail": self.detail,
             "next_pending_session_id": self.next_pending_session_id,
             "next_pending_session_path": (
@@ -2079,6 +2116,7 @@ class WorkbenchSummary:
 
 RecoveryKind = Literal[
     "none",
+    "review-continuation",
     "reply-needed",
     "not-loop-ready",
     "verify-failed",
@@ -2092,6 +2130,7 @@ RecoveryKind = Literal[
 ]
 RECOVERY_KINDS: tuple[RecoveryKind, ...] = (
     "none",
+    "review-continuation",
     "reply-needed",
     "not-loop-ready",
     "verify-failed",
@@ -2302,6 +2341,7 @@ class WorkbenchRecovery:
     commit_index: int | None = None
     warnings: tuple[str, ...] = ()
     warning_details: tuple[RecoveryWarning, ...] = ()
+    review_resume: Mapping[str, Any] = field(default_factory=dict)
 
     def compact_payload(self) -> dict[str, Any]:
         primary_action = self.actions[0] if self.actions else None
@@ -2319,6 +2359,7 @@ class WorkbenchRecovery:
             "artifact_count": len(self.artifacts),
             "command_count": len(self.commands),
             "warning_count": len(self.warnings),
+            "review_resume": dict(self.review_resume),
         }
 
     def to_payload(self) -> dict[str, Any]:
@@ -2341,6 +2382,7 @@ class WorkbenchRecovery:
             "warning_details": [
                 warning.to_payload() for warning in self.warning_details
             ],
+            "review_resume": dict(self.review_resume),
             "compact": self.compact_payload(),
         }
 
@@ -2366,6 +2408,7 @@ class _RecoveryBuildContext:
     stale_reason: str | None
     warnings: tuple[str, ...]
     warning_details: tuple[RecoveryWarning, ...]
+    review_resume: review_continuation.ReviewResume
 
 
 def _coerce_path_value(value: Any) -> Path | None:
@@ -2601,6 +2644,9 @@ def _build_recovery_context(
         progress_path=progress_path,
     )
     reason = _pause_reason(raw_state, runner_state)
+    review_resume = review_continuation.evaluate_review_continuation(
+        snapshot, events_path
+    )
     return _RecoveryBuildContext(
         snapshot=snapshot,
         state_path=state_path,
@@ -2619,6 +2665,7 @@ def _build_recovery_context(
         stale_reason=stale_reason,
         warnings=warnings,
         warning_details=warning_details,
+        review_resume=review_resume,
     )
 
 
@@ -3389,6 +3436,7 @@ def _build_recovery_payload(
     selected_commit: Mapping[str, Any] | None = None,
     warnings: tuple[str, ...] = (),
     warning_details: tuple[RecoveryWarning, ...] = (),
+    review_resume: Mapping[str, Any] | None = None,
 ) -> WorkbenchRecovery:
     run_id, session_id, turn_index, commit_index = _recovery_common_context(
         raw_state=raw_state,
@@ -3413,6 +3461,7 @@ def _build_recovery_payload(
         commit_index=commit_index,
         warnings=warnings,
         warning_details=warning_details,
+        review_resume=review_resume or {},
     )
 
 
@@ -3453,6 +3502,7 @@ def _build_context_recovery_payload(
         selected_commit=selected_commit,
         warnings=context.warnings,
         warning_details=context.warning_details,
+        review_resume=context.review_resume.to_payload(),
     )
 
 
@@ -3887,6 +3937,192 @@ def _build_clean_none_recovery(
     )
 
 
+def _review_resume_artifacts(
+    context: _RecoveryBuildContext,
+) -> tuple[RecoveryArtifactReference, ...]:
+    artifacts = list(context.base_artifacts)
+    for filename, label, kind in (
+        ("final-review.md", "Final review", "review-output"),
+        ("final-review.json", "Structured review", "review-artifact"),
+    ):
+        path = context.snapshot.plan_dir / filename
+        try:
+            present = path.is_file()
+        except OSError:
+            present = False
+        if present:
+            artifacts.append(
+                RecoveryArtifactReference(
+                    label=label,
+                    path=path,
+                    kind=kind,
+                    source="review-continuation",
+                )
+            )
+    return tuple(artifacts)
+
+
+def _build_review_continuation_recovery(
+    context: _RecoveryBuildContext,
+) -> WorkbenchRecovery | None:
+    resume = context.review_resume
+    if resume.action == "initial-review":
+        return None
+    if (
+        resume.action == "terminal"
+        and resume.blocker
+        in review_continuation.TERMINAL_REVIEW_DISPOSITIONS
+    ):
+        return None
+
+    evidence = [
+        RecoveryEvidenceRow(
+            label="Review continuation",
+            value=resume.action,
+            detail=resume.review_session_id,
+            severity="info",
+        ),
+        RecoveryEvidenceRow(
+            label="Historical materializations",
+            value=str(resume.historical_materializations),
+            severity="info",
+        ),
+    ]
+    actions: tuple[RecoveryActionCard, ...]
+
+    def profile_guidance(*, include_cap: bool) -> str:
+        guidance = (
+            "Configure a review harness distinct from the implementation "
+            "harness so the next launch supplies --review-harness."
+        )
+        if include_cap:
+            guidance += (
+                " Set max review-fix cycles to "
+                f"{resume.minimum_required_cap} or higher so the next launch "
+                "supplies --max-review-fix-cycles."
+            )
+        return guidance
+
+    if resume.blocker == "higher-cap-required":
+        if resume.selected_cap is None:
+            title = "Review-fix cap required"
+            summary = (
+                "Review repairs can resume after supplying "
+                "--max-review-fix-cycles with a value of "
+                f"{resume.minimum_required_cap} or higher."
+            )
+            cap_detail = "No review-fix cap has been recorded"
+            action_description = (
+                profile_guidance(include_cap=True)
+            )
+        else:
+            title = "Higher review-fix cap required"
+            summary = (
+                "Review repair budget is exhausted at the selected cap of "
+                f"{resume.selected_cap}; increase --max-review-fix-cycles "
+                f"to {resume.minimum_required_cap} or higher."
+            )
+            cap_detail = f"Selected cap: {resume.selected_cap}"
+            action_description = (
+                profile_guidance(include_cap=True)
+            )
+        summary += (
+            " Configure a review harness distinct from the implementation "
+            "harness; without --review-harness, review continuation will not "
+            "run."
+        )
+        severity: RecoverySeverity = "warning"
+        evidence.append(
+            RecoveryEvidenceRow(
+                label="Minimum review-fix cap",
+                value=str(resume.minimum_required_cap),
+                detail=cap_detail,
+                severity="warning",
+            )
+        )
+        actions = (
+            _profile_action(action_description),
+        )
+    elif resume.blocker == "artifact-invalid":
+        title = "Review artifact needs correction"
+        summary = resume.artifact_error or (
+            "The structured review artifact is not safely materializable."
+        )
+        severity = "error"
+        evidence.append(
+            RecoveryEvidenceRow(
+                label="Artifact validation",
+                value="invalid",
+                detail=resume.artifact_error,
+                severity="error",
+            )
+        )
+        actions = (
+            _inspect_action(
+                "Inspect final-review.md and final-review.json, then rerun."
+            ),
+        )
+    elif resume.action == "terminal":
+        title = "Review continuation is inconsistent"
+        summary = (
+            "Recorded review repair history cannot be resumed safely: "
+            f"{resume.blocker or 'unknown blocker'}."
+        )
+        severity = "error"
+        evidence.append(
+            RecoveryEvidenceRow(
+                label="Continuation blocker",
+                value=resume.blocker,
+                severity="error",
+            )
+        )
+        actions = (
+            _inspect_action("Inspect review events and generated sessions."),
+        )
+    else:
+        title = "Review continuation ready"
+        if resume.action == "materialize-repairs":
+            summary = (
+                "Rerun the plan to materialize repairs from review session "
+                f"{resume.review_session_id}."
+            )
+        elif resume.action == "run-repairs":
+            summary = "Rerun the plan to execute pending review repairs."
+        else:
+            summary = (
+                "Rerun the plan to review the completed repair sessions again."
+            )
+        summary += (
+            " Configure a review harness distinct from the implementation "
+            "harness before launching; without --review-harness, review "
+            "continuation will not run."
+        )
+        cap_exceeds_default = (
+            resume.action == "materialize-repairs"
+            and resume.minimum_required_cap
+            > runner.DEFAULT_MAX_REVIEW_FIX_CYCLES
+        )
+        if cap_exceeds_default:
+            summary += (
+                " Set --max-review-fix-cycles to "
+                f"{resume.minimum_required_cap} or higher as well."
+            )
+        severity = "info"
+        actions = (_profile_action(profile_guidance(include_cap=cap_exceeds_default)),)
+
+    return _build_context_recovery_payload(
+        context,
+        kind="review-continuation",
+        title=title,
+        summary=summary,
+        severity=severity,
+        recoverable=True,
+        artifacts=_review_resume_artifacts(context),
+        evidence=tuple(evidence),
+        actions=actions,
+    )
+
+
 def build_workbench_recovery(
     plan: DiscoveredPlan,
     *,
@@ -3952,6 +4188,11 @@ def build_workbench_recovery(
     recovery_kind = _pause_reason_recovery_kind(reason)
 
     if context.runner_state.get("paused") is True:
+        if reason == events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR:
+            continuation = _build_review_continuation_recovery(context)
+            if continuation is not None:
+                return continuation
+
         if recovery_kind == "not-loop-ready":
             return _build_not_loop_ready_recovery(context)
 
@@ -3985,6 +4226,11 @@ def build_workbench_recovery(
         and context.runner_state.get("run_finished_at")
         and context.runner_state.get("ok") is False
     ):
+        if reason == events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR:
+            continuation = _build_review_continuation_recovery(context)
+            if continuation is not None:
+                return continuation
+
         if recovery_kind == "commit-failed":
             return _build_commit_failed_recovery(context)
 
@@ -3995,6 +4241,9 @@ def build_workbench_recovery(
 
         return _build_failed_finished_recovery(context, reason=reason)
 
+    continuation = _build_review_continuation_recovery(context)
+    if continuation is not None:
+        return continuation
     return _build_clean_none_recovery(context)
 
 
@@ -4091,9 +4340,10 @@ def build_workbench_summary(
     4. ``paused-for-reply`` - runner state ``paused=True``.
     5. ``failed`` - finished run with ``ok=False``.
     6. ``stale`` - stale lock or stale-unfinished runner state.
-    7. ``complete`` - no pending sessions remain.
-    8. ``recent`` - pending sessions remain after a finished run.
-    9. ``ready`` - pending sessions remain and no run state exists.
+    7. ``recent`` - review continuation is ready despite zero pending sessions.
+    8. ``complete`` - no pending sessions or eligible continuation remain.
+    9. ``recent`` - pending sessions remain after a finished run.
+    10. ``ready`` - pending sessions remain and no run state exists.
     """
     plan_dir = plan.plan_dir
     if not plan.exists:
@@ -4119,6 +4369,9 @@ def build_workbench_summary(
     state_path, events_path, progress_path = _summary_base_paths(
         snapshot.plan_dir, state_dir
     )
+    review_resume = review_continuation.evaluate_review_continuation(
+        snapshot, events_path
+    ).to_payload()
     lock_path = state.lock_path_for_plan(snapshot.plan_dir, state_dir)
     lock_info = state._read_lock_path(lock_path, snapshot.plan_dir)
     runner_state = state._runner_state_payload(state_path)
@@ -4176,9 +4429,12 @@ def build_workbench_summary(
         last_activity_source: LastActivitySource | None = None,
         completed_at: str | None = None,
         concise_reason: str | None = None,
+        activity_label: str | None = None,
     ) -> WorkbenchSummary:
         urgency_group = URGENCY_GROUP_BY_STATE[primary_state]
-        activity_label = ACTIVITY_LABEL_BY_STATE[primary_state]
+        resolved_activity_label = (
+            activity_label or ACTIVITY_LABEL_BY_STATE[primary_state]
+        )
         resolved_reason = concise_reason or detail or next_action_hint
         next_pending_session_id = (
             next_pending.id if next_pending is not None else None
@@ -4189,7 +4445,7 @@ def build_workbench_summary(
             primary_state=primary_state,
             recommended_action=recommended_action,
             urgency_group=urgency_group,
-            activity_label=activity_label,
+            activity_label=resolved_activity_label,
             concise_reason=resolved_reason,
             detail=detail,
             next_action_hint=next_action_hint,
@@ -4235,10 +4491,11 @@ def build_workbench_summary(
             last_activity_at=last_activity_at,
             last_activity_source=last_activity_source,
             completed_at=completed_at,
-            activity_label=activity_label,
+            activity_label=resolved_activity_label,
             concise_reason=resolved_reason,
             searchable_text=searchable_text,
             recovery=recovery,
+            review_resume=review_resume,
             warnings=warnings,
         )
 
@@ -4296,8 +4553,55 @@ def build_workbench_summary(
         )
 
     if runner_state.get("paused") is True:
+        pause_reason = (
+            runner_state.get("pause_reason")
+            or runner_state.get("reason")
+            or None
+        )
+        if (
+            pause_reason == events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR
+            and active_turn is None
+            and recovery.get("kind") == "review-continuation"
+        ):
+            failed_activity, failed_source = _first_activity((
+                (runner_state.get("run_finished_at"), "run-finished"),
+                (runner_state.get("run_started_at"), "run-started"),
+            ))
+            if (
+                recovery.get("severity") == "info"
+                and review_resume.get("eligible") is True
+                and review_resume.get("action")
+                in {"materialize-repairs", "run-repairs", "rereview"}
+            ):
+                return base_kwargs(
+                    primary_state="recent",
+                    recommended_action="run",
+                    next_action_hint=recovery["title"],
+                    detail=recovery["summary"],
+                    pause_reason=pause_reason,
+                    pause_message=runner_state.get("pause_message") or None,
+                    last_activity_at=failed_activity,
+                    last_activity_source=failed_source,
+                    concise_reason=recovery["summary"],
+                    activity_label=(
+                        REVIEW_CONTINUATION_ACTIVITY_LABEL
+                        if next_pending is None
+                        else None
+                    ),
+                )
+            return base_kwargs(
+                primary_state="failed",
+                recommended_action="inspect-failure",
+                next_action_hint=recovery["title"],
+                detail=recovery["summary"],
+                pause_reason=pause_reason,
+                pause_message=runner_state.get("pause_message") or None,
+                last_activity_at=failed_activity,
+                last_activity_source=failed_source,
+                concise_reason=recovery["summary"],
+            )
+
         warnings: list[str] = []
-        pause_reason = runner_state.get("reason") or None
         pause_message = None
         preview = None
         qna_last_message_path = last_message_path
@@ -4424,25 +4728,86 @@ def build_workbench_summary(
             (_last_progress_entry_at(snapshot.plan_dir), "progress-journal"),
             (runner_state.get("run_finished_at"), "run-finished"),
         ))
+        review_action = review_resume.get("action")
+        if review_resume.get("eligible") and review_action in {
+            "materialize-repairs",
+            "rereview",
+        }:
+            if review_action == "materialize-repairs":
+                hint = (
+                    "Resume review repairs from session "
+                    f"{review_resume.get('review_session_id')}"
+                )
+                detail = "Review repair materialization is ready"
+            else:
+                hint = "Rerun review after completed repair sessions"
+                detail = "Completed review repairs are awaiting rereview"
+            return base_kwargs(
+                primary_state="recent",
+                recommended_action="run",
+                next_action_hint=hint,
+                detail=detail,
+                last_activity_at=complete_activity,
+                last_activity_source=complete_source,
+                concise_reason=detail,
+                activity_label=REVIEW_CONTINUATION_ACTIVITY_LABEL,
+            )
+        if review_resume.get("blocker") == "higher-cap-required":
+            minimum = review_resume.get("minimum_required_cap")
+            selected_cap = review_resume.get("selected_cap")
+            if selected_cap is None:
+                hint = f"Supply a review-fix cap of {minimum} or higher"
+                detail = "Review repairs require a review-fix cap to resume"
+            else:
+                hint = f"Increase to a review-fix cap of {minimum} or higher"
+                detail = (
+                    "Review repair budget is exhausted at the selected cap "
+                    f"of {selected_cap}"
+                )
+        elif review_resume.get("blocker") == "artifact-invalid":
+            hint = "Correct the structured review artifact before rerunning"
+            detail = review_resume.get("artifact_error") or (
+                "Review artifact validation failed"
+            )
+        elif (
+            review_action == "terminal"
+            and review_resume.get("blocker")
+            not in review_continuation.TERMINAL_REVIEW_DISPOSITIONS
+        ):
+            hint = recovery.get("title") or (
+                "Inspect inconsistent review continuation"
+            )
+            detail = recovery.get("summary") or (
+                "Recorded review repair history cannot be resumed safely: "
+                f"{review_resume.get('blocker') or 'unknown blocker'}."
+            )
+        else:
+            hint = "All sessions complete"
+            detail = "No pending sessions remain"
         return base_kwargs(
             primary_state="complete",
             recommended_action="view",
-            next_action_hint="All sessions complete",
-            detail="No pending sessions remain",
+            next_action_hint=hint,
+            detail=detail,
             last_activity_at=complete_activity,
             last_activity_source=complete_source,
             completed_at=complete_activity,
-            concise_reason="No pending sessions remain",
+            concise_reason=detail,
         )
 
     if runner_state.get("present") and runner_state.get("run_finished_at"):
         recent_activity, recent_source = _first_activity((
             (runner_state.get("run_finished_at"), "run-finished"),
         ))
+        review_hint = (
+            f"Resume review repairs with session {next_pending.id}"
+            if review_resume.get("action") == "run-repairs"
+            else f"Resume with session {next_pending.id}"
+        )
         return base_kwargs(
             primary_state="recent",
             recommended_action="run",
-            next_action_hint=f"Resume with session {next_pending.id}",
+            next_action_hint=review_hint,
             detail=f"Last run finished at {runner_state.get('run_finished_at')}",
             last_activity_at=recent_activity,
             last_activity_source=recent_source,
@@ -4454,10 +4819,15 @@ def build_workbench_summary(
     ready_activity, ready_source = _first_activity((
         (_last_progress_entry_at(snapshot.plan_dir), "progress-journal"),
     ))
+    ready_hint = (
+        f"Start review repairs with session {next_pending.id}"
+        if review_resume.get("action") == "run-repairs"
+        else f"Start session {next_pending.id}"
+    )
     return base_kwargs(
         primary_state="ready",
         recommended_action="run",
-        next_action_hint=f"Start session {next_pending.id}",
+        next_action_hint=ready_hint,
         detail="Ready to run; no prior runner state",
         last_activity_at=ready_activity,
         last_activity_source=ready_source,
@@ -4593,6 +4963,15 @@ def _validate_launch_profile(profile: LaunchProfile | None) -> LaunchProfile:
             LAUNCH_REASON_INVALID_PROFILE,
             f"timeout must be positive: {profile.timeout!r}",
         )
+    if (
+        profile.max_review_fix_cycles is not None
+        and profile.max_review_fix_cycles < 0
+    ):
+        raise LaunchError(
+            LAUNCH_REASON_INVALID_PROFILE,
+            "max_review_fix_cycles must be zero or a positive integer: "
+            f"{profile.max_review_fix_cycles!r}",
+        )
     return profile
 
 
@@ -4631,6 +5010,10 @@ def build_launch_argv(
         argv.extend(["--effort", validated.effort])
     if validated.timeout is not None:
         argv.extend(["--timeout", str(validated.timeout)])
+    if validated.max_review_fix_cycles is not None:
+        argv.extend(
+            ["--max-review-fix-cycles", str(validated.max_review_fix_cycles)]
+        )
     if validated.commit_mode == "per-session":
         argv.append("--commit-per-session")
     elif validated.commit_mode == "end":

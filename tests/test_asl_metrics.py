@@ -10,7 +10,16 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from agent_session_loop import cli, metrics, plans
+from agent_session_loop import (
+    cli,
+    events,
+    metrics,
+    plans,
+    review,
+    review_continuation,
+    review_repair,
+)
+from tests.support import write_plan_with_ids
 
 
 def _iso(now: datetime, *, hours_ago: float) -> str:
@@ -77,6 +86,41 @@ def _append_event(
     }
     with (state_dir / "events.jsonl").open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _write_generated_review_repair_plan(
+    plan_dir: Path,
+    *,
+    review_id: str = "2",
+    child_status: str = "pending",
+) -> None:
+    child_id = f"{review_id}.1"
+    write_plan_with_ids(
+        plan_dir,
+        (("1", "complete"), (review_id, "complete"), (child_id, child_status)),
+    )
+    review_path = plan_dir / plans.session_id_to_filename(review_id)
+    review_path.write_text(
+        "\n".join(
+            (
+                review.REVIEW_SESSION_MARKER,
+                review.review_session_version_marker(),
+                review_path.read_text(encoding="utf-8"),
+            )
+        ),
+        encoding="utf-8",
+    )
+    child_path = plan_dir / plans.session_id_to_filename(child_id)
+    child_path.write_text(
+        "\n".join(
+            (
+                review_repair.REVIEW_REPAIR_SESSION_MARKER,
+                review_repair.review_repair_session_version_marker(),
+                child_path.read_text(encoding="utf-8"),
+            )
+        ),
+        encoding="utf-8",
+    )
 
 
 class MetricsCollectionTests(unittest.TestCase):
@@ -340,6 +384,187 @@ class MetricsCollectionTests(unittest.TestCase):
         self.assertEqual(2, cycles["findings_closed"])
         self.assertEqual(0, cycles["findings_repeated"])
 
+    def test_review_reopens_report_attempts_and_dedupe_materializations(
+        self,
+    ) -> None:
+        state_dir = _make_state_dir(
+            self.state_root, self.tmp_path / "plan-review-reopen"
+        )
+        _append_event(
+            state_dir,
+            created_at=_iso(self.now, hours_ago=6),
+            name=events.REVIEW_CYCLE_EVENT,
+            payload={
+                "cycle": 1,
+                "review_session_id": "2",
+                "disposition": "not-loop-ready",
+                "repair_session_ids": ["2.1"],
+            },
+        )
+        _append_event(
+            state_dir,
+            created_at=_iso(self.now, hours_ago=5),
+            name=events.REVIEW_REPAIR_REOPENED_EVENT,
+            payload={
+                "source_cycle": 1,
+                "source_review_session_id": "2",
+                "source_disposition": "not-loop-ready",
+                "repair_session_ids": ["2.1"],
+                "materialized": True,
+                "result": "ok",
+            },
+        )
+        _append_event(
+            state_dir,
+            created_at=_iso(self.now, hours_ago=4),
+            name=events.REVIEW_CYCLE_EVENT,
+            payload={
+                "cycle": 2,
+                "review_session_id": "3",
+                "disposition": "repairs-materialized",
+                "repair_session_ids": ["3.1"],
+            },
+        )
+        _append_event(
+            state_dir,
+            created_at=_iso(self.now, hours_ago=3),
+            name=events.REVIEW_REPAIR_REOPENED_EVENT,
+            payload={
+                "source_cycle": 2,
+                "source_review_session_id": "3",
+                "source_disposition": "cycle-cap-exhausted",
+                "repair_session_ids": ["3.1"],
+                "materialized": True,
+                "result": "ok",
+            },
+        )
+        _append_event(
+            state_dir,
+            created_at=_iso(self.now, hours_ago=2),
+            name=events.REVIEW_REPAIR_REOPENED_EVENT,
+            payload={
+                "source_cycle": 3,
+                "source_review_session_id": "4",
+                "source_disposition": "malformed-review-repair",
+                "repair_session_ids": [],
+                "materialized": False,
+                "result": "malformed-review-repair",
+                "error": "repair groups exceed the supported maximum",
+            },
+        )
+
+        cycles = self._collect().review_cycles
+        self.assertEqual(2, cycles["cycles_recorded"])
+        self.assertEqual(2, cycles["repairs_materialized"])
+        self.assertEqual(2, cycles["unique_materializations"])
+        self.assertEqual(3, cycles["reopen_attempts"])
+        self.assertEqual(2, cycles["successful_reopen_materializations"])
+        self.assertEqual(1, cycles["reopen_failures"])
+        self.assertEqual(
+            {
+                "cycle-cap-exhausted": 1,
+                "malformed-review-repair": 1,
+                "not-loop-ready": 1,
+            },
+            cycles["reopen_attempts_by_source_disposition"],
+        )
+        self.assertEqual(
+            {"malformed-review-repair": 1},
+            cycles["reopen_failures_by_result"],
+        )
+
+    def test_materializations_reconcile_child_only_crash_with_evaluator(
+        self,
+    ) -> None:
+        plan_dir = self.tmp_path / "plan-child-only-materialization"
+        _write_generated_review_repair_plan(plan_dir)
+        state_dir = _make_state_dir(self.state_root, plan_dir)
+        event_path = state_dir / events.EVENTS_FILE_NAME
+
+        projected = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(plan_dir), event_path
+        )
+        cycles = self._collect().review_cycles
+
+        self.assertEqual(1, projected.historical_materializations)
+        self.assertEqual(
+            projected.historical_materializations,
+            cycles["unique_materializations"],
+        )
+        self.assertEqual(1, cycles["repairs_materialized"])
+        self.assertEqual(0, cycles["cycles_recorded"])
+
+    def test_materializations_reconcile_legacy_cycle_and_child_once(
+        self,
+    ) -> None:
+        plan_dir = self.tmp_path / "plan-legacy-materialization"
+        _write_generated_review_repair_plan(plan_dir)
+        state_dir = _make_state_dir(self.state_root, plan_dir)
+        event_path = state_dir / events.EVENTS_FILE_NAME
+        _append_event(
+            state_dir,
+            created_at=_iso(self.now, hours_ago=24 * 30),
+            name=events.REVIEW_CYCLE_EVENT,
+            payload={
+                "cycle": 1,
+                "disposition": "repairs-materialized",
+                "fingerprints": ["finding:legacy"],
+            },
+        )
+
+        projected = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(plan_dir), event_path
+        )
+        cycles = self._collect().review_cycles
+
+        self.assertEqual(1, projected.historical_materializations)
+        self.assertEqual(
+            projected.historical_materializations,
+            cycles["unique_materializations"],
+        )
+        self.assertEqual(1, cycles["repairs_materialized"])
+        self.assertEqual(0, cycles["cycles_recorded"])
+        self.assertEqual({}, cycles["by_disposition"])
+
+    def test_recovered_reopen_supplies_lineage_not_attempt_activity(
+        self,
+    ) -> None:
+        plan_dir = self.tmp_path / "plan-recovered-reopen"
+        _write_generated_review_repair_plan(plan_dir)
+        state_dir = _make_state_dir(self.state_root, plan_dir)
+        event_path = state_dir / events.EVENTS_FILE_NAME
+        _append_event(
+            state_dir,
+            created_at=_iso(self.now, hours_ago=2),
+            name=events.REVIEW_REPAIR_REOPENED_EVENT,
+            payload={
+                "source_cycle": 1,
+                "source_review_session_id": "2",
+                "source_disposition": "cycle-cap-exhausted",
+                "repair_session_ids": ["2.1"],
+                "materialized": True,
+                "recovered": True,
+                "result": "recovered-existing-children",
+            },
+        )
+
+        projected = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(plan_dir), event_path
+        )
+        cycles = self._collect().review_cycles
+
+        self.assertEqual(1, projected.historical_materializations)
+        self.assertEqual(
+            projected.historical_materializations,
+            cycles["unique_materializations"],
+        )
+        self.assertEqual(1, cycles["repairs_materialized"])
+        self.assertEqual(0, cycles["reopen_attempts"])
+        self.assertEqual(0, cycles["successful_reopen_materializations"])
+        self.assertEqual(0, cycles["reopen_failures"])
+        self.assertEqual({}, cycles["reopen_attempts_by_source_disposition"])
+        self.assertEqual({}, cycles["reopen_failures_by_result"])
+
     def test_compaction_projection_covers_only_active_dirs(self) -> None:
         active_dir = _make_state_dir(self.state_root, self.tmp_path / "plan-g")
         fat_checks = [
@@ -472,6 +697,8 @@ class MetricsCliTests(unittest.TestCase):
         self.assertIn("First-pass completion", stdout)
         self.assertIn("Verification repair", stdout)
         self.assertIn("Review cycles", stdout)
+        self.assertIn("unique materializations", stdout)
+        self.assertIn("reopen attempts", stdout)
         self.assertIn("Compaction", stdout)
 
     def test_metrics_rejects_invalid_since_days(self) -> None:

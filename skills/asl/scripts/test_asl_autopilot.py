@@ -507,6 +507,30 @@ def _status_payload(pending, *, lock=None, ok=True, next_pending_id="1"):
     }
 
 
+def _review_resume(
+    action,
+    *,
+    eligible,
+    blocker=None,
+    minimum_required_cap=1,
+    source_disposition=None,
+    artifact_error=None,
+):
+    return {
+        "source_cycle": 1 if source_disposition is not None else None,
+        "review_session_id": "2" if source_disposition is not None else None,
+        "source_disposition": source_disposition,
+        "action": action,
+        "eligible": eligible,
+        "blocker": blocker,
+        "historical_materializations": max(0, minimum_required_cap - 1),
+        "minimum_required_cap": minimum_required_cap,
+        "selected_cap": max(0, minimum_required_cap - 1),
+        "artifact_valid": blocker != "artifact-invalid",
+        "artifact_error": artifact_error,
+    }
+
+
 def _active_lock(plan_dir="/tmp/plan", *, stale=False):
     return {
         "present": True,
@@ -606,9 +630,13 @@ class ClassifyLockTest(unittest.TestCase):
 class SuperviseRunInjectedTest(unittest.TestCase):
     """Drive the supervision loop with injected status/run invokers."""
 
-    def _supervise(self, status_invoker, run_invoker, **kwargs):
+    def _supervise(self, status_invoker, run_invoker, *, parsed=None, **kwargs):
         return autopilot.supervise_run(
-            {"plan_dir": "/tmp/plan", "argv": ["asl", "run", "/tmp/plan", "--json"]},
+            parsed
+            or {
+                "plan_dir": "/tmp/plan",
+                "argv": ["asl", "run", "/tmp/plan", "--json"],
+            },
             status_invoker=status_invoker,
             run_invoker=run_invoker,
             clock=_counter_clock(),
@@ -652,6 +680,301 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         self.assertEqual(result["reason"], "complete")
         # Polled three times: two attach waits then the completed state.
         self.assertEqual(status.calls, 3)
+
+    def test_active_lock_with_zero_pending_attaches_before_completing(self) -> None:
+        status = _StatusScript([
+            _status_payload(0, lock=_active_lock()),
+            _status_payload(0),
+        ])
+        result = self._supervise(status, _never_run)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "complete")
+        self.assertEqual(status.calls, 2)
+
+    def test_all_complete_initial_review_launches_with_review_harness(self) -> None:
+        initial = _status_payload(0)
+        initial["review_resume"] = _review_resume(
+            "initial-review", eligible=False, blocker="review-harness-required"
+        )
+        terminal = _status_payload(0)
+        terminal["review_resume"] = _review_resume(
+            "terminal",
+            eligible=False,
+            blocker="all-clear",
+            source_disposition="all-clear",
+        )
+        status = _StatusScript([initial, terminal])
+        run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
+        parsed = {
+            "plan_dir": "/tmp/plan",
+            "argv": ["asl", "run", "/tmp/plan", "--review-harness", "codex", "--json"],
+            "review_harness": "codex",
+            "max_review_fix_cycles": 2,
+        }
+        result = self._supervise(status, run, parsed=parsed)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(run.chunks, [1])
+        self.assertEqual(result["review_resume"]["blocker"], "all-clear")
+        self.assertNotIn("no automatic continuation", autopilot._human_summary(result))
+
+    def test_corrected_malformed_review_launches_materialization(self) -> None:
+        corrected = _status_payload(0)
+        corrected["review_resume"] = _review_resume(
+            "materialize-repairs",
+            eligible=True,
+            minimum_required_cap=1,
+            source_disposition="malformed-review-repair",
+        )
+        terminal = _status_payload(0)
+        terminal["review_resume"] = _review_resume(
+            "terminal",
+            eligible=False,
+            blocker="findings-repeated",
+            minimum_required_cap=2,
+            source_disposition="findings-repeated",
+        )
+        status = _StatusScript([corrected, terminal])
+        run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
+        parsed = {
+            "plan_dir": "/tmp/plan",
+            "argv": ["asl", "run", "/tmp/plan", "--review-harness", "codex", "--json"],
+            "review_harness": "codex",
+            "max_review_fix_cycles": 1,
+        }
+        result = self._supervise(status, run, parsed=parsed)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(run.chunks, [1])
+        # The terminal projection prevents another launch after the reopened
+        # chunk, even though its reported next-cap minimum is now higher.
+        self.assertEqual(status.calls, 2)
+
+    def test_raised_command_cap_overrides_status_historical_cap(self) -> None:
+        resumable = _status_payload(0)
+        resumable["review_resume"] = _review_resume(
+            "materialize-repairs",
+            eligible=False,
+            blocker="higher-cap-required",
+            minimum_required_cap=3,
+            source_disposition="cycle-cap-exhausted",
+        )
+        terminal = _status_payload(0)
+        terminal["review_resume"] = _review_resume(
+            "terminal",
+            eligible=False,
+            blocker="findings-repeated",
+            minimum_required_cap=4,
+            source_disposition="findings-repeated",
+        )
+        status = _StatusScript([resumable, terminal])
+        run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
+        parsed = {
+            "plan_dir": "/tmp/plan",
+            "argv": ["asl", "run", "/tmp/plan", "--max-review-fix-cycles", "3", "--json"],
+            "review_harness": "codex",
+            "max_review_fix_cycles": 3,
+        }
+        result = self._supervise(status, run, parsed=parsed)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(run.chunks, [1])
+
+    def test_unchanged_insufficient_cap_returns_guidance_without_launch(self) -> None:
+        blocked = _status_payload(0)
+        blocked["review_resume"] = _review_resume(
+            "materialize-repairs",
+            eligible=False,
+            blocker="higher-cap-required",
+            minimum_required_cap=3,
+            source_disposition="cycle-cap-exhausted",
+        )
+        parsed = {
+            "plan_dir": "/tmp/plan",
+            "argv": ["asl", "run", "/tmp/plan", "--max-review-fix-cycles", "2", "--json"],
+            "review_harness": "codex",
+            "max_review_fix_cycles": 2,
+        }
+        result = self._supervise(_StatusScript([blocked]), _never_run, parsed=parsed)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["chunks"], 0)
+        self.assertEqual(result["review_resume"]["minimum_required_cap"], 3)
+
+    def test_command_cap_lower_than_status_selected_cap_does_not_launch(self) -> None:
+        status_payload = _status_payload(0)
+        status_payload["review_resume"] = _review_resume(
+            "materialize-repairs",
+            eligible=True,
+            minimum_required_cap=3,
+            source_disposition="cycle-cap-exhausted",
+        )
+        status_payload["review_resume"]["selected_cap"] = 5
+        parsed = {
+            "plan_dir": "/tmp/plan",
+            "argv": ["asl", "run", "/tmp/plan", "--max-review-fix-cycles", "2", "--json"],
+            "review_harness": "codex",
+            "max_review_fix_cycles": 2,
+        }
+        result = self._supervise(
+            _StatusScript([status_payload]), _never_run, parsed=parsed
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["chunks"], 0)
+        summary = autopilot._human_summary(result)
+        self.assertIn("with a review harness", summary)
+        self.assertIn("--max-review-fix-cycles 3 or higher", summary)
+
+    def test_missing_rereview_launches_when_command_cap_is_sufficient(self) -> None:
+        rereview = _status_payload(0)
+        rereview["review_resume"] = _review_resume(
+            "rereview",
+            eligible=True,
+            minimum_required_cap=2,
+            source_disposition="repairs-materialized",
+        )
+        terminal = _status_payload(0)
+        terminal["review_resume"] = _review_resume(
+            "terminal",
+            eligible=False,
+            blocker="all-clear",
+            minimum_required_cap=2,
+            source_disposition="all-clear",
+        )
+        status = _StatusScript([rereview, terminal])
+        run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
+        parsed = {
+            "plan_dir": "/tmp/plan",
+            "argv": ["asl", "run", "/tmp/plan", "--review-harness", "codex", "--json"],
+            "review_harness": "codex",
+            "max_review_fix_cycles": 2,
+        }
+        result = self._supervise(status, run, parsed=parsed)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(run.chunks, [1])
+
+    def test_missing_rereview_launches_below_reported_cap(self) -> None:
+        rereview = _status_payload(0)
+        rereview["review_resume"] = _review_resume(
+            "rereview",
+            eligible=True,
+            minimum_required_cap=3,
+            source_disposition="repairs-materialized",
+        )
+        terminal = _status_payload(0)
+        terminal["review_resume"] = _review_resume(
+            "terminal",
+            eligible=False,
+            blocker="all-clear",
+            minimum_required_cap=3,
+            source_disposition="all-clear",
+        )
+        parsed = {
+            "plan_dir": "/tmp/plan",
+            "argv": ["asl", "run", "/tmp/plan", "--max-review-fix-cycles", "2", "--json"],
+            "review_harness": "codex",
+            "max_review_fix_cycles": 2,
+        }
+        status = _StatusScript([rereview, terminal])
+        run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
+        result = self._supervise(status, run, parsed=parsed)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["chunks"], 1)
+        self.assertEqual(run.chunks, [1])
+        self.assertEqual(result["review_resume"]["blocker"], "all-clear")
+
+    def test_artifact_invalid_and_terminal_dispositions_do_not_launch(self) -> None:
+        cases = (
+            _review_resume(
+                "materialize-repairs",
+                eligible=False,
+                blocker="artifact-invalid",
+                source_disposition="malformed-review-repair",
+                artifact_error="repair_group is missing",
+            ),
+            _review_resume(
+                "terminal",
+                eligible=False,
+                blocker="findings-repeated",
+                source_disposition="findings-repeated",
+            ),
+            _review_resume(
+                "terminal",
+                eligible=False,
+                blocker="unstructured-findings",
+                source_disposition="unstructured-findings",
+            ),
+            _review_resume(
+                "terminal",
+                eligible=False,
+                blocker="all-clear",
+                source_disposition="all-clear",
+            ),
+        )
+        for review_resume in cases:
+            with self.subTest(blocker=review_resume["blocker"]):
+                status_payload = _status_payload(0)
+                status_payload["review_resume"] = review_resume
+                parsed = {
+                    "plan_dir": "/tmp/plan",
+                    "argv": ["asl", "run", "/tmp/plan", "--review-harness", "codex", "--json"],
+                    "review_harness": "codex",
+                    "max_review_fix_cycles": 9,
+                }
+                result = self._supervise(
+                    _StatusScript([status_payload]), _never_run, parsed=parsed
+                )
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["chunks"], 0)
+
+    def test_run_repairs_and_unknown_actions_do_not_launch(self) -> None:
+        for action in ("run-repairs", "future-action"):
+            with self.subTest(action=action):
+                status_payload = _status_payload(0)
+                status_payload["review_resume"] = _review_resume(
+                    action,
+                    eligible=True,
+                    source_disposition="repairs-materialized",
+                )
+                parsed = {
+                    "plan_dir": "/tmp/plan",
+                    "argv": [
+                        "asl",
+                        "run",
+                        "/tmp/plan",
+                        "--review-harness",
+                        "codex",
+                        "--json",
+                    ],
+                    "review_harness": "codex",
+                    "max_review_fix_cycles": 9,
+                }
+                result = self._supervise(
+                    _StatusScript([status_payload]), _never_run, parsed=parsed
+                )
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["chunks"], 0)
+
+    def test_review_resume_does_not_launch_without_review_harness(self) -> None:
+        status_payload = _status_payload(0)
+        status_payload["review_resume"] = _review_resume(
+            "materialize-repairs", eligible=True
+        )
+        result = self._supervise(_StatusScript([status_payload]), _never_run)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["chunks"], 0)
+        summary = autopilot._human_summary(result)
+        self.assertIn("with a review harness", summary)
+        self.assertIn("eligible materialize-repairs continuation", summary)
+
+    def test_older_status_without_review_resume_keeps_complete_behavior(self) -> None:
+        parsed = {
+            "plan_dir": "/tmp/plan",
+            "argv": ["asl", "run", "/tmp/plan", "--review-harness", "codex", "--json"],
+            "review_harness": "codex",
+            "max_review_fix_cycles": 4,
+        }
+        result = self._supervise(
+            _StatusScript([_status_payload(0)]), _never_run, parsed=parsed
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["chunks"], 0)
 
     def test_paused_run_stops_with_paused(self) -> None:
         status = _StatusScript([_status_payload(1)])
@@ -1626,6 +1949,198 @@ class RunAutopilotReviewTest(unittest.TestCase):
         # The runner owns repair cycles now; the helper attaches no follow-up
         # fix-plan guidance.
         self.assertNotIn("review_fix", result)
+
+    def test_findings_carry_review_resume_cap_guidance(self) -> None:
+        review_resume = _review_resume(
+            "materialize-repairs",
+            eligible=False,
+            blocker="higher-cap-required",
+            minimum_required_cap=3,
+            source_disposition="cycle-cap-exhausted",
+        )
+
+        def complete_with_guidance(parsed):
+            return {
+                "ok": True,
+                "stage": autopilot.RUN_STAGE,
+                "reason": "complete",
+                "chunks": 0,
+                "status": {"review_resume": review_resume},
+            }
+
+        verdict = {
+            "ok": True,
+            "outcome": "findings",
+            "status_line": "Status: 1 Findings (0 high, 1 med, 0 low)",
+            "total_findings": 1,
+            "findings_by_severity": {"high": 0, "med": 1, "low": 0},
+            "review_output_path": "/tmp/plan/final-review.md",
+            "summary": "…",
+        }
+        result = autopilot.run_autopilot(
+            self._args(command="asl run /tmp/plan --review-harness codex --max-review-fix-cycles 2"),
+            supervisor=complete_with_guidance,
+            review_reader=lambda parsed: verdict,
+        )
+        self.assertEqual(result["reason"], "review_findings")
+        self.assertEqual(result["review_resume"], review_resume)
+        summary = autopilot._human_summary(result)
+        self.assertIn("--max-review-fix-cycles 3 or higher", summary)
+
+    def test_higher_cap_guidance_adds_missing_review_harness(self) -> None:
+        review_resume = _review_resume(
+            "materialize-repairs",
+            eligible=False,
+            blocker="higher-cap-required",
+            minimum_required_cap=3,
+            source_disposition="cycle-cap-exhausted",
+        )
+
+        def complete_with_guidance(parsed):
+            return {
+                "ok": True,
+                "stage": autopilot.RUN_STAGE,
+                "reason": "complete",
+                "chunks": 0,
+                "review_resume": review_resume,
+            }
+
+        result = autopilot.run_autopilot(
+            self._args(command="asl run /tmp/plan --max-review-fix-cycles 2"),
+            supervisor=complete_with_guidance,
+        )
+        summary = autopilot._human_summary(result)
+        self.assertIn("with a review harness", summary)
+        self.assertIn("--max-review-fix-cycles 3 or higher", summary)
+
+    def test_eligible_guidance_honors_existing_review_harness(self) -> None:
+        result = {
+            "ok": True,
+            "reason": "complete",
+            "command": {"review_harness": "codex"},
+            "review_resume": _review_resume(
+                "materialize-repairs",
+                eligible=True,
+                minimum_required_cap=3,
+                source_disposition="cycle-cap-exhausted",
+            ),
+        }
+
+        summary = autopilot._human_summary(result)
+
+        self.assertIn("rerun the same review-enabled command", summary)
+        self.assertIn("--max-review-fix-cycles 3 or higher", summary)
+        self.assertNotIn("with a review harness", summary)
+
+    def test_enabled_harness_rereview_guidance_is_cap_free(self) -> None:
+        result = {
+            "ok": True,
+            "reason": "complete",
+            "command": {"review_harness": "codex"},
+            "review_resume": _review_resume(
+                "rereview",
+                eligible=True,
+                minimum_required_cap=9,
+                source_disposition="repairs-materialized",
+            ),
+        }
+
+        summary = autopilot._human_summary(result)
+
+        self.assertIn("rerun the same review-enabled command", summary)
+        self.assertNotIn("--max-review-fix-cycles", summary)
+
+    def test_paused_repair_summaries_omit_continuation_guidance(self) -> None:
+        for reason in ("paused", "needs_agent_reply"):
+            with self.subTest(reason=reason):
+                result = {
+                    "ok": False,
+                    "reason": reason,
+                    "error": "the repair session needs an answer",
+                    "review_resume": _review_resume(
+                        "run-repairs",
+                        eligible=True,
+                        source_disposition="repairs-materialized",
+                    ),
+                }
+
+                summary = autopilot._human_summary(result)
+
+                self.assertIn("the repair session needs an answer", summary)
+                self.assertNotIn("resume the same plan", summary)
+                self.assertNotIn("review harness", summary)
+
+    def test_foreign_lock_summary_omits_review_continuation_guidance(self) -> None:
+        result = {
+            "ok": False,
+            "reason": "user_required",
+            "error": "active lock belongs to another plan",
+            "review_resume": _review_resume(
+                "materialize-repairs",
+                eligible=False,
+                blocker="higher-cap-required",
+                minimum_required_cap=3,
+                source_disposition="cycle-cap-exhausted",
+            ),
+        }
+
+        summary = autopilot._human_summary(result)
+
+        self.assertIn("active lock belongs to another plan", summary)
+        self.assertNotIn("resume the same plan", summary)
+        self.assertNotIn("--max-review-fix-cycles", summary)
+
+    def test_human_summary_surfaces_artifact_remediation(self) -> None:
+        result = {
+            "ok": False,
+            "reason": "review_findings",
+            "review": {"status_line": "Status: 1 Findings (1 high, 0 med, 0 low)"},
+            "review_resume": _review_resume(
+                "materialize-repairs",
+                eligible=False,
+                blocker="artifact-invalid",
+                source_disposition="malformed-review-repair",
+                artifact_error="repair_group is missing",
+            ),
+        }
+        summary = autopilot._human_summary(result)
+        self.assertIn("correct the review artifact", summary)
+        self.assertIn("repair_group is missing", summary)
+
+    def test_complete_summary_also_surfaces_artifact_remediation(self) -> None:
+        result = {
+            "ok": True,
+            "reason": "complete",
+            "command": {"review_harness": None},
+            "review_error": {"reason": "review-malformed"},
+            "review_resume": _review_resume(
+                "materialize-repairs",
+                eligible=False,
+                blocker="artifact-invalid",
+                source_disposition="malformed-review-repair",
+                artifact_error="done_when is empty",
+            ),
+        }
+        summary = autopilot._human_summary(result)
+        self.assertIn("ok: complete", summary)
+        self.assertIn("correct the review artifact: done_when is empty", summary)
+        self.assertIn("resume the same plan with a review harness", summary)
+
+    def test_terminal_blocker_guidance_remains_visible(self) -> None:
+        result = {
+            "ok": False,
+            "reason": "blocked",
+            "review_resume": _review_resume(
+                "terminal",
+                eligible=False,
+                blocker="repair-sessions-missing",
+                source_disposition="repairs-materialized",
+            ),
+        }
+        self.assertIn(
+            "no automatic continuation (repair-sessions-missing)",
+            autopilot._human_summary(result),
+        )
 
     def test_all_clear_stays_complete_with_review_attached(self) -> None:
         verdict = {

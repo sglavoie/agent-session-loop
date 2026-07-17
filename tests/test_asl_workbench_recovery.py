@@ -65,6 +65,9 @@ from agent_session_loop.formatting import (
     format_turn_started_message,
 )
 from tests.support import (
+    write_completed_review_plan,
+    write_review_cycle_event,
+    _structured_review_finding,
     _WORKBENCH_DEAD_PID,
     _make_workbench_plan,
     _write_state_payload,
@@ -112,6 +115,167 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             self.assertFalse(recovery.recoverable)
             payload = recovery.to_payload()
             self.assertEqual("none", payload["compact"]["kind"])
+
+    def test_review_budget_recovery_reports_required_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = write_completed_review_plan(
+                tmp_path / "budget-review",
+                [_structured_review_finding()],
+            )
+            state_root = tmp_path / "state"
+            write_review_cycle_event(
+                plan_dir,
+                state_root,
+                {
+                    "cycle": 1,
+                    "review_session_id": "2",
+                    "disposition": "cycles-disabled",
+                    "fingerprints": [],
+                    "repair_session_ids": [],
+                    "max_review_fix_cycles": 0,
+                },
+            )
+
+            recovery = workbench.build_workbench_recovery(
+                _discovered(plan_dir), state_dir=state_root
+            )
+
+            self.assertEqual("review-continuation", recovery.kind)
+            self.assertEqual("Higher review-fix cap required", recovery.title)
+            self.assertIn("1 or higher", recovery.summary)
+            self.assertIn("--review-harness", recovery.summary)
+            action = recovery.actions[0]
+            self.assertEqual("review-profile", action.id)
+            self.assertEqual("profile", action.target)
+            self.assertIn("--review-harness", action.description)
+            self.assertIn("--max-review-fix-cycles", action.description)
+            payload = recovery.to_payload()
+            self.assertEqual(
+                "higher-cap-required",
+                payload["review_resume"]["blocker"],
+            )
+            self.assertEqual(
+                payload["review_resume"],
+                payload["compact"]["review_resume"],
+            )
+            launch_argv = workbench.build_launch_argv(
+                plan_dir,
+                profile=workbench.LaunchProfile(
+                    harness="codex",
+                    review_harness="claude",
+                    max_review_fix_cycles=payload["review_resume"][
+                        "minimum_required_cap"
+                    ],
+                ),
+            )
+            self.assertEqual(
+                "claude", launch_argv[launch_argv.index("--review-harness") + 1]
+            )
+            self.assertEqual(
+                str(payload["review_resume"]["minimum_required_cap"]),
+                launch_argv[launch_argv.index("--max-review-fix-cycles") + 1],
+            )
+
+    def test_completed_review_repairs_recommend_rereview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = write_completed_review_plan(
+                tmp_path / "rereview",
+                [_structured_review_finding()],
+            )
+            state_root = tmp_path / "state"
+            materialized = review_repair.materialize_review_repair_sessions(
+                plan_dir, state_dir=state_root
+            )
+            self.assertTrue(materialized.ok, materialized.error)
+            child = materialized.children[0].path
+            child.write_text(
+                child.read_text(encoding="utf-8").replace(
+                    "- **Status**: pending", "- **Status**: complete"
+                ),
+                encoding="utf-8",
+            )
+
+            recovery = workbench.build_workbench_recovery(
+                _discovered(plan_dir), state_dir=state_root
+            )
+
+            self.assertEqual("review-continuation", recovery.kind)
+            self.assertEqual("rereview", recovery.review_resume["action"])
+            self.assertIn("review", recovery.summary.lower())
+            self.assertIn("--review-harness", recovery.summary)
+            self.assertEqual("review-profile", recovery.actions[0].id)
+            self.assertTrue(recovery.recoverable)
+
+    def test_ready_continuation_names_cap_above_runner_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path, "ready-continuation")
+            required_cap = runner.DEFAULT_MAX_REVIEW_FIX_CYCLES + 1
+            resume = workbench.review_continuation.ReviewResume(
+                source_cycle=2,
+                review_session_id="2",
+                source_disposition="cycles-disabled",
+                action="materialize-repairs",
+                eligible=True,
+                blocker=None,
+                historical_materializations=2,
+                minimum_required_cap=required_cap,
+                selected_cap=runner.DEFAULT_MAX_REVIEW_FIX_CYCLES,
+            )
+
+            with mock.patch.object(
+                workbench.review_continuation,
+                "evaluate_review_continuation",
+                return_value=resume,
+            ):
+                recovery = workbench.build_workbench_recovery(
+                    _discovered(plan_dir), state_dir=tmp_path / "state"
+                )
+
+            self.assertEqual("Review continuation ready", recovery.title)
+            self.assertIn("--review-harness", recovery.summary)
+            self.assertIn(
+                f"--max-review-fix-cycles to {required_cap}", recovery.summary
+            )
+            self.assertIn(
+                f"{required_cap} or higher", recovery.actions[0].description
+            )
+
+    def test_ready_rereview_omits_cap_above_runner_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path, "ready-rereview")
+            required_cap = runner.DEFAULT_MAX_REVIEW_FIX_CYCLES + 1
+            resume = workbench.review_continuation.ReviewResume(
+                source_cycle=2,
+                review_session_id="2",
+                source_disposition="repairs-materialized",
+                action="rereview",
+                eligible=True,
+                blocker=None,
+                historical_materializations=2,
+                minimum_required_cap=required_cap,
+                selected_cap=runner.DEFAULT_MAX_REVIEW_FIX_CYCLES,
+            )
+
+            with mock.patch.object(
+                workbench.review_continuation,
+                "evaluate_review_continuation",
+                return_value=resume,
+            ):
+                recovery = workbench.build_workbench_recovery(
+                    _discovered(plan_dir), state_dir=tmp_path / "state"
+                )
+
+            self.assertEqual("Review continuation ready", recovery.title)
+            self.assertIn("--review-harness", recovery.summary)
+            self.assertIn("--review-harness", recovery.actions[0].description)
+            self.assertNotIn("--max-review-fix-cycles", recovery.summary)
+            self.assertNotIn(
+                "--max-review-fix-cycles", recovery.actions[0].description
+            )
 
     def test_state_read_warning_details_cover_stable_codes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -424,6 +588,28 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                     )
                     self.assertEqual(expected_kind, recovery.kind)
                     observed.add(recovery.kind)
+
+            continuation_plan = write_completed_review_plan(
+                tmp_path / "kind-review-continuation",
+                [_structured_review_finding()],
+            )
+            write_review_cycle_event(
+                continuation_plan,
+                tmp_path / "state",
+                {
+                    "cycle": 1,
+                    "review_session_id": "2",
+                    "disposition": "cycles-disabled",
+                    "fingerprints": [],
+                    "repair_session_ids": [],
+                    "max_review_fix_cycles": 0,
+                },
+            )
+            continuation = workbench.build_workbench_recovery(
+                _discovered(continuation_plan), state_dir=tmp_path / "state"
+            )
+            self.assertEqual("review-continuation", continuation.kind)
+            observed.add(continuation.kind)
 
             self.assertEqual(set(workbench.RECOVERY_KINDS), observed)
 

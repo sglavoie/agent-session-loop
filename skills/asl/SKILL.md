@@ -21,8 +21,10 @@ review it materializes same-plan repair sessions, executes them, and rereviews,
 bounded by `asl run --max-review-fix-cycles` (default 2). The skill workflow is
 supervision and Q&A only: run the helper; when it reports that a paused run
 needs an answer, infer a defensible reply or ask the user, then resume; and
-when it reports remaining review findings, surface them to the user. This
-skill never drafts, splits, or expands follow-up fix plans.
+when it reports remaining review findings, surface them to the user. A higher
+absolute review-fix cap or a safely corrected structured findings artifact may
+resume runner-owned repair/rereview on the same plan. This skill never drafts,
+splits, or expands follow-up fix plans.
 
 ## Input
 
@@ -80,11 +82,14 @@ you can tell a healthy-but-slow run from a genuinely stuck one and act on it.
 ### Step 3: Handle pauses
 
 The helper auto-retries recoverable same-session pauses (`verify-failed`,
-`nonzero-exit`, `timeout`, `no-status-change`) up to twice per session and
-reason, so it only escalates when a pause genuinely needs an answer. When it
-does, the result carries `reason: needs_agent_reply` with a `questions` block
-holding the resolver prompt, the paused agent's last message, the pause
-metadata, and artifact paths.
+`transport-failed`, `timeout`, `no-status-change`) up to twice per session and
+reason, so it only escalates when a pause genuinely needs an answer. Only
+`transport-failed` backs off before relaunching: 5 seconds, then 30 seconds;
+the other recoverable pauses retry immediately. An unclassified `nonzero-exit`
+pause is never retried. When it does escalate, the result carries
+`reason: needs_agent_reply` with a `questions` block holding the resolver
+prompt, the paused agent's last message, the pause metadata, and artifact
+paths.
 
 Decide the reply with discipline:
 
@@ -118,17 +123,22 @@ review reports findings, the helper returns `reason: review_findings` with a
 - `total_findings` and `findings_by_severity`.
 - `summary` — a bounded excerpt of the review body.
 
-`review_findings` means the runner already exhausted its own automatic
-repair/rereview budget — it materializes same-plan repair sessions after a
-findings review, executes them, and rereviews, stopping on all-clear, repeated
-finding fingerprints, malformed repair output, or the
-`--max-review-fix-cycles` cap (default 2). Do **not** draft, split, or expand a
+`review_findings` means no automatic continuation remains for the command's
+current cap and artifact state. The runner materializes same-plan repair
+sessions after a findings review, executes them, and rereviews, stopping on
+all-clear, repeated finding fingerprints, unstructured findings, malformed
+repair output, or the `--max-review-fix-cycles` cap (default 2). The result's
+additive `review_resume` block explains whether a higher absolute cap or a
+corrected `final-review.json` artifact can resume that same plan; terminal
+dispositions intentionally remain stopped. Do **not** draft, split, or expand a
 follow-up fix plan. Instead:
 
 1. Read the full `final-review.md` at `review_output_path`.
 2. Hand the remaining findings to the user for a decision, including the
    status line and the run's recorded cycle disposition when available
-   (`review_fix_disposition` in the run payload/state).
+   (`review_fix_disposition` in the run payload/state). When `review_resume`
+   reports `higher-cap-required` or `artifact-invalid`, include its minimum cap
+   or artifact-remediation detail so the user can resume the same plan.
 
 ### Step 5: Report
 
@@ -143,8 +153,8 @@ and any blocker that needs the user's attention.
   Keep the skill workflow thin.
 - Automatic repair/rereview cycles are owned by the runner and bounded by
   `asl run --max-review-fix-cycles` (default 2; `--max-review-fix-plans` is a
-  deprecated alias). After the runner stops, unresolved findings go to the
-  user — this skill never creates follow-up fix plans.
+  deprecated alias). Corrected artifacts and higher caps resume the same plan;
+  this skill never creates follow-up fix plans.
 - The preflight/`asl run` readiness gate now rejects a plan whose completion-contract
   `command` checks are not runnable (an unresolved `argv[0]`, or a non-importable
   `python -m <module>`), so a paused run may cite a `command-not-runnable` finding —

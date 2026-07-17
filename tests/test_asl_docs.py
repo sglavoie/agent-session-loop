@@ -52,6 +52,7 @@ from agent_session_loop import (
     progress_repair,
     qna,
     review,
+    review_continuation,
     review_repair,
     run_control,
     runner,
@@ -993,12 +994,9 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
         self.assertIn("`clear\n  selection`", docs)
 
     def test_docs_urgency_table_lists_activity_labels(self) -> None:
-        # Session 7 deferred the per-state activity_label column to
-        # session 8 QA. Each ACTIVITY_LABEL_BY_STATE string must appear
-        # in the docs urgency table so external readers can predict the
-        # exact UI badge text without consulting workbench.py, and a
-        # drift between the runtime constant and the table would fail
-        # this regression.
+        # The per-state activity_label column and its zero-pending review
+        # continuation override are both documented so external readers can
+        # predict the exact UI badge text without consulting workbench.py.
         docs = self._read("docs/agent-session-loop.md")
         self.assertIn("activity_label", docs)
         for primary_state, label in workbench.ACTIVITY_LABEL_BY_STATE.items():
@@ -1010,6 +1008,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
                     f"{label!r} for state {primary_state!r}"
                 ),
             )
+        self.assertIn(workbench.REVIEW_CONTINUATION_ACTIVITY_LABEL, docs)
 
 
 class AuthoritativeDocsRegressionTests(unittest.TestCase):
@@ -1085,6 +1084,129 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
     def test_review_cycle_default_matches_runner_constant(self) -> None:
         self.assertIn(
             f"(default {runner.DEFAULT_MAX_REVIEW_FIX_CYCLES};", self.docs
+        )
+
+    def test_recoverable_pause_docs_match_autopilot(self) -> None:
+        module_path = REPO_ROOT / "skills" / "asl" / "scripts" / "asl_autopilot.py"
+        spec = importlib.util.spec_from_file_location(
+            "asl_autopilot_docs_regression", module_path
+        )
+        self.assertIsNotNone(spec)
+        assert spec is not None
+        autopilot = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(autopilot)
+
+        skill = (REPO_ROOT / "skills" / "asl" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        surfaces = (self.docs, skill)
+        recoverable_copy = "The helper auto-retries recoverable same-session pauses"
+        for surface in surfaces:
+            section = surface.split(recoverable_copy, 1)[1].split("\n\n", 1)[0]
+            normalized_section = " ".join(section.split())
+            pause_list = re.search(r"\(([^)]*)\)", section)
+            self.assertIsNotNone(pause_list)
+            assert pause_list is not None
+            self.assertEqual(
+                autopilot.RECOVERABLE_PAUSE_REASONS,
+                tuple(re.findall(r"`([^`]+)`", pause_list.group(1))),
+            )
+            self.assertNotIn("`nonzero-exit`", pause_list.group(1))
+            self.assertIn(
+                "An unclassified `nonzero-exit` pause is never retried.",
+                normalized_section,
+            )
+            self.assertIn(
+                "Only `transport-failed` backs off",
+                normalized_section,
+            )
+
+    def test_review_continuation_surfaces_share_documented_contract(self) -> None:
+        self.assertIn("absolute cross-run cap", self.docs)
+        self.assertIn(events.REVIEW_REPAIR_REOPENED_EVENT, self.docs)
+        self.assertIn("`review_resume` projection", self.docs)
+        self.assertIn("`review_reopen` record", self.docs)
+        for action in (
+            "initial-review",
+            "materialize-repairs",
+            "run-repairs",
+            "rereview",
+            "terminal",
+        ):
+            self.assertIn(f"`{action}`", self.docs)
+        emitted_blockers = (
+            "review-harness-required",
+            "higher-cap-required",
+            "artifact-invalid",
+            *sorted(review_continuation.TERMINAL_REVIEW_DISPOSITIONS),
+            "repair-sessions-missing",
+            "repair-sessions-not-runnable",
+            "unknown-disposition",
+        )
+        for blocker in emitted_blockers:
+            self.assertIn(f"`{blocker}`", self.docs)
+        self.assertIn(
+            "An unrecognized recorded disposition is retained in\n"
+            "`source_disposition` for diagnosis and maps to the stable\n"
+            "`unknown-disposition` blocker.",
+            self.docs,
+        )
+        for recovery_kind in workbench.RECOVERY_KINDS:
+            self.assertIn(f"`{recovery_kind}`", self.docs)
+
+    def test_review_metrics_additive_fields_are_documented(self) -> None:
+        report = metrics.collect_metrics(
+            state_dir=REPO_ROOT / ".missing-metrics-state",
+            since_days=metrics.DEFAULT_SINCE_DAYS,
+        )
+        for field in (
+            "repairs_materialized",
+            "unique_materializations",
+            "reopen_attempts",
+            "successful_reopen_materializations",
+            "reopen_failures",
+            "reopen_attempts_by_source_disposition",
+            "reopen_failures_by_result",
+        ):
+            self.assertIn(field, report.review_cycles)
+            self.assertIn(field, self.docs)
+        self.assertIn("durable current-plan totals", self.docs)
+        self.assertIn("recovered reopen\nbackfills", self.docs)
+        self.assertIn("not fresh attempts", self.docs)
+
+    def test_operator_surfaces_do_not_restore_manual_review_plan_guidance(
+        self,
+    ) -> None:
+        surfaces = {
+            "README.md": self.readme,
+            "docs/agent-session-loop.md": self.docs,
+            "skills/asl/SKILL.md": (
+                REPO_ROOT / "skills" / "asl" / "SKILL.md"
+            ).read_text(encoding="utf-8"),
+            "skills/asl/scripts/asl_autopilot.py": (
+                REPO_ROOT
+                / "skills"
+                / "asl"
+                / "scripts"
+                / "asl_autopilot.py"
+            ).read_text(encoding="utf-8"),
+            "agent_session_loop/workbench.py": (
+                REPO_ROOT / "agent_session_loop" / "workbench.py"
+            ).read_text(encoding="utf-8"),
+        }
+        unsupported_guidance = (
+            "draft a fix plan",
+            "rerun the helper against the generated plan directory",
+            "capped at 2 generated follow-up plans",
+            "opens bounded review-fix follow-up cycles",
+        )
+        for name, text in surfaces.items():
+            for phrase in unsupported_guidance:
+                self.assertNotIn(phrase, text, f"{name} restores {phrase!r}")
+        self.assertIn(
+            "Do **not** draft, split, or expand a\nfollow-up fix plan",
+            surfaces["skills/asl/SKILL.md"],
         )
 
     def test_state_schema_docs_match_authoritative_versions(self) -> None:

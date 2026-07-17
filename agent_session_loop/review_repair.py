@@ -6,8 +6,11 @@ turns those validated findings into *serial child repair sessions* appended
 beneath the generated review session ``N`` as ``N.1``, ``N.2``, ... inside the
 **same** plan directory — no second plan directory is ever created.
 
-The materialization is deterministic and atomic:
+Planning is read-only, and materialization is deterministic and atomic:
 
+- :func:`plan_review_repair_sessions` resolves the source review, validates the
+  v2 artifacts, records full artifact digests and stable finding fingerprints,
+  detects existing-child conflicts, and renders every proposed child in memory.
 - Findings are grouped by their ``repair_group`` (every finding belongs to
   exactly one group; grouping preserves first-appearance order). At most
   :data:`MAX_REPAIR_GROUPS` groups are allowed per cycle — larger finding sets
@@ -116,13 +119,43 @@ class ReviewRepairResult:
 
 
 @dataclass(frozen=True)
-class _ChildSpec:
-    group: str
+class RepairGroupPlan:
+    """One validated, fully rendered child proposed by repair planning."""
+
+    repair_group: str
+    proposed_child_id: SessionId
     title: str
     finding_ids: tuple[str, ...]
     done_when: tuple[str, ...]
-    checks: list[dict[str, Any]]
+    checks: tuple[dict[str, Any], ...]
     findings: tuple[dict[str, Any], ...]
+    contract: contracts.CompletionContract
+    rendered_text: str
+
+
+@dataclass(frozen=True)
+class ReviewRepairPlan:
+    """Read-only validation and child-specification result.
+
+    Successful findings plans contain normalized structured findings,
+    fingerprints, and fully rendered repair groups ready for atomic staging.
+    Failed plans retain any artifact provenance and conflict information that
+    could be established safely, while using the materializer's existing
+    stable reason/error vocabulary.
+    """
+
+    ok: bool
+    reason: str
+    review_session_id: SessionId | None = None
+    validated_findings: tuple[dict[str, Any], ...] = ()
+    finding_fingerprints: tuple[str, ...] = ()
+    repair_groups: tuple[RepairGroupPlan, ...] = ()
+    proposed_child_ids: tuple[SessionId, ...] = ()
+    existing_child_ids: tuple[SessionId, ...] = ()
+    review_output_sha256: str | None = None
+    review_artifact_sha256: str | None = None
+    error: str | None = None
+    detail: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -230,34 +263,13 @@ def _merge_verification_checks(
     return merged
 
 
-def _build_child_specs(
-    grouped: Sequence[tuple[str, tuple[dict[str, Any], ...]]],
-) -> list[_ChildSpec]:
-    specs: list[_ChildSpec] = []
-    for group, group_findings in grouped:
-        done_when = _dedupe_preserving_order(
-            [
-                bullet
-                for finding in group_findings
-                for bullet in finding["done_criteria"]
-            ]
-        )
-        checks = _merge_verification_checks(group, group_findings)
-        specs.append(
-            _ChildSpec(
-                group=group,
-                title=f"Review repair: {group}",
-                finding_ids=tuple(finding["id"] for finding in group_findings),
-                done_when=tuple(done_when),
-                checks=checks,
-                findings=tuple(group_findings),
-            )
-        )
-    return specs
-
-
 def _render_child_body(
-    child_id: SessionId, review_id: SessionId, spec: _ChildSpec
+    child_id: SessionId,
+    review_id: SessionId,
+    *,
+    repair_group: str,
+    finding_ids: Sequence[str],
+    findings: Sequence[dict[str, Any]],
 ) -> list[str]:
     lines: list[str] = [
         REVIEW_REPAIR_SESSION_MARKER,
@@ -270,16 +282,16 @@ def _render_child_body(
             f"generated review session `{review_id.value}` in this plan "
             "directory."
         ),
-        f"- Repair group: `{spec.group}`.",
+        f"- Repair group: `{repair_group}`.",
         (
-            f"- Addresses {len(spec.finding_ids)} review finding(s): "
-            f"{', '.join(spec.finding_ids)}."
+            f"- Addresses {len(finding_ids)} review finding(s): "
+            f"{', '.join(finding_ids)}."
         ),
         "",
         "## Findings to repair",
         "",
     ]
-    for finding in spec.findings:
+    for finding in findings:
         lines.append(
             f"### {finding['id']} ({finding['severity']}): {finding['title']}"
         )
@@ -311,6 +323,71 @@ def _render_child_body(
         ]
     )
     return lines
+
+
+def _build_repair_group_plans(
+    review_id: SessionId,
+    grouped: Sequence[tuple[str, tuple[dict[str, Any], ...]]],
+) -> list[RepairGroupPlan]:
+    """Validate and fully render every proposed child without writing files."""
+    group_plans: list[RepairGroupPlan] = []
+    previous_id = review_id
+    for index, (group, group_findings) in enumerate(grouped, start=1):
+        child_id = parse_session_id(f"{review_id.value}.{index}")
+        title = f"Review repair: {group}"
+        finding_ids = tuple(finding["id"] for finding in group_findings)
+        done_when = tuple(
+            _dedupe_preserving_order(
+                [
+                    bullet
+                    for finding in group_findings
+                    for bullet in finding["done_criteria"]
+                ]
+            )
+        )
+        checks = tuple(_merge_verification_checks(group, group_findings))
+        body_lines = _render_child_body(
+            child_id,
+            review_id,
+            repair_group=group,
+            finding_ids=finding_ids,
+            findings=group_findings,
+        )
+        try:
+            contract = authoring.contract_from_payload(
+                child_id,
+                done_when,
+                {"session": child_id.value, "checks": list(checks)},
+            )
+            rendered_text = authoring.render_session_file(
+                session_id=child_id,
+                title=title,
+                instruction_lines=body_lines,
+                heading_level=2,
+                is_first=False,
+                previous_session_id=previous_id,
+                contract=contract,
+                require_contract=True,
+            )
+        except PlanError as error:
+            raise ReviewRepairError(
+                f"could not author repair child {child_id.value}: {error}"
+            ) from error
+        group_plans.append(
+            RepairGroupPlan(
+                repair_group=group,
+                proposed_child_id=child_id,
+                title=title,
+                finding_ids=finding_ids,
+                done_when=done_when,
+                checks=checks,
+                findings=tuple(group_findings),
+                contract=contract,
+                rendered_text=rendered_text,
+            )
+        )
+        previous_id = child_id
+    return group_plans
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +577,182 @@ def _make_children_executable(
 # ---------------------------------------------------------------------------
 
 
+def _artifact_sha256_or_none(
+    digest_fn: Any, canonical_dir: Path
+) -> str | None:
+    """Return artifact provenance when readable without masking validation."""
+    try:
+        return str(digest_fn(canonical_dir))
+    except PlanError:
+        return None
+
+
+def _invalid_plan(
+    review_id: SessionId | None,
+    error: str,
+    *,
+    detail: str | None = None,
+    validated_findings: Sequence[dict[str, Any]] = (),
+    finding_fingerprints: Sequence[str] = (),
+    proposed_child_ids: Sequence[SessionId] = (),
+    existing_child_ids: Sequence[SessionId] = (),
+    review_output_sha256: str | None = None,
+    review_artifact_sha256: str | None = None,
+) -> ReviewRepairPlan:
+    return ReviewRepairPlan(
+        ok=False,
+        reason=REVIEW_REPAIR_REASON_MALFORMED,
+        review_session_id=review_id,
+        validated_findings=tuple(validated_findings),
+        finding_fingerprints=tuple(finding_fingerprints),
+        proposed_child_ids=tuple(proposed_child_ids),
+        existing_child_ids=tuple(existing_child_ids),
+        review_output_sha256=review_output_sha256,
+        review_artifact_sha256=review_artifact_sha256,
+        error=error,
+        detail=detail,
+    )
+
+
+def plan_review_repair_sessions(
+    plan_dir: str | Path,
+    *,
+    review_session_id: int | str | SessionId | None = None,
+) -> ReviewRepairPlan:
+    """Validate and specify review repair children without mutating state.
+
+    This is the single validation/specification path used by materialization
+    and read-only continuation consumers. It validates the existing v2 review
+    contract, resolves the source review, detects child conflicts, enforces the
+    group cap, merges group contracts, and renders every proposed child wholly
+    in memory. It never acquires a lock or writes plan/state files.
+    """
+    canonical_dir = canonicalize_path(plan_dir)
+    output_sha256 = _artifact_sha256_or_none(
+        review.final_review_output_sha256, canonical_dir
+    )
+    artifact_sha256 = _artifact_sha256_or_none(
+        review.final_review_artifact_sha256, canonical_dir
+    )
+    verdict = review.load_review_verdict(canonical_dir, require_artifact=True)
+    if not verdict["ok"]:
+        return _invalid_plan(
+            None,
+            f"structured review verdict is not usable: {verdict.get('error')}",
+            detail=str(verdict.get("reason")),
+            review_output_sha256=output_sha256,
+            review_artifact_sha256=artifact_sha256,
+        )
+
+    # Resolve the review session the children hang beneath.
+    if review_session_id is not None:
+        try:
+            review_id = parse_session_id(review_session_id)
+        except ValueError as error:
+            return _invalid_plan(
+                None,
+                f"invalid review session id: {error}",
+                review_output_sha256=output_sha256,
+                review_artifact_sha256=artifact_sha256,
+            )
+        if not (canonical_dir / review_id.filename).is_file():
+            return _invalid_plan(
+                review_id,
+                f"review session file not found: {review_id.filename}",
+                review_output_sha256=output_sha256,
+                review_artifact_sha256=artifact_sha256,
+            )
+    else:
+        found = find_generated_review_session(canonical_dir)
+        if found is None:
+            return _invalid_plan(
+                None,
+                "no generated review session found in the plan",
+                review_output_sha256=output_sha256,
+                review_artifact_sha256=artifact_sha256,
+            )
+        review_id = found.session_id
+
+    if not review_id.is_integer:
+        return _invalid_plan(
+            review_id,
+            f"review session id {review_id.value!r} must be a top-level id",
+            review_output_sha256=output_sha256,
+            review_artifact_sha256=artifact_sha256,
+        )
+
+    findings = tuple(verdict.get("findings", ()))
+    fingerprints = review.finding_fingerprints(list(findings)) or ()
+    if not findings:
+        return ReviewRepairPlan(
+            ok=True,
+            reason=REVIEW_REPAIR_REASON_NO_FINDINGS,
+            review_session_id=review_id,
+            review_output_sha256=output_sha256,
+            review_artifact_sha256=artifact_sha256,
+        )
+
+    sessions = plans.discover_session_files(canonical_dir)
+    grouped = group_findings_by_repair_group(findings)
+    proposed_child_ids = tuple(
+        parse_session_id(f"{review_id.value}.{index}")
+        for index in range(1, len(grouped) + 1)
+    )
+    existing = _existing_children(sessions, review_id)
+    existing_child_ids = tuple(session.session_id for session in existing)
+    if existing:
+        ids = ", ".join(session_id.value for session_id in existing_child_ids)
+        return _invalid_plan(
+            review_id,
+            "repair children already exist for review session "
+            f"{review_id.value}: {ids}",
+            validated_findings=findings,
+            finding_fingerprints=fingerprints,
+            proposed_child_ids=proposed_child_ids,
+            existing_child_ids=existing_child_ids,
+            review_output_sha256=output_sha256,
+            review_artifact_sha256=artifact_sha256,
+        )
+
+    if len(grouped) > MAX_REPAIR_GROUPS:
+        return _invalid_plan(
+            review_id,
+            f"{len(grouped)} repair groups exceed the maximum of "
+            f"{MAX_REPAIR_GROUPS}; group findings by subsystem before "
+            "materializing",
+            validated_findings=findings,
+            finding_fingerprints=fingerprints,
+            proposed_child_ids=proposed_child_ids,
+            review_output_sha256=output_sha256,
+            review_artifact_sha256=artifact_sha256,
+        )
+
+    try:
+        repair_groups = tuple(_build_repair_group_plans(review_id, grouped))
+    except ReviewRepairError as error:
+        return _invalid_plan(
+            review_id,
+            str(error),
+            validated_findings=findings,
+            finding_fingerprints=fingerprints,
+            proposed_child_ids=proposed_child_ids,
+            review_output_sha256=output_sha256,
+            review_artifact_sha256=artifact_sha256,
+        )
+
+    return ReviewRepairPlan(
+        ok=True,
+        reason=REVIEW_REPAIR_REASON_OK,
+        review_session_id=review_id,
+        validated_findings=findings,
+        finding_fingerprints=tuple(fingerprints),
+        repair_groups=repair_groups,
+        proposed_child_ids=proposed_child_ids,
+        review_output_sha256=output_sha256,
+        review_artifact_sha256=artifact_sha256,
+    )
+
+
 def _malformed(
     review_id: SessionId | None, error: str, *, detail: str | None = None
 ) -> ReviewRepairResult:
@@ -570,41 +823,19 @@ def _materialize(
     now: datetime | None,
     lock_info: state.LockInfo | None,
 ) -> ReviewRepairResult:
-    verdict = review.load_review_verdict(canonical_dir, require_artifact=True)
-    if not verdict["ok"]:
+    repair_plan = plan_review_repair_sessions(
+        canonical_dir, review_session_id=review_session_id
+    )
+    if not repair_plan.ok:
         return _malformed(
-            None,
-            f"structured review verdict is not usable: {verdict.get('error')}",
-            detail=str(verdict.get("reason")),
+            repair_plan.review_session_id,
+            repair_plan.error or "review repair planning failed",
+            detail=repair_plan.detail,
         )
-
-    # Resolve the review session the children hang beneath.
-    if review_session_id is not None:
-        try:
-            review_id = parse_session_id(review_session_id)
-        except ValueError as error:
-            return _malformed(None, f"invalid review session id: {error}")
-        if not (canonical_dir / review_id.filename).is_file():
-            return _malformed(
-                review_id,
-                f"review session file not found: {review_id.filename}",
-            )
-    else:
-        found = find_generated_review_session(canonical_dir)
-        if found is None:
-            return _malformed(
-                None, "no generated review session found in the plan"
-            )
-        review_id = found.session_id
-
-    if not review_id.is_integer:
-        return _malformed(
-            review_id,
-            f"review session id {review_id.value!r} must be a top-level id",
-        )
-
-    findings = list(verdict.get("findings", ()))
-    if not findings:
+    review_id = repair_plan.review_session_id
+    if review_id is None:
+        return _malformed(None, "review repair planning did not resolve a session")
+    if repair_plan.reason == REVIEW_REPAIR_REASON_NO_FINDINGS:
         return ReviewRepairResult(
             ok=True,
             reason=REVIEW_REPAIR_REASON_NO_FINDINGS,
@@ -612,72 +843,30 @@ def _materialize(
         )
 
     sessions = plans.discover_session_files(canonical_dir)
-    existing = _existing_children(sessions, review_id)
-    if existing:
-        ids = ", ".join(session.session_id.value for session in existing)
-        return _malformed(
-            review_id,
-            "repair children already exist for review session "
-            f"{review_id.value}: {ids}",
-        )
 
-    grouped = group_findings_by_repair_group(findings)
-    if len(grouped) > MAX_REPAIR_GROUPS:
-        return _malformed(
-            review_id,
-            f"{len(grouped)} repair groups exceed the maximum of "
-            f"{MAX_REPAIR_GROUPS}; group findings by subsystem before "
-            "materializing",
-        )
-
-    try:
-        specs = _build_child_specs(grouped)
-    except ReviewRepairError as error:
-        return _malformed(review_id, str(error))
-
-    # Render and stage every child session file.
+    # Stage the fully validated child texts produced by the read-only planner.
     transaction = PlanTransaction(canonical_dir)
     children: list[RepairChild] = []
     manifest_rows: list[ManifestSession] = []
-    previous_id = review_id
-    for index, spec in enumerate(specs, start=1):
-        child_id = parse_session_id(f"{review_id.value}.{index}")
-        body_lines = _render_child_body(child_id, review_id, spec)
-        try:
-            contract = authoring.contract_from_payload(
-                child_id,
-                spec.done_when,
-                {"session": child_id.value, "checks": spec.checks},
-            )
-            text = authoring.render_session_file(
-                session_id=child_id,
-                title=spec.title,
-                instruction_lines=body_lines,
-                heading_level=2,
-                is_first=False,
-                previous_session_id=previous_id,
-                contract=contract,
-                require_contract=True,
-            )
-        except PlanError as error:
-            return _malformed(
-                review_id,
-                f"could not author repair child {child_id.value}: {error}",
-            )
-        transaction.stage(child_id.filename, text)
+    for group_plan in repair_plan.repair_groups:
+        child_id = group_plan.proposed_child_id
+        transaction.stage(child_id.filename, group_plan.rendered_text)
         children.append(
             RepairChild(
                 session_id=child_id,
-                repair_group=spec.group,
-                title=spec.title,
-                finding_ids=spec.finding_ids,
+                repair_group=group_plan.repair_group,
+                title=group_plan.title,
+                finding_ids=group_plan.finding_ids,
                 path=canonical_dir / child_id.filename,
             )
         )
         manifest_rows.append(
-            ManifestSession(session_id=child_id, title=spec.title, status="pending")
+            ManifestSession(
+                session_id=child_id,
+                title=group_plan.title,
+                status="pending",
+            )
         )
-        previous_id = child_id
 
     # Refresh the manifest table + session count (derived bookkeeping).
     manifest_path = canonical_dir / "manifest.md"

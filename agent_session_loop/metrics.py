@@ -11,11 +11,13 @@ reports workflow reliability and storage numbers for a recent window
 - review repair-cycle closure and repetition,
 - artifact growth and projected compaction savings.
 
-Everything is derived from ``events.jsonl``, per-turn ``result.json`` files,
-and file sizes; no plan directory content is read or mutated. Compaction
-savings are projected with a dry-run over the state directories that had
-activity inside the window (the full corpus is available via
-``asl compact-state`` per plan).
+Windowed activity is derived from ``events.jsonl`` and per-turn
+``result.json`` files. Durable review-materialization totals additionally
+inspect readable current plan snapshots so generated repair children can be
+reconciled with the full review-event history. No state or plan content is
+mutated. Compaction savings are projected with a dry-run over the state
+directories that had activity inside the window (the full corpus is available
+via ``asl compact-state`` per plan).
 """
 
 from __future__ import annotations
@@ -30,6 +32,8 @@ from typing import Any
 
 from . import compact_state
 from . import events
+from . import plans
+from . import review_continuation
 from . import session_overview
 from . import state
 
@@ -191,7 +195,12 @@ def collect_metrics(
     findings_introduced = 0
     findings_closed = 0
     findings_repeated = 0
-    repairs_materialized = 0
+    unique_materialization_keys: set[tuple[str, str]] = set()
+    reopen_attempts = 0
+    successful_reopen_materializations = 0
+    reopen_failures = 0
+    reopen_source_disposition_counts: dict[str, int] = {}
+    reopen_failure_result_counts: dict[str, int] = {}
 
     agent_mux_deliveries = 0
     agent_mux_acknowledged = 0
@@ -218,6 +227,24 @@ def collect_metrics(
         state_dirs_scanned += 1
         dir_key = plan_state_dir.name
         active = False
+        plan_dir = _plan_dir_for_state_dir(plan_state_dir)
+        snapshot = None
+        if plan_dir is not None:
+            try:
+                snapshot = plans.inspect_plan(plan_dir)
+            except (plans.PlanError, OSError):
+                # Metrics remain best-effort for stale state directories. The
+                # full event history still supplies an events-only fallback.
+                pass
+        materialization_keys = (
+            review_continuation.reconciled_materialization_keys(
+                plan_state_dir / events.EVENTS_FILE_NAME,
+                snapshot,
+            )
+        )
+        unique_materialization_keys.update(
+            (dir_key, key) for key in materialization_keys
+        )
 
         for payload in _iter_turn_results(plan_state_dir):
             finished_at = _parse_timestamp(payload.get("finished_at"))
@@ -253,12 +280,12 @@ def collect_metrics(
                         completion_times[key] = started_at
 
         for record in _read_event_records(plan_state_dir / events.EVENTS_FILE_NAME):
-            created_at = _parse_timestamp(record.get("created_at"))
-            if created_at is None or created_at < cutoff:
-                continue
             name = record.get("name")
             payload = record.get("payload")
             payload = payload if isinstance(payload, dict) else {}
+            created_at = _parse_timestamp(record.get("created_at"))
+            if created_at is None or created_at < cutoff:
+                continue
             if name == events.RUN_PAUSED_EVENT:
                 active = True
                 pauses_total += 1
@@ -310,9 +337,39 @@ def collect_metrics(
                         findings_closed += count
                     else:
                         findings_repeated += count
-                repair_ids = payload.get("repair_session_ids")
-                if isinstance(repair_ids, list) and repair_ids:
-                    repairs_materialized += 1
+            elif name == events.REVIEW_REPAIR_REOPENED_EVENT:
+                active = True
+                if payload.get("recovered") is True:
+                    # Crash-recovery backfills preserve durable lineage but
+                    # are not fresh reopen attempts in this time window.
+                    continue
+                reopen_attempts += 1
+                source_disposition = payload.get("source_disposition")
+                source_disposition = (
+                    source_disposition
+                    if isinstance(source_disposition, str)
+                    and source_disposition
+                    else "unknown"
+                )
+                reopen_source_disposition_counts[source_disposition] = (
+                    reopen_source_disposition_counts.get(
+                        source_disposition, 0
+                    )
+                    + 1
+                )
+                if payload.get("materialized") is True:
+                    successful_reopen_materializations += 1
+                else:
+                    reopen_failures += 1
+                    result = payload.get("result")
+                    result = (
+                        result
+                        if isinstance(result, str) and result
+                        else "unknown"
+                    )
+                    reopen_failure_result_counts[result] = (
+                        reopen_failure_result_counts.get(result, 0) + 1
+                    )
             elif name == events.AGENT_MUX_DELIVERY_EVENT:
                 active = True
                 agent_mux_deliveries += 1
@@ -347,7 +404,6 @@ def collect_metrics(
 
         if active:
             state_dirs_active += 1
-            plan_dir = _plan_dir_for_state_dir(plan_state_dir)
             if plan_dir is None:
                 compaction_skipped.append(dir_key)
             else:
@@ -426,7 +482,21 @@ def collect_metrics(
         review_cycles={
             "cycles_recorded": cycles_total,
             "by_disposition": dict(sorted(cycle_disposition_counts.items())),
-            "repairs_materialized": repairs_materialized,
+            # Keep the legacy key while making its cross-event semantics
+            # idempotent. New consumers should prefer the explicit name.
+            "repairs_materialized": len(unique_materialization_keys),
+            "unique_materializations": len(unique_materialization_keys),
+            "reopen_attempts": reopen_attempts,
+            "successful_reopen_materializations": (
+                successful_reopen_materializations
+            ),
+            "reopen_failures": reopen_failures,
+            "reopen_attempts_by_source_disposition": dict(
+                sorted(reopen_source_disposition_counts.items())
+            ),
+            "reopen_failures_by_result": dict(
+                sorted(reopen_failure_result_counts.items())
+            ),
             "findings_introduced": findings_introduced,
             "findings_closed": findings_closed,
             "findings_repeated": findings_repeated,
@@ -518,7 +588,13 @@ def _print_report(report: MetricsReport) -> None:
     print("\nReview cycles:")
     print(
         f"  recorded {cycles['cycles_recorded']}, "
-        f"repairs materialized {cycles['repairs_materialized']}"
+        f"unique materializations {cycles['unique_materializations']}"
+    )
+    print(
+        f"  reopen attempts {cycles['reopen_attempts']}, "
+        f"successful materializations "
+        f"{cycles['successful_reopen_materializations']}, "
+        f"failures {cycles['reopen_failures']}"
     )
     print(
         f"  findings introduced {cycles['findings_introduced']}, "
@@ -527,6 +603,12 @@ def _print_report(report: MetricsReport) -> None:
     )
     for disposition, count in cycles["by_disposition"].items():
         print(f"  {disposition}: {count}")
+    for disposition, count in cycles[
+        "reopen_attempts_by_source_disposition"
+    ].items():
+        print(f"  reopen source {disposition}: {count}")
+    for result, count in cycles["reopen_failures_by_result"].items():
+        print(f"  reopen failure {result}: {count}")
     delivery = report.agent_mux_delivery
     print("\nAgentMux delivery:")
     print(

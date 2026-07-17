@@ -3566,6 +3566,14 @@
       "review_harness_model",
       profile.review_harness_model || ""
     );
+    setInputValue(
+      form,
+      "max_review_fix_cycles",
+      profile.max_review_fix_cycles === null ||
+      profile.max_review_fix_cycles === undefined
+        ? ""
+        : String(profile.max_review_fix_cycles)
+    );
     setTriStateValue(form, "unsafe_bypass", profile.unsafe_bypass);
     setTriStateValue(
       form,
@@ -3646,11 +3654,32 @@
     } else {
       profile.timeout = null;
     }
+    const rawReviewFixCycles = (
+      form.elements.namedItem("max_review_fix_cycles").value || ""
+    ).trim();
+    if (rawReviewFixCycles) {
+      const parsed = parseInt(rawReviewFixCycles, 10);
+      profile.max_review_fix_cycles = Number.isFinite(parsed) ? parsed : null;
+    } else {
+      profile.max_review_fix_cycles = null;
+    }
     return { label: label || null, profile: profile };
   }
 
-  function validateLaunchPayload(payload) {
+  function validateProfilePayload(payload) {
     const errors = [];
+    if (
+      payload.profile.max_review_fix_cycles !== null &&
+      payload.profile.max_review_fix_cycles !== undefined &&
+      payload.profile.max_review_fix_cycles < 0
+    ) {
+      errors.push("max review-fix cycles must be zero or greater");
+    }
+    return errors;
+  }
+
+  function validateLaunchPayload(payload) {
+    const errors = validateProfilePayload(payload);
     if (!payload.profile.cwd) errors.push("cwd is required to launch");
     if (!payload.profile.harness) {
       errors.push("harness is required to launch");
@@ -3694,6 +3723,11 @@
       const planDir = state.route.planDir;
       if (!planDir) return;
       const payload = readProfileFormPayload();
+      const errors = validateProfilePayload(payload);
+      if (errors.length > 0) {
+        showFormError("wb-profile-form-errors", errors.join("; "));
+        return;
+      }
       try {
         const body = await apiRequest("/api/registry/pin", {
           method: "POST",

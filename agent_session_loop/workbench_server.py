@@ -1702,6 +1702,9 @@ def _coerce_profile_payload(raw: Any) -> workbench.LaunchProfile | None:
         commit_mode=_coerce_optional_str(raw.get("commit_mode")),
         review_harness=_coerce_optional_str(raw.get("review_harness")),
         review_harness_model=_coerce_optional_str(raw.get("review_harness_model")),
+        max_review_fix_cycles=_coerce_max_review_fix_cycles(
+            raw.get("max_review_fix_cycles")
+        ),
         unsafe_bypass=_coerce_optional_bool(raw.get("unsafe_bypass")),
         allow_not_loop_ready=_coerce_optional_bool(
             raw.get("allow_not_loop_ready")
@@ -1721,14 +1724,25 @@ def _coerce_optional_str(value: Any) -> str | None:
     return text or None
 
 
-def _coerce_optional_int(value: Any) -> int | None:
+def _coerce_optional_int(value: Any, *, field_name: str = "timeout") -> int | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
         raise _BadRequestError(
-            "invalid-request", "profile timeout must be an integer when set"
+            "invalid-request",
+            f"profile {field_name} must be an integer when set",
         )
     return value
+
+
+def _coerce_max_review_fix_cycles(value: Any) -> int | None:
+    cap = _coerce_optional_int(value, field_name="max_review_fix_cycles")
+    if cap is not None and cap < 0:
+        raise _BadRequestError(
+            "invalid-request",
+            "profile max_review_fix_cycles must be zero or a positive integer when set",
+        )
+    return cap
 
 
 def _coerce_optional_bool(value: Any) -> bool | None:

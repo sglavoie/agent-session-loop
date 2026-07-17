@@ -115,6 +115,7 @@ class WorkbenchRegistryTests(unittest.TestCase):
                             "commit_mode": "per-session",
                             "review_harness": "codex",
                             "review_harness_model": "o4-mini",
+                            "max_review_fix_cycles": 3,
                             "unsafe_bypass": True,
                             "allow_not_loop_ready": False,
                             "note": "ship soon",
@@ -137,6 +138,7 @@ class WorkbenchRegistryTests(unittest.TestCase):
             self.assertEqual("claude-haiku", first.profile.harness_model)
             self.assertEqual("codex", first.profile.review_harness)
             self.assertEqual("o4-mini", first.profile.review_harness_model)
+            self.assertEqual(3, first.profile.max_review_fix_cycles)
             self.assertTrue(first.profile.unsafe_bypass)
             self.assertFalse(first.profile.allow_not_loop_ready)
             self.assertEqual("per-session", first.profile.commit_mode)

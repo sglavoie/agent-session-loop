@@ -109,6 +109,26 @@ def final_review_artifact_path(plan_dir: str | Path) -> Path:
     return Path(plan_dir) / FINAL_REVIEW_ARTIFACT_FILENAME
 
 
+def final_review_output_sha256(plan_dir: str | Path) -> str:
+    """Return the full SHA-256 digest of ``final-review.md``.
+
+    The file is streamed through :func:`plans.file_sha256`, whose fixed-size
+    reads keep memory use bounded even when a malformed or manually edited
+    review artifact is unexpectedly large.
+    """
+    return plans.file_sha256(final_review_output_path(plan_dir))
+
+
+def final_review_artifact_sha256(plan_dir: str | Path) -> str:
+    """Return the full SHA-256 digest of ``final-review.json``.
+
+    This hashes the complete serialized artifact, intentionally covering
+    repair grouping, done criteria, and verification checks that are excluded
+    from :func:`finding_fingerprint` identity.
+    """
+    return plans.file_sha256(final_review_artifact_path(plan_dir))
+
+
 def review_session_version_marker(
     version: int = GENERATED_REVIEW_SESSION_VERSION,
 ) -> str:

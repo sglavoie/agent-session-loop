@@ -349,9 +349,11 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # Hash routing wiring + detail-view scaffolding.
         self.assertIn("parseHashRoute", decoded)
         self.assertIn("refreshDetail", decoded)
+        self.assertIn("validateProfilePayload", decoded)
         self.assertIn("validateLaunchPayload", decoded)
         self.assertIn("harness_model", decoded)
         self.assertIn("review_harness_model", decoded)
+        self.assertIn("max_review_fix_cycles", decoded)
         self.assertIn("review model requires a review harness", decoded)
         self.assertIn("clearReplyTextarea", decoded)
         self.assertIn('reply: { scroll: "wb-recovery-panel"', decoded)

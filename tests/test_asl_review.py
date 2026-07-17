@@ -50,6 +50,7 @@ from agent_session_loop import (
     progress_repair,
     qna,
     review,
+    review_continuation,
     review_repair,
     run_control,
     runner,
@@ -68,11 +69,13 @@ from tests.support import (
     REPO_ROOT,
     write_plan,
     write_plan_with_ids,
+    write_completed_review_plan,
     install_fake_codex,
     install_fake_harness,
     init_git_repo,
     read_jsonl,
     _contract_block,
+    _discovered,
     _structured_review_finding,
     _load_script_module,
 )
@@ -271,6 +274,27 @@ class StructuredReviewArtifactTests(unittest.TestCase):
                 review.review_session_version_marker()
             )
         )
+
+    def test_review_artifact_sha256_helpers_hash_full_files_in_chunks(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            markdown = b"review\n" + (b"m" * (1024 * 1024 + 17))
+            artifact = b'{"findings":"' + (b"j" * (1024 * 1024 + 31)) + b'"}'
+            (plan_dir / review.FINAL_REVIEW_FILENAME).write_bytes(markdown)
+            (plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_bytes(
+                artifact
+            )
+
+            self.assertEqual(
+                hashlib.sha256(markdown).hexdigest(),
+                review.final_review_output_sha256(plan_dir),
+            )
+            self.assertEqual(
+                hashlib.sha256(artifact).hexdigest(),
+                review.final_review_artifact_sha256(plan_dir),
+            )
 
     def test_load_review_verdict_markdown_only_stays_compatible(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -617,6 +641,239 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
             self.plan_dir, state_dir=self.state_dir, **kwargs
         )
 
+    def _plan_bytes(self) -> dict[str, bytes]:
+        return {
+            str(path.relative_to(self.plan_dir)): path.read_bytes()
+            for path in self.plan_dir.rglob("*")
+            if path.is_file()
+        }
+
+    def _write_review_events(self, *payloads: dict[str, object]) -> Path:
+        event_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir)
+            / events.EVENTS_FILE_NAME
+        )
+        event_path.parent.mkdir(parents=True, exist_ok=True)
+        event_path.write_text(
+            "".join(
+                json.dumps(
+                    {
+                        "name": events.REVIEW_CYCLE_EVENT,
+                        "payload": payload,
+                    }
+                )
+                + "\n"
+                for payload in payloads
+            ),
+            encoding="utf-8",
+        )
+        return event_path
+
+    def test_dry_planning_is_complete_and_performs_no_writes(self) -> None:
+        findings = [
+            self._finding("F1", "runner"),
+            self._finding("F2", "runner", severity="med"),
+            self._finding("F3", "workbench", severity="low"),
+        ]
+        self._write_plan(findings)
+        before = self._plan_bytes()
+
+        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertTrue(repair_plan.ok, repair_plan.error)
+        self.assertEqual(review_repair.REVIEW_REPAIR_REASON_OK, repair_plan.reason)
+        self.assertEqual("2", repair_plan.review_session_id.value)
+        self.assertEqual(
+            tuple(review.finding_fingerprint(finding) for finding in findings),
+            repair_plan.finding_fingerprints,
+        )
+        self.assertEqual(
+            ["runner", "workbench"],
+            [group.repair_group for group in repair_plan.repair_groups],
+        )
+        self.assertEqual(
+            ["2.1", "2.2"],
+            [session_id.value for session_id in repair_plan.proposed_child_ids],
+        )
+        self.assertEqual(
+            ("F1", "F2"), repair_plan.repair_groups[0].finding_ids
+        )
+        self.assertIn(
+            "## Completion Contract",
+            repair_plan.repair_groups[0].rendered_text,
+        )
+        self.assertEqual(before, self._plan_bytes())
+        self.assertFalse(self.state_dir.exists())
+        self.assertEqual([], sorted(self.plan_dir.glob("session-2.*.md")))
+
+    def test_dry_planning_accepts_exactly_eight_groups(self) -> None:
+        self._write_plan(
+            [self._finding(f"F{i}", f"g{i}") for i in range(8)]
+        )
+
+        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertTrue(repair_plan.ok, repair_plan.error)
+        self.assertEqual(8, len(repair_plan.repair_groups))
+        self.assertEqual(
+            [f"2.{index}" for index in range(1, 9)],
+            [session_id.value for session_id in repair_plan.proposed_child_ids],
+        )
+
+    def test_dry_planning_rejects_nine_groups_without_writes(self) -> None:
+        self._write_plan(
+            [self._finding(f"F{i}", f"g{i}") for i in range(9)]
+        )
+        before = self._plan_bytes()
+
+        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertFalse(repair_plan.ok)
+        self.assertEqual(
+            review_repair.REVIEW_REPAIR_REASON_MALFORMED,
+            repair_plan.reason,
+        )
+        self.assertIn("exceed the maximum of 8", repair_plan.error)
+        self.assertEqual(9, len(repair_plan.proposed_child_ids))
+        self.assertEqual(before, self._plan_bytes())
+
+    def test_dry_planning_reports_conflicting_checks(self) -> None:
+        self._write_plan(
+            [
+                self._finding(
+                    "F1",
+                    "runner",
+                    verification_checks=[
+                        {
+                            "type": "command",
+                            "name": "shared",
+                            "argv": ["python3", "-c", "pass"],
+                        }
+                    ],
+                ),
+                self._finding(
+                    "F2",
+                    "runner",
+                    verification_checks=[
+                        {
+                            "type": "command",
+                            "name": "shared",
+                            "argv": ["python3", "-c", "print(1)"],
+                        }
+                    ],
+                ),
+            ]
+        )
+
+        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertFalse(repair_plan.ok)
+        self.assertIn("conflicting", repair_plan.error)
+        self.assertEqual(2, len(repair_plan.validated_findings))
+        self.assertEqual([], sorted(self.plan_dir.glob("session-2.*.md")))
+
+    def test_dry_planning_reports_missing_and_inconsistent_artifacts(
+        self,
+    ) -> None:
+        self._write_plan([self._finding("F1", "runner")])
+        artifact_path = self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME
+        artifact_body = artifact_path.read_text(encoding="utf-8")
+        artifact_path.unlink()
+
+        missing = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertFalse(missing.ok)
+        self.assertEqual(review.REVIEW_REASON_MISSING_ARTIFACT, missing.detail)
+        self.assertIsNone(missing.review_artifact_sha256)
+        artifact_path.write_text(artifact_body, encoding="utf-8")
+        (self.plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
+            f"# Review\n\n{review.REVIEW_STATUS_ALL_CLEAR}\n",
+            encoding="utf-8",
+        )
+
+        inconsistent = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertFalse(inconsistent.ok)
+        self.assertEqual(
+            review.REVIEW_REASON_CONTRADICTORY_ARTIFACT,
+            inconsistent.detail,
+        )
+        self.assertIsNotNone(inconsistent.review_output_sha256)
+        self.assertIsNotNone(inconsistent.review_artifact_sha256)
+
+    def test_dry_planning_reports_existing_child_conflicts(self) -> None:
+        self._write_plan([self._finding("F1", "runner")])
+        materialized = self._materialize()
+        self.assertTrue(materialized.ok)
+
+        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertFalse(repair_plan.ok)
+        self.assertIn("already exist", repair_plan.error)
+        self.assertEqual(
+            ("2.1",),
+            tuple(session_id.value for session_id in repair_plan.existing_child_ids),
+        )
+        self.assertEqual(
+            ("2.1",),
+            tuple(session_id.value for session_id in repair_plan.proposed_child_ids),
+        )
+
+    def test_revised_grouping_changes_json_digest_not_fingerprints(self) -> None:
+        original = self._finding("F1", "runner")
+        self._write_plan([original])
+        first = review_repair.plan_review_repair_sessions(self.plan_dir)
+        revised = self._finding(
+            "F1",
+            "workbench",
+            done_criteria=["F1 is fixed through a revised criterion."],
+            verification_checks=[
+                {
+                    "type": "command",
+                    "name": "verify-revised-F1",
+                    "argv": ["python3", "-c", "print('revised')"],
+                }
+            ],
+        )
+        (self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+            json.dumps(
+                {"version": 2, "outcome": "findings", "findings": [revised]}
+            ),
+            encoding="utf-8",
+        )
+
+        second = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertTrue(first.ok, first.error)
+        self.assertTrue(second.ok, second.error)
+        self.assertEqual(first.finding_fingerprints, second.finding_fingerprints)
+        self.assertEqual(first.review_output_sha256, second.review_output_sha256)
+        self.assertNotEqual(
+            first.review_artifact_sha256, second.review_artifact_sha256
+        )
+        self.assertEqual("runner", first.repair_groups[0].repair_group)
+        self.assertEqual("workbench", second.repair_groups[0].repair_group)
+
+    def test_materializer_stages_prevalidated_planner_output(self) -> None:
+        self._write_plan([self._finding("F1", "runner")])
+        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+        self.assertTrue(repair_plan.ok, repair_plan.error)
+
+        with mock.patch.object(
+            review_repair,
+            "plan_review_repair_sessions",
+            return_value=repair_plan,
+        ), mock.patch.object(
+            review_repair.authoring,
+            "render_session_file",
+            side_effect=AssertionError("writer re-rendered a planned child"),
+        ):
+            result = self._materialize()
+
+        self.assertTrue(result.ok, result.error)
+        child_text = result.children[0].path.read_text(encoding="utf-8")
+        self.assertEqual(repair_plan.repair_groups[0].rendered_text, child_text)
+
     def test_materializes_one_child_per_repair_group(self) -> None:
         self._write_plan(
             [
@@ -930,6 +1187,261 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
         manifest = (self.plan_dir / "manifest.md").read_text(encoding="utf-8")
         self.assertIn("**Readiness**: loop-ready", manifest)
 
+    def test_continuation_projects_disabled_and_exhausted_cap_boundaries(
+        self,
+    ) -> None:
+        finding = self._finding("F1", "runner")
+        self._write_plan([finding])
+        fingerprint = review.finding_fingerprint(finding)
+        event_path = self._write_review_events(
+            {
+                "cycle": 1,
+                "review_session_id": "2",
+                "disposition": "cycles-disabled",
+                "fingerprints": [fingerprint],
+                "repair_session_ids": [],
+                "max_review_fix_cycles": 0,
+            }
+        )
+
+        disabled = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir), event_path
+        )
+
+        self.assertEqual("materialize-repairs", disabled.action)
+        self.assertFalse(disabled.eligible)
+        self.assertEqual("higher-cap-required", disabled.blocker)
+        self.assertEqual(1, disabled.minimum_required_cap)
+        self.assertEqual((fingerprint,), disabled.source_fingerprints)
+        self.assertIsNone(disabled.source_review_output_sha256)
+        self.assertIsNotNone(disabled.current_review_output_sha256)
+        self.assertIsNotNone(disabled.current_review_artifact_sha256)
+
+        resumed = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir),
+            event_path,
+            max_review_fix_cycles=1,
+        )
+        self.assertTrue(resumed.eligible)
+        self.assertIsNone(resumed.blocker)
+
+        event_path = self._write_review_events(
+            {
+                "cycle": 1,
+                "review_session_id": "1",
+                "disposition": "repairs-materialized",
+                "fingerprints": ["finding:old"],
+                "repair_session_ids": ["1.1"],
+                "max_review_fix_cycles": 1,
+            },
+            {
+                "cycle": 2,
+                "review_session_id": "2",
+                "disposition": "cycle-cap-exhausted",
+                "fingerprints": [fingerprint],
+                "repair_session_ids": [],
+                "max_review_fix_cycles": 1,
+            },
+        )
+        exhausted = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir), event_path
+        )
+        self.assertEqual(1, exhausted.historical_materializations)
+        self.assertEqual(2, exhausted.minimum_required_cap)
+        self.assertEqual("higher-cap-required", exhausted.blocker)
+
+    def test_continuation_rechecks_malformed_artifact_after_correction(
+        self,
+    ) -> None:
+        findings = [self._finding(f"F{i}", f"g{i}") for i in range(9)]
+        self._write_plan(findings)
+        event_path = self._write_review_events(
+            {
+                "cycle": 1,
+                "review_session_id": "2",
+                "disposition": "malformed-review-repair",
+                "fingerprints": [
+                    review.finding_fingerprint(finding) for finding in findings
+                ],
+                "repair_session_ids": [],
+                "max_review_fix_cycles": 1,
+            }
+        )
+
+        malformed = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir), event_path
+        )
+        self.assertFalse(malformed.eligible)
+        self.assertEqual("artifact-invalid", malformed.blocker)
+        self.assertFalse(malformed.artifact_valid)
+        self.assertIn("exceed the maximum of 8", malformed.artifact_error or "")
+
+        findings[-1]["repair_group"] = "g7"
+        (self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+            json.dumps(
+                {"version": 2, "outcome": "findings", "findings": findings}
+            ),
+            encoding="utf-8",
+        )
+        corrected = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir), event_path
+        )
+        self.assertTrue(corrected.artifact_valid)
+        self.assertTrue(corrected.eligible)
+        self.assertEqual("materialize-repairs", corrected.action)
+        self.assertIsNone(corrected.blocker)
+
+    def test_continuation_marks_manually_changed_all_clear_invalid(
+        self,
+    ) -> None:
+        self._write_plan([], outcome="all-clear")
+        event_path = self._write_review_events(
+            {
+                "cycle": 1,
+                "review_session_id": "2",
+                "disposition": "cycles-disabled",
+                "fingerprints": ["finding:original"],
+                "repair_session_ids": [],
+                "max_review_fix_cycles": 0,
+            }
+        )
+
+        projected = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir),
+            event_path,
+            max_review_fix_cycles=1,
+        )
+
+        self.assertEqual("materialize-repairs", projected.action)
+        self.assertFalse(projected.eligible)
+        self.assertEqual("artifact-invalid", projected.blocker)
+        self.assertIs(projected.artifact_valid, False)
+        self.assertEqual(
+            "the completed findings review no longer has repair findings; "
+            "a manually changed all-clear artifact cannot finalize it",
+            projected.artifact_error,
+        )
+        self.assertIsNotNone(projected.current_review_output_sha256)
+        self.assertIsNotNone(projected.current_review_artifact_sha256)
+
+    def test_continuation_reconciles_not_loop_ready_and_crash_lineage(
+        self,
+    ) -> None:
+        self._write_plan([self._finding("F1", "runner")])
+        materialized = self._materialize()
+        self.assertTrue(materialized.ok, materialized.error)
+        child_path = materialized.children[0].path
+        event_path = self._write_review_events(
+            {
+                "cycle": 1,
+                "disposition": "not-loop-ready",
+                "fingerprints": ["finding:legacy"],
+                "repair_session_ids": ["2.1"],
+                "max_review_fix_cycles": 1,
+            }
+        )
+
+        pending = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir), event_path
+        )
+        self.assertEqual("run-repairs", pending.action)
+        self.assertTrue(pending.eligible)
+        self.assertEqual(1, pending.historical_materializations)
+        self.assertEqual(("2.1",), pending.pending_repair_session_ids)
+        self.assertIsNone(pending.artifact_valid)
+        self.assertIsNone(pending.artifact_error)
+        self.assertEqual(1, runner._review_cycle_state(event_path)["repairs_materialized"])
+
+        events.append_event(
+            event_path,
+            events.Event(
+                events.REVIEW_REPAIR_REOPENED_EVENT,
+                {
+                    "source_cycle": 1,
+                    "source_review_session_id": "2",
+                    "repair_session_ids": ["2.1"],
+                    "materialized": True,
+                },
+            ),
+        )
+        deduped = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir), event_path
+        )
+        self.assertEqual(1, deduped.historical_materializations)
+        self.assertEqual(1, runner._review_cycle_state(event_path)["repairs_materialized"])
+
+        event_path.unlink()
+        crashed = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir), event_path
+        )
+        self.assertEqual("run-repairs", crashed.action)
+        self.assertEqual(1, crashed.historical_materializations)
+
+        child_path.write_text(
+            child_path.read_text(encoding="utf-8").replace(
+                "- **Status**: pending", "- **Status**: complete"
+            ),
+            encoding="utf-8",
+        )
+        rereview = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir), event_path
+        )
+        self.assertEqual("rereview", rereview.action)
+        self.assertTrue(rereview.eligible)
+        self.assertIsNone(rereview.artifact_valid)
+        self.assertIsNone(rereview.artifact_error)
+
+    def test_continuation_skips_repair_planning_for_terminal_states(self) -> None:
+        self._write_plan([self._finding("F1", "runner")])
+        for disposition, repair_ids, blocker, materializations in (
+            ("all-clear", [], "all-clear", 0),
+            ("findings-repeated", [], "findings-repeated", 0),
+            ("unstructured-findings", [], "unstructured-findings", 0),
+            ("repairs-materialized", [], "repair-sessions-missing", 1),
+            (
+                "repairs-materialized",
+                ["2.1"],
+                "repair-sessions-missing",
+                1,
+            ),
+            ("future-disposition", [], "unknown-disposition", 0),
+        ):
+            with self.subTest(disposition=disposition, repair_ids=repair_ids):
+                event_path = self._write_review_events(
+                    {
+                        "cycle": 1,
+                        "review_session_id": "2",
+                        "disposition": disposition,
+                        "fingerprints": [],
+                        "repair_session_ids": repair_ids,
+                        "max_review_fix_cycles": 8,
+                    }
+                )
+                with mock.patch.object(
+                    review_repair,
+                    "plan_review_repair_sessions",
+                    side_effect=AssertionError(
+                        "terminal continuation must not plan repair children"
+                    ),
+                ):
+                    terminal = (
+                        review_continuation.evaluate_review_continuation(
+                            plans.inspect_plan(self.plan_dir), event_path
+                        )
+                    )
+                self.assertEqual("terminal", terminal.action)
+                self.assertFalse(terminal.eligible)
+                self.assertEqual(blocker, terminal.blocker)
+                self.assertEqual(disposition, terminal.source_disposition)
+                self.assertEqual(
+                    materializations, terminal.historical_materializations
+                )
+                self.assertEqual(
+                    materializations + 1, terminal.minimum_required_cap
+                )
+                self.assertIsNone(terminal.current_review_output_sha256)
+                self.assertIsNone(terminal.current_review_artifact_sha256)
+
 
 class ReviewRepairCycleTests(unittest.TestCase):
     """Automatic repair/rereview cycles: fingerprints, caps, dispositions."""
@@ -1155,6 +1667,421 @@ class ReviewRepairCycleTests(unittest.TestCase):
         self.assertEqual(1, state_payload["repairs_materialized"])
         self.assertEqual((), state_payload["previous_fingerprints"])
 
+    def test_post_reopen_baseline_uses_ordered_source_lineage(self) -> None:
+        cases = (
+            ("same-source", "3", True, ("finding:same",)),
+            ("newer-source", "4", True, ("finding:newer",)),
+            ("older-source", "2", True, ("finding:cycle",)),
+            ("failed-newer", "4", False, ("finding:cycle",)),
+            ("malformed-source", "not-a-session", True, ("finding:cycle",)),
+        )
+        for name, reopen_source, materialized, expected in cases:
+            with self.subTest(name=name):
+                event_path = self.tmp_path / f"{name}.jsonl"
+                event_path.write_text(
+                    "".join(
+                        json.dumps(record) + "\n"
+                        for record in (
+                            {
+                                "name": events.REVIEW_CYCLE_EVENT,
+                                "payload": {
+                                    "cycle": 2,
+                                    "review_session_id": "3",
+                                    "fingerprints": ["finding:cycle"],
+                                },
+                            },
+                            {
+                                "name": events.REVIEW_REPAIR_REOPENED_EVENT,
+                                "payload": {
+                                    "source_cycle": 99,
+                                    "source_review_session_id": reopen_source,
+                                    "materialized": materialized,
+                                    "current_fingerprints": [
+                                        f"finding:{name.split('-')[0]}"
+                                    ],
+                                },
+                            },
+                        )
+                    ),
+                    encoding="utf-8",
+                )
+
+                state_payload = runner._review_cycle_state(event_path)
+
+                self.assertEqual(expected, state_payload["previous_fingerprints"])
+
+        legacy_path = self.tmp_path / "legacy-cycle-fallback.jsonl"
+        legacy_path.write_text(
+            "".join(
+                json.dumps(record) + "\n"
+                for record in (
+                    {
+                        "name": events.REVIEW_CYCLE_EVENT,
+                        "payload": {
+                            "cycle": 2,
+                            "fingerprints": ["finding:legacy"],
+                        },
+                    },
+                    {
+                        "name": events.REVIEW_REPAIR_REOPENED_EVENT,
+                        "payload": {
+                            "source_cycle": 2,
+                            "materialized": True,
+                            "current_fingerprints": ["finding:corrected"],
+                        },
+                    },
+                )
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            ("finding:corrected",),
+            runner._review_cycle_state(legacy_path)["previous_fingerprints"],
+        )
+
+    def test_post_reopen_baseline_resolves_lineage_less_cycle_source(
+        self,
+    ) -> None:
+        self._write_completed_review_history(
+            self.plan_dir,
+            review_ids=("2", "3", "4"),
+        )
+        snapshot = plans.inspect_plan(self.plan_dir)
+
+        def write_history(
+            name: str,
+            *,
+            reopen_source: str | None,
+            reopen_cycle: int | None,
+        ) -> Path:
+            event_path = self.tmp_path / f"lineage-less-{name}.jsonl"
+            reopen_payload: dict[str, object] = {
+                "materialized": True,
+                "current_fingerprints": [f"finding:{name}"],
+            }
+            if reopen_source is not None:
+                reopen_payload["source_review_session_id"] = reopen_source
+            if reopen_cycle is not None:
+                reopen_payload["source_cycle"] = reopen_cycle
+            event_path.write_text(
+                "".join(
+                    json.dumps(record) + "\n"
+                    for record in (
+                        {
+                            "name": events.REVIEW_CYCLE_EVENT,
+                            "payload": {
+                                "cycle": 2,
+                                "fingerprints": ["finding:legacy"],
+                            },
+                        },
+                        {
+                            "name": events.REVIEW_REPAIR_REOPENED_EVENT,
+                            "payload": reopen_payload,
+                        },
+                    )
+                ),
+                encoding="utf-8",
+            )
+            return event_path
+
+        newer_path = write_history(
+            "newer", reopen_source="4", reopen_cycle=None
+        )
+        self.assertEqual(
+            ("finding:newer",),
+            runner._review_cycle_state(newer_path, snapshot)[
+                "previous_fingerprints"
+            ],
+        )
+        self.assertEqual(
+            ("finding:newer",),
+            runner._review_cycle_state(newer_path)["previous_fingerprints"],
+        )
+
+        same_path = write_history(
+            "same", reopen_source="3", reopen_cycle=None
+        )
+        self.assertEqual(
+            ("finding:same",),
+            runner._review_cycle_state(same_path, snapshot)[
+                "previous_fingerprints"
+            ],
+        )
+
+        older_path = write_history(
+            "older", reopen_source="2", reopen_cycle=None
+        )
+        self.assertEqual(
+            ("finding:legacy",),
+            runner._review_cycle_state(older_path, snapshot)[
+                "previous_fingerprints"
+            ],
+        )
+
+        mismatch_path = write_history(
+            "numeric-mismatch", reopen_source=None, reopen_cycle=99
+        )
+        self.assertEqual(
+            ("finding:legacy",),
+            runner._review_cycle_state(mismatch_path, snapshot)[
+                "previous_fingerprints"
+            ],
+        )
+
+    def test_post_reopen_baseline_without_readable_reviews_orders_sources(
+        self,
+    ) -> None:
+        self._write_completed_review_history(
+            self.plan_dir,
+            review_ids=("2", "4"),
+        )
+        snapshot = plans.inspect_plan(self.plan_dir)
+        for review_id in ("2", "4"):
+            (self.plan_dir / f"session-{review_id}.md").unlink()
+        self.assertEqual(
+            {}, review_continuation._generated_review_statuses(snapshot)
+        )
+
+        for name, sources in (
+            ("older-then-newer", ("2", "4")),
+            ("newer-then-older", ("4", "2")),
+        ):
+            with self.subTest(name=name):
+                event_path = self.tmp_path / f"unreadable-reviews-{name}.jsonl"
+                event_path.write_text(
+                    "".join(
+                        json.dumps(record) + "\n"
+                        for record in (
+                            {
+                                "name": events.REVIEW_CYCLE_EVENT,
+                                "payload": {
+                                    "cycle": 2,
+                                    "fingerprints": ["finding:legacy"],
+                                },
+                            },
+                            *(
+                                {
+                                    "name": events.REVIEW_REPAIR_REOPENED_EVENT,
+                                    "payload": {
+                                        "source_review_session_id": source,
+                                        "materialized": True,
+                                        "current_fingerprints": [
+                                            f"finding:source-{source}"
+                                        ],
+                                    },
+                                }
+                                for source in sources
+                            ),
+                        )
+                    ),
+                    encoding="utf-8",
+                )
+
+                self.assertEqual(
+                    ("finding:source-4",),
+                    runner._review_cycle_state(event_path, snapshot)[
+                        "previous_fingerprints"
+                    ],
+                )
+
+    def test_zero_cycle_reopen_baseline_orders_sources(self) -> None:
+        for name, sources in (
+            ("older-then-newer", ("2", "4")),
+            ("newer-then-older", ("4", "2")),
+        ):
+            with self.subTest(name=name):
+                event_path = self.tmp_path / f"zero-cycle-{name}.jsonl"
+                event_path.write_text(
+                    "".join(
+                        json.dumps(
+                            {
+                                "name": events.REVIEW_REPAIR_REOPENED_EVENT,
+                                "payload": {
+                                    "source_review_session_id": source,
+                                    "materialized": True,
+                                    "current_fingerprints": [
+                                        f"finding:source-{source}"
+                                    ],
+                                },
+                            }
+                        )
+                        + "\n"
+                        for source in sources
+                    ),
+                    encoding="utf-8",
+                )
+
+                state_payload = runner._review_cycle_state(event_path)
+
+                self.assertEqual(1, state_payload["cycle"])
+                self.assertEqual(
+                    ("finding:source-4",),
+                    state_payload["previous_fingerprints"],
+                )
+
+    def test_legacy_event_without_lineage_counts_once_with_children(
+        self,
+    ) -> None:
+        write_plan_with_ids(
+            self.plan_dir,
+            (("1", "complete"), ("2", "complete"), ("2.1", "pending")),
+        )
+        review_body = runner.build_generated_review_session_body(
+            plans.parse_session_id("2"),
+            review_harness="claude",
+            plan_dir=self.plan_dir,
+        ).replace("- **Status**: pending", "- **Status**: complete")
+        (self.plan_dir / "session-2.md").write_text(
+            review_body, encoding="utf-8"
+        )
+        child_path = self.plan_dir / "session-2.1.md"
+        child_path.write_text(
+            review_repair.REVIEW_REPAIR_SESSION_MARKER
+            + "\n"
+            + review_repair.REVIEW_REPAIR_SESSION_VERSION_MARKER_TEMPLATE.format(
+                version=review_repair.GENERATED_REVIEW_REPAIR_SESSION_VERSION
+            )
+            + "\n"
+            + child_path.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        event_path = self.tmp_path / "events.jsonl"
+        event_path.write_text(
+            json.dumps(
+                {
+                    "name": events.REVIEW_CYCLE_EVENT,
+                    "payload": {
+                        "cycle": 1,
+                        "disposition": (
+                            runner.REVIEW_CYCLE_DISPOSITION_REPAIRS
+                        ),
+                        "fingerprints": ["finding:legacy"],
+                        "max_review_fix_cycles": 1,
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        snapshot = plans.inspect_plan(self.plan_dir)
+
+        event_only = review_continuation.review_cycle_state(event_path)
+        reconciled = review_continuation.review_cycle_state(
+            event_path, snapshot
+        )
+        projected = review_continuation.evaluate_review_continuation(
+            snapshot, event_path
+        )
+
+        self.assertEqual(1, event_only["repairs_materialized"])
+        self.assertEqual(
+            event_only["repairs_materialized"],
+            reconciled["repairs_materialized"],
+        )
+        self.assertEqual(1, projected.historical_materializations)
+        self.assertEqual(2, projected.minimum_required_cap)
+
+    def test_cap_enforcement_counts_children_after_cycle_event_crash(
+        self,
+    ) -> None:
+        finding = _structured_review_finding()
+        write_plan_with_ids(
+            self.plan_dir,
+            (
+                ("1", "complete"),
+                ("2", "complete"),
+                ("2.1", "complete"),
+                ("3", "complete"),
+            ),
+        )
+        for review_id in ("2", "3"):
+            review_body = runner.build_generated_review_session_body(
+                plans.parse_session_id(review_id),
+                review_harness="claude",
+                plan_dir=self.plan_dir,
+            ).replace("- **Status**: pending", "- **Status**: complete")
+            (self.plan_dir / f"session-{review_id}.md").write_text(
+                review_body, encoding="utf-8"
+            )
+        child_path = self.plan_dir / "session-2.1.md"
+        child_path.write_text(
+            review_repair.REVIEW_REPAIR_SESSION_MARKER
+            + "\n"
+            + review_repair.REVIEW_REPAIR_SESSION_VERSION_MARKER_TEMPLATE.format(
+                version=review_repair.GENERATED_REVIEW_REPAIR_SESSION_VERSION
+            )
+            + "\n"
+            + child_path.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        (self.plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
+            "## Findings\n"
+            "- High issue in agent_session_loop/runner.py.\n"
+            "- Context in tests/test_asl_review.py.\n"
+            "- Context in docs/agent-session-loop.md.\n"
+            "Status: 1 Findings (1 high, 0 med, 0 low)\n",
+            encoding="utf-8",
+        )
+        (self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+            json.dumps(
+                {"version": 2, "outcome": "findings", "findings": [finding]}
+            ),
+            encoding="utf-8",
+        )
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        event_path = self.state_dir / "events.jsonl"
+        snapshot = plans.inspect_plan(self.plan_dir)
+        projected_before = review_continuation.evaluate_review_continuation(
+            snapshot, event_path, max_review_fix_cycles=1
+        )
+        self.assertEqual(1, projected_before.historical_materializations)
+        self.assertEqual(2, projected_before.minimum_required_cap)
+
+        payload: dict[str, object] = {
+            "run_id": "run-1",
+            "run_dir": str(self.tmp_path / "run"),
+            "review_cycles": [],
+        }
+        action, after = runner._advance_review_cycle(
+            event_path=event_path,
+            payload=payload,
+            persistence=runner._RunPersistence(),
+            args=argparse.Namespace(
+                state_dir=str(self.state_dir), allow_not_loop_ready=False
+            ),
+            cwd=self.repo_root,
+            session_id="3",
+            session_label="session 3",
+            session_details={"session": "3"},
+            snapshot=snapshot,
+            turn_payload={
+                "review_verdict": {
+                    "passed": True,
+                    "outcome": "findings",
+                    "total_findings": 1,
+                    "findings": [finding],
+                }
+            },
+            max_review_fix_cycles=1,
+        )
+
+        self.assertEqual("complete", action)
+        self.assertIs(snapshot, after)
+        self.assertFalse((self.plan_dir / "session-3.1.md").exists())
+        self.assertEqual(
+            runner.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
+            payload["review_cycles"][0]["disposition"],
+        )
+        enforced = runner._review_cycle_state(event_path, snapshot)
+        projected_after = review_continuation.evaluate_review_continuation(
+            snapshot, event_path, max_review_fix_cycles=1
+        )
+        self.assertEqual(
+            projected_after.historical_materializations,
+            enforced["repairs_materialized"],
+        )
+        self.assertEqual(1, enforced["repairs_materialized"])
+
     def test_advance_review_cycle_pauses_on_malformed_repair(self) -> None:
         # Pre-existing children trip the materializer's idempotency guard,
         # which is one of the fail-closed malformed-review-repair paths.
@@ -1318,6 +2245,365 @@ class ReviewRepairCycleTests(unittest.TestCase):
             if record["name"] == events.REVIEW_CYCLE_EVENT
         ]
 
+    def _review_reopen_events(self) -> list[dict[str, object]]:
+        return [
+            record["payload"]
+            for record in read_jsonl(self._events_path())
+            if record["name"] == events.REVIEW_REPAIR_REOPENED_EVENT
+        ]
+
+    def _write_completed_review_history(
+        self,
+        plan_dir: Path,
+        *,
+        review_ids: tuple[str, ...],
+        repair_ids: tuple[str, ...] = (),
+    ) -> None:
+        session_ids = ("1", *review_ids, *repair_ids)
+        write_plan_with_ids(
+            plan_dir,
+            tuple(
+                (session_id, "complete")
+                for session_id in sorted(
+                    session_ids,
+                    key=lambda item: plans.parse_session_id(item).sort_key,
+                )
+            ),
+        )
+        for review_id in review_ids:
+            review_body = runner.build_generated_review_session_body(
+                plans.parse_session_id(review_id),
+                review_harness="claude",
+                plan_dir=plan_dir,
+            ).replace("- **Status**: pending", "- **Status**: complete")
+            (plan_dir / f"session-{review_id}.md").write_text(
+                review_body, encoding="utf-8"
+            )
+        for repair_id in repair_ids:
+            repair_path = plan_dir / f"session-{repair_id}.md"
+            repair_path.write_text(
+                review_repair.REVIEW_REPAIR_SESSION_MARKER
+                + "\n"
+                + review_repair.REVIEW_REPAIR_SESSION_VERSION_MARKER_TEMPLATE.format(
+                    version=review_repair.GENERATED_REVIEW_REPAIR_SESSION_VERSION
+                )
+                + "\n"
+                + repair_path.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+        (plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
+            f"# Final review\n\n{review.REVIEW_STATUS_ALL_CLEAR}\n",
+            encoding="utf-8",
+        )
+        (plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+            json.dumps(
+                {"version": 2, "outcome": "all-clear", "findings": []}
+            ),
+            encoding="utf-8",
+        )
+
+    def test_legacy_cycle_does_not_claim_newer_eventless_review(self) -> None:
+        self._write_completed_review_history(
+            self.plan_dir,
+            review_ids=("2", "3"),
+            repair_ids=("2.1",),
+        )
+        event_path = self._events_path()
+        events.append_event(
+            event_path,
+            events.Event(
+                events.REVIEW_CYCLE_EVENT,
+                {
+                    "cycle": 1,
+                    "disposition": runner.REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED,
+                    "fingerprints": ["finding:legacy"],
+                    "repair_session_ids": [],
+                    "max_review_fix_cycles": 0,
+                },
+            ),
+        )
+        events.append_event(
+            event_path,
+            events.Event(
+                events.REVIEW_REPAIR_REOPENED_EVENT,
+                {
+                    "source_cycle": 1,
+                    "source_review_session_id": "2",
+                    "repair_session_ids": ["2.1"],
+                    "materialized": True,
+                    "before_max_review_fix_cycles": 0,
+                    "after_max_review_fix_cycles": 1,
+                },
+            ),
+        )
+
+        projected = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir),
+            event_path,
+            max_review_fix_cycles=2,
+        )
+
+        self.assertEqual("3", projected.review_session_id)
+        self.assertIsNone(projected.source_cycle)
+        self.assertEqual("terminal", projected.action)
+        self.assertFalse(projected.eligible)
+        self.assertEqual("all-clear", projected.source_disposition)
+        self.assertEqual("all-clear", projected.blocker)
+
+        reopen_events_before = self._review_reopen_events()
+        completed, payload = self._run_cycles(
+            review_outcomes="all-clear",
+            extra_args=[
+                "--allow-not-loop-ready",
+                "--max-review-fix-cycles",
+                "2",
+            ],
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual("terminal", payload["review_resume"]["action"])
+        self.assertEqual("3", payload["review_resume"]["review_session_id"])
+        self.assertEqual("all-clear", payload["review_fix_disposition"])
+        self.assertEqual(reopen_events_before, self._review_reopen_events())
+        self.assertTrue(
+            all(
+                record.get("materialized") is True
+                for record in self._review_reopen_events()
+            )
+        )
+
+    def test_legacy_cycle_source_resolution_preserves_controls(self) -> None:
+        cases = (
+            (
+                "one-review-legacy",
+                ("2",),
+                ({"cycle": 1, "disposition": "all-clear"},),
+                "2",
+                1,
+            ),
+            (
+                "explicit-lineage",
+                ("2", "3"),
+                (
+                    {
+                        "cycle": 1,
+                        "review_session_id": "3",
+                        "disposition": "all-clear",
+                    },
+                ),
+                "3",
+                1,
+            ),
+            (
+                "multiple-legacy-positions",
+                ("2", "3"),
+                (
+                    {"cycle": 1, "disposition": "all-clear"},
+                    {"cycle": 2, "disposition": "all-clear"},
+                ),
+                "3",
+                2,
+            ),
+        )
+        for name, review_ids, cycle_payloads, source_id, source_cycle in cases:
+            with self.subTest(name=name):
+                plan_dir = self.tmp_path / name
+                self._write_completed_review_history(
+                    plan_dir, review_ids=review_ids
+                )
+                event_path = self.tmp_path / f"{name}.jsonl"
+                event_path.write_text(
+                    "".join(
+                        json.dumps(
+                            {
+                                "name": events.REVIEW_CYCLE_EVENT,
+                                "payload": payload,
+                            }
+                        )
+                        + "\n"
+                        for payload in cycle_payloads
+                    ),
+                    encoding="utf-8",
+                )
+
+                projected = review_continuation.evaluate_review_continuation(
+                    plans.inspect_plan(plan_dir), event_path
+                )
+
+                self.assertEqual(source_id, projected.review_session_id)
+                self.assertEqual(source_cycle, projected.source_cycle)
+                self.assertEqual("all-clear", projected.source_disposition)
+                self.assertEqual("terminal", projected.action)
+                self.assertEqual("all-clear", projected.blocker)
+
+    def test_eventless_all_clear_review_projects_terminal(self) -> None:
+        write_completed_review_plan(self.plan_dir, [])
+        event_path = self._events_path()
+        self.assertFalse(event_path.exists())
+
+        projected = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir), event_path
+        )
+
+        self.assertEqual("terminal", projected.action)
+        self.assertFalse(projected.eligible)
+        self.assertEqual("all-clear", projected.source_disposition)
+        self.assertEqual("all-clear", projected.blocker)
+        recovery = workbench.build_workbench_recovery(
+            _discovered(self.plan_dir), state_dir=self.state_dir
+        )
+        self.assertEqual("none", recovery.kind)
+
+        completed, payload = self._run_cycles(
+            review_outcomes="all-clear",
+            extra_args=["--allow-not-loop-ready"],
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual("terminal", payload["review_resume"]["action"])
+        self.assertEqual("all-clear", payload["review_resume"]["blocker"])
+        self.assertEqual("all-clear", payload["review_fix_disposition"])
+        self.assertEqual([], self._review_reopen_events())
+
+    def test_eventless_all_clear_defers_to_durable_repair_children(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "pending",
+                (("2.1", "pending"),),
+                "run-repairs",
+                True,
+                None,
+            ),
+            (
+                "complete",
+                (("2.1", "complete"),),
+                "rereview",
+                True,
+                None,
+            ),
+            (
+                "mixed",
+                (("2.1", "complete"), ("2.2", "blocked")),
+                "terminal",
+                False,
+                "repair-sessions-not-runnable",
+            ),
+        )
+        for name, child_statuses, action, eligible, blocker in cases:
+            with self.subTest(name=name):
+                plan_dir = self.tmp_path / f"eventless-{name}"
+                child_ids = tuple(
+                    session_id for session_id, _status in child_statuses
+                )
+                self._write_completed_review_history(
+                    plan_dir,
+                    review_ids=("2",),
+                    repair_ids=child_ids,
+                )
+                for child_id, status in child_statuses:
+                    child_path = plan_dir / f"session-{child_id}.md"
+                    child_path.write_text(
+                        child_path.read_text(encoding="utf-8").replace(
+                            "- **Status**: complete",
+                            f"- **Status**: {status}",
+                        ),
+                        encoding="utf-8",
+                    )
+
+                projected = review_continuation.evaluate_review_continuation(
+                    plans.inspect_plan(plan_dir),
+                    self.tmp_path / f"eventless-{name}.jsonl",
+                )
+
+                self.assertEqual("2", projected.review_session_id)
+                self.assertIsNone(projected.source_cycle)
+                self.assertEqual("all-clear", projected.source_disposition)
+                self.assertEqual(action, projected.action)
+                self.assertEqual(eligible, projected.eligible)
+                self.assertEqual(blocker, projected.blocker)
+                self.assertNotEqual("all-clear", projected.blocker)
+
+    def test_eventless_all_clear_with_missing_reopen_children_pauses(
+        self,
+    ) -> None:
+        self._write_completed_review_history(
+            self.plan_dir,
+            review_ids=("2",),
+            repair_ids=("2.1",),
+        )
+        child_path = self.plan_dir / "session-2.1.md"
+        self.assertTrue(child_path.is_file())
+        child_path.unlink()
+        event_path = self._events_path()
+        events.append_event(
+            event_path,
+            events.Event(
+                events.REVIEW_REPAIR_REOPENED_EVENT,
+                {
+                    "source_cycle": None,
+                    "source_review_session_id": "2",
+                    "source_disposition": None,
+                    "repair_session_ids": ["2.1"],
+                    "materialized": True,
+                    "result": "ok",
+                    "after_max_review_fix_cycles": 1,
+                },
+            ),
+        )
+
+        projected = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir),
+            event_path,
+            max_review_fix_cycles=1,
+        )
+
+        self.assertEqual("2", projected.review_session_id)
+        self.assertIsNone(projected.source_cycle)
+        self.assertEqual("all-clear", projected.source_disposition)
+        self.assertEqual("terminal", projected.action)
+        self.assertFalse(projected.eligible)
+        self.assertEqual("repair-sessions-missing", projected.blocker)
+        self.assertEqual(("2.1",), projected.repair_session_ids)
+
+        completed, payload = self._run_cycles(
+            review_outcomes="all-clear",
+            extra_args=[
+                "--allow-not-loop-ready",
+                "--max-review-fix-cycles",
+                "1",
+            ],
+        )
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["paused"])
+        self.assertEqual(
+            events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
+            payload["pause_reason"],
+        )
+        self.assertEqual("terminal", payload["review_resume"]["action"])
+        self.assertEqual(
+            "repair-sessions-missing", payload["review_resume"]["blocker"]
+        )
+        self.assertIsNone(payload["review_fix_disposition"])
+
+        recovery = workbench.build_workbench_recovery(
+            _discovered(self.plan_dir), state_dir=self.state_dir
+        )
+        self.assertEqual("review-continuation", recovery.kind)
+        self.assertEqual("Review continuation is inconsistent", recovery.title)
+        self.assertEqual("error", recovery.severity)
+        self.assertEqual(payload["pause_message"], recovery.summary)
+        self.assertEqual(payload["review_resume"], recovery.review_resume)
+
     def test_findings_repairs_all_clear_completes_in_one_invocation(
         self,
     ) -> None:
@@ -1413,6 +2699,89 @@ class ReviewRepairCycleTests(unittest.TestCase):
         self.assertTrue((self.plan_dir / "session-2.1.md").is_file())
         self.assertFalse((self.plan_dir / "session-3.1.md").exists())
 
+        # A larger unused cap cannot reopen the repeated-finding circuit
+        # breaker or append another review on a later direct invocation.
+        resumed, resumed_payload = self._run_cycles(
+            review_outcomes="findings,findings-drift,all-clear",
+            extra_args=["--max-review-fix-cycles", "8"],
+        )
+        self.assertEqual(0, resumed.returncode, resumed.stderr)
+        self.assertEqual([], resumed_payload["turns"])
+        self.assertEqual("terminal", resumed_payload["review_resume"]["action"])
+        self.assertEqual(
+            "findings-repeated", resumed_payload["review_resume"]["blocker"]
+        )
+        self.assertFalse((self.plan_dir / "session-4.md").exists())
+
+    def test_eventless_repeated_rereview_stops_before_rematerialization(
+        self,
+    ) -> None:
+        self._write_plan()
+
+        # Stop after the first findings review materializes its child. Then
+        # model the crash window after the child completes and the rereview
+        # completes, but before _advance_review_cycle appends that rereview's
+        # findings-repeated cycle record.
+        first, first_payload = self._run_cycles(
+            review_outcomes="findings",
+            extra_args=["--max-sessions", "1"],
+        )
+        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertEqual("max-sessions", first_payload["reason"])
+        first_cycle = first_payload["review_cycles"][0]
+        fingerprint = first_cycle["fingerprints"][0]
+        self.assertEqual(
+            runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+            first_cycle["disposition"],
+        )
+
+        repair_path = self.plan_dir / "session-2.1.md"
+        repair_path.write_text(
+            repair_path.read_text(encoding="utf-8").replace(
+                "- **Status**: pending", "- **Status**: complete"
+            ),
+            encoding="utf-8",
+        )
+        rereview, created = runner.ensure_generated_review_session(
+            self.plan_dir, review_harness="claude"
+        )
+        self.assertTrue(created)
+        self.assertEqual("3", rereview.id)
+        rereview.path.write_text(
+            rereview.path.read_text(encoding="utf-8").replace(
+                "- **Status**: pending", "- **Status**: complete"
+            ),
+            encoding="utf-8",
+        )
+
+        projected = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir),
+            self._events_path(),
+            max_review_fix_cycles=2,
+        )
+        self.assertEqual("terminal", projected.action)
+        self.assertFalse(projected.eligible)
+        self.assertEqual(
+            runner.REVIEW_CYCLE_DISPOSITION_REPEATED,
+            projected.blocker,
+        )
+        self.assertEqual((fingerprint,), projected.current_fingerprints)
+
+        resumed, resumed_payload = self._run_cycles(
+            review_outcomes="findings,findings-drift",
+            extra_args=["--max-review-fix-cycles", "2"],
+        )
+
+        self.assertEqual(0, resumed.returncode, resumed.stderr)
+        self.assertEqual([], resumed_payload["turns"])
+        self.assertEqual("terminal", resumed_payload["review_resume"]["action"])
+        self.assertEqual(
+            runner.REVIEW_CYCLE_DISPOSITION_REPEATED,
+            resumed_payload["review_resume"]["blocker"],
+        )
+        self.assertFalse((self.plan_dir / "session-3.1.md").exists())
+        self.assertEqual(1, len(self._review_cycle_events()))
+
     def test_zero_cycles_reviews_but_creates_no_repairs(self) -> None:
         self._write_plan()
 
@@ -1487,6 +2856,843 @@ class ReviewRepairCycleTests(unittest.TestCase):
             payload["review_fix_disposition"],
         )
         self.assertFalse((self.plan_dir / "session-2.1.md").exists())
+
+    def test_completed_review_reopens_only_when_absolute_cap_increases(
+        self,
+    ) -> None:
+        self._write_plan()
+        scripted = "findings,findings-new,all-clear"
+
+        first, first_payload = self._run_cycles(
+            review_outcomes=scripted,
+            extra_args=["--max-review-fix-cycles", "0"],
+        )
+
+        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertEqual("cycles-disabled", first_payload["review_fix_disposition"])
+        self.assertEqual(
+            "higher-cap-required", first_payload["review_resume"]["blocker"]
+        )
+        first_cycle = self._review_cycle_events()[0]
+        self.assertIsNotNone(first_cycle["review_output_sha256"])
+        self.assertIsNotNone(first_cycle["review_artifact_sha256"])
+        artifact_before_noop = (
+            self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME
+        ).read_bytes()
+
+        same, same_payload = self._run_cycles(
+            review_outcomes=scripted,
+            extra_args=["--max-review-fix-cycles", "0"],
+        )
+
+        self.assertEqual(0, same.returncode, same.stderr)
+        self.assertEqual([], same_payload["turns"])
+        self.assertEqual(
+            "higher-cap-required", same_payload["review_resume"]["blocker"]
+        )
+        self.assertEqual(
+            artifact_before_noop,
+            (self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).read_bytes(),
+        )
+        self.assertFalse((self.plan_dir / "session-2.1.md").exists())
+        self.assertEqual([], self._review_reopen_events())
+
+        second, second_payload = self._run_cycles(
+            review_outcomes=scripted,
+            extra_args=["--max-review-fix-cycles", "1"],
+        )
+
+        self.assertEqual(0, second.returncode, second.stderr)
+        self.assertEqual(
+            ["2.1", "3"],
+            [turn["session_id"] for turn in second_payload["turns"]],
+        )
+        self.assertEqual(
+            "cycle-cap-exhausted", second_payload["review_fix_disposition"]
+        )
+        self.assertEqual(
+            "higher-cap-required", second_payload["review_resume"]["blocker"]
+        )
+        first_reopen = self._review_reopen_events()[0]
+        self.assertTrue(first_reopen["materialized"])
+        self.assertEqual("2", first_reopen["source_review_session_id"])
+        self.assertEqual(["2.1"], first_reopen["repair_session_ids"])
+        self.assertEqual(0, first_reopen["historical_materializations_before"])
+        self.assertEqual(1, first_reopen["historical_materializations_after"])
+        self.assertEqual(0, first_reopen["before_max_review_fix_cycles"])
+        self.assertEqual(1, first_reopen["after_max_review_fix_cycles"])
+        self.assertIsNotNone(first_reopen["current_review_output_sha256"])
+        self.assertIsNotNone(first_reopen["current_review_artifact_sha256"])
+
+        artifact_before_second_noop = (
+            self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME
+        ).read_bytes()
+        lower, lower_payload = self._run_cycles(
+            review_outcomes=scripted,
+            extra_args=["--max-review-fix-cycles", "1"],
+        )
+        self.assertEqual(0, lower.returncode, lower.stderr)
+        self.assertEqual([], lower_payload["turns"])
+        self.assertEqual(
+            artifact_before_second_noop,
+            (self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).read_bytes(),
+        )
+        self.assertFalse((self.plan_dir / "session-3.1.md").exists())
+
+        third, third_payload = self._run_cycles(
+            review_outcomes=scripted,
+            extra_args=["--max-review-fix-cycles", "2"],
+        )
+
+        self.assertEqual(0, third.returncode, third.stderr)
+        self.assertEqual(
+            ["3.1", "4"],
+            [turn["session_id"] for turn in third_payload["turns"]],
+        )
+        self.assertEqual("all-clear", third_payload["review_fix_disposition"])
+        self.assertEqual("terminal", third_payload["review_resume"]["action"])
+        reopen_events = self._review_reopen_events()
+        self.assertEqual(2, len(reopen_events))
+        self.assertEqual("3", reopen_events[1]["source_review_session_id"])
+        self.assertEqual(["3.1"], reopen_events[1]["repair_session_ids"])
+        self.assertEqual(1, reopen_events[1]["historical_materializations_before"])
+        self.assertEqual(2, reopen_events[1]["historical_materializations_after"])
+        self.assertEqual(1, reopen_events[1]["before_max_review_fix_cycles"])
+        self.assertEqual(2, reopen_events[1]["after_max_review_fix_cycles"])
+
+    def test_repair_sessions_missing_blocker_is_not_reported_all_complete(
+        self,
+    ) -> None:
+        self._write_plan()
+        first, first_payload = self._run_cycles(
+            review_outcomes="findings,all-clear",
+            extra_args=[
+                "--max-review-fix-cycles",
+                "1",
+                "--max-sessions",
+                "1",
+            ],
+        )
+        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertEqual("max-sessions", first_payload["reason"])
+        child_path = self.plan_dir / "session-2.1.md"
+        self.assertTrue(child_path.is_file())
+
+        child_path.unlink()
+        resumed, payload = self._run_cycles(
+            review_outcomes="findings,all-clear",
+            extra_args=["--max-review-fix-cycles", "1"],
+        )
+
+        self.assertEqual(1, resumed.returncode, resumed.stderr)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["paused"])
+        self.assertNotEqual("all-complete", payload["reason"])
+        self.assertEqual(
+            events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
+            payload["pause_reason"],
+        )
+        self.assertEqual("terminal", payload["review_resume"]["action"])
+        self.assertEqual(
+            "repair-sessions-missing", payload["review_resume"]["blocker"]
+        )
+        self.assertIsNone(payload["review_fix_disposition"])
+
+        finished_events = [
+            record["payload"]
+            for record in read_jsonl(self._events_path())
+            if record["name"] == "run_finished"
+            and record["payload"]["run_id"] == payload["run_id"]
+        ]
+        self.assertEqual(1, len(finished_events))
+        self.assertIsNone(finished_events[0]["review_fix_disposition"])
+
+        recovery = workbench.build_workbench_recovery(
+            _discovered(self.plan_dir), state_dir=self.state_dir
+        )
+        self.assertEqual("review-continuation", recovery.kind)
+        self.assertEqual("Review continuation is inconsistent", recovery.title)
+        self.assertEqual("error", recovery.severity)
+        self.assertEqual(payload["pause_message"], recovery.summary)
+        self.assertEqual(payload["review_resume"], recovery.review_resume)
+
+    def test_partial_repair_child_deletion_pauses_as_missing_lineage(
+        self,
+    ) -> None:
+        self._write_completed_review_history(
+            self.plan_dir,
+            review_ids=("2",),
+            repair_ids=("2.1", "2.2"),
+        )
+        missing_child = self.plan_dir / "session-2.2.md"
+        self.assertTrue(missing_child.is_file())
+        missing_child.unlink()
+        event_path = self._events_path()
+        events.append_event(
+            event_path,
+            events.Event(
+                events.REVIEW_CYCLE_EVENT,
+                {
+                    "cycle": 1,
+                    "review_session_id": "2",
+                    "disposition": "repairs-materialized",
+                    "repair_session_ids": ["2.1", "2.2"],
+                    "max_review_fix_cycles": 1,
+                },
+            ),
+        )
+
+        projected = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir),
+            event_path,
+            max_review_fix_cycles=1,
+        )
+
+        self.assertEqual("2", projected.review_session_id)
+        self.assertEqual("terminal", projected.action)
+        self.assertFalse(projected.eligible)
+        self.assertEqual("repair-sessions-missing", projected.blocker)
+        self.assertEqual(("2.1", "2.2"), projected.repair_session_ids)
+        self.assertEqual(("2.1",), projected.completed_repair_session_ids)
+
+        completed, payload = self._run_cycles(
+            review_outcomes="all-clear",
+            extra_args=[
+                "--allow-not-loop-ready",
+                "--max-review-fix-cycles",
+                "1",
+            ],
+        )
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["paused"])
+        self.assertEqual(
+            events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
+            payload["pause_reason"],
+        )
+        self.assertEqual("terminal", payload["review_resume"]["action"])
+        self.assertEqual(
+            "repair-sessions-missing",
+            payload["review_resume"]["blocker"],
+        )
+        self.assertIsNone(payload["review_fix_disposition"])
+
+        recovery = workbench.build_workbench_recovery(
+            _discovered(self.plan_dir), state_dir=self.state_dir
+        )
+        self.assertEqual("review-continuation", recovery.kind)
+        self.assertEqual("Review continuation is inconsistent", recovery.title)
+        self.assertEqual("error", recovery.severity)
+        self.assertEqual(payload["pause_message"], recovery.summary)
+        self.assertEqual(payload["review_resume"], recovery.review_resume)
+
+    def test_reopen_rechecks_corrected_artifact_and_preserves_legacy_lineage(
+        self,
+    ) -> None:
+        self._write_plan()
+        first, _ = self._run_cycles(
+            review_outcomes="findings,all-clear",
+            extra_args=["--max-review-fix-cycles", "0"],
+        )
+        self.assertEqual(0, first.returncode, first.stderr)
+
+        # Model a legacy source cycle whose persisted event predates digests.
+        event_path = self._events_path()
+        records = read_jsonl(event_path)
+        for record in records:
+            if record["name"] == events.REVIEW_CYCLE_EVENT:
+                record["payload"].pop("review_output_sha256", None)
+                record["payload"].pop("review_artifact_sha256", None)
+        event_path.write_text(
+            "".join(json.dumps(record) + "\n" for record in records),
+            encoding="utf-8",
+        )
+
+        findings = [
+            _structured_review_finding(
+                finding_id=f"revised-{index}",
+                title=f"Revised finding {index}",
+                evidence=[
+                    {
+                        "path": f"agent_session_loop/revised_{index}.py:{index}",
+                        "symbol": f"target_{index}",
+                    }
+                ],
+                repair_group=f"group-{index}",
+                verification_checks=[
+                    {
+                        "type": "command",
+                        "name": f"verify-revised-{index}",
+                        "argv": ["python3", "-c", "pass"],
+                    }
+                ],
+            )
+            for index in range(1, 10)
+        ]
+        artifact_path = self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME
+        artifact_path.write_text(
+            json.dumps(
+                {"version": 2, "outcome": "findings", "findings": findings}
+            ),
+            encoding="utf-8",
+        )
+        review_path = self.plan_dir / review.FINAL_REVIEW_FILENAME
+        review_path.write_text(
+            review_path.read_text(encoding="utf-8").replace(
+                "Status: 1 Findings (1 high, 0 med, 0 low)",
+                "Status: 9 Findings (9 high, 0 med, 0 low)",
+            ),
+            encoding="utf-8",
+        )
+        invalid_bytes = artifact_path.read_bytes()
+
+        invalid, invalid_payload = self._run_cycles(
+            review_outcomes="findings,all-clear",
+            extra_args=["--max-review-fix-cycles", "1"],
+        )
+
+        self.assertEqual(1, invalid.returncode)
+        self.assertEqual(
+            "malformed-review-repair", invalid_payload["pause_reason"]
+        )
+        self.assertEqual("artifact-invalid", invalid_payload["review_resume"]["blocker"])
+        self.assertIn(
+            "exceed the maximum of 8", invalid_payload["pause_message"]
+        )
+        self.assertEqual(invalid_bytes, artifact_path.read_bytes())
+        self.assertEqual([], sorted(self.plan_dir.glob("session-2.*.md")))
+        self.assertFalse(self._review_reopen_events()[-1]["materialized"])
+
+        # A revised, internally consistent v2 artifact may regroup findings.
+        findings[-1]["repair_group"] = "group-8"
+        artifact_path.write_text(
+            json.dumps(
+                {"version": 2, "outcome": "findings", "findings": findings}
+            ),
+            encoding="utf-8",
+        )
+        resumed, resumed_payload = self._run_cycles(
+            review_outcomes="findings,all-clear",
+            extra_args=["--max-review-fix-cycles", "1"],
+        )
+
+        self.assertEqual(0, resumed.returncode, resumed.stderr)
+        self.assertEqual(
+            [*(f"2.{index}" for index in range(1, 9)), "3"],
+            [turn["session_id"] for turn in resumed_payload["turns"]],
+        )
+        success = [
+            record for record in self._review_reopen_events() if record["materialized"]
+        ][0]
+        self.assertIsNone(success["source_review_output_sha256"])
+        self.assertIsNone(success["source_review_artifact_sha256"])
+        self.assertNotEqual(
+            success["previous_fingerprints"], success["current_fingerprints"]
+        )
+        self.assertEqual(
+            [f"2.{index}" for index in range(1, 9)],
+            success["repair_session_ids"],
+        )
+
+    def test_post_reopen_review_repeats_against_corrected_fingerprints(
+        self,
+    ) -> None:
+        self._write_plan()
+        first, first_payload = self._run_cycles(
+            review_outcomes="findings,findings-new",
+            extra_args=["--max-review-fix-cycles", "0"],
+        )
+        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertEqual(
+            runner.REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED,
+            first_payload["review_fix_disposition"],
+        )
+
+        artifact_path = self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME
+        artifact_path.write_text("{not valid json", encoding="utf-8")
+        invalid, invalid_payload = self._run_cycles(
+            review_outcomes="findings,findings-new",
+            extra_args=["--max-review-fix-cycles", "1"],
+        )
+        self.assertEqual(1, invalid.returncode)
+        self.assertEqual(
+            events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
+            invalid_payload["pause_reason"],
+        )
+        self.assertFalse(self._review_reopen_events()[-1]["materialized"])
+
+        # Model a completed findings rereview whose review_cycle event was
+        # lost. Its corrected artifact is then materialized successfully,
+        # leaving the latest durable cycle attached to the older review 2.
+        eventless_review, created = runner.ensure_generated_review_session(
+            self.plan_dir, review_harness="claude"
+        )
+        self.assertTrue(created)
+        self.assertEqual("3", eventless_review.id)
+        eventless_review.path.write_text(
+            eventless_review.path.read_text(encoding="utf-8").replace(
+                "- **Status**: pending", "- **Status**: complete"
+            ),
+            encoding="utf-8",
+        )
+
+        corrected = _structured_review_finding(
+            finding_id="corrected-cycle-finding",
+            title="Missing error handling in verification executor",
+            evidence=[
+                {
+                    "path": "agent_session_loop/verification.py:88",
+                    "symbol": "run_check",
+                }
+            ],
+            repair_group="verification-errors",
+        )
+        corrected_fingerprint = review.finding_fingerprint(corrected)
+        self.assertNotEqual(
+            first_payload["review_cycles"][0]["fingerprints"],
+            [corrected_fingerprint],
+        )
+        artifact_path.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "outcome": "findings",
+                    "findings": [corrected],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        materialized = review_repair.materialize_review_repair_sessions(
+            self.plan_dir,
+            review_session_id="3",
+            cwd=self.repo_root,
+            state_dir=self.state_dir,
+        )
+        self.assertTrue(materialized.ok, materialized.error)
+        self.assertEqual(
+            ["3.1"], [child.session_id.value for child in materialized.children]
+        )
+        events.append_event(
+            self._events_path(),
+            events.Event(
+                events.REVIEW_REPAIR_REOPENED_EVENT,
+                {
+                    "run_id": "eventless-review-reopen",
+                    "source_cycle": 2,
+                    "source_review_session_id": "3",
+                    "source_disposition": (
+                        runner.REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED
+                    ),
+                    "previous_fingerprints": None,
+                    "current_fingerprints": [corrected_fingerprint],
+                    "repair_session_ids": ["3.1"],
+                    "materialized": True,
+                    "recovered": False,
+                    "result": "materialized",
+                    "historical_materializations_before": 0,
+                    "historical_materializations_after": 1,
+                    "minimum_required_cap": 1,
+                    "before_max_review_fix_cycles": 0,
+                    "after_max_review_fix_cycles": 1,
+                },
+            ),
+        )
+        before_rereview = runner._review_cycle_state(
+            self._events_path(), plans.inspect_plan(self.plan_dir)
+        )
+        self.assertEqual(
+            (corrected_fingerprint,), before_rereview["previous_fingerprints"]
+        )
+
+        resumed, resumed_payload = self._run_cycles(
+            review_outcomes="findings,findings-new",
+            extra_args=["--max-review-fix-cycles", "1"],
+        )
+
+        self.assertEqual(0, resumed.returncode, resumed.stderr)
+        self.assertEqual(
+            ["3.1", "4"],
+            [turn["session_id"] for turn in resumed_payload["turns"]],
+        )
+        self.assertEqual(
+            runner.REVIEW_CYCLE_DISPOSITION_REPEATED,
+            resumed_payload["review_fix_disposition"],
+        )
+        post_reopen = resumed_payload["review_cycles"][-1]
+        self.assertEqual("4", post_reopen["review_session_id"])
+        self.assertEqual([corrected_fingerprint], post_reopen["fingerprints"])
+        self.assertEqual(
+            [corrected_fingerprint], post_reopen["repeated_findings"]
+        )
+        self.assertEqual([], post_reopen["introduced_findings"])
+        successful_reopen = [
+            record
+            for record in self._review_reopen_events()
+            if record["materialized"]
+        ][0]
+        self.assertEqual("3", successful_reopen["source_review_session_id"])
+        self.assertEqual(
+            [corrected_fingerprint],
+            successful_reopen["current_fingerprints"],
+        )
+        self.assertFalse((self.plan_dir / "session-4.1.md").exists())
+
+    def test_reopened_children_rereview_across_max_sessions_boundary(
+        self,
+    ) -> None:
+        self._write_plan()
+        first, _ = self._run_cycles(
+            review_outcomes="findings,all-clear",
+            extra_args=["--max-review-fix-cycles", "0"],
+        )
+        self.assertEqual(0, first.returncode, first.stderr)
+
+        artifact_path = self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME
+        original = json.loads(artifact_path.read_text(encoding="utf-8"))
+        extra_finding = dict(original["findings"][0])
+        extra_finding.update(
+            {
+                "id": "cycle-finding-extra",
+                "title": "A second repair group",
+                "evidence": [
+                    {
+                        "path": "agent_session_loop/review.py:200",
+                        "symbol": "load_review_verdict",
+                    }
+                ],
+                "repair_group": "review-loading",
+                "verification_checks": [
+                    {
+                        "type": "command",
+                        "name": "review-loading-check",
+                        "argv": ["python3", "-c", "pass"],
+                    }
+                ],
+            }
+        )
+        original["findings"].append(extra_finding)
+        artifact_path.write_text(json.dumps(original), encoding="utf-8")
+        review_path = self.plan_dir / review.FINAL_REVIEW_FILENAME
+        review_path.write_text(
+            review_path.read_text(encoding="utf-8").replace(
+                "Status: 1 Findings (1 high, 0 med, 0 low)",
+                "Status: 2 Findings (2 high, 0 med, 0 low)",
+            ),
+            encoding="utf-8",
+        )
+
+        partial, partial_payload = self._run_cycles(
+            review_outcomes="findings,all-clear",
+            extra_args=[
+                "--max-review-fix-cycles",
+                "1",
+                "--max-sessions",
+                "1",
+            ],
+        )
+
+        self.assertEqual(0, partial.returncode, partial.stderr)
+        self.assertEqual("max-sessions", partial_payload["reason"])
+        self.assertEqual(
+            ["2.1"], [turn["session_id"] for turn in partial_payload["turns"]]
+        )
+        self.assertTrue((self.plan_dir / "session-2.2.md").is_file())
+        self.assertFalse((self.plan_dir / "session-3.md").exists())
+        partial_resume = partial_payload["review_resume"]
+        self.assertEqual(
+            ["2.2"], partial_resume["pending_repair_session_ids"]
+        )
+        self.assertEqual(
+            ["2.1"], partial_resume["completed_repair_session_ids"]
+        )
+        partial_finished = [
+            record["payload"]
+            for record in read_jsonl(self._events_path())
+            if record["name"] == "run_finished"
+            and record["payload"]["run_id"] == partial_payload["run_id"]
+        ]
+        self.assertEqual(1, len(partial_finished))
+        self.assertEqual(
+            partial_resume, partial_finished[0]["review_resume"]
+        )
+
+        final, final_payload = self._run_cycles(
+            review_outcomes="findings,all-clear",
+            extra_args=[
+                "--max-review-fix-cycles",
+                "1",
+                "--max-sessions",
+                "1",
+            ],
+        )
+
+        self.assertEqual(0, final.returncode, final.stderr)
+        self.assertEqual(
+            ["2.2", "3"],
+            [turn["session_id"] for turn in final_payload["turns"]],
+        )
+        self.assertEqual("all-clear", final_payload["review_fix_disposition"])
+        self.assertEqual(1, len(self._review_reopen_events()))
+        self.assertFalse((self.plan_dir / "session-2.3.md").exists())
+        progress = (self.plan_dir / "progress.md").read_text(encoding="utf-8")
+        self.assertEqual(1, progress.count("## Session 2.1 "))
+        self.assertEqual(1, progress.count("## Session 2.2 "))
+        self.assertEqual(1, progress.count("## Session 3 "))
+
+    def test_eventless_materialization_crash_backfills_rereview_baseline(
+        self,
+    ) -> None:
+        eventless_finding = _structured_review_finding(
+            finding_id="cycle-finding-2",
+            title="Missing error handling in verification executor",
+            evidence=[
+                {
+                    "path": "agent_session_loop/verification.py:88",
+                    "symbol": "run_check",
+                }
+            ],
+            repair_group="verification-errors",
+        )
+        eventless_fingerprint = review.finding_fingerprint(eventless_finding)
+        cases = (
+            (
+                "repeats-eventless",
+                "findings-new",
+                runner.REVIEW_CYCLE_DISPOSITION_REPEATED,
+                [eventless_fingerprint],
+                [],
+            ),
+            (
+                "matches-only-older",
+                "findings",
+                runner.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
+                [],
+                None,
+            ),
+        )
+        for (
+            name,
+            rereview_outcome,
+            expected_disposition,
+            expected_repeated,
+            expected_introduced,
+        ) in cases:
+            with self.subTest(name=name):
+                self.plan_dir = self.tmp_path / f"plan-{name}"
+                self.state_dir = self.tmp_path / f"state-{name}"
+                self._write_plan()
+                first, first_payload = self._run_cycles(
+                    review_outcomes="findings",
+                    extra_args=["--max-review-fix-cycles", "0"],
+                )
+                self.assertEqual(0, first.returncode, first.stderr)
+                older_fingerprint = first_payload["review_cycles"][0][
+                    "fingerprints"
+                ][0]
+                self.assertNotEqual(older_fingerprint, eventless_fingerprint)
+
+                eventless_review, created = runner.ensure_generated_review_session(
+                    self.plan_dir, review_harness="claude"
+                )
+                self.assertTrue(created)
+                self.assertEqual("3", eventless_review.id)
+                eventless_review.path.write_text(
+                    eventless_review.path.read_text(encoding="utf-8").replace(
+                        "- **Status**: pending", "- **Status**: complete"
+                    ),
+                    encoding="utf-8",
+                )
+                (self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+                    json.dumps(
+                        {
+                            "version": 2,
+                            "outcome": "findings",
+                            "findings": [eventless_finding],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                materialized = review_repair.materialize_review_repair_sessions(
+                    self.plan_dir,
+                    review_session_id="3",
+                    cwd=self.repo_root,
+                    state_dir=self.state_dir,
+                )
+                self.assertTrue(materialized.ok, materialized.error)
+                self.assertEqual([], self._review_reopen_events())
+
+                projected = review_continuation.evaluate_review_continuation(
+                    plans.inspect_plan(self.plan_dir),
+                    self._events_path(),
+                    max_review_fix_cycles=1,
+                )
+                self.assertIsNone(projected.source_disposition)
+                self.assertEqual("run-repairs", projected.action)
+                self.assertEqual(
+                    (eventless_fingerprint,), projected.current_fingerprints
+                )
+
+                resumed, payload = self._run_cycles(
+                    review_outcomes=rereview_outcome,
+                    extra_args=["--max-review-fix-cycles", "1"],
+                )
+
+                self.assertEqual(0, resumed.returncode, resumed.stderr)
+                self.assertEqual(
+                    ["3.1", "4"],
+                    [turn["session_id"] for turn in payload["turns"]],
+                )
+                reopen_events = self._review_reopen_events()
+                self.assertEqual(1, len(reopen_events))
+                self.assertTrue(reopen_events[0]["recovered"])
+                self.assertEqual(
+                    [eventless_fingerprint],
+                    reopen_events[0]["current_fingerprints"],
+                )
+                rereview_cycle = payload["review_cycles"][-1]
+                self.assertEqual(
+                    expected_disposition, rereview_cycle["disposition"]
+                )
+                self.assertEqual(
+                    expected_repeated, rereview_cycle["repeated_findings"]
+                )
+                if expected_introduced is None:
+                    expected_introduced = [older_fingerprint]
+                self.assertEqual(
+                    expected_introduced,
+                    rereview_cycle["introduced_findings"],
+                )
+
+    def test_first_review_crash_backfill_repeats_against_reopen_baseline(
+        self,
+    ) -> None:
+        self._write_plan()
+
+        # Model a crash after the first implementation completed, followed by
+        # a first review that materialized its repair child before the initial
+        # review_cycle append. The event log therefore has no cycle record.
+        implementation_path = self.plan_dir / "session-1.md"
+        implementation_path.write_text(
+            implementation_path.read_text(encoding="utf-8").replace(
+                "- **Status**: pending", "- **Status**: complete"
+            ),
+            encoding="utf-8",
+        )
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        first_review, created = runner.ensure_generated_review_session(
+            self.plan_dir, review_harness="claude"
+        )
+        self.assertTrue(created)
+        self.assertEqual("2", first_review.id)
+        first_review.path.write_text(
+            first_review.path.read_text(encoding="utf-8").replace(
+                "- **Status**: pending", "- **Status**: complete"
+            ),
+            encoding="utf-8",
+        )
+
+        finding = _structured_review_finding(
+            finding_id="cycle-finding-2",
+            title="Missing error handling in verification executor",
+            evidence=[
+                {
+                    "path": "agent_session_loop/verification.py:88",
+                    "symbol": "run_check",
+                }
+            ],
+            repair_group="verification-errors",
+        )
+        fingerprint = review.finding_fingerprint(finding)
+        (self.plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
+            "## Findings\n"
+            "- agent_session_loop/verification.py:88 — Missing error handling "
+            "in verification executor.\n"
+            "- Checked tests/test_agent_session_loop.py for regression coverage.\n"
+            "- Compared docs/agent-session-loop.md for documented behavior.\n"
+            "Status: 1 Findings (1 high, 0 med, 0 low)\n",
+            encoding="utf-8",
+        )
+        (self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+            json.dumps(
+                {"version": 2, "outcome": "findings", "findings": [finding]}
+            ),
+            encoding="utf-8",
+        )
+        materialized = review_repair.materialize_review_repair_sessions(
+            self.plan_dir,
+            review_session_id="2",
+            cwd=self.repo_root,
+            state_dir=self.state_dir,
+        )
+        self.assertTrue(materialized.ok, materialized.error)
+        self.assertFalse(self._events_path().exists())
+
+        resumed, payload = self._run_cycles(
+            review_outcomes="findings-new",
+            extra_args=["--max-review-fix-cycles", "1"],
+        )
+
+        self.assertEqual(0, resumed.returncode, resumed.stderr)
+        self.assertEqual(
+            ["2.1", "3"], [turn["session_id"] for turn in payload["turns"]]
+        )
+        reopen_events = self._review_reopen_events()
+        self.assertEqual(1, len(reopen_events))
+        self.assertTrue(reopen_events[0]["recovered"])
+        self.assertEqual([fingerprint], reopen_events[0]["current_fingerprints"])
+        self.assertEqual(1, len(payload["review_cycles"]))
+        rereview_cycle = payload["review_cycles"][0]
+        self.assertEqual(
+            runner.REVIEW_CYCLE_DISPOSITION_REPEATED,
+            rereview_cycle["disposition"],
+        )
+        self.assertEqual([fingerprint], rereview_cycle["repeated_findings"])
+        self.assertEqual([], rereview_cycle["introduced_findings"])
+        self.assertFalse((self.plan_dir / "session-3.1.md").exists())
+
+    def test_existing_reopened_children_backfill_missing_success_event(
+        self,
+    ) -> None:
+        self._write_plan()
+        first, _ = self._run_cycles(
+            review_outcomes="findings,all-clear",
+            extra_args=["--max-review-fix-cycles", "0"],
+        )
+        self.assertEqual(0, first.returncode, first.stderr)
+        materialized = review_repair.materialize_review_repair_sessions(
+            self.plan_dir,
+            review_session_id="2",
+            cwd=self.repo_root,
+            state_dir=self.state_dir,
+        )
+        self.assertTrue(materialized.ok, materialized.error)
+        self.assertEqual([], self._review_reopen_events())
+
+        resumed, payload = self._run_cycles(
+            review_outcomes="findings,all-clear",
+            extra_args=["--max-review-fix-cycles", "1"],
+        )
+
+        self.assertEqual(0, resumed.returncode, resumed.stderr)
+        self.assertEqual(
+            ["2.1", "3"], [turn["session_id"] for turn in payload["turns"]]
+        )
+        reopen_events = self._review_reopen_events()
+        self.assertEqual(1, len(reopen_events))
+        self.assertTrue(reopen_events[0]["materialized"])
+        self.assertTrue(reopen_events[0]["recovered"])
+        self.assertEqual("recovered-existing-children", reopen_events[0]["result"])
+        self.assertEqual(["2.1"], reopen_events[0]["repair_session_ids"])
+        self.assertFalse((self.plan_dir / "session-2.2.md").exists())
 
 
 if __name__ == "__main__":

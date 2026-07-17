@@ -538,6 +538,55 @@ def _structured_review_finding(
     return finding
 
 
+def write_completed_review_plan(
+    plan_dir: Path,
+    findings: list[dict[str, object]],
+) -> Path:
+    """Write a two-session plan ending in one completed generated review."""
+    write_plan_with_ids(plan_dir, (("1", "complete"), ("2", "complete")))
+    review_body = runner.build_generated_review_session_body(
+        plans.parse_session_id("2"),
+        review_harness="codex",
+        plan_dir=plan_dir,
+    ).replace("- **Status**: pending", "- **Status**: complete")
+    (plan_dir / "session-2.md").write_text(review_body, encoding="utf-8")
+    if findings:
+        high = sum(1 for finding in findings if finding["severity"] == "high")
+        med = sum(1 for finding in findings if finding["severity"] == "med")
+        low = sum(1 for finding in findings if finding["severity"] == "low")
+        status_line = (
+            f"Status: {len(findings)} Findings "
+            f"({high} high, {med} med, {low} low)"
+        )
+        outcome = "findings"
+    else:
+        status_line = review.REVIEW_STATUS_ALL_CLEAR
+        outcome = "all-clear"
+    (plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
+        f"# Final review\n\n{status_line}\n", encoding="utf-8"
+    )
+    (plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+        json.dumps({"version": 2, "outcome": outcome, "findings": findings}),
+        encoding="utf-8",
+    )
+    return plans.canonicalize_path(plan_dir)
+
+
+def write_review_cycle_event(
+    plan_dir: Path,
+    state_root: Path,
+    payload: dict[str, object],
+) -> Path:
+    """Append one review-cycle fixture event and return its event path."""
+    event_path = (
+        state.plan_state_dir(plan_dir, state_root) / events.EVENTS_FILE_NAME
+    )
+    events.append_event(
+        event_path, events.Event(events.REVIEW_CYCLE_EVENT, payload)
+    )
+    return event_path
+
+
 def _write_plan_dir(plan_dir: Path) -> Path:
     plan_dir.mkdir(parents=True, exist_ok=True)
     (plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")

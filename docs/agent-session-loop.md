@@ -400,26 +400,44 @@ bounded same-plan repair/rereview cycles: it materializes one pending repair
 child per `repair_group` beneath the review session (`N.1`, `N.2`, ... via
 `agent_session_loop.review_repair`), executes the children serially with the
 implementation harness, then appends the next top-level review session and
-rereviews. `--max-review-fix-cycles N` bounds how many repair materializations
-a plan may accumulate (default 2; `0` still runs the review but never creates
-repair sessions; `--max-review-fix-plans` is a deprecated compatibility
-alias — passing both flags is an input error). The loop stops early on an
-all-clear rereview, on repeated findings (each finding is fingerprinted from
-its normalized severity, title, evidence paths, and symbols —
-`review.finding_fingerprint` — so line-number drift between reviews does not
-defeat the comparison; a fingerprint that repeats the previous review stops
-the loop without another cycle), on operator stop requests, or on cap
-exhaustion, and pauses with `reason: malformed-review-repair` when safe repair
-sessions cannot be materialized. Every review completion appends a
-`review_cycle` event and a `review_cycles[]` state entry recording the cycle
-number, review session id, outcome, introduced/closed/repeated finding
-fingerprints, repair session ids, and disposition; the run payload's
-`review_fix_disposition` carries the final disposition (`all-clear`,
-`repairs-materialized`, `cycles-disabled`, `cycle-cap-exhausted`,
-`findings-repeated`, `unstructured-findings`, `malformed-review-repair`, or
-`not-loop-ready`). Cycle state is reconstructed from the persistent
-`events.jsonl`, so caps and repeated-finding detection survive pauses and
-relaunches.
+rereviews. `--max-review-fix-cycles N` is an **absolute cross-run cap** on
+unique source-review materializations (default 2; `0` still runs the review but
+never creates repair sessions; `--max-review-fix-plans` is a deprecated
+compatibility alias — passing both flags is an input error). A source review
+counts once when it produced repair children, including legacy
+`not-loop-ready` histories and crash-recovered reopen records; ordinary cycle
+and reopen evidence never double-count it. The minimum cap needed for another
+materialization is therefore `historical_materializations + 1`, not the prior
+run's cap plus one.
+
+An all-complete plan is not necessarily inert. A later run with a higher
+absolute cap automatically reopens `cycles-disabled` or
+`cycle-cap-exhausted` findings. A prior `malformed-review-repair` becomes
+eligible after `final-review.json` is externally corrected into a safe,
+internally consistent v2 artifact; changed findings or grouping are accepted
+and audited through new fingerprints and Markdown/JSON digests. ASL never
+rewrites that artifact, and manually changing its outcome to `all-clear` does
+not complete the plan—the generated rereview session is the only all-clear
+authority. Existing generated repair children are authoritative after a crash:
+the runner executes pending children or appends a missing rereview, but never
+recreates them.
+
+The loop stops on an all-clear rereview, repeated finding fingerprints,
+unstructured findings, operator stop requests, or an unchanged insufficient
+cap. Repeated and unstructured findings are terminal circuit breakers. Every
+review completion appends a `review_cycle` event and a `review_cycles[]` state
+entry recording the cycle number, review session id, outcome,
+introduced/closed/repeated fingerprints, repair session ids, disposition, and
+full artifact digests (digest fields are nullable for legacy records). A reopen
+attempt appends `review_repair_reopened`; successful records preserve source
+lineage, previous/current fingerprints and digests, exact child IDs, and
+before/after cap accounting. The run payload's `review_fix_disposition` keeps
+the compatible disposition vocabulary (`all-clear`, `repairs-materialized`,
+`cycles-disabled`, `cycle-cap-exhausted`, `findings-repeated`,
+`unstructured-findings`, `malformed-review-repair`, or `not-loop-ready`).
+Cycle and continuation state are reconstructed from append-only events plus
+generated sessions, so caps, idempotency, and rereview scheduling survive
+pauses, crashes, and later processes.
 
 `preflight` inspects the plan without invoking a harness and reports every
 finding needed to clear the loop-ready gate: missing readiness lines, contract
@@ -630,11 +648,25 @@ runtime, first-pass session completion, pause counts by reason (including the
 never-retry quota/auth/invalid-model classifications), verification repair
 convergence (verify-failed pauses, exhaustion, and sessions repaired after a
 failure), review repair-cycle dispositions with introduced/closed/repeated
-finding counts, artifact corpus size and in-window growth, and projected
-compaction savings (a dry-run over the state directories active inside the
-window, net of retained failure-artifact bytes; use `asl compact-state` for a
-full per-plan projection). The command
-is read-only: it never mutates state, events, or plan directories.
+finding counts, reopen attempts and successful/failed reopen materializations,
+reopen attempts by source disposition, and reopen failures by result. Those
+cycle and reopen activity counters are timestamp-windowed; recovered reopen
+backfills supply lineage but are not fresh attempts. Review materializations
+are durable current-plan totals, independent of the timestamp window, and are
+deduplicated by source review across the full `review_cycle` and
+`review_repair_reopened` history plus generated repair children. This matches
+`review_resume` cap accounting after materialize/event-append crashes and for
+legacy lineage-less cycles. JSON exposes the explicit
+`review_cycles.unique_materializations`, `reopen_attempts`,
+`successful_reopen_materializations`, `reopen_failures`,
+`reopen_attempts_by_source_disposition`, and `reopen_failures_by_result`
+fields while retaining
+`review_cycles.repairs_materialized` as a compatible alias with the same
+idempotent value. Metrics also report artifact corpus size and in-window
+growth, and projected compaction savings (a dry-run over the state directories
+active inside the window, net of retained failure-artifact bytes; use
+`asl compact-state` for a full per-plan projection). The command is read-only:
+it never mutates state, events, or plan directories.
 
 `asl questions` reads the durable paused turn for a plan and renders an external
 resolver prompt that another agent (or a human) can use to gather operator
@@ -844,7 +876,8 @@ both are `null` between turns and after `run_finished`. `events.jsonl` records
 `verification_started`, `verification_check_started`, `verification_heartbeat`,
 `verification_check_finished`, `verification_finished`, `commit_started`,
 `commit_finished`, `run_control`, `review_session_created`, `review_cycle`,
-`run_paused`, and `run_finished` events as they happen. Verification heartbeats fire every 30
+`review_repair_reopened`, `run_paused`, and `run_finished` events as they
+happen. Verification heartbeats fire every 30
 seconds while a single check is in flight, so long-running checks remain
 observable in `tail` and the live status snapshot. Verification check argv is
 captured in the `verification_check_started` payload and not streamed to a
@@ -858,7 +891,12 @@ carries `run_id`, the review `session_id`, `review_harness`,
 completed review session and carries the repair/rereview cycle record (cycle
 number, review session id, outcome, finding fingerprints with
 introduced/closed/repeated classification, repair session ids, and
-disposition). `tail` renders them inline alongside other events. Commit events include the commit index,
+disposition). `review_repair_reopened` records each later attempt to consume
+an existing findings artifact. Successful records include the source
+cycle/session/disposition, previous and current artifact evidence, repair child
+IDs, and before/after materialization-cap accounting; failed attempts preserve
+the stable result and error without consuming budget. `tail` renders review
+cycle events inline alongside other events. Commit events include the commit index,
 scope, session ID for per-session commits, argv, cwd, artifact paths, status
 result, duration, and commit SHA when one was created. `run_control` events
 record `stop-after-current-requested`, `stop-after-current-canceled`,
@@ -950,6 +988,58 @@ recorded on `active_turn` while a review turn is in flight and on the recent
 session overview rows surfaced by `asl sessions`. Dry-run `planned` payloads
 include `review_requested`, `review_harness`, and `review_output_path` so
 planners can preview the review path before any harness runs.
+
+Both `status --json` and `run --json` expose the same additive
+`review_resume` projection. Existing fields remain unchanged, so older clients
+may ignore this block. `action` is one of `initial-review`,
+`materialize-repairs`, `run-repairs`, `rereview`, or `terminal`; `eligible`
+describes the persisted/effective-cap evaluation, and `blocker` is `null`,
+`review-harness-required`, `higher-cap-required`, `artifact-invalid`, a
+terminal disposition (`all-clear`, `findings-repeated`, or
+`unstructured-findings`), or a non-disposition terminal blocker
+(`repair-sessions-missing`, `repair-sessions-not-runnable`, or
+`unknown-disposition`). An unrecognized recorded disposition is retained in
+`source_disposition` for diagnosis and maps to the stable
+`unknown-disposition` blocker. The projection includes source lineage,
+historical/required/selected cap values, pending and completed repair IDs,
+artifact validity/error, previous/current finding fingerprints, and nullable
+source/current Markdown and JSON SHA-256 digests. For example, an all-complete
+plan stopped at its absolute cap can report:
+
+```json
+{
+  "review_resume": {
+    "source_cycle": 2,
+    "review_session_id": "7",
+    "source_disposition": "cycle-cap-exhausted",
+    "action": "materialize-repairs",
+    "eligible": false,
+    "blocker": "higher-cap-required",
+    "historical_materializations": 2,
+    "minimum_required_cap": 3,
+    "selected_cap": 2,
+    "repair_session_ids": [],
+    "pending_repair_session_ids": [],
+    "completed_repair_session_ids": [],
+    "source_fingerprints": ["finding:abc"],
+    "current_fingerprints": ["finding:abc"],
+    "source_review_output_sha256": "<sha256-or-null>",
+    "source_review_artifact_sha256": "<sha256-or-null>",
+    "current_review_output_sha256": "<sha256>",
+    "current_review_artifact_sha256": "<sha256>",
+    "artifact_valid": true,
+    "artifact_error": null
+  }
+}
+```
+
+A new run's explicit `--max-review-fix-cycles 3` prospectively satisfies that
+budget blocker even when read-only status was computed under the older cap.
+Stable insufficient-budget runs make no session or artifact changes and return
+the same projection. When a reopen is attempted, `run --json` additionally
+exposes the latest `review_reopen` record; the durable append-only copy is the
+`review_repair_reopened` event. `review_cycles`, `review_fix_disposition`, and
+the existing review-verdict fields remain available for compatibility.
 
 Commit payloads include `commit_index`, `scope`, `session`, `session_id`,
 `artifact_dir`, `stdout_path`, `stderr_path`, `result_path`, `argv`, `cwd`,
@@ -1144,12 +1234,15 @@ wedged plan can never loop forever.
 ### Reply behavior
 
 The helper auto-retries recoverable same-session pauses (`verify-failed`,
-`nonzero-exit`, `timeout`, `no-status-change`) up to twice per session and
-reason before escalating. When a pause genuinely needs an answer, the result
-carries `needs_agent_reply` with a `questions` block (resolver prompt, the
-paused agent's last message, pause metadata, artifact paths). The driving agent
-either infers a clearly defensible reply from the plan/repo/artifacts or relays
-the question to the operator, then resumes by streaming the reply on stdin:
+`transport-failed`, `timeout`, `no-status-change`) up to twice per session and
+reason before escalating. Only `transport-failed` backs off before relaunching:
+5 seconds, then 30 seconds; the other recoverable pauses retry immediately.
+An unclassified `nonzero-exit` pause is never retried. When a pause genuinely
+needs an answer, the result carries `needs_agent_reply` with a `questions`
+block (resolver prompt, the paused agent's last message, pause metadata,
+artifact paths). The driving agent either infers a clearly defensible reply
+from the plan/repo/artifacts or relays the question to the operator, then
+resumes by streaming the reply on stdin:
 
 ```text
 printf '%s' '<reply text>' | skills/asl/scripts/asl-autopilot.py --command '<same exact command>' --json --reply-stdin
@@ -1161,13 +1254,18 @@ When the supervised command used `--review-harness`, a clean completion still
 carries the final-review verdict. An all-clear review returns `complete` with a
 `review` block whose `outcome` is `all-clear`. A review that reports findings
 returns `review_findings` with the `final-review.md` path, status line,
-severity counts, and a bounded summary excerpt. On findings the driving agent
-opens a bounded follow-up fix cycle — draft a fix plan, `session-split` and
-`session-expand` it, then rerun the helper against the generated plan directory.
-Automatic review-fix loops are capped at 2 generated follow-up plans; after
-that, remaining findings go to the operator instead of another auto-loop. This
-loop cap lives in skill prose because each helper invocation supervises exactly
-one command and there is no cross-invocation loop counter.
+severity counts, a bounded summary excerpt, and the freshest `review_resume`
+guidance. Repair creation, child execution, and rereview are runner-owned on
+the same plan. The supervisor attaches to an active matching lock before
+considering zero-pending completion, and when unlocked it relaunches only for
+`initial-review`, `materialize-repairs`, or `rereview` actions permitted by the
+command's review harness. Only `materialize-repairs` is gated by the effective
+absolute cap; eligible `rereview` launches are cap-free because they consume no
+materialization budget. A corrected malformed artifact or a higher cap can
+therefore resume the same command later without a second plan. Insufficient
+caps and terminal all-clear/repeated/unstructured findings do not relaunch, so
+every supervision loop has a deterministic stop. The skill never authors,
+splits, or expands a separate repair plan.
 
 ### Final helper statuses
 
@@ -1180,8 +1278,9 @@ terminal verdict (`ok` is `true` only for a clean completion):
   could not auto-resolve; a `questions` block carries the resolver context and
   the driving agent must supply a reply.
 - `review_findings` (`ok: false`): the run completed but the final review
-  reported findings; a `review` block carries the verdict for a follow-up fix
-  cycle.
+  reported findings and no automatic continuation supported by the current
+  command remains; `review` carries the verdict and `review_resume` explains a
+  higher-cap, artifact-correction, or terminal circuit-breaker result.
 - `user_required` (`ok: false`): an active `asl run` lock holds this plan/state
   for a different run; a human must resolve the conflict before supervising.
 - `blocked` (`ok: false`): a chunk stopped without completing and without a
@@ -1763,12 +1862,19 @@ backwards-compatible — no existing key is renamed or removed.
   `artifact_count`, `command_count`, and `warning_count`. Queue/detail
   clients can render the compact summary immediately, then fetch
   `/api/recovery` for full evidence, commands, and artifacts.
+- `review_resume` (object) — the same additive continuation projection exposed
+  by `asl status --json`. Queue rows use it to distinguish a truly terminal
+  complete plan from ready repair materialization/rereview, an insufficient
+  absolute cap, or a malformed artifact that needs external correction. The
+  compact and full Recovery Center payloads expose the identical object.
 
 Urgency rank constants (lower = higher priority), mirrored from
 `workbench.URGENCY_RANK_BY_STATE`. The `activity_label` column shows
 the literal UI badge string the queue renders for each state, so
 external readers can predict row text without consulting
-`workbench.ACTIVITY_LABEL_BY_STATE`:
+`workbench.ACTIVITY_LABEL_BY_STATE`. A zero-pending, eligible review
+continuation keeps the `recent` state but uses the distinct
+`workbench.REVIEW_CONTINUATION_ACTIVITY_LABEL` badge:
 
 | Primary state     | urgency_rank | urgency_group | activity_label                |
 | ----------------- | -----------: | ------------- | ----------------------------- |
@@ -1778,15 +1884,16 @@ external readers can predict row text without consulting
 | invalid           |           40 | needs-action  | Plan unreadable               |
 | verifying         |           50 | in-progress   | Verifying                     |
 | running           |           60 | in-progress   | Active turn                   |
-| recent            |           70 | ready         | Run finished, sessions remain |
+| recent (pending sessions) |           70 | ready         | Run finished, sessions remain |
+| recent (zero-pending review continuation) | 70 | ready | Review continuation ready |
 | ready             |           80 | ready         | Ready to run                  |
 | complete          |           90 | complete      | All sessions complete         |
 
 The exported Python constants (`workbench.URGENCY_GROUPS`,
 `workbench.LAST_ACTIVITY_SOURCES`, `workbench.URGENCY_RANK_BY_STATE`,
-`workbench.URGENCY_GROUP_BY_STATE`, `workbench.ACTIVITY_LABEL_BY_STATE`)
-are the source of truth — keep any external code that branches on these
-strings in sync with that module.
+`workbench.URGENCY_GROUP_BY_STATE`, `workbench.ACTIVITY_LABEL_BY_STATE`, and
+`workbench.REVIEW_CONTINUATION_ACTIVITY_LABEL`) are the source of truth — keep
+any external code that branches on these strings in sync with that module.
 
 ### Recovery Center payload
 
@@ -1796,7 +1903,7 @@ payloads, and preflight repair hints on every refresh; no harness/model
 is called to summarize failures, and no recovery state is persisted.
 
 `workbench.RECOVERY_KINDS` is the source-of-truth vocabulary:
-`none`, `reply-needed`, `not-loop-ready`, `verify-failed`,
+`none`, `review-continuation`, `reply-needed`, `not-loop-ready`, `verify-failed`,
 `no-contract`, `malformed-contract`, `stale-lock`, `stale-state`,
 `commit-preflight`, `commit-failed`, and `generic`. V1 maps common
 structured blockers to concrete cards and falls back to `generic` for
@@ -1805,6 +1912,10 @@ unknown failures.
 The full `/api/recovery` payload's `recovery` object contains:
 
 - `plan_dir`, `kind`, `title`, `summary`, `severity`, and `recoverable`.
+- `review_resume`, identical to status/run JSON. A `review-continuation` card
+  uses it to show historical materializations, the minimum required cap,
+  artifact validation errors, or the ready `materialize-repairs`,
+  `run-repairs`, and `rereview` action.
 - `run_id`, `session_id`, `turn_index`, and `commit_index` when a
   selected turn or failed commit can be identified.
 - `evidence` rows (`label`, `value`, `detail`, `severity`) for pause
@@ -1821,7 +1932,8 @@ The full `/api/recovery` payload's `recovery` object contains:
   --session <id> --json`, and `asl preflight <plan-dir> --json`.
 - `artifacts` (`label`, `path`, `kind`, `source`) for existing
   `state.json`, `events.jsonl`, `progress.md`, stdout/stderr,
-  `result.json`, failed commit files, and related config files.
+  `result.json`, failed commit files, related config files, and—when review
+  continuation is relevant—`final-review.md` plus `final-review.json`.
 - `warnings` legacy strings plus `warning_details` structured entries
   (`code`, `message`, `severity`). State-read warning codes are
   `state-missing-race`, `state-unreadable`, `state-malformed-json`, and
@@ -1855,6 +1967,26 @@ These minimized examples show the stable shape custom clients can branch
 on. Real `/api/recovery` responses include the full field set described
 above, plus nullable IDs such as `run_id`, `session_id`, `turn_index`, or
 `commit_index` when they are available.
+
+`review-continuation` with an insufficient absolute cap:
+
+```json
+{
+  "kind": "review-continuation",
+  "severity": "warning",
+  "recoverable": true,
+  "review_resume": {
+    "action": "materialize-repairs",
+    "blocker": "higher-cap-required",
+    "historical_materializations": 2,
+    "minimum_required_cap": 3
+  },
+  "artifacts": [
+    { "label": "Final review", "path": ".../final-review.md" },
+    { "label": "Structured review", "path": ".../final-review.json" }
+  ]
+}
+```
 
 `none`:
 

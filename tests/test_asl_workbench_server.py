@@ -749,6 +749,49 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertEqual("codex", reloaded.pins[0].profile.harness)
         self.assertEqual(600, reloaded.pins[0].profile.timeout)
 
+    def test_registry_pin_rejects_negative_review_fix_cap_before_persisting(
+        self,
+    ) -> None:
+        server = self._start_server()
+
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/registry/pin",
+            method="POST",
+            body={
+                "plan_dir": str(self.canonical_plan_dir),
+                "profile": {"max_review_fix_cycles": -1},
+            },
+            headers=self._auth(server),
+        )
+
+        self.assertEqual(400, status)
+        self.assertFalse(body["ok"])
+        self.assertEqual("invalid-request", body["reason"])
+        self.assertIn("max_review_fix_cycles", body["error"])
+        reloaded = workbench.load_registry(self.registry_path)
+        self.assertEqual((), reloaded.pins)
+
+    def test_registry_pin_names_non_integer_review_fix_cap_in_error(self) -> None:
+        server = self._start_server()
+
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/registry/pin",
+            method="POST",
+            body={
+                "plan_dir": str(self.canonical_plan_dir),
+                "profile": {"max_review_fix_cycles": "two"},
+            },
+            headers=self._auth(server),
+        )
+
+        self.assertEqual(400, status)
+        self.assertFalse(body["ok"])
+        self.assertEqual("invalid-request", body["reason"])
+        self.assertEqual(
+            "profile max_review_fix_cycles must be an integer when set",
+            body["error"],
+        )
+
     def test_registry_unpin_removes_pin(self) -> None:
         seeded = workbench.upsert_pin(
             workbench.load_registry(self.registry_path),
@@ -1558,6 +1601,7 @@ class WorkbenchServerTests(unittest.TestCase):
             "commit_mode": "per-session",
             "review_harness": "claude",
             "review_harness_model": "claude-sonnet",
+            "max_review_fix_cycles": 3,
             "unsafe_bypass": True,
             "allow_not_loop_ready": True,
             "note": "scratch profile",

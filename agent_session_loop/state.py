@@ -644,8 +644,14 @@ def status_payload(
     snapshot: plans.PlanSnapshot,
     state_dir: str | Path | None = None,
 ) -> dict[str, Any]:
+    # Local import avoids a module cycle: repair planning depends on state for
+    # its mutating materializer, while this status path only uses its read-only
+    # continuation evaluator after state has finished importing.
+    from . import review_continuation
+
     plan_state = plan_state_dir(snapshot.plan_dir, state_dir)
     state_path = plan_state / events.STATE_FILE_NAME
+    event_path = plan_state / events.EVENTS_FILE_NAME
     lock_path = lock_path_for_plan(snapshot.plan_dir, state_dir)
     lock_info = _read_lock_path(lock_path, snapshot.plan_dir)
     next_pending = snapshot.next_pending
@@ -654,6 +660,9 @@ def status_payload(
     runner_state["stale_unfinished"] = stale_unfinished
     runner_state["stale_reason"] = stale_reason
     progress_journal = _progress_journal_payload(snapshot.plan_dir)
+    review_resume = review_continuation.evaluate_review_continuation(
+        snapshot, event_path
+    ).to_payload()
     return responses.success_payload(
         "status",
         plan_dir=str(snapshot.plan_dir),
@@ -664,7 +673,7 @@ def status_payload(
         plan_hash=snapshot.plan_hash,
         state_dir=str(plan_state),
         state_path=str(state_path),
-        events_path=str(plan_state / events.EVENTS_FILE_NAME),
+        events_path=str(event_path),
         runner_state=runner_state,
         active_turn=runner_state.get("active_turn"),
         active_verification=runner_state.get("active_verification"),
@@ -678,6 +687,7 @@ def status_payload(
         sessions=[_session_payload(session) for session in snapshot.sessions],
         lock=_lock_payload(lock_info, lock_path),
         progress_journal=progress_journal,
+        review_resume=review_resume,
     )
 
 

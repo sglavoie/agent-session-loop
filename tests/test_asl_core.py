@@ -2280,6 +2280,14 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertTrue(payload["state_path"].endswith("/state.json"))
             self.assertTrue(payload["events_path"].endswith("/events.jsonl"))
             self.assertEqual(1, payload["counts"]["pending"])
+            self.assertEqual(
+                "initial-review", payload["review_resume"]["action"]
+            )
+            self.assertFalse(payload["review_resume"]["eligible"])
+            self.assertEqual(
+                "review-harness-required",
+                payload["review_resume"]["blocker"],
+            )
 
     def test_status_payload_progress_journal_absent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
