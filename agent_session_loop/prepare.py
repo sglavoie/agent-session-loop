@@ -56,7 +56,7 @@ import sys
 import tempfile
 from typing import Any, Callable, Iterable
 
-from . import authoring, baseline, contracts, harnesses, preflight, responses
+from . import authoring, baseline, contracts, harnesses, plans, preflight, responses
 from .authoring import PlanTransaction
 from .baseline_cache import (
     BASELINE_RESULTS_FILENAME,
@@ -814,6 +814,27 @@ def save_prepare_validation(
             pass
         raise PlanError(f"cannot write {path}: {error}") from error
     return path
+
+
+def ensure_plan_metadata(plan_dir: str | Path, cwd: str | Path) -> Path:
+    """Persist prepare's workspace without silently rebinding an existing plan."""
+    canonical_cwd = canonicalize_path(cwd)
+    validation = load_prepare_validation(plan_dir)
+    if validation is not None:
+        validation_cwd = canonicalize_path(validation.codebase_root)
+        if validation_cwd != canonical_cwd:
+            raise PlanError(
+                "prepare cwd does not match stored validation root: "
+                f"{canonical_cwd} != {validation_cwd}"
+            )
+
+    metadata = plans.load_plan_metadata(plan_dir)
+    if metadata is not None and canonicalize_path(metadata.cwd) != canonical_cwd:
+        raise PlanError(
+            "prepare cwd does not match stored plan metadata: "
+            f"{canonical_cwd} != {metadata.cwd}"
+        )
+    return plans.save_plan_metadata(plan_dir, canonical_cwd)
 
 
 def merge_validations(
@@ -1843,6 +1864,8 @@ def prepare_plan(
                 "resume mode: no new split created",
             )
         )
+
+    ensure_plan_metadata(plan_dir, canonical_cwd)
 
     resume_command = _format_resume_command(
         plan_dir,

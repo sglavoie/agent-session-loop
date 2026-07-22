@@ -205,6 +205,10 @@ class RunReadinessGateTests(unittest.TestCase):
             plans.stable_readiness_sha256(self.plan_dir),
             metadata.readiness_sha256,
         )
+        self.assertEqual(
+            str(plans.canonicalize_path(self.repo_root)),
+            plans.load_plan_metadata(self.plan_dir).cwd,
+        )
 
     def test_run_auto_repairs_when_state_is_reviewed(self) -> None:
         self._write_plan(("pending",), readiness="reviewed")
@@ -318,6 +322,9 @@ class RunReadinessGateTests(unittest.TestCase):
         self,
     ) -> None:
         self._write_plan(("pending",), readiness="loop-ready")
+        previous = self.tmp_path / "previous-repo"
+        previous.mkdir()
+        plans.save_plan_metadata(self.plan_dir, previous)
 
         completed, payload = self._run()
 
@@ -330,6 +337,10 @@ class RunReadinessGateTests(unittest.TestCase):
         self.assertEqual(
             plans.stable_readiness_sha256(self.plan_dir),
             metadata.readiness_sha256,
+        )
+        self.assertEqual(
+            str(plans.canonicalize_path(self.repo_root)),
+            plans.load_plan_metadata(self.plan_dir).cwd,
         )
 
     def test_lifecycle_returns_to_loop_ready_when_max_sessions_leaves_pending(

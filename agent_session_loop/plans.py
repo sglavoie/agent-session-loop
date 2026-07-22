@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -43,6 +44,8 @@ DISCOVERED_FACTS_HEADING = "### Discovered Facts"
 OPEN_QUESTIONS_HEADING = "### Open Questions"
 PROGRESS_FILE_NAME = "progress.md"
 PROGRESS_SCHEMA_VERSION = 1
+PLAN_METADATA_FILE_NAME = "plan-metadata.json"
+PLAN_METADATA_SCHEMA_VERSION = 1
 PROGRESS_SCHEMA_COMMENT = "<!-- agent-session-loop progress-journal v1 -->"
 PROGRESS_HEADER = (
     "# Progress Journal\n"
@@ -73,6 +76,17 @@ SESSION_STATUS_TABLE_HEADERS = {
 
 class PlanError(Exception):
     """Raised when a plan directory cannot be inspected safely."""
+
+
+@dataclass(frozen=True)
+class PlanMetadata:
+    """Stable machine-readable workspace association for one plan."""
+
+    cwd: str
+    version: int = PLAN_METADATA_SCHEMA_VERSION
+
+    def to_dict(self) -> dict[str, object]:
+        return {"version": self.version, "cwd": self.cwd}
 
 
 @dataclass(frozen=True, order=True)
@@ -348,6 +362,63 @@ def canonicalize_path(path: str | Path) -> Path:
     """Return a filesystem-canonical path without requiring it to exist."""
     expanded = os.path.expanduser(os.fspath(path))
     return Path(os.path.realpath(os.path.abspath(expanded)))
+
+
+def plan_metadata_path(plan_dir: str | Path) -> Path:
+    """Return the stable workspace-metadata path for ``plan_dir``."""
+    return canonicalize_path(plan_dir) / PLAN_METADATA_FILE_NAME
+
+
+def load_plan_metadata(plan_dir: str | Path) -> PlanMetadata | None:
+    """Load workspace metadata, returning ``None`` when it has not been written."""
+    path = plan_metadata_path(plan_dir)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        _raise_read_error(path, error)
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise PlanError(
+            f"{path} is not valid JSON: {error.msg} at line {error.lineno}"
+        ) from error
+    if not isinstance(payload, dict):
+        raise PlanError(f"{path} must contain a JSON object")
+
+    unknown = sorted(set(payload) - {"version", "cwd"})
+    if unknown:
+        raise PlanError(f"{path} contains unknown keys: {', '.join(unknown)}")
+    version = payload.get("version")
+    if type(version) is not int or version != PLAN_METADATA_SCHEMA_VERSION:
+        raise PlanError(
+            f"{path} uses unsupported version {version!r}; "
+            f"expected {PLAN_METADATA_SCHEMA_VERSION}"
+        )
+    cwd = payload.get("cwd")
+    if not isinstance(cwd, str) or not cwd.strip():
+        raise PlanError(f"{path} field 'cwd' must be a non-empty string")
+    if cwd != cwd.strip() or not Path(cwd).is_absolute():
+        raise PlanError(f"{path} field 'cwd' must be a canonical absolute path")
+    canonical_cwd = str(canonicalize_path(cwd))
+    if cwd != canonical_cwd:
+        raise PlanError(
+            f"{path} field 'cwd' is not canonical: {cwd!r}; "
+            f"expected {canonical_cwd!r}"
+        )
+    return PlanMetadata(cwd=cwd, version=version)
+
+
+def save_plan_metadata(plan_dir: str | Path, cwd: str | Path) -> Path:
+    """Atomically persist the canonical workspace associated with a plan."""
+    path = plan_metadata_path(plan_dir)
+    canonical_cwd = canonicalize_path(cwd)
+    metadata = PlanMetadata(cwd=str(canonical_cwd))
+    text = json.dumps(metadata.to_dict(), indent=2, sort_keys=True) + "\n"
+    _atomic_write_text(path, text)
+    return path
 
 
 def path_sha256(path: str | Path) -> str:

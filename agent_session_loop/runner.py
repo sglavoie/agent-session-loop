@@ -5883,6 +5883,8 @@ def _run_locked(
     reply_origin: str = REPLY_ORIGIN_ARGV,
 ) -> tuple[int, dict[str, Any]]:
     snapshot = plans.inspect_plan(args.plan_dir)
+    if not args.dry_run:
+        plans.save_plan_metadata(snapshot.plan_dir, cwd)
     state_dir = state.plan_state_dir(snapshot.plan_dir, args.state_dir)
     run_dir = state_dir / "runs" / run_id
     event_path = state_dir / events.EVENTS_FILE_NAME

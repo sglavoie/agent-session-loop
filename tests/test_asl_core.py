@@ -72,6 +72,57 @@ from tests.support import (
 )
 
 
+class PlanMetadataTests(unittest.TestCase):
+    def test_round_trip_uses_canonical_absolute_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan_dir = root / "plan"
+            cwd = root / "repo"
+            plan_dir.mkdir()
+            cwd.mkdir()
+
+            path = plans.save_plan_metadata(plan_dir, cwd / ".." / "repo")
+            metadata = plans.load_plan_metadata(plan_dir)
+
+            self.assertEqual(
+                plans.canonicalize_path(plan_dir) / plans.PLAN_METADATA_FILE_NAME,
+                path,
+            )
+            self.assertEqual(
+                plans.PlanMetadata(cwd=str(cwd.resolve())), metadata
+            )
+            self.assertEqual(
+                {"cwd": str(cwd.resolve()), "version": 1},
+                json.loads(path.read_text(encoding="utf-8")),
+            )
+
+    def test_missing_returns_none_and_malformed_metadata_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            self.assertIsNone(plans.load_plan_metadata(plan_dir))
+            path = plan_dir / plans.PLAN_METADATA_FILE_NAME
+            path.write_text('{"version": 1, "cwd": "relative"}\n', encoding="utf-8")
+            with self.assertRaisesRegex(plans.PlanError, "canonical absolute"):
+                plans.load_plan_metadata(plan_dir)
+
+    def test_metadata_does_not_change_plan_or_readiness_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan_dir = root / "plan"
+            cwd = root / "repo"
+            write_plan(plan_dir, ("pending",))
+            cwd.mkdir()
+            content_before = plans.plan_content_sha256(plan_dir)
+            readiness_before = plans.stable_readiness_sha256(plan_dir)
+
+            plans.save_plan_metadata(plan_dir, cwd)
+
+            self.assertEqual(content_before, plans.plan_content_sha256(plan_dir))
+            self.assertEqual(
+                readiness_before, plans.stable_readiness_sha256(plan_dir)
+            )
+
+
 class EventPersistenceTests(unittest.TestCase):
     def test_append_event_writes_complete_json_lines_under_concurrency(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

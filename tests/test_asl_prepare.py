@@ -1056,8 +1056,13 @@ class PrepareEndToEndTests(unittest.TestCase):
             "session-1.expand.md",
             "session-2.expand.md",
             prepare.PREPARE_VALIDATION_FILENAME,
+            plans.PLAN_METADATA_FILE_NAME,
         ):
             self.assertTrue((plan_dir / name).is_file(), name)
+        self.assertEqual(
+            str(plans.canonicalize_path(self.repo)),
+            plans.load_plan_metadata(plan_dir).cwd,
+        )
         manifest = (plan_dir / "manifest.md").read_text(encoding="utf-8")
         self.assertIn("**Readiness**: loop-ready", manifest)
         session_text = (plan_dir / "session-1.md").read_text(encoding="utf-8")
@@ -1213,6 +1218,26 @@ class PrepareEndToEndTests(unittest.TestCase):
         self.assertEqual(
             ["skipped", "skipped", "ok", "ok", "ok", "ok"],
             [step.status for step in resumed.steps],
+        )
+
+    def test_resume_refuses_to_rebind_existing_plan_metadata(self) -> None:
+        source = self._write_source()
+        first = self._prepare(source, _recording_validator([]))
+        self.assertTrue(first.ok, first)
+        assert first.plan_dir is not None
+        other_repo = self.tmp_path / "other-repo"
+        other_repo.mkdir()
+
+        with self.assertRaisesRegex(plans.PlanError, "does not match"):
+            self._prepare(
+                None,
+                _recording_validator([]),
+                cwd=other_repo,
+                resume_plan_dir=first.plan_dir,
+            )
+        self.assertEqual(
+            str(plans.canonicalize_path(self.repo)),
+            plans.load_plan_metadata(first.plan_dir).cwd,
         )
 
     def test_resume_is_idempotent_and_reuses_cached_baselines(self) -> None:

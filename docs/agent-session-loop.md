@@ -604,6 +604,25 @@ validation only for sessions missing from the stored
 `prepare-validation.json` aggregate and reuses recorded baseline evidence
 whose repository fingerprint still matches; it never creates another split.
 
+`prepare` also writes `PLAN_DIR/plan-metadata.json` as soon as the authored or
+resumed plan directory is bound to a repository, including plans retained after
+a later preparation failure. The durable schema is deliberately small and
+strict:
+
+```json
+{
+  "version": 1,
+  "cwd": "/canonical/absolute/repository/path"
+}
+```
+
+On resume, `prepare` refuses to rebind a plan when this `cwd` or the legacy
+`prepare-validation.json.codebase_root` identifies a different repository. A
+non-dry-run `asl run` refreshes the file from the runner's actual canonical
+working directory, which also backfills older plans; `--dry-run` does not write
+it. The metadata file is not plan prose and is excluded from both the plan
+content and stable readiness hashes.
+
 Source-plan session headings use a tolerant, fence-aware grammar shared by
 `session-split`, `plan-iterate`, and `asl prepare`. Outside matching backtick or
 tilde fences, the parser accepts case-insensitive H2-H6 ATX headings with zero
