@@ -23,6 +23,7 @@ same-plan continuation guidance reported by the runner.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -31,7 +32,7 @@ import shlex
 import subprocess
 import sys
 import time
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 # Review verdict parsing is shared with the runner through
 # ``agent_session_loop.review`` (the same thin-wrapper pattern the
@@ -59,7 +60,10 @@ HELPER_DESCRIPTION = (
 # Stage tag for the run supervision loop (start/attach/poll/chunk). Callers key
 # off `stage` to distinguish a supervision-time result from a parse-time
 # failure, and off `reason` for the specific verdict (`complete`,
-# `user_required`, `paused`, `blocked`, `capped`, `status-error`, `run-error`).
+# `max-sessions`, `stopped`, `user_required`, `paused`, `blocked`, `capped`,
+# `status-error`, `run-error`). `max-sessions` and `stopped` are the two clean
+# early stops: both are `ok: true` with `completed`/`pending` counts, never a
+# pause or a failure.
 RUN_STAGE = "run"
 
 # Stage tag for the safe command parser. Callers
@@ -1199,6 +1203,111 @@ def _classify_lock(parsed: dict, status: dict) -> str:
     return "attach"
 
 
+def _runner_state(status: dict) -> dict:
+    """Return the ``runner_state`` block of an ``asl status`` payload."""
+    runner_state = status.get("runner_state") if isinstance(status, dict) else None
+    return runner_state if isinstance(runner_state, dict) else {}
+
+
+def _runner_run_id(status: dict) -> Optional[str]:
+    """Identity of the run that wrote the plan's persisted ``state.json``."""
+    run_id = _runner_state(status).get("run_id")
+    return run_id if isinstance(run_id, str) and run_id else None
+
+
+def _lock_created_at(status: dict) -> Optional[str]:
+    """Creation timestamp of the plan lock reported by ``asl status``."""
+    lock = status.get("lock") if isinstance(status, dict) else None
+    created_at = lock.get("created_at") if isinstance(lock, dict) else None
+    return created_at if isinstance(created_at, str) and created_at else None
+
+
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    """Parse an ISO-8601 stamp from a status payload, normalized to UTC."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _state_written_after_lock(status: dict, lock_created_at: Optional[str]) -> bool:
+    """Positive evidence the persisted state belongs to the lock's holder.
+
+    A runner takes the plan lock before it persists any state, and locks are
+    exclusive, so a ``run_started_at`` at or after the lock's ``created_at``
+    can only have been written by the run holding that lock — while an earlier
+    run's leftover ``state.json``, which necessarily started before this lock
+    existed, is excluded. Returns ``False`` when either timestamp is missing or
+    unreadable, leaving callers on whatever evidence they already had.
+    """
+    created_at = _parse_timestamp(lock_created_at)
+    started_at = _parse_timestamp(_runner_state(status).get("run_started_at"))
+    if created_at is None or started_at is None:
+        return False
+    return started_at >= created_at
+
+
+def _attached_run_wrote_state(
+    status: dict,
+    attached_run_id: Optional[str],
+    attached_lock_created_at: Optional[str],
+) -> bool:
+    """Was the persisted ``state.json`` written by the run we attached to?
+
+    Preferred evidence is the ``run_id`` observed in ``runner_state`` while the
+    lock was held: an exact identity match. But the runner acquires the plan
+    lock *before* it persists the state carrying that ``run_id``, so a run that
+    starts, finishes one session and honors a stop between two attach polls can
+    leave the supervisor with no trustworthy identity at all. In that startup
+    window fall back to the lock itself (see
+    :func:`_state_written_after_lock`), which still rejects an older run's
+    leftover state.
+    """
+    if attached_run_id is not None:
+        return _runner_run_id(status) == attached_run_id
+    return _state_written_after_lock(status, attached_lock_created_at)
+
+
+def _attached_stop_honored(
+    status: dict,
+    attached_run_id: Optional[str],
+    attached_lock_created_at: Optional[str],
+) -> bool:
+    """Did the attached run exit by honoring a ``stop-after-current`` request?
+
+    Only the run the supervisor was actually attached to can answer for the
+    lock it just released, so the persisted state must be attributable to that
+    run (see :func:`_attached_run_wrote_state`); that attribution is what keeps
+    a *stale* ``stopped`` state — left by an older run, or still on disk because
+    the attached run died before persisting its own outcome — from being
+    mistaken for the current outcome and blocking a legitimate launch.
+
+    Beyond identity the state must describe a *clean, finished* stop: present
+    and readable, ``run_finished_at`` set (an unfinished/orphaned state says
+    nothing about how the run ended), ``ok`` true, not paused, and
+    ``reason == "stopped"``. Any other terminal reason — including the other
+    clean early stop, ``max-sessions`` — is not an honored control request and
+    leaves the normal launch path alone.
+    """
+    runner_state = _runner_state(status)
+    if not runner_state.get("present") or runner_state.get("error"):
+        return False
+    if not _attached_run_wrote_state(status, attached_run_id, attached_lock_created_at):
+        return False
+    if not runner_state.get("run_finished_at"):
+        return False
+    return (
+        runner_state.get("ok") is True
+        and not runner_state.get("paused")
+        and runner_state.get("reason") == "stopped"
+    )
+
+
 def _run_result(
     ok: bool,
     reason: str,
@@ -1368,13 +1477,28 @@ def supervise_run(
     - an active lock for a different run stops with ``user_required``;
     - an active matching lock means another run is driving the plan, so the
       supervisor sleeps ``poll_interval`` and re-polls (attach), even when the
-      transient status snapshot reports zero pending sessions;
+      transient status snapshot reports zero pending sessions. The attached
+      run's ``run_id`` and the pending count at attach are recorded so that,
+      once its lock clears, the sessions it finished are attributed to
+      ``completed`` and its persisted terminal reason is read back;
     - ``--max-sessions`` is a global budget: the drop in pending across chunks
       accumulates the implementation sessions completed this run, and once that
       count reaches the cap with impl sessions still pending the run stops
       cleanly with ``max-sessions`` (``ok: true``, reporting ``completed`` and
       ``pending``). A budget spent exactly as pending reaches 0 falls through to
       the normal complete/review path rather than pre-empting it;
+    - a runner that honored an out-of-band ``asl control stop-after-current``
+      request stops the supervision the same way with ``stopped``
+      (``ok: true``, reporting ``completed`` and ``pending``) instead of
+      relaunching the remaining sessions and undoing the request. Both routes
+      to the plan are covered: a chunk this supervisor launched exiting cleanly
+      with ``reason: "stopped"``, and an *attached* run releasing its lock
+      having persisted ``ok``/``reason: "stopped"``/``run_finished_at``. That
+      state must be attributable to the attached run — by the ``run_id``
+      observed while attached, or, when the run finished before it ever
+      persisted one, by having started at or after the attached lock's
+      ``created_at`` — which keeps a stale ``stopped`` state from an earlier run
+      from blocking a new one (see :func:`_attached_stop_honored`);
     - without a lock, pending sessions launch normally, while an all-complete
       plan launches only a ``review_resume`` initial-review requested by the
       command's review harness, a materialize-repairs action allowed by the
@@ -1452,6 +1576,23 @@ def supervise_run(
     budget: Optional[int] = parsed.get("max_sessions")
     completed_total = 0
     launched_pending: Optional[int] = None
+    # Set when the run that last held this plan stopped cleanly with
+    # `reason: "stopped"`, i.e. an out-of-band `asl control stop-after-current`
+    # was honored after the current session — either a chunk we launched
+    # (from its exit payload) or a run we attached to (from the state it
+    # persisted). Recorded here so it survives into the next iteration, where
+    # the guard below stops instead of relaunching.
+    stop_requested = False
+    # Identity and pending baseline of the run currently being attached to (a
+    # foreign `asl run` driving this plan). `attached_pending` doubles as the
+    # "we are attached" flag: it is the pending count at the first attach poll,
+    # so the sessions that run finishes while we watch can be attributed once it
+    # releases the lock, while `attached_run_id` (when the holder got far enough
+    # to persist it) and `attached_lock_created_at` let us read that specific
+    # run's terminal reason out of the persisted `runner_state`.
+    attached_run_id: Optional[str] = None
+    attached_lock_created_at: Optional[str] = None
+    attached_pending: Optional[int] = None
 
     while True:
         status = status_invoker(parsed)
@@ -1483,6 +1624,33 @@ def supervise_run(
         pending = _pending_count(status)
         if disposition == "attach":
             attach_polls += 1
+            # Record who holds the plan and how much work was pending when we
+            # first attached, so the unlocked iteration below can attribute this
+            # run's progress and read its persisted terminal reason. A lock
+            # created at a different moment means another run took over; track
+            # the latest, since it owns the lock we are waiting on, and drop any
+            # run_id observed for the previous holder — it no longer identifies
+            # the run we are waiting on. The lock is always observable; its
+            # holder's `run_id` only becomes so once the runner persists its
+            # initial state, which happens after the lock is taken.
+            if attached_pending is None:
+                attached_pending = pending
+            observed_lock_created_at = _lock_created_at(status)
+            if observed_lock_created_at != attached_lock_created_at:
+                attached_lock_created_at = observed_lock_created_at
+                attached_run_id = None
+            # Trust a visible `run_id` only once it demonstrably came from the
+            # current holder: the previous run's `state.json` stays on disk
+            # until the new one overwrites it, so inside the startup window the
+            # `run_id` on offer names the *wrong* run. Older `asl status`
+            # payloads carry no lock `created_at` to check against; there,
+            # trusting whatever identity is visible is still the best available.
+            observed_run_id = _runner_run_id(status)
+            if observed_run_id is not None and (
+                _parse_timestamp(attached_lock_created_at) is None
+                or _state_written_after_lock(status, attached_lock_created_at)
+            ):
+                attached_run_id = observed_run_id
             if attach_polls > max_chunks:
                 return _run_result(
                     False,
@@ -1538,6 +1706,25 @@ def supervise_run(
             completed_total += max(0, launched_pending - pending)
             launched_pending = None
 
+        # A run we were attached to has released its lock. Attribute the sessions
+        # it finished while we watched (same pending-drop measure the chunk
+        # accounting uses, so `completed` stays accurate for work the supervisor
+        # did not launch itself), then derive that run's terminal reason from the
+        # state it persisted: `asl status` already exposes the finished run's
+        # `run_id`/`run_started_at`/`ok`/`reason`/`run_finished_at`, and a clean
+        # `stopped` from *that same run* means the runner honored an out-of-band
+        # `asl control stop-after-current`. Feeding it into `stop_requested`
+        # routes both the self-launched and attached cases through the single
+        # guard below, so we never launch a chunk that would silently undo the
+        # operator's request.
+        if attached_pending is not None:
+            completed_total += max(0, attached_pending - pending)
+            if _attached_stop_honored(status, attached_run_id, attached_lock_created_at):
+                stop_requested = True
+            attached_pending = None
+            attached_run_id = None
+            attached_lock_created_at = None
+
         # A spent budget with impl sessions still pending is a clean, intentional
         # early stop — never a failure or a pause. When the budget is spent
         # exactly as pending reaches 0, `pending > 0` is false so we fall through
@@ -1546,6 +1733,23 @@ def supervise_run(
             return _run_result(
                 True,
                 "max-sessions",
+                status=status,
+                chunks=chunks,
+                completed=completed_total,
+                pending=pending,
+            )
+
+        # A graceful stop the runner honored (`asl control stop-after-current`,
+        # sent out of band) is the same kind of clean, intentional early stop as
+        # a spent budget: the run — ours or the one we attached to — exited `ok`
+        # after finishing its session, so relaunching here would silently undo
+        # the operator's request. As with the budget, `pending > 0` keeps a stop
+        # that lands exactly as pending reaches 0 from pre-empting the normal
+        # complete/review path.
+        if stop_requested and pending > 0:
+            return _run_result(
+                True,
+                "stopped",
                 status=status,
                 chunks=chunks,
                 completed=completed_total,
@@ -1697,9 +1901,11 @@ def supervise_run(
                 ),
             )
         # Clean stop; loop re-polls. Pending 0 -> complete/review continuation;
-        # a spent `--max-sessions` budget -> clean `max-sessions` stop; otherwise
-        # relaunch (the runner drives all pending sessions in one chunk, so this
-        # normally only recurs for review continuations).
+        # a spent `--max-sessions` budget -> clean `max-sessions` stop; a runner
+        # that honored a `stop-after-current` request -> clean `stopped` stop;
+        # otherwise relaunch (the runner drives all pending sessions in one
+        # chunk, so this normally only recurs for review continuations).
+        stop_requested = run_payload.get("reason") == "stopped"
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -1802,9 +2008,14 @@ def run_autopilot(
     Command parsing runs first: an unparseable or unsupported command returns
     the structured parse-failure payload immediately. When the command parses
     cleanly, the supervisor starts/attaches/polls the run and drives it until the
-    plan completes, the ``--max-sessions`` global budget is spent, or the run
-    pauses. The parsed ``command`` model is attached to the result so callers
+    plan completes, the ``--max-sessions`` global budget is spent, a graceful
+    ``asl control stop-after-current`` request is honored (``stopped``), or the
+    run pauses. The parsed ``command`` model is attached to the result so callers
     (and reply handling) can see exactly what was executed.
+
+    The two clean early stops (``max-sessions`` and ``stopped``) are passed
+    through untouched — no ``asl questions`` fetch and no review verdict read,
+    since neither is a pause and neither means the plan finished.
 
     When ``args.reply_stdin`` is set the helper reads the inferred reply text
     from stdin and resumes the paused run through ``asl run --reply-stdin``
@@ -1906,6 +2117,17 @@ def _human_summary(result: dict) -> str:
         return (
             f"ok: max-sessions - completed {completed} session(s), "
             f"{pending} still pending; re-run the same command to continue"
+        )
+    if reason == "stopped":
+        # A honored `stop-after-current` request: report it exactly like the
+        # budget stop — a clean early stop with progress counts, never a pause,
+        # a failure, or `blocked`.
+        completed = result.get("completed")
+        pending = result.get("pending")
+        return (
+            f"ok: stopped - graceful stop after the current session; completed "
+            f"{completed} session(s), {pending} still pending; re-run the same "
+            "command to continue"
         )
     guidance = None
     if reason == "complete":

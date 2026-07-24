@@ -150,6 +150,26 @@ def _add_workbench_serve_args(
     )
 
 
+def _add_control_plan_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "plan_dir",
+        metavar="PLAN_DIR_OR_ID",
+        help=(
+            "Split plan directory to control, or the compact plan label "
+            "printed after 'plan' by 'asl sessions'"
+        ),
+    )
+    parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+
+
 def _add_unsafe_bypass_flags(parser: argparse.ArgumentParser) -> None:
     parser.set_defaults(unsafe_bypass=True)
     parser.add_argument(
@@ -898,6 +918,47 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     )
     workbench_registry_parser.set_defaults(
         handler_ref="workbench:workbench_registry_from_args",
+    )
+
+    control_parser = subparsers.add_parser(
+        "control",
+        help=(
+            "Queue a control command for the runner that owns a plan "
+            "(works for --json runs, where the run-control keys are off)."
+        ),
+    )
+    # Unlike `workbench`, the bare `asl control` form has no sensible default
+    # action, so a subcommand is required.
+    control_sub = control_parser.add_subparsers(
+        dest="control_command",
+        required=True,
+    )
+
+    control_stop_parser = control_sub.add_parser(
+        "stop-after-current",
+        help=(
+            "Request a graceful stop once the current session finishes "
+            "(programmatic equivalent of the interactive 'p' key)."
+        ),
+    )
+    _add_control_plan_args(control_stop_parser)
+    control_stop_parser.set_defaults(
+        handler_ref="control_cli:control_stop_after_current_from_args",
+    )
+
+    control_select_harness_parser = control_sub.add_parser(
+        "select-harness",
+        help="Choose the harness future sessions of a run should use.",
+    )
+    _add_control_plan_args(control_select_harness_parser)
+    control_select_harness_parser.add_argument(
+        "--harness",
+        required=True,
+        choices=harnesses.HARNESS_NAMES,
+        help="Harness future sessions should run with",
+    )
+    control_select_harness_parser.set_defaults(
+        handler_ref="control_cli:control_select_harness_from_args",
     )
 
     return parser

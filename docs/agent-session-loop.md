@@ -152,8 +152,9 @@ asl run ~/.local/share/agent-plans/example-plan/ --harness codex
 
 The runner stops when every `session-<id>.md` handoff status is `complete`, when
 `--max-sessions` is reached, when an operator requests stop-after-current, or
-when a pause condition requires review. Resume a paused run by re-running the
-same command after fixing the blocker.
+when a pause condition requires review. The first three are successful exits
+(`reason: all-complete`, `max-sessions`, and `stopped` respectively). Resume a
+paused or stopped run by re-running the same command after fixing the blocker.
 
 `asl run` refuses any plan whose `**Readiness**` is not `loop-ready`, but it
 first attempts to self-heal recoverable drift before pausing. The runner's
@@ -316,7 +317,7 @@ git worktree before the first harness turn starts, and require `spec` on
 `--commit-at-end` to commit once after all pending sessions complete in the
 same run. Both modes always invoke `spec commit --yes --no-verify`. A
 stop-after-current request before all sessions complete exits successfully
-without running the final `--commit-at-end` commit.
+(`reason: stopped`) without running the final `--commit-at-end` commit.
 
 ## Commands
 
@@ -336,6 +337,8 @@ asl review-verdict PLAN_DIR [--state-dir DIR] [--json]
 asl tail PLAN_DIR [--state-dir DIR] [--lines N] [--no-follow]
 asl sessions [--running] [--recent] [--limit N] [--state-dir DIR] [--verbose] [--json]
 asl doctor --harness codex|claude|copilot [--harness-model MODEL] [--effort EFFORT] [--cwd REPO_ROOT] --plan-dir PLAN_DIR [--unsafe-bypass|--no-unsafe-bypass] [--json]
+asl control stop-after-current PLAN_DIR_OR_ID [--state-dir DIR] [--json]
+asl control select-harness PLAN_DIR_OR_ID --harness codex|claude|copilot [--state-dir DIR] [--json]
 asl unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
 asl compact-state PLAN_DIR [--state-dir DIR] [--apply] [--json]
 asl migrate-state PLAN_DIR --from OLD_PLAN_PATH [--state-dir DIR] [--apply] [--json]
@@ -407,8 +410,8 @@ outside `PLAN_DIR` before and after the review turn and pauses the run with
 `reason: review-mutated-worktree` if the fingerprint changes. Review turns are
 never auto-committed even under `--commit-per-session`. Review is skipped (with
 the reason recorded in `review_skipped_reason`) on `--max-sessions` reached,
-stop-after-current, verification failure, harness failure, commit failure, or
-any pause during the implementation phase. If the plan is already fully
+stop-after-current (`reason: stopped`), verification failure, harness failure,
+commit failure, or any pause during the implementation phase. If the plan is already fully
 complete at run start, `--review-harness` still creates and runs the review
 session. If a pending generated review session already exists in the plan and
 the run is started without `--review-harness`, the run pauses with
@@ -527,6 +530,33 @@ For normal text TTY runs, `run` also listens for keyboard controls:
 Keyboard controls are disabled for `run --json`, `run --dry-run`, and runs
 where stdin or stderr is not a TTY.
 
+`asl control` is the programmatic equivalent of those keys, so a supervising
+agent driving `run --json` can still request them. Each subcommand appends one
+command to the same durable per-plan control queue the Workbench HTTP API feeds
+(`control-queue.jsonl`); the runner drains it at its lifecycle checkpoints and
+applies the identical transition the keyboard listener emits. Nothing else is
+mutated — the runner alone owns `state.json`.
+
+- `asl control stop-after-current PLAN_DIR_OR_ID` queues the `p` request. Its
+  payload reports `enqueued`, `command_id`, `run_active`, and
+  `pending_after_current` (sessions still pending once the executing one
+  finishes), plus a `note`: `will stop after current session`, `current session
+  is the last; stop is a no-op` when nothing would follow, or `no active run;
+  command applies when a runner next drains the queue`.
+- `asl control select-harness PLAN_DIR_OR_ID --harness H` queues the `1`/`2`/`3`
+  request. Its payload reports `enqueued`, `command_id`, `harness`,
+  `run_active`, and a `note` naming the harness future sessions will use. An
+  unknown harness fails with `reason: invalid-harness` before anything is
+  enqueued.
+
+Enqueueing succeeds for a readable plan even with no runner attached; the
+command simply waits in the queue for the next drain. Both subcommands accept
+the same `PLAN_DIR_OR_ID` compact-label resolution as `status` and reuse its
+`ambiguous-plan` / `malformed-plan` / `state-error` failure reasons. A queue the
+process cannot create or append to — an unwritable or non-directory state root —
+fails with `reason: os-error` and a `details.queue_path`, still as exactly one
+JSON object under `--json` (a single stderr line otherwise), never a traceback.
+
 `status` reads durable plan files and prints session counts, the next pending
 session, content hashes, state paths, lock state, and any active harness turn.
 Use `--json` for scripts. Its positional argument, `PLAN_DIR_OR_ID`, accepts
@@ -539,8 +569,8 @@ precedence, and only a bare, nonexistent argument (no directory component)
 triggers a state-root lookup honoring `--state-dir`. Matching is exact and
 case-sensitive against existing plan directories: zero matches keep the current
 `malformed-plan` error, while multiple matches fail with `reason:
-ambiguous-plan`. Resolution is `status`-only; `run`, `tail`, `unlock`, and other
-plan-taking commands remain path-only. Successful text and JSON output continue
+ambiguous-plan`. Resolution is limited to `status` and `asl control`; `run`,
+`tail`, `unlock`, and other plan-taking commands remain path-only. Successful text and JSON output continue
 to report the canonical resolved `plan_dir`.
 
 `tail` prints recent activity for the latest run and follows `events.jsonl`
@@ -1385,6 +1415,11 @@ terminal verdict (`ok` is `true` only for a clean completion):
   with sessions still pending — an intentional clean early stop, not a pause or a
   failure. `completed` and `pending` counts are attached; re-running the same
   command continues from the remaining sessions.
+- `stopped` (`ok: true`): a stop-after-current request (the `p` key or
+  `asl control stop-after-current`) was honored with sessions still pending —
+  the structural twin of `max-sessions`, not a pause or a failure. `completed`
+  and `pending` counts are attached and the helper does not relaunch;
+  re-running the same command continues from the remaining sessions.
 - `needs_agent_reply` (`ok: false`): the run paused on a decision the helper
   could not auto-resolve; a `questions` block carries the resolver context and
   the driving agent must supply a reply.

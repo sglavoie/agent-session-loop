@@ -45,7 +45,8 @@ cycles. Shell operators, pipes, redirects, `--dry-run`, and user-supplied
 run after `N` implementation sessions have completed, not `N` per relaunch. With
 no `--max-sessions`, a single `asl run` process drives every pending session to
 completion (there is no per-chunk restarting). See Step 4 for how a budget stop
-is reported.
+is reported. A run can also be stopped gracefully **without** a budget — see
+*Request a graceful stop mid-run* below.
 
 ## Instructions
 
@@ -66,6 +67,30 @@ go to stderr. Each heartbeat carries live progress — the running session label
 to a `WARN possibly stalled` line once idle time crosses the stall threshold. To
 override the runner's cycle cap at launch, include `--max-review-fix-cycles N`
 inside the `--command` string (`0` still reviews but creates no repair sessions).
+
+#### Request a graceful stop mid-run
+
+To stop a supervised run early without waiting for it to finish, request the
+graceful stop **out of band**:
+
+```text
+asl control stop-after-current <plan-dir> [--state-dir DIR] --json
+```
+
+Pass the same `plan-dir` and `--state-dir` the helper was given. Because the
+helper blocks in the foreground, send this from a **separate shell** — or start
+the helper in the background — whenever a mid-run stop may be needed. The request
+is queued durably, so it is also safe to send when no run is active yet: the next
+runner to drain the queue applies it.
+
+The stop takes effect **after the current session finishes** and surfaces as
+`reason: stopped` with `ok: true` plus `completed` and `pending` counts — an
+intentional clean early stop, not a pause and not a failure. This holds whether
+the helper launched the run itself or **attached** to a run already in flight:
+in the attach case it reads the stop back from the finished run's persisted
+state, so it never relaunches over an honored request. Do **not** auto-resume
+it; re-running the same command later continues from the remaining sessions.
+See Step 4.
 
 ### Step 2: Handle pauses
 
@@ -128,6 +153,14 @@ plus `completed` and `pending` counts. This is an **intentional, clean early
 stop** — not a pause and not a failure. Report the progress (e.g. "completed N of
 M sessions; K pending") and do **not** auto-resume, reply, or run `asl questions`;
 re-running the same command later continues from the remaining sessions.
+
+The same holds for `reason: stopped`, which the helper returns when the runner
+honored an out-of-band `asl control stop-after-current` request (see *Request a
+graceful stop mid-run* under Step 1). It too carries `ok: true` with `completed`
+and `pending` counts and is an **intentional, clean early stop** — never report
+it as a pause,
+a failure, or `blocked`, and never auto-resume it. Report the progress and say
+that re-running the same command continues from the remaining sessions.
 
 ## Notes
 
