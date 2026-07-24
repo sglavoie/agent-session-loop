@@ -17,10 +17,11 @@ import argparse
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import shlex
 import sys
 from typing import Any
 
-from . import events, plans, responses, state
+from . import events, pause_policy, plans, responses, state
 
 
 REASON_NO_PAUSED_RUN = "no-paused-run"
@@ -76,6 +77,7 @@ class QnAContext:
     last_message_path: Path
     result_path: Path | None
     last_message: str
+    state_dir_override: str | None = None
 
 
 def load_qna_context(
@@ -183,7 +185,23 @@ def load_qna_context(
         last_message_path=last_message_path,
         result_path=_coerce_path(turn.get("result_path")),
         last_message=last_message,
+        state_dir_override=_state_dir_override_from_payload(payload),
     )
+
+
+def _state_dir_override_from_payload(payload: dict[str, Any]) -> str | None:
+    """Return the ``--state-dir`` override the paused run recorded, if any.
+
+    The runner persists it under ``run_config.state_dir_override`` (added in the
+    same session that introduced ``asl run --resume``). Resume guidance must
+    re-emit ``--state-dir`` when the original run used one, because the override
+    is what located this state file in the first place and cannot be recovered
+    from the config it points at.
+    """
+    run_config = payload.get("run_config")
+    if not isinstance(run_config, dict):
+        return None
+    return _optional_str(run_config.get("state_dir_override"))
 
 
 def qna_context_payload(context: QnAContext) -> dict[str, Any]:
@@ -464,17 +482,46 @@ def render_resolver_prompt(context: QnAContext) -> str:
     )
     lines.append(
         "4. The answer will be passed verbatim to "
-        "`asl run --reply` to resume the paused session."
+        "`asl run --resume --reply` to resume the paused session "
+        "(--resume restores the original harness, model, and effort)."
     )
     lines.append("")
 
     return "\n".join(lines)
 
 
+def _resume_command_base(context: QnAContext) -> list[str]:
+    parts = ["asl", "run", str(context.plan_dir), "--resume"]
+    if context.state_dir_override:
+        parts.extend(["--state-dir", context.state_dir_override])
+    return parts
+
+
+def resume_command_text(context: QnAContext) -> str:
+    """``asl run <plan> --resume [--state-dir X] --reply TEXT`` guidance.
+
+    ``--resume`` rehydrates the paused run's harness/model/effort from the
+    persisted run_config, so a non-default-harness run never resumes on the
+    ``codex`` default.
+    """
+    return shlex.join([*_resume_command_base(context), "--reply", "TEXT"])
+
+
+def reply_stdin_command_text(context: QnAContext) -> str:
+    """``asl run <plan> --resume [--state-dir X] --reply-stdin`` guidance.
+
+    Same rehydration as :func:`resume_command_text`, but the operator answer is
+    piped on stdin so it never appears in argv.
+    """
+    return shlex.join([*_resume_command_base(context), "--reply-stdin"])
+
+
 def questions_payload(context: QnAContext) -> dict[str, Any]:
     """Render a paused-run context as the ``asl questions`` JSON payload."""
     return responses.success_payload(
         "questions",
+        resume_command=resume_command_text(context),
+        reply_stdin_command=reply_stdin_command_text(context),
         plan_dir=str(context.plan_dir),
         state_dir=str(context.state_dir),
         state_path=str(context.state_path),
@@ -485,6 +532,7 @@ def questions_payload(context: QnAContext) -> dict[str, Any]:
         pause_reason=context.pause_reason,
         pause_message=context.pause_message,
         pause_details=dict(context.pause_details),
+        pause_policy=pause_policy.classify_pause(context.pause_reason),
         harness=context.harness,
         model=context.model,
         model_source=context.model_source,

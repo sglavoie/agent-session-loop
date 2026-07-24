@@ -5,9 +5,10 @@ Adapters construct argv lists and run harnesses without shell interpolation.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import shutil
 import signal
@@ -614,3 +615,70 @@ def run_harness(
         model=model,
         effort=effort,
     )
+
+
+# Single source for the skill-invocation prefix rule: derived from the adapters
+# themselves so the mapping cannot drift from what each harness actually parses.
+_SKILL_PREFIX_ADAPTERS: tuple[type[HarnessAdapter], ...] = (
+    CodexAdapter,
+    ClaudeAdapter,
+    CopilotAdapter,
+)
+SKILL_PREFIXES: dict[HarnessName, str] = {
+    adapter.name: adapter.skill_prefix for adapter in _SKILL_PREFIX_ADAPTERS
+}
+
+
+def detect_invoking_harness(
+    env: Mapping[str, str] | None = None,
+) -> HarnessName | None:
+    """Best-effort detection of the harness that launched this process.
+
+    Returns the single harness whose environment markers are present, or
+    ``None`` when zero or more than one match (ambiguous). Detection only
+    orders human-facing output — it never gates behavior — so unknown or
+    conflicting environments fall back to ``None`` and the default ordering.
+    """
+    source = os.environ if env is None else env
+    detected: list[HarnessName] = []
+    if source.get("CLAUDECODE"):
+        detected.append("claude")
+    if any(key.startswith("CODEX_") for key in source):
+        detected.append("codex")
+    if any(
+        key.startswith("COPILOT_") or key.startswith("GITHUB_COPILOT_")
+        for key in source
+    ):
+        detected.append("copilot")
+    if len(detected) == 1:
+        return detected[0]
+    return None
+
+
+def _ordered_harness_names(
+    env: Mapping[str, str] | None = None,
+) -> list[HarnessName]:
+    """Harness names with the detected invoking harness (if any) first."""
+    detected = detect_invoking_harness(env)
+    if detected is None:
+        return list(HARNESS_NAMES)
+    return [detected, *(name for name in HARNESS_NAMES if name != detected)]
+
+
+def skill_invocations(
+    skill: str,
+    argument: str | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> dict[HarnessName, str]:
+    """Return ready-to-paste ``<prefix><skill>[ <argument>]`` per harness.
+
+    The mapping is ordered with the best-effort invoking harness first (when it
+    is unambiguously detected) so callers can surface the most likely command at
+    the top; ordering never changes which harnesses appear.
+    """
+    suffix = f" {argument}" if argument else ""
+    return {
+        name: f"{SKILL_PREFIXES[name]}{skill}{suffix}"
+        for name in _ordered_harness_names(env)
+    }

@@ -38,8 +38,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from agent_session_loop import events as _events  # noqa: E402
+from agent_session_loop import harnesses as _harnesses  # noqa: E402
+from agent_session_loop import pause_policy as _pause_policy  # noqa: E402
 from agent_session_loop import review as _review  # noqa: E402
 from agent_session_loop import review_continuation as _review_continuation  # noqa: E402
+from agent_session_loop import run_flags as _run_flags  # noqa: E402
+from agent_session_loop import tail as _tail  # noqa: E402
 
 HELPER_NAME = "asl-autopilot"
 HELPER_DESCRIPTION = (
@@ -59,10 +64,9 @@ RUN_STAGE = "run"
 # failure, and off `reason` for the specific parse verdict.
 PARSE_STAGE = "parse"
 
-# Agent harnesses recognized by `asl run` (mirrors
-# `agent_session_loop.harnesses.HARNESS_NAMES`). Kept here so the helper stays a
-# standalone script with no import dependency on the ASL package.
-HARNESS_NAMES = ("codex", "claude", "copilot")
+# Agent harnesses recognized by `asl run`, re-exported from the ASL package so
+# the helper and the runner share one list by construction.
+HARNESS_NAMES = _harnesses.HARNESS_NAMES
 
 # Shell operators the helper refuses to interpret. The command is executed
 # without a shell, so any of these would either be passed as a literal to the
@@ -94,50 +98,21 @@ DEFAULT_MAX_CHUNKS = 50
 # via the `stall_threshold` kwarg only — deliberately not a CLI flag.
 DEFAULT_STALL_IDLE_THRESHOLD = 90.0
 
-# Pause reasons the supervisor treats as transient and same-session
-# retryable. These mirror ASL's own stable pause vocabulary
-# (`agent_session_loop.events` / `agent_session_loop.runner`): `verify-failed`,
-# `timeout`, and `no-status-change` are cases where relaunching the same
-# session can succeed without any human answer, and `transport-failed` is the
-# only harness-failure *category* the classifier marks retryable. Crucially,
-# unclassified `nonzero-exit` is fail-closed (never retried), and the
-# quota/auth/invalid-model categories are deliberately absent so quota and
-# session-limit exhaustion are never relaunched. Every other pause (a
-# question/blocked state) needs an agent- or user-supplied reply.
-RECOVERABLE_PAUSE_REASONS = (
-    "verify-failed",
-    "transport-failed",
-    "timeout",
-    "no-status-change",
-)
-
-# How many times the supervisor relaunches the same session for a given
-# recoverable pause reason before giving up and surfacing the pause. Keyed per
-# (session id, reason) so an unrelated later pause starts fresh.
-DEFAULT_MAX_RETRIES = 2
-
-# Non-retryable harness-failure categories that always require human
-# intervention and carry no useful question/answer context: quota /
-# session-limit exhaustion, authentication failures, and invalid-model
-# rejections. The supervisor surfaces these as `user_required` — carrying any
-# parsed reset information — and deliberately skips `asl questions`, since no
-# reply can clear them. Mirrors the non-retryable categories the Session 5
-# classifier marks (`agent_session_loop.events` /
-# `agent_session_loop.runner.classify_harness_failure`).
+# Pause classification is owned by `agent_session_loop.pause_policy`, the single
+# source of truth for which pauses are recoverable, which require a human, the
+# same-session retry budget, and the transport backoff schedule. These names are
+# re-exported under their historical public identifiers so the supervision loop,
+# `test_asl_autopilot.py`, and the helper's JSON contract keep resolving them.
+# The runner attaches `pause_policy.classify_pause(reason)` to its pause
+# payloads; the supervisor prefers that payload block (see
+# `_effective_pause_policy`) and falls back to these constants for older state.
+RECOVERABLE_PAUSE_REASONS = _pause_policy.RECOVERABLE_PAUSE_REASONS
+DEFAULT_MAX_RETRIES = _pause_policy.DEFAULT_MAX_RETRIES
 USER_REQUIRED_HARNESS_FAILURE_REASONS = (
-    "quota-exhausted",
-    "auth-failed",
-    "invalid-model",
+    _pause_policy.USER_REQUIRED_HARNESS_FAILURE_REASONS
 )
-
-# Bounded backoff schedule (seconds) applied before each relaunch of a
-# transient `transport-failed` pause. The classifier marks only
-# `transport-failed` retryable, so we relaunch the same session at most
-# len(TRANSPORT_RETRY_DELAYS_SECONDS) times, sleeping the scheduled delay first
-# (5s, then 30s). The other recoverable pauses (`verify-failed`, `timeout`,
-# `no-status-change`) keep their immediate, zero-delay retry — Session 10
-# revisits verification repair with fingerprint-aware context.
-TRANSPORT_RETRY_DELAYS_SECONDS = (5.0, 30.0)
+TRANSPORT_RETRY_DELAYS_SECONDS = _pause_policy.TRANSPORT_RETRY_DELAYS_SECONDS
+classify_pause = _pause_policy.classify_pause
 
 # Default automatic repair/rereview cycle cap, mirroring
 # ``agent_session_loop.runner.DEFAULT_MAX_REVIEW_FIX_CYCLES``. The runner owns
@@ -197,70 +172,16 @@ def _parse_error(reason: str, error: str) -> dict:
 
 
 def _build_run_parser() -> _RunArgumentParser:
-    """Return a parser mirroring the user-facing ``asl run`` flag surface.
+    """Return a parser for the user-facing ``asl run`` flag surface.
 
-    Mirrors ``agent_session_loop.cli`` (lines 165-278). Keeping a local mirror —
-    rather than importing the real CLI — lets the helper validate commands as a
-    standalone script and keeps the parser tests as the alignment tripwire when
-    ASL's flags change.
+    Built from the shared declarative spec in
+    ``agent_session_loop.run_flags`` (``mode="supervisor"``: ``None`` defaults so
+    the reconstruction below can tell which flags the operator actually passed).
+    The runner's real CLI subparser is built from the same spec, so the two can
+    never drift.
     """
     parser = _RunArgumentParser(prog="asl run", add_help=False)
-    parser.add_argument("plan_dir")
-    parser.add_argument("--cwd")
-    parser.add_argument("--harness", choices=HARNESS_NAMES)
-    parser.add_argument("--review-harness", dest="review_harness", choices=HARNESS_NAMES)
-    parser.add_argument("--harness-model", dest="harness_model")
-    parser.add_argument("--review-harness-model", dest="review_harness_model")
-    parser.add_argument("--effort")
-    parser.add_argument("--timeout", type=int)
-    parser.add_argument("--max-sessions", dest="max_sessions", type=int)
-    parser.add_argument("--max-pending-sessions", dest="max_pending_sessions", type=int)
-    parser.add_argument(
-        "--max-review-fix-cycles",
-        dest="max_review_fix_cycles",
-        type=int,
-    )
-    parser.add_argument(
-        "--max-review-fix-plans",
-        dest="max_review_fix_plans",
-        type=int,
-    )
-    commit_group = parser.add_mutually_exclusive_group()
-    commit_group.add_argument(
-        "--commit-per-session",
-        dest="commit_mode",
-        action="store_const",
-        const="per-session",
-        default=None,
-    )
-    commit_group.add_argument(
-        "--commit-at-end",
-        dest="commit_mode",
-        action="store_const",
-        const="end",
-    )
-    parser.add_argument("--state-dir", dest="state_dir")
-    parser.add_argument("--note")
-    parser.add_argument(
-        "--unsafe-bypass",
-        dest="unsafe_bypass",
-        action="store_true",
-        default=None,
-    )
-    parser.add_argument(
-        "--no-unsafe-bypass",
-        dest="unsafe_bypass",
-        action="store_false",
-    )
-    parser.add_argument("--json", action="store_true")
-    parser.add_argument("--dry-run", dest="dry_run", action="store_true")
-    parser.add_argument(
-        "--allow-not-loop-ready",
-        dest="allow_not_loop_ready",
-        action="store_true",
-    )
-    parser.add_argument("--reply")
-    parser.add_argument("--reply-stdin", dest="reply_stdin", action="store_true")
+    _run_flags.add_run_arguments(parser, mode="supervisor")
     return parser
 
 
@@ -360,55 +281,20 @@ def parse_command(command: str) -> dict:
             "--reply/--reply-stdin are owned by the helper; do not pass them",
         )
 
-    # Mirror ASL's own numeric/harness validation (runner.py:1068-1083) so the
-    # helper fails fast with the same guarantees instead of deferring to a child
-    # crash.
-    if namespace.timeout is not None and namespace.timeout <= 0:
-        return _parse_error("invalid-argument", "--timeout must be a positive integer")
-    if namespace.max_sessions is not None and namespace.max_sessions <= 0:
-        return _parse_error(
-            "invalid-argument", "--max-sessions must be a positive integer"
-        )
-    if namespace.max_pending_sessions is not None and namespace.max_pending_sessions <= 0:
-        return _parse_error(
-            "invalid-argument", "--max-pending-sessions must be a positive integer"
-        )
-    if namespace.max_review_fix_cycles is not None and namespace.max_review_fix_cycles < 0:
-        return _parse_error(
-            "invalid-argument",
-            "--max-review-fix-cycles must be zero or a positive integer",
-        )
-    if namespace.max_review_fix_plans is not None and namespace.max_review_fix_plans < 0:
-        return _parse_error(
-            "invalid-argument",
-            "--max-review-fix-plans must be zero or a positive integer",
-        )
-    if (
-        namespace.max_review_fix_cycles is not None
-        and namespace.max_review_fix_plans is not None
-    ):
-        return _parse_error(
-            "invalid-argument",
-            "--max-review-fix-plans is a deprecated alias of "
-            "--max-review-fix-cycles; pass only one",
-        )
-    if (
-        namespace.review_harness is not None
-        and namespace.review_harness == namespace.harness
-    ):
-        return _parse_error(
-            "invalid-argument",
-            "--review-harness must differ from --harness "
-            f"(both set to {namespace.harness!r})",
-        )
-    if (
-        namespace.review_harness_model is not None
-        and namespace.review_harness is None
-    ):
-        return _parse_error(
-            "invalid-argument",
-            "--review-harness-model requires --review-harness",
-        )
+    # Mirror ASL's own numeric/harness validation so the helper fails fast with
+    # the same guarantees instead of deferring to a child crash. The checks live
+    # in ``agent_session_loop.run_flags`` — the same module the runner validates
+    # against — so the helper and the runner can never disagree. On a ``--resume``
+    # command the harness/model cross-field check is deferred to the child: the
+    # helper validates the raw command before the persisted ``run_config`` is
+    # overlaid, whereas the runner rehydrates the review harness first, so a
+    # model-only resume override the runner accepts must not be rejected here.
+    validation_errors = _run_flags.validate_run_namespace(
+        namespace,
+        defer_resume_dependent=bool(getattr(namespace, "resume", False)),
+    )
+    if validation_errors:
+        return _parse_error("invalid-argument", validation_errors[0].message)
 
     plan_dir = _expand_user_only(namespace.plan_dir)
     cwd = _expand_user_only(namespace.cwd) if namespace.cwd is not None else None
@@ -463,6 +349,8 @@ def parse_command(command: str) -> dict:
         child_args.append("--no-unsafe-bypass")
     if namespace.allow_not_loop_ready:
         child_args.append("--allow-not-loop-ready")
+    if getattr(namespace, "resume", False):
+        child_args.append("--resume")
 
     json_appended = not namespace.json
     child_args.append("--json")
@@ -490,6 +378,19 @@ def parse_command(command: str) -> dict:
                 else DEFAULT_MAX_REVIEW_FIX_CYCLES
             )
         ),
+        # Whether the operator passed a repair cap explicitly (either the
+        # canonical flag or the deprecated alias). On a `--resume` command an
+        # implicit cap must defer to the persisted `run_config`, so the
+        # supervisor keys off this to decide whether to prefer the persisted
+        # value (see `_effective_review_config`).
+        "max_review_fix_cycles_explicit": (
+            namespace.max_review_fix_cycles is not None
+            or namespace.max_review_fix_plans is not None
+        ),
+        # `--resume` reruns the plan against its persisted `run_config`; the
+        # supervisor resolves the effective review harness/cap from that config
+        # before an all-complete review-continuation decision.
+        "resume": bool(getattr(namespace, "resume", False)),
     }
 
 
@@ -500,12 +401,21 @@ def parse_command(command: str) -> dict:
 parse_review_verdict = _review.parse_review_verdict
 
 
-def _bounded_review_summary(text: str, *, max_chars: int = REVIEW_SUMMARY_MAX_CHARS) -> str:
-    """Return a bounded excerpt of the review body for the findings payload."""
+def _bounded_review_summary(
+    text: str, *, max_chars: int = REVIEW_SUMMARY_MAX_CHARS
+) -> tuple[str, bool]:
+    """Return a bounded review excerpt and whether it was truncated.
+
+    The ``(text, truncated)`` pair lets the caller flag the truncation
+    explicitly instead of silently dropping the tail: an untruncated body
+    returns ``(body, False)``; an over-length body returns the bounded excerpt
+    with a trailing marker and ``True`` so callers can point at the full-review
+    escape hatch (`asl review-verdict`).
+    """
     stripped = text.strip()
     if len(stripped) <= max_chars:
-        return stripped
-    return stripped[:max_chars].rstrip() + "\n… (truncated)"
+        return stripped, False
+    return stripped[:max_chars].rstrip() + "\n… (truncated)", True
 
 
 def _read_review_verdict(parsed: dict) -> dict:
@@ -518,7 +428,9 @@ def _read_review_verdict(parsed: dict) -> dict:
     missing or unreadable file yields ``ok: False`` with ``reason:
     "review-missing"`` so callers can distinguish "no review artifact" from a
     grammar violation. On success a bounded ``summary`` of the review body is
-    attached so unresolved findings can be surfaced to the user.
+    attached with a ``summary_truncated`` flag and a ``full_review`` hint naming
+    ``asl review-verdict`` (the authoritative untruncated surface), so a long
+    review is never silently clipped.
     """
     verdict = _review.load_review_verdict(parsed["plan_dir"])
     if verdict.get("ok"):
@@ -529,7 +441,13 @@ def _read_review_verdict(parsed: dict) -> dict:
                 text = handle.read()
         except OSError:
             text = ""
-        verdict["summary"] = _bounded_review_summary(text)
+        summary, summary_truncated = _bounded_review_summary(text)
+        verdict["summary"] = summary
+        verdict["summary_truncated"] = summary_truncated
+        verdict["full_review"] = (
+            f"run `asl review-verdict {parsed['plan_dir']}` for the full, "
+            "untruncated review verdict, findings, and remediation steps"
+        )
     return verdict
 
 
@@ -653,26 +571,173 @@ def _status_snapshot(status: object) -> dict:
     return {"state": "unknown"}
 
 
-def _heartbeat_detail(snapshot: dict, stall_threshold: float):
+def _events_path_from_status(status: object) -> Optional[str]:
+    """Return the ``events_path`` an ``asl status`` payload advertises, if any.
+
+    ``asl status --json`` includes the plan's ``events.jsonl`` path at the top
+    level (``state.status_payload``). A non-dict, ``ok: False``, or path-less
+    payload yields ``None`` so callers fall back to per-tick status probes.
+    """
+    if isinstance(status, dict) and status.get("ok"):
+        path = status.get("events_path")
+        if isinstance(path, str) and path:
+            return path
+    return None
+
+
+class _EventsTailer:
+    """Derive per-tick heartbeat snapshots from an appended ``events.jsonl``.
+
+    Constructed with the ``events_path`` named by the first authoritative
+    ``asl status`` payload, it follows the JSONL file with
+    :func:`agent_session_loop.tail.follow_events`, folding each newly appended
+    ``turn_heartbeat``/``verification_heartbeat``/``run_paused``/``run_finished``
+    record into a running view of the supervised child. :meth:`snapshot`
+    returns a :func:`_status_snapshot`-shaped dict plus whether the event stream
+    has gone silent for at least ``stall_threshold`` seconds — the authoritative
+    stall signal for the event-driven path, so the 30s ``state.json`` refresh lag
+    can no longer raise a false positive. Because the runner emits a
+    ``turn_heartbeat`` every 30s while it is alive, a stream that stays silent
+    past the threshold means the runner itself stopped, not merely a quiet child.
+    This silence is measured directly against the monotonic clock, so it keeps
+    aging even after ``idle_seconds`` freezes at the last heartbeat value —
+    a below-threshold idle sample can no longer suppress the stall indefinitely.
+
+    The underlying follower tolerates versionless (v1) records, unparseable
+    "garbage" lines (skipped), and truncation or rotation of the events file
+    (reopened from the start), so a tailer never crashes the supervised run; on
+    any internal error the caller disables it and falls back to the injectable
+    ``status`` probe.
+    """
+
+    def __init__(
+        self,
+        events_path: str,
+        *,
+        clock=time.monotonic,
+        stall_threshold: float = DEFAULT_STALL_IDLE_THRESHOLD,
+        follow=None,
+    ) -> None:
+        follow = follow if follow is not None else _tail.follow_events
+        self._events = follow(events_path)
+        self._clock = clock
+        self._stall_threshold = stall_threshold
+        self._snapshot: dict = {"state": "unknown"}
+        self._last_event_at = clock()
+
+    def snapshot(self):
+        """Fold newly appended records and return ``(snapshot, events_stale)``.
+
+        Reads the next batch of records the follower has to offer (all history on
+        the first call, then only appended records), updates the derived snapshot
+        to reflect the latest folded event, and reports whether the stream has
+        been silent at least ``stall_threshold`` seconds. The returned snapshot is
+        a fresh copy so callers cannot mutate the tailer's internal state.
+        """
+        now = self._clock()
+        saw_event = False
+        for record in next(self._events):
+            saw_event = True
+            self._apply(record)
+        if saw_event:
+            self._last_event_at = now
+        events_stale = (now - self._last_event_at) >= self._stall_threshold
+        return dict(self._snapshot), events_stale
+
+    def _apply(self, record: object) -> None:
+        if not isinstance(record, dict):
+            return
+        name = record.get("name")
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        if name == _events.TURN_HEARTBEAT_EVENT:
+            self._snapshot = {
+                "state": "running",
+                "session_id": payload.get("session_id"),
+                "session_number": payload.get("session_number"),
+                "total_sessions": payload.get("total_sessions"),
+                "idle_seconds": payload.get("idle_seconds"),
+                "elapsed_seconds": payload.get("elapsed_seconds"),
+            }
+        elif name == _events.VERIFICATION_HEARTBEAT_EVENT:
+            self._snapshot = {"state": "verifying"}
+        elif name == _events.RUN_PAUSED_EVENT:
+            self._snapshot = {"state": "paused", "reason": payload.get("reason")}
+        elif name == "run_finished":
+            self._snapshot = {"state": "unknown"}
+
+
+def _build_events_tailer(
+    status_probe, clock, stall_threshold: float
+) -> Optional[_EventsTailer]:
+    """Build an :class:`_EventsTailer` from the first ``asl status`` payload.
+
+    Probes ``status_probe`` once to learn the plan's ``events_path``, then opens
+    a tailer on it. Returns ``None`` — so :func:`_invoke_run` falls back to
+    per-tick status probes — when there is no probe, the probe fails, the payload
+    advertises no events path, or the tailer cannot be constructed.
+    """
+    if status_probe is None:
+        return None
+    try:
+        status = status_probe()
+    except Exception:
+        return None
+    events_path = _events_path_from_status(status)
+    if not events_path:
+        return None
+    try:
+        return _EventsTailer(
+            events_path, clock=clock, stall_threshold=stall_threshold
+        )
+    except Exception:
+        return None
+
+
+def _heartbeat_detail(snapshot: dict, stall_threshold: float, events_stale=None):
     """Distill a snapshot into a ``(is_stall, detail)`` pair for a heartbeat.
 
     ``detail`` is the enrichment fragment shared by every heartbeat site so the
     in-chunk and attach-wait lines render identically:
 
-    - ``running`` below ``stall_threshold``: ``(False, "session <id> (n/total) |
-      idle <n>s")`` — the ``(n/total)`` fragment is omitted when either number is
+    - ``running`` with no stall: ``(False, "session <id> (n/total) | idle
+      <n>s")`` — the ``(n/total)`` fragment is omitted when either number is
       absent, and the ``idle`` fragment when ``idle_seconds`` is unavailable.
-    - ``running`` at or above ``stall_threshold``: ``(True, "idle <n>s (no
-      output)")`` so callers can render their own ``WARN possibly stalled`` line.
-    - ``verifying`` (review phase): ``(False, "verifying")``.
+    - ``running`` stalled: ``(True, "idle <n>s (no output)")`` when a high
+      ``idle_seconds`` drove the verdict, else ``(True, "no new events for
+      <n>s+ (no output)")`` when event silence did — either way callers render
+      their own ``WARN possibly stalled`` line.
+    - ``verifying`` (review phase): ``(False, "verifying")`` while the stream is
+      fresh; ``(True, "no new events for <n>s+ (no output)")`` when the events
+      tailer reports the verification stream went silent past the threshold (the
+      heartbeat carries no ``idle_seconds``, so event silence is the only signal).
     - any other snapshot (``paused``/``unknown``/errored): ``(False, None)`` so
       callers fall back to their plain line, preserving pre-enrichment behavior.
+
+    ``events_stale`` selects the stall signal. ``None`` (the subprocess-probe
+    fallback and the attach-wait heartbeat, whose ``idle_seconds`` was just read
+    from a fresh ``asl status``) keeps the historical idle-only trigger: a stall
+    iff ``idle_seconds`` crosses ``stall_threshold``. The events tailer passes an
+    explicit bool, and there event silence is the authoritative signal: because
+    the runner emits a ``turn_heartbeat`` every 30s while alive, a stream silent
+    past the threshold means the runner itself stopped — so ``events_stale``
+    alone decides the stall, independent of the ``idle_seconds`` frozen at the
+    last heartbeat. This is what lets a below-threshold idle sample still stall
+    once the stream goes silent (a frozen low idle can no longer suppress it),
+    while a still-fresh stream keeps suppressing the warning even when that
+    sampled idle is high (the 30s ``state.json`` refresh lag can never raise a
+    false positive on its own).
     """
     state = snapshot.get("state")
     if state == "running":
         idle = snapshot.get("idle_seconds")
-        if isinstance(idle, (int, float)) and idle >= stall_threshold:
-            return True, f"idle {int(idle)}s (no output)"
+        idle_high = isinstance(idle, (int, float)) and idle >= stall_threshold
+        stalled = idle_high if events_stale is None else bool(events_stale)
+        if stalled:
+            if idle_high:
+                return True, f"idle {int(idle)}s (no output)"
+            return True, f"no new events for {int(stall_threshold)}s+ (no output)"
         label = f"session {snapshot.get('session_id')}"
         number = snapshot.get("session_number")
         total = snapshot.get("total_sessions")
@@ -683,6 +748,14 @@ def _heartbeat_detail(snapshot: dict, stall_threshold: float):
         )
         return False, f"{label}{idle_fragment}"
     if state == "verifying":
+        # The verification heartbeat carries no ``idle_seconds``, so event
+        # silence is the only stall signal available for this phase. As with
+        # ``running``, ``events_stale is None`` (the subprocess-probe/attach-wait
+        # path, which has no event-freshness reading) keeps the historical
+        # never-stall behavior; an explicit ``True`` from the events tailer means
+        # the verification stream itself went silent past the threshold, so warn.
+        if events_stale:
+            return True, f"no new events for {int(stall_threshold)}s+ (no output)"
         return False, "verifying"
     return False, None
 
@@ -692,6 +765,7 @@ def _format_heartbeat(
     elapsed: float,
     snapshot: dict,
     stall_threshold: float,
+    events_stale=None,
 ) -> str:
     """Render a per-tick heartbeat line from a :func:`_status_snapshot`.
 
@@ -706,7 +780,7 @@ def _format_heartbeat(
       ``running, elapsed Ns`` line, preserving pre-enrichment behavior.
     """
     plain = f"chunk {chunk_index}: running, elapsed {int(elapsed)}s"
-    is_stall, detail = _heartbeat_detail(snapshot, stall_threshold)
+    is_stall, detail = _heartbeat_detail(snapshot, stall_threshold, events_stale)
     if detail is None:
         return plain
     if is_stall:
@@ -727,6 +801,7 @@ def _invoke_run(
     heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     popen=subprocess.Popen,
     status_probe=None,
+    events_tailer=None,
     stall_threshold: float = DEFAULT_STALL_IDLE_THRESHOLD,
 ) -> dict:
     """Start one ``asl run`` chunk, wait with heartbeats, return its JSON.
@@ -737,13 +812,22 @@ def _invoke_run(
     seconds it stays alive, keeping stdout clear for the parsed result. A child
     that crashes or prints non-JSON yields a synthetic ``run-error`` payload.
 
-    When ``status_probe`` is supplied it is called once per heartbeat tick (in a
-    ``try/except``) to fetch a live ``asl status`` payload; the resulting
-    snapshot enriches the tick with the session label, ``(n/total)``, and idle
-    seconds, and raises a ``WARN possibly stalled`` line once ``idle_seconds``
-    crosses ``stall_threshold``. A ``None`` probe, a probe that raises, or a
-    paused/unknown snapshot falls back to the legacy plain ``running, elapsed
-    Ns`` line. The initial started/resumed heartbeat is never probed.
+    Heartbeat ticks derive their live snapshot from the plan's ``events.jsonl``
+    rather than re-probing ``asl status`` every 30s: when ``status_probe`` is
+    supplied it is called once at start to learn the ``events_path``, and an
+    :class:`_EventsTailer` (overridable via ``events_tailer``) folds the appended
+    ``turn_heartbeat``/``verification_heartbeat`` records into each tick's
+    session label, ``(n/total)``, and idle seconds. A ``WARN possibly stalled``
+    line is raised once the event stream itself goes silent past
+    ``stall_threshold`` (the authoritative signal that the runner stopped
+    emitting its 30s heartbeats), independent of the ``idle_seconds`` frozen at
+    the last heartbeat, so the 30s ``state.json`` refresh lag can no longer raise
+    a false positive and a below-threshold idle sample can no longer suppress a
+    real stall. If no events
+    path is available, the tailer raises, or the snapshot is paused/unknown, the
+    tick falls back to the injectable ``status_probe`` (the historical idle-only
+    behavior) and finally to the plain ``running, elapsed Ns`` line. The initial
+    started/resumed heartbeat is never probed.
 
     When ``reply_text`` is supplied this launches the resume path: ``asl run``
     is invoked with ``--reply-stdin`` appended and the reply is streamed on the
@@ -773,6 +857,12 @@ def _invoke_run(
             "_invoke_error": True,
         }
 
+    # Prefer the event-driven tailer (opened from the first `asl status`
+    # payload's events_path); keep `status_probe` as the per-tick fallback seam.
+    tailer = events_tailer
+    if tailer is None:
+        tailer = _build_events_tailer(status_probe, clock, stall_threshold)
+
     start = clock()
     heartbeat(
         f"chunk {chunk_index}: "
@@ -796,7 +886,36 @@ def _invoke_run(
             pending_input = None
             elapsed = clock() - start
             message: Optional[str] = None
-            if status_probe is not None:
+            if tailer is not None:
+                try:
+                    snapshot, events_stale = tailer.snapshot()
+                except Exception:
+                    # Disable the tailer for the rest of the chunk and fall back
+                    # to the subprocess probe seam on this and later ticks.
+                    tailer = None
+                else:
+                    # Only trust the tailer when it yields a usable
+                    # (running/verifying) snapshot. An unknown/paused snapshot
+                    # means the event stream told us nothing this tick — a
+                    # missing or not-yet-readable events file makes
+                    # `follow_events` yield empty batches without raising, so the
+                    # snapshot stays "unknown". Falling through to the
+                    # authoritative status probe (rather than emitting a plain
+                    # line that would suppress it) keeps enriched progress and
+                    # stall detection from being disabled indefinitely, and the
+                    # tailer stays live so it resumes once the file appears.
+                    _, detail = _heartbeat_detail(
+                        snapshot, stall_threshold, events_stale
+                    )
+                    if detail is not None:
+                        message = _format_heartbeat(
+                            chunk_index,
+                            elapsed,
+                            snapshot,
+                            stall_threshold,
+                            events_stale=events_stale,
+                        )
+            if message is None and status_probe is not None:
                 try:
                     snapshot = _status_snapshot(status_probe())
                 except Exception:
@@ -907,22 +1026,84 @@ def _review_resume_payload(payload: Optional[dict]) -> Optional[dict]:
     return review_resume if isinstance(review_resume, dict) else None
 
 
+def _resume_run_config(parsed: dict, status: dict) -> Optional[dict]:
+    """Load the persisted ``run_config`` for a ``--resume`` supervised command.
+
+    A ``--resume`` command reruns the plan against the flags its last run
+    persisted, so the effective review harness and repair cap live in the
+    plan's ``state.json`` (``run_config`` block), not in the resume-only command
+    string. ``asl status --json`` advertises the ``state_path`` of that file, so
+    this reads it the same way the runner's ``_load_resume_state`` does. Returns
+    ``None`` — so the caller falls back to the parsed command's own values —
+    when the command is not a resume, the status carries no readable
+    ``state_path``, or the file lacks a ``run_config`` block.
+    """
+    if not parsed.get("resume") or not isinstance(status, dict):
+        return None
+    state_path = status.get("state_path")
+    if not isinstance(state_path, str) or not state_path:
+        return None
+    try:
+        with open(state_path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    run_config = payload.get("run_config")
+    return run_config if isinstance(run_config, dict) else None
+
+
+def _effective_review_config(
+    parsed: dict, status: dict
+) -> tuple[Optional[str], object]:
+    """Return the ``(review_harness, max_review_fix_cycles)`` governing a launch.
+
+    For a normal command these come straight from the parsed command. A
+    ``--resume`` command may omit ``--review-harness``/``--max-review-fix-cycles``
+    and expect the runner to rehydrate them from the persisted ``run_config``;
+    this resolves the same persisted values so the supervisor's all-complete
+    review-continuation decision matches what the resumed child would actually
+    do (rather than stopping ``complete`` because the resume-only command has no
+    review harness and only the default cap). Explicitly-passed flags always
+    win, mirroring the runner's resume overlay.
+    """
+    review_harness = parsed.get("review_harness")
+    cap = parsed.get("max_review_fix_cycles", DEFAULT_MAX_REVIEW_FIX_CYCLES)
+    run_config = _resume_run_config(parsed, status)
+    if run_config is None:
+        return review_harness, cap
+    if review_harness is None:
+        persisted_harness = run_config.get("review_harness")
+        if persisted_harness:
+            review_harness = persisted_harness
+    if not parsed.get("max_review_fix_cycles_explicit"):
+        persisted_cap = run_config.get("max_review_fix_cycles")
+        if type(persisted_cap) is int and persisted_cap >= 0:
+            cap = persisted_cap
+    return review_harness, cap
+
+
 def _should_launch_for_status(parsed: dict, status: dict, pending: int) -> bool:
     """Decide whether an unlocked status needs another ``asl run`` chunk.
 
     Pending sessions retain the historical launch behavior.  An all-complete
-    plan only relaunches when a review harness was requested and the additive
+    plan only relaunches when a review harness is in effect and the additive
     ``review_resume`` projection explicitly asks for an initial review, repair
-    materialization, or rereview.  Repair materialization is gated against the
-    *current command's* effective absolute cap, not the cap persisted by a
-    previous run.  Rereview consumes no materialization budget, so an eligible
-    rereview launches regardless of that cap.  Missing projections preserve
-    compatibility with older ``asl status`` payloads by keeping the old
-    all-complete stop behavior.
+    materialization, or rereview.  The effective review harness and repair cap
+    are resolved through :func:`_effective_review_config`, so a ``--resume``
+    command honors the persisted ``run_config`` rather than the resume-only
+    command's absent harness and default cap.  Repair materialization is gated
+    against that effective absolute cap, not the cap persisted by a previous
+    run.  Rereview consumes no materialization budget, so an eligible rereview
+    launches regardless of that cap.  Missing projections preserve compatibility
+    with older ``asl status`` payloads by keeping the old all-complete stop
+    behavior.
     """
     if pending > 0:
         return True
-    if not parsed.get("review_harness"):
+    review_harness, effective_cap = _effective_review_config(parsed, status)
+    if not review_harness:
         return False
 
     review_resume = _review_resume_payload(status)
@@ -938,9 +1119,6 @@ def _should_launch_for_status(parsed: dict, status: dict, pending: int) -> bool:
         return False
 
     minimum_cap = review_resume.get("minimum_required_cap")
-    effective_cap = parsed.get(
-        "max_review_fix_cycles", DEFAULT_MAX_REVIEW_FIX_CYCLES
-    )
     if (
         type(minimum_cap) is not int
         or minimum_cap < 0
@@ -1054,6 +1232,22 @@ def _pause_classification(run_payload: dict) -> Optional[dict]:
     return None
 
 
+def _effective_pause_policy(run_payload: dict, pause_reason: str) -> dict:
+    """Return the pause policy governing ``run_payload``'s pause.
+
+    Prefers the ``pause_policy`` block the runner attaches to a paused payload
+    (the single source of truth carried alongside the pause), so a payload that
+    overrides the default classification — e.g. ``{recoverable: false}`` for a
+    normally-recoverable reason — wins. Falls back to
+    :func:`classify_pause` (derived from the re-exported constants) when the
+    payload predates the block, so old state files keep working.
+    """
+    policy = run_payload.get("pause_policy")
+    if isinstance(policy, dict):
+        return policy
+    return classify_pause(pause_reason)
+
+
 def _verification_repair_exhausted(run_payload: dict) -> bool:
     """Return True when the runner marked a verify-failed repair exhausted.
 
@@ -1073,6 +1267,48 @@ def _verification_repair_exhausted(run_payload: dict) -> bool:
     return False
 
 
+def _events_size(path: Optional[str]) -> Optional[int]:
+    """Current byte size of an ``events.jsonl``, or ``None`` when unreadable."""
+    if not path:
+        return None
+    try:
+        return os.stat(path).st_size
+    except OSError:
+        return None
+
+
+def _attach_events_wait(
+    events_path,
+    *,
+    poll_interval: float,
+    heartbeat_interval: float,
+    clock,
+    sleep,
+    events_stat,
+) -> None:
+    """Wait between attach-mode full ``asl status`` probes, watching events.jsonl.
+
+    Sleeps ``poll_interval`` slices while ``os.stat``-ing the events file and
+    returns — signalling the caller to run a fresh full probe — once the
+    ``heartbeat_interval`` elapses or the file grows (new activity or a terminal
+    event). With no events file to watch (no path, or an unreadable one) it
+    degrades to a single ``poll_interval`` sleep so callers without a live event
+    stream keep the legacy full-probe-every-poll cadence.
+    """
+    baseline = events_stat(events_path)
+    if baseline is None:
+        sleep(poll_interval)
+        return
+    start = clock()
+    while True:
+        sleep(poll_interval)
+        current = events_stat(events_path)
+        if current is None or current != baseline:
+            return
+        if clock() - start >= heartbeat_interval:
+            return
+
+
 def supervise_run(
     parsed: dict,
     *,
@@ -1082,6 +1318,7 @@ def supervise_run(
     clock=time.monotonic,
     sleep=time.sleep,
     heartbeat=_emit_heartbeat,
+    events_stat=_events_size,
     poll_interval: float = DEFAULT_POLL_INTERVAL,
     heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     stall_threshold: float = DEFAULT_STALL_IDLE_THRESHOLD,
@@ -1130,12 +1367,15 @@ def supervise_run(
     ``max_chunks`` bounds both self-launched relaunches and attach polls so a
     wedged plan can never loop forever.
 
-    Both heartbeat sites carry live progress. Self-launched chunks probe
-    ``asl status`` each tick via the injected ``status_invoker`` seam
-    (``status_probe=lambda: status_invoker(parsed)``), and the attach-wait
-    heartbeat reuses the ``status`` payload already fetched this iteration to
-    surface the same session/idle detail and a ``WARN possibly stalled`` line
-    once ``idle_seconds`` crosses ``stall_threshold``.
+    Both heartbeat sites carry live progress. Self-launched chunks derive each
+    tick from the plan's ``events.jsonl`` (see :func:`_invoke_run`), and the
+    attach-wait heartbeat reuses the ``status`` payload already fetched this
+    iteration to surface the same session/idle detail and a ``WARN possibly
+    stalled`` line once ``idle_seconds`` crosses ``stall_threshold``. Between
+    attach heartbeats the loop only ``os.stat``s ``events.jsonl`` (via the
+    ``events_stat`` seam) rather than re-running ``asl status`` every poll; a
+    fresh full probe — which keeps lock/pending classification authoritative —
+    runs once the heartbeat interval elapses or the events file grows.
     """
     if run_invoker is None:
 
@@ -1174,6 +1414,7 @@ def supervise_run(
                 chunks=chunks, error=error,
             )
 
+        events_path = status.get("events_path")
         disposition = _classify_lock(parsed, status)
         if disposition == "mismatch":
             return _run_result(
@@ -1222,7 +1463,18 @@ def supervise_run(
                     message = f"attached to active run; waiting {context} | {detail}"
                 heartbeat(message)
                 last_attach_beat = now
-            sleep(poll_interval)
+            # Between full probes, watch events.jsonl by os.stat rather than
+            # re-running `asl status` every poll; a fresh full probe (which keeps
+            # lock/pending classification authoritative) runs once the heartbeat
+            # interval elapses or the file grows.
+            _attach_events_wait(
+                events_path,
+                poll_interval=poll_interval,
+                heartbeat_interval=heartbeat_interval,
+                clock=clock,
+                sleep=sleep,
+                events_stat=events_stat,
+            )
             continue
 
         if not _should_launch_for_status(parsed, status, pending):
@@ -1264,12 +1516,13 @@ def supervise_run(
             session_id = _current_session_id(status)
             retry_key = (session_id, pause_reason)
             classification = _pause_classification(run_payload)
+            policy = _effective_pause_policy(run_payload, pause_reason)
 
             # Non-retryable harness failures that need a human and carry no
             # useful Q&A context (quota/session-limit, auth, invalid-model):
             # surface immediately as `user_required` with any reset info, never
             # retry, and let run_autopilot skip `asl questions` for them.
-            if pause_reason in USER_REQUIRED_HARNESS_FAILURE_REASONS:
+            if policy.get("requires_user"):
                 return _run_result(
                     False,
                     "user_required",
@@ -1300,7 +1553,7 @@ def supervise_run(
                 and _verification_repair_exhausted(run_payload)
             )
             if (
-                pause_reason in RECOVERABLE_PAUSE_REASONS
+                policy.get("recoverable")
                 and used < max_retries
                 and not verify_repair_exhausted
             ):
@@ -1335,7 +1588,7 @@ def supervise_run(
                     "session": session_id,
                     "reason": pause_reason,
                     "count": used,
-                    "exhausted": pause_reason in RECOVERABLE_PAUSE_REASONS,
+                    "exhausted": bool(policy.get("recoverable")),
                     "delayed_seconds": retry_delays.get(retry_key, 0.0),
                     "classification": classification,
                 },
@@ -1506,58 +1759,43 @@ def run_autopilot(
 
     if result.get("reason") == "paused":
         _attach_question_context(result, parsed, questioner)
-    elif result.get("reason") == "complete" and parsed.get("review_harness"):
-        _attach_review_context(result, parsed, review_reader)
+    elif result.get("reason") == "complete":
+        # The effective persisted review harness — not just the explicitly
+        # parsed ``--review-harness`` — governs terminal verdict attachment, so a
+        # resume-only review-enabled run (whose harness lives in the persisted
+        # ``run_config``) still surfaces a findings verdict instead of returning a
+        # bare ``complete``. This mirrors how ``_should_launch_for_status`` gates
+        # the continuation launch decision on the same effective config.
+        review_harness, _ = _effective_review_config(
+            parsed, result.get("status") or {}
+        )
+        if review_harness:
+            _attach_review_context(result, parsed, review_reader)
     return result
 
 
 def _review_resume_guidance(result: dict) -> Optional[str]:
-    """Return concise operator guidance from a surfaced review projection."""
-    review_resume = _review_resume_payload(result)
-    if review_resume is None:
-        return None
+    """Return concise operator guidance from a surfaced review projection.
+
+    Thin wrapper over :func:`review_continuation.review_resume_guidance`, the
+    single renderer shared with the runner and the CLI, so all three describe
+    the same continuation identically. Review-harness activity is derived from
+    :func:`_effective_review_config` — the same resolver that governs the
+    launch decision and terminal verdict attachment — so a resume-only command
+    whose harness lives in the persisted ``run_config`` is recognized as
+    review-enabled and is not told to add an explicit review harness the runner
+    already rehydrates.
+    """
     command = result.get("command")
-    needs_review_harness = not (
-        isinstance(command, dict) and command.get("review_harness")
+    parsed = command if isinstance(command, dict) else {}
+    status = result.get("status")
+    review_harness, _ = _effective_review_config(
+        parsed, status if isinstance(status, dict) else {}
     )
-    blocker = review_resume.get("blocker")
-    if blocker == "higher-cap-required":
-        minimum = review_resume.get("minimum_required_cap")
-        if type(minimum) is int:
-            requirements = []
-            if needs_review_harness:
-                requirements.append("a review harness")
-            requirements.append(f"--max-review-fix-cycles {minimum} or higher")
-            return "resume the same plan with " + " and ".join(requirements)
-    if blocker == "artifact-invalid":
-        artifact_error = review_resume.get("artifact_error")
-        detail = f": {artifact_error}" if artifact_error else ""
-        guidance = f"correct the review artifact{detail}"
-        if needs_review_harness:
-            guidance += ", then resume the same plan with a review harness"
-        return guidance
-    if review_resume.get("action") == "terminal" and blocker:
-        if blocker in _review_continuation.TERMINAL_REVIEW_DISPOSITIONS:
-            return None
-        return f"no automatic continuation ({blocker})"
-    if review_resume.get("eligible") is True:
-        action = review_resume.get("action") or "review"
-        minimum = review_resume.get("minimum_required_cap")
-        cap_guidance = (
-            f" and --max-review-fix-cycles {minimum} or higher"
-            if action == "materialize-repairs" and type(minimum) is int
-            else ""
-        )
-        command_guidance = (
-            "resume the same plan with a review harness"
-            if needs_review_harness
-            else "rerun the same review-enabled command"
-        )
-        return (
-            f"{command_guidance}{cap_guidance} "
-            f"to run the eligible {action} continuation"
-        )
-    return None
+    return _review_continuation.review_resume_guidance(
+        _review_resume_payload(result),
+        review_harness_active=bool(review_harness),
+    )
 
 
 def _human_summary(result: dict) -> str:

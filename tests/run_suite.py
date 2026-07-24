@@ -46,6 +46,7 @@ FAST_MODULES = (
     "tests.test_asl_compaction",
     "tests.test_asl_authoring",
     "tests.test_session_overview",
+    "tests.test_asl_state_migration",
 )
 
 # Integration modules: fake-harness end-to-end runs, workbench HTTP servers,

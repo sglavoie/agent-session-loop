@@ -88,6 +88,14 @@ class SkillInstructionTests(unittest.TestCase):
             text,
         )
         self.assertIn("<skill-prefix>plan-preflight-iterate", text)
+        # Contract validation and validator ingestion delegate to the `asl`
+        # subcommands rather than inlining `python3 -` heredocs.
+        self.assertIn(
+            "asl contract-check <plan-dir> --cwd <codebase-root> --json",
+            text,
+        )
+        self.assertIn("asl expand-ingest <plan-dir> --batch-file", text)
+        self.assertNotIn("<<'PY'", text)
 
     def test_session_split_names_current_contract_categories(self) -> None:
         text = (REPO_ROOT / "skills/session-split/SKILL.md").read_text(
@@ -97,21 +105,26 @@ class SkillInstructionTests(unittest.TestCase):
         self.assertIn("missing-contract", text)
         self.assertNotIn("session-contract", text)
 
-    def test_session_split_documents_shared_source_heading_grammar(self) -> None:
+    def test_session_split_delegates_heading_grammar_to_parser(self) -> None:
         text = (REPO_ROOT / "skills/session-split/SKILL.md").read_text(
             encoding="utf-8"
         )
 
-        self.assertIn("case-insensitive H2-H6 ATX headings", text)
-        self.assertIn("zero to three leading spaces", text)
-        self.assertIn("`:`, `-`, `–`, or `—`", text)
+        # The full source-heading grammar restatement is gone; the parser is
+        # authoritative and malformed headings surface as PlanError verbatim.
+        self.assertIn(
+            "agent_session_loop.authoring.parse_plan_document",
+            text,
+        )
         self.assertIn("without asking for normalization approval", text)
-        self.assertIn("line-specific `PlanError` directly", text)
+        self.assertIn("line-specific `PlanError`", text)
+        self.assertIn("reason `malformed-plan`", text)
         self.assertIn(
             "only when canonical parsing succeeds with zero explicit session headings",
             text,
         )
         self.assertIn("canonical `## Session N: <title>` headings", text)
+        self.assertNotIn("zero to three leading spaces", text)
         self.assertNotIn(
             "using the `## Session <id>` / `### Session <id>` headings",
             text,
@@ -122,6 +135,10 @@ class SkillInstructionTests(unittest.TestCase):
             encoding="utf-8"
         )
 
+        # The manual readiness gate delegates to the machine-readable preflight
+        # payload rather than re-encoding the repair ordering in prose.
+        self.assertIn("`auto_repair_plan`", text)
+        self.assertIn("`suggested_pause`", text)
         self.assertIn("asl unlock <plan-dir> --json", text)
         self.assertIn("Never run `asl unlock --force`", text)
         self.assertIn("asl backfill-progress --force <plan-dir>", text)
@@ -134,6 +151,66 @@ class SkillInstructionTests(unittest.TestCase):
             text,
         )
         self.assertIn("When `runner_managed=true`:", text)
+
+    def test_session_run_delegates_to_shared_payload_surfaces(self) -> None:
+        text = (REPO_ROOT / "skills/session-run/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+
+        # Single shared execution path plus one compact mode-deviation table —
+        # the only place `--runner-managed` differs after input parsing.
+        self.assertIn("## Shared execution path", text)
+        self.assertIn("## Mode deviations", text)
+        # Next-command derivation and verify remediation defer to the tooling.
+        self.assertIn("`next_command`", text)
+        self.assertIn("`repair_hint`", text)
+        self.assertIn("`--runner-managed`", text)
+
+    def test_session_resplit_delegates_mechanics_to_helper(self) -> None:
+        text = (REPO_ROOT / "skills/session-resplit/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+
+        # Compact single-line prefix rule shared with the other session-* skills
+        # (the old multi-line "Determine <skill-prefix> once" block is gone).
+        self.assertIn("**Skill-invocation prefix**", text)
+        self.assertNotIn("Determine `<skill-prefix>` once", text)
+
+        # Mechanics (parsing, inference, locks, archival, ledgers) belong to the
+        # helper; the skill keeps only the semantic contract-allocation work.
+        self.assertIn("resplit-session.py", text)
+        self.assertIn(
+            "input parsing, target/count inference",
+            text,
+        )
+        # Handoff status inspection delegates to `asl status --json` rather than
+        # re-deriving the final-handoff parsing rules in prose.
+        self.assertIn("asl status <plan-dir> --json", text)
+        self.assertNotIn(
+            "Find the last line whose trimmed text is exactly `## Handoff`",
+            text,
+        )
+        # The compressed lock step no longer restates the acquire_lock API call.
+        self.assertNotIn(
+            'acquire_lock(plan_dir, state_dir=None, owner="session-resplit")',
+            text,
+        )
+        # Active-lock recovery policy: the helper self-clears stale locks, so
+        # `lock-contention` is always an active lock — wait for or investigate
+        # the live runner, never force-remove/unlock it (F6).
+        self.assertIn("self-clears stale locks", text)
+        self.assertIn("always means an *active* lock", text)
+        self.assertIn("wait for that runner to finish", text)
+        self.assertIn("never force-remove an active lock or run a manual unlock", text)
+        self.assertNotIn("add --force if it", text)
+
+        # Child-spec schema and contract-allocation reasons stay in the skill.
+        self.assertIn("--child-spec", text)
+        self.assertIn("`no-contract`", text)
+        self.assertIn("`ambiguous-contract`", text)
+        # Runner signal vocabulary is preserved for the supervising loop.
+        self.assertIn("RESPLIT_STATUS: complete", text)
+        self.assertIn("RESPLIT_PAUSE: <reason> - <detail>", text)
 
 
 class PlanWorkflowDocsTests(unittest.TestCase):

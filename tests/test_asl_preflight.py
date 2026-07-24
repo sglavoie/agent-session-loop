@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import shlex
 import shutil
@@ -1588,6 +1589,242 @@ class PreflightRepairHintTests(unittest.TestCase):
         self.assertIsNone(preflight.runtime_repair_hint("nonexistent"))
 
 
+def _finding(
+    severity: str,
+    category: str,
+    message: str,
+    *,
+    detail: str = "",
+    path: str | None = None,
+) -> preflight.PreflightFinding:
+    return preflight.PreflightFinding(
+        severity=severity,
+        category=category,
+        message=message,
+        detail=detail,
+        path=path,
+    )
+
+
+def _report(*findings: preflight.PreflightFinding) -> preflight.PreflightReport:
+    return preflight.PreflightReport(
+        plan_dir=Path("/plan"),
+        findings=tuple(findings),
+    )
+
+
+def _backtick_commands(text: str) -> list[str]:
+    """Return every substring wrapped in single backticks in ``text``."""
+    return re.findall(r"`([^`]+)`", text)
+
+
+def _extract_backtick_command(text: str, prefix: str) -> str:
+    """Return the first backtick command in ``text`` starting with ``prefix``."""
+    for command in _backtick_commands(text):
+        if command.startswith(prefix):
+            return command
+    raise AssertionError(f"no `{prefix}...` command found in: {text!r}")
+
+
+class RepairHintSubstitutionTests(unittest.TestCase):
+    def test_plan_dir_and_repo_root_substituted_into_command(self) -> None:
+        hint = preflight.REPAIR_HINTS["env-lock"]
+        payload = preflight.repair_hint_payload(
+            hint, plan_dir="/plans/demo", cwd="/repo"
+        )
+        self.assertIn("asl unlock /plans/demo --json", payload["message"])
+        self.assertNotIn("<plan-dir>", payload["message"])
+        self.assertNotIn("<plan-dir>", payload["question_template"])
+
+    def test_repo_root_left_as_placeholder_when_cwd_none(self) -> None:
+        hint = preflight.REPAIR_HINTS["baseline-missing"]
+        payload = preflight.repair_hint_payload(
+            hint, plan_dir="/plans/demo", cwd=None
+        )
+        self.assertIn("asl baseline /plans/demo --cwd <repo-root>", payload["message"])
+
+    def test_every_hint_command_carries_plan_dir_placeholder(self) -> None:
+        # Audit: any hint whose message embeds an `asl <plandir-cmd>` command
+        # must use the `<plan-dir>` placeholder (never a bare `<plan>` or an
+        # unsubstituted literal) so the payload can inject the real directory.
+        plan_dir_commands = ("asl unlock", "asl backfill-progress", "asl baseline")
+        tables = (
+            preflight.REPAIR_HINTS.values(),
+            preflight._CATEGORY_HINT_OVERRIDES.values(),
+        )
+        for table in tables:
+            for hint in table:
+                with self.subTest(check_id=hint.check_id):
+                    self.assertNotIn("<plan>", hint.message)
+                    for command in plan_dir_commands:
+                        if command in hint.message:
+                            self.assertIn("<plan-dir>", hint.message)
+                    if "asl preflight" in hint.message and "--mark-loop-ready" in hint.message:
+                        self.assertIn(
+                            "asl preflight <plan-dir> --json --mark-loop-ready",
+                            hint.message,
+                        )
+
+    def test_baseline_command_survives_whitespace_and_metacharacters(self) -> None:
+        # The baseline remediation command embeds both the plan directory and
+        # the repo root; a path with whitespace or shell metacharacters must
+        # round-trip as one argument each.
+        weird_plan = "/plans/de mo; rm -rf $(evil)"
+        weird_repo = "/re po & 'quote'"
+        payload = preflight.repair_hint_payload(
+            preflight.REPAIR_HINTS["baseline-missing"],
+            plan_dir=weird_plan,
+            cwd=weird_repo,
+        )
+        command = _extract_backtick_command(payload["message"], "asl baseline")
+        self.assertEqual(
+            ["asl", "baseline", weird_plan, "--cwd", weird_repo],
+            shlex.split(command),
+        )
+
+    def test_every_substituted_hint_embeds_only_quoted_paths(self) -> None:
+        # Audit: after substitution, each weird path appears in the payload
+        # only in its shell-quoted form (never raw), so every embedded command
+        # round-trips through shlex.split without splitting a path.
+        weird_plan = "/plans/de mo; rm -rf $(evil)"
+        weird_repo = "/re po & 'quote'"
+        tables = (
+            preflight.REPAIR_HINTS.values(),
+            preflight._CATEGORY_HINT_OVERRIDES.values(),
+        )
+        for table in tables:
+            for hint in table:
+                payload = preflight.repair_hint_payload(
+                    hint, plan_dir=weird_plan, cwd=weird_repo
+                )
+                for field in ("message", "question_template"):
+                    text = payload[field]
+                    with self.subTest(check_id=hint.check_id, field=field):
+                        # Strip the quoted forms; the raw path must not survive.
+                        residue = text.replace(
+                            shlex.quote(weird_plan), ""
+                        ).replace(shlex.quote(weird_repo), "")
+                        self.assertNotIn(weird_plan, residue)
+                        self.assertNotIn(weird_repo, residue)
+                    for command in _backtick_commands(text):
+                        if command.startswith("asl "):
+                            # Well-formed shell: parses without raising.
+                            shlex.split(command)
+
+
+class AutoRepairPlanTests(unittest.TestCase):
+    def test_ok_report_has_empty_plan_and_no_pause(self) -> None:
+        report = _report(_finding("green", "env-amx", "optional"))
+        self.assertEqual(
+            (), preflight.build_auto_repair_plan(report, plan_dir="/plan")
+        )
+        self.assertIsNone(
+            preflight.build_suggested_pause(report, plan_dir="/plan")
+        )
+
+    def test_stale_lock_then_progress_then_readiness_order(self) -> None:
+        report = _report(
+            _finding("red", "manifest-readiness", "manifest is missing readiness metadata"),
+            _finding("yellow", "progress-journal-missing", "progress journal not initialized"),
+            _finding("yellow", "env-lock", "stale lock present at /p/lock"),
+        )
+        plan = preflight.build_auto_repair_plan(report, plan_dir="/plans/x")
+        commands = [step["command"] for step in plan]
+        self.assertEqual(
+            [
+                "asl unlock /plans/x --json",
+                "asl backfill-progress --force /plans/x",
+                "asl preflight /plans/x --json --mark-loop-ready",
+            ],
+            commands,
+        )
+        for step in plan:
+            self.assertEqual(1, step["max_attempts"])
+        # readiness-only residue is fully repairable -> no fallback pause.
+        self.assertIsNone(
+            preflight.build_suggested_pause(report, plan_dir="/plans/x")
+        )
+
+    def test_active_lock_blocks_and_never_unlocks(self) -> None:
+        report = _report(
+            _finding("red", "env-lock", "active lock held by pid 9 at /p/lock"),
+            _finding("yellow", "progress-journal-missing", "journal missing"),
+        )
+        plan = preflight.build_auto_repair_plan(report, plan_dir="/plans/x")
+        self.assertEqual(1, len(plan))
+        step = plan[0]
+        self.assertTrue(step["blocked"])
+        self.assertEqual("lock-contention", step["pause_reason"])
+        # The active-lock plan never emits an unlock command or `--force`.
+        self.assertNotIn("command", step)
+        for entry in plan:
+            self.assertNotIn("--force", json.dumps(entry))
+        pause = preflight.build_suggested_pause(report, plan_dir="/plans/x")
+        self.assertEqual("lock-contention", pause["reason"])
+
+    def test_hard_blocker_suppresses_readiness_step_and_suggests_unsafe(
+        self,
+    ) -> None:
+        report = _report(
+            _finding("red", "manifest-readiness", "manifest is missing readiness metadata"),
+            _finding("red", "missing-contract", "session 1 is missing a ## Completion Contract section"),
+        )
+        plan = preflight.build_auto_repair_plan(report, plan_dir="/plans/x")
+        # A non-readiness blocker (missing-contract) means mark-loop-ready would
+        # be refused, so no readiness repair step is offered.
+        self.assertEqual([], [s for s in plan if "command" in s])
+        pause = preflight.build_suggested_pause(report, plan_dir="/plans/x")
+        self.assertEqual("unsafe", pause["reason"])
+        self.assertIn("missing-contract", pause["detail"])
+        self.assertIn("automatic plan repair failed", pause["detail"])
+
+    def test_progress_only_repairable_without_pause(self) -> None:
+        report = _report(
+            _finding("yellow", "progress-journal-missing", "journal missing"),
+        )
+        plan = preflight.build_auto_repair_plan(report, plan_dir="/plans/x")
+        self.assertEqual(
+            ["asl backfill-progress --force /plans/x"],
+            [s["command"] for s in plan],
+        )
+        self.assertIsNone(
+            preflight.build_suggested_pause(report, plan_dir="/plans/x")
+        )
+
+    def test_repair_commands_survive_whitespace_and_metacharacters(self) -> None:
+        # A plan path carrying whitespace and shell metacharacters must stay a
+        # single argument in every auto-repair step: stale-lock, progress-
+        # backfill, and readiness. Each step exposes an authoritative `argv`
+        # array, and its `command` is that argv rendered shell-safe so it
+        # round-trips through shlex.split.
+        weird = "/plans/de mo; rm -rf $(evil) 'q'"
+        report = _report(
+            _finding(
+                "red",
+                "manifest-readiness",
+                "manifest is missing readiness metadata",
+            ),
+            _finding(
+                "yellow",
+                "progress-journal-missing",
+                "progress journal not initialized",
+            ),
+            _finding("yellow", "env-lock", "stale lock present at /p/lock"),
+        )
+        plan = preflight.build_auto_repair_plan(report, plan_dir=weird)
+        self.assertEqual(
+            [
+                ["asl", "unlock", weird, "--json"],
+                ["asl", "backfill-progress", "--force", weird],
+                ["asl", "preflight", weird, "--json", "--mark-loop-ready"],
+            ],
+            [step["argv"] for step in plan],
+        )
+        for step in plan:
+            self.assertEqual(step["argv"], shlex.split(step["command"]))
+            self.assertIn(weird, shlex.split(step["command"]))
+
+
 class PreflightEnvironmentTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -2013,6 +2250,9 @@ class PreflightCliTests(unittest.TestCase):
         self.assertEqual("per-session", payload["commit_mode"])
         self.assertFalse(payload["mark_loop_ready_requested"])
         self.assertFalse(payload["marked_loop_ready"])
+        # An ok plan needs no repairs and suggests no pause.
+        self.assertEqual([], payload["auto_repair_plan"])
+        self.assertIsNone(payload["suggested_pause"])
         # No red/yellow findings present.
         counts = payload["findings_by_severity"]
         self.assertEqual(0, counts["red"])
@@ -2080,6 +2320,28 @@ class PreflightCliTests(unittest.TestCase):
         self.assertFalse(payload["paused"])
         categories = {finding["category"] for finding in payload["findings"]}
         self.assertIn("manifest-readiness", categories)
+        # A readiness-only break is auto-repairable via --mark-loop-ready and
+        # the emitted repair_hint embeds the plan-dir-substituted command.
+        commands = [
+            step["command"]
+            for step in payload["auto_repair_plan"]
+            if "command" in step
+        ]
+        self.assertIn(
+            f"asl preflight {self.plan_dir} --json --mark-loop-ready",
+            commands,
+        )
+        self.assertIsNone(payload["suggested_pause"])
+        readiness_hints = [
+            hint
+            for hint in payload["repair_hints"]
+            if hint["category"] == "manifest-readiness"
+        ]
+        self.assertTrue(readiness_hints)
+        self.assertIn(
+            f"asl preflight {self.plan_dir} --json --mark-loop-ready",
+            readiness_hints[0]["message"],
+        )
         # findings keep the dataclass shape exactly.
         sample = payload["findings"][0]
         for key in (

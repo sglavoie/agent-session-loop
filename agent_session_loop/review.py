@@ -19,10 +19,12 @@ artifact never yields an ``ok`` verdict.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 from pathlib import Path
 import re
+import sys
 from typing import Any
 
 from . import contracts
@@ -548,6 +550,238 @@ def load_review_verdict(
     payload["findings"] = artifact["findings"]
     payload["review_artifact_path"] = str(artifact_path)
     return payload
+
+
+# Command name for the authoritative review-verdict surface.
+REVIEW_VERDICT_COMMAND = "review-verdict"
+
+
+def _review_verdict_summary(verdict: dict[str, Any]) -> tuple[str, int]:
+    """Return the full ``final-review.md`` body and its character count.
+
+    ``asl review-verdict`` is the authoritative escape hatch from the bounded
+    helper excerpt, so it never truncates: it reads the entire review body and
+    reports the true length. The bounded helper summary (which does truncate)
+    is the only surface that ever flags ``summary_truncated: true``.
+    """
+    output_path = verdict.get("review_output_path")
+    text = ""
+    if isinstance(output_path, str) and output_path:
+        try:
+            text = Path(output_path).read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+    stripped = text.strip()
+    return stripped, len(stripped)
+
+
+def _review_verdict_next_steps(
+    verdict: dict[str, Any],
+    *,
+    plan_dir: str,
+    guidance: str | None,
+) -> list[str]:
+    """Return exact remediation commands for the current verdict/continuation.
+
+    A non-ok verdict names the exact artifact to correct (or, for a missing
+    review, the command that generates it); an all-clear verdict needs nothing;
+    a findings verdict defers to the shared continuation renderer so the runner,
+    the CLI, and the autopilot describe the same continuation identically.
+
+    Both fallback commands render their plan path through the shared shell-safe
+    :func:`agent_session_loop.responses.format_command` builder, so a plan
+    directory containing whitespace or shell metacharacters round-trips as a
+    single argument under :func:`shlex.split` instead of splitting apart.
+    """
+    from . import responses
+
+    run_command = responses.format_command(["asl", "run", plan_dir])
+    if not verdict.get("ok"):
+        reason = verdict.get("reason")
+        error = verdict.get("error")
+        if reason == REVIEW_REASON_MISSING:
+            return [
+                f"{run_command} --review-harness codex|claude|copilot  "
+                f"# generate {FINAL_REVIEW_FILENAME}"
+            ]
+        artifact_reasons = {
+            REVIEW_REASON_MISSING_ARTIFACT,
+            REVIEW_REASON_MALFORMED_ARTIFACT,
+            REVIEW_REASON_CONTRADICTORY_ARTIFACT,
+        }
+        target = (
+            verdict.get("review_artifact_path")
+            if reason in artifact_reasons
+            else verdict.get("review_output_path")
+        )
+        detail = f": {error}" if error else ""
+        return [f"correct {target}{detail}"]
+    if verdict.get("outcome") == REVIEW_OUTCOME_ALL_CLEAR:
+        return []
+    # Findings outcome: the continuation projection is authoritative when it
+    # has actionable guidance; otherwise fall back to the command that resumes
+    # the runner-owned repair/rereview cycles so a findings verdict always
+    # carries a concrete remediation.
+    if guidance:
+        return [guidance]
+    return [
+        f"{run_command} --review-harness codex|claude|copilot  "
+        "# resume repair/rereview cycles to resolve the findings"
+    ]
+
+
+def _relevant_review_session_version(
+    snapshot: plans.PlanSnapshot, review_resume: dict[str, Any]
+) -> int | None:
+    """Return the generated-review version that governs artifact enforcement.
+
+    The relevant session is the source review the continuation projection
+    resolved (``review_session_id``); its marker version decides whether
+    ``final-review.json`` is required, mirroring the runner's own enforcement.
+    Returns ``None`` when no generated review session governs the current
+    verdict — a legacy v1 (base-marker-only) review or no generated review at
+    all — so the permissive default applies and Markdown-only reviews stay
+    supported.
+    """
+    source_id = review_resume.get("review_session_id")
+    if not isinstance(source_id, str) or not source_id:
+        return None
+    for session in snapshot.sessions:
+        if session.id != source_id:
+            continue
+        try:
+            body = session.path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        return review_session_marker_version(body)
+    return None
+
+
+def review_verdict_payload(
+    plan_dir: str | Path, state_dir: str | Path | None = None
+) -> dict[str, Any]:
+    """Build the authoritative ``asl review-verdict`` payload.
+
+    Merges :func:`load_review_verdict` (the shared verdict, carrying full
+    untruncated ``findings`` when the structured artifact is present) with the
+    read-only continuation projection under ``review_resume``, then attaches the
+    full untruncated ``summary`` (with ``summary_truncated``/
+    ``summary_total_chars``) and exact ``next_steps`` remediation commands. The
+    verdict's own ``ok``/``reason`` surface at the top level so a malformed or
+    missing review reports a stable ``reason`` from the shared vocabulary.
+
+    When the governing generated review session is version
+    :data:`GENERATED_REVIEW_SESSION_VERSION` or newer, a missing
+    ``final-review.json`` is enforced as ``missing-review-artifact`` — matching
+    runner and continuation enforcement — while legacy v1 Markdown-only reviews
+    remain accepted.
+
+    Local imports keep ``review`` free of an import cycle: ``review_continuation``
+    imports this module, and ``state`` reaches its continuation evaluator lazily.
+    """
+    from . import events, responses, review_continuation, state
+
+    snapshot = plans.inspect_plan(plan_dir)
+    plan_state = state.plan_state_dir(snapshot.plan_dir, state_dir)
+    event_path = plan_state / events.EVENTS_FILE_NAME
+    review_resume = review_continuation.evaluate_review_continuation(
+        snapshot, event_path
+    ).to_payload()
+    review_session_version = _relevant_review_session_version(
+        snapshot, review_resume
+    )
+    verdict = load_review_verdict(
+        snapshot.plan_dir,
+        require_artifact=(
+            review_session_version is not None
+            and review_session_version >= GENERATED_REVIEW_SESSION_VERSION
+        ),
+    )
+    summary, summary_total = _review_verdict_summary(verdict)
+    guidance = review_continuation.review_resume_guidance(
+        review_resume, review_harness_active=False
+    )
+    next_steps = _review_verdict_next_steps(
+        verdict, plan_dir=str(snapshot.plan_dir), guidance=guidance
+    )
+
+    payload = responses.success_payload(REVIEW_VERDICT_COMMAND)
+    # Merge the verdict; its ``ok``/``reason``/``error`` surface at the top
+    # level, and ``findings`` (when present) is the full untruncated list.
+    payload.update(verdict)
+    payload["command"] = REVIEW_VERDICT_COMMAND
+    payload["plan_dir"] = str(snapshot.plan_dir)
+    payload["state_dir"] = str(plan_state)
+    payload["events_path"] = str(event_path)
+    payload["review_resume"] = review_resume
+    payload["summary"] = summary
+    payload["summary_truncated"] = False
+    payload["summary_total_chars"] = summary_total
+    payload["findings"] = verdict.get("findings")
+    payload["next_steps"] = next_steps
+    return payload
+
+
+def review_verdict_from_args(args: argparse.Namespace) -> int:
+    """Run the ``review-verdict`` subcommand from CLI arguments.
+
+    Returns ``0`` for a valid all-clear or findings verdict and ``1`` for a
+    malformed plan or any stable non-ok verdict (missing, malformed, or
+    contradictory review), so shell automation can gate on the exit status.
+    """
+    from . import responses
+
+    plan_dir_arg = args.plan_dir
+    want_json = bool(args.json)
+    try:
+        payload = review_verdict_payload(plan_dir_arg, args.state_dir)
+    except plans.PlanError as error:
+        if want_json:
+            responses.print_json(
+                responses.error_payload(
+                    REVIEW_VERDICT_COMMAND,
+                    reason="malformed-plan",
+                    error=str(error),
+                    paused=False,
+                    plan_dir=str(plan_dir_arg),
+                )
+            )
+        else:
+            print(
+                f"agent-session-loop review-verdict: {error}",
+                file=sys.stderr,
+            )
+        return 1
+
+    if want_json:
+        responses.print_json(payload)
+    else:
+        _print_text_review_verdict(payload)
+    # A stable missing, malformed, or contradictory verdict is a non-ok
+    # payload; exit nonzero so shell automation can trust the status. Valid
+    # all-clear and findings verdicts stay ``ok`` and exit zero.
+    return 0 if payload.get("ok") else 1
+
+
+def _print_text_review_verdict(payload: dict[str, Any]) -> None:
+    print(f"Plan: {payload['plan_dir']}")
+    if payload.get("ok"):
+        print(f"Verdict: {payload.get('status_line')}")
+        print(f"Outcome: {payload.get('outcome')}")
+        print(f"Total findings: {payload.get('total_findings')}")
+    else:
+        print(f"Verdict: not ok ({payload.get('reason')})")
+        error = payload.get("error")
+        if error:
+            print(f"Error: {error}")
+    if payload.get("summary_total_chars"):
+        print(f"Summary ({payload['summary_total_chars']} chars):")
+        print(payload["summary"])
+    next_steps = payload.get("next_steps") or []
+    if next_steps:
+        print("Next steps:")
+        for step in next_steps:
+            print(f"  - {step}")
 
 
 # Cross-cycle finding identity. Rereview cycles need to recognize a finding

@@ -547,6 +547,73 @@ def _state_run_finished(state_payload: dict[str, Any] | None) -> bool:
     )
 
 
+def follow_events(path: str | Path):
+    """Incrementally follow appended event records from a JSONL events file.
+
+    A generator that yields one *batch* — a ``list`` of decoded event-record
+    dicts — per iteration: each ``next()`` reads the bytes appended since the
+    previous call, splits them into complete newline-terminated JSON records,
+    and yields the parsed dicts (an empty list when nothing new arrived). A
+    trailing partial line is buffered until its newline appears, so a record
+    still being written is never parsed half-way.
+
+    It tolerates the file not existing yet (yields ``[]`` until it appears),
+    blank or unparseable "garbage" lines (skipped), non-object records
+    (skipped), and truncation or rotation — a file that shrank below the read
+    offset, or whose identity (device/inode) changed, is reopened from the
+    start. Versionless (v1) records need no special handling: the follower
+    surfaces every dict record verbatim and leaves schema interpretation to the
+    caller. The generator never stops on its own; the caller drives it and
+    decides when to stop.
+    """
+    events_path = Path(path)
+    offset = 0
+    buffer = b""
+    identity: tuple[int, int] | None = None
+    while True:
+        records: list[dict[str, Any]] = []
+        try:
+            stat_result = events_path.stat()
+        except OSError:
+            yield records
+            continue
+        current_identity = (stat_result.st_dev, stat_result.st_ino)
+        if stat_result.st_size < offset or (
+            identity is not None and current_identity != identity
+        ):
+            # Truncation (file shrank) or rotation (new inode): reopen from the
+            # start so a rewritten events file is followed rather than skipped.
+            offset = 0
+            buffer = b""
+        identity = current_identity
+        if stat_result.st_size > offset:
+            try:
+                with events_path.open("rb") as handle:
+                    handle.seek(offset)
+                    chunk = handle.read()
+                    offset = handle.tell()
+            except OSError:
+                yield records
+                continue
+            buffer += chunk
+            *complete, buffer = buffer.split(b"\n")
+            for raw_line in complete:
+                stripped = raw_line.strip()
+                if not stripped:
+                    continue
+                try:
+                    text = stripped.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                try:
+                    raw = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(raw, dict):
+                    records.append(raw)
+        yield records
+
+
 class _TailFollowLoop:
     def __init__(
         self,

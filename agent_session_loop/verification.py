@@ -454,6 +454,29 @@ def _is_module_invocation(argv: tuple[str, ...]) -> bool:
     return _PYTHON_BASENAME_PATTERN.fullmatch(basename) is not None
 
 
+def _is_bare_python_invocation(argv: tuple[str, ...]) -> bool:
+    """True when ``argv[0]`` is the *unversioned* ``python`` interpreter.
+
+    A completion-contract command that shells out to bare, unversioned
+    ``python`` is not portable: ``python`` is frequently absent in environments
+    that ship only a versioned ``python3``. The actionable remediation is to
+    use ``python3`` — matching the ``session-expand`` skill guidance.
+
+    A versioned ``python3``/``python3.11`` invocation is *not* flagged here,
+    regardless of whether it uses ``-m``, ``-c``, or a script path — those are
+    valid inline evidence checks. Module importability for the ``-m`` form is
+    diagnosed separately by :func:`diagnose_command`.
+    """
+    if not argv:
+        return False
+    basename = Path(argv[0]).name
+    if _PYTHON_BASENAME_PATTERN.fullmatch(basename) is None:
+        return False
+    # Only the unversioned ``python`` command is flagged; ``python3`` and
+    # ``python3.11`` carry an explicit version and are treated as available.
+    return basename == "python"
+
+
 def _default_module_probe(
     interpreter: str, module: str, *, cwd: Path
 ) -> bool | None:
@@ -817,6 +840,64 @@ def _print_text_no_contract(session_id: SessionId, *, plan_dir: str) -> None:
     print("Verify: no completion contract", file=sys.stderr)
 
 
+def _no_contract_skill_remediation(plan_dir: str) -> dict[str, Any]:
+    """Manual-mode remediation for a missing Completion Contract.
+
+    ``session-run`` has no ``--allow-not-loop-ready`` equivalent and fails
+    closed on ``no-contract``. This names both escape hatches with the plan
+    directory substituted: bypass the requirement via ``asl run
+    --allow-not-loop-ready`` or repair the plan and re-mark it loop-ready via
+    ``asl preflight --mark-loop-ready``. Both commands are rendered through the
+    shared shell-safe :func:`agent_session_loop.responses.format_command`
+    builder, so a plan directory containing whitespace or shell metacharacters
+    stays a single argument. The steps use Session 6's shared ``responses``
+    builder so every surface describes next actions with one payload shape.
+    """
+    run_command = responses.format_command(
+        ["asl", "run", plan_dir, "--allow-not-loop-ready"]
+    )
+    preflight_command = responses.format_command(
+        ["asl", "preflight", plan_dir, "--json", "--mark-loop-ready"]
+    )
+    steps = [
+        responses.command_step(run_command),
+        responses.command_step(preflight_command),
+    ]
+    message = (
+        "session-run has no bypass flag and fails closed when a session has "
+        "no `## Completion Contract`. Bypass the requirement with "
+        f"`{run_command}`, or add a contract and re-mark the plan loop-ready "
+        f"with `{preflight_command}`."
+    )
+    return {"message": message, **responses.next_steps_payload(steps)}
+
+
+def _verify_remediation_fields(
+    *,
+    reason: str,
+    failure_reason: str | None,
+    plan_dir: str,
+    cwd: str | None,
+) -> dict[str, Any]:
+    """Attach a ``repair_hint`` (and ``no-contract`` ``skill_remediation``).
+
+    The hint mirrors ``workbench``'s runtime-recovery usage of
+    :func:`agent_session_loop.preflight.runtime_repair_hint`; the import is
+    deferred because ``preflight`` imports this module.
+    """
+    from . import preflight  # local import: preflight imports verification
+
+    fields: dict[str, Any] = {}
+    hint = preflight.runtime_repair_hint(reason, failure_reason=failure_reason)
+    if hint is not None:
+        fields["repair_hint"] = preflight.repair_hint_payload(
+            hint, plan_dir=plan_dir, cwd=cwd
+        )
+    if reason == VERIFY_EXIT_REASON_NO_CONTRACT:
+        fields["skill_remediation"] = _no_contract_skill_remediation(plan_dir)
+    return fields
+
+
 def _emit_verify_error(
     *,
     want_json: bool,
@@ -826,6 +907,7 @@ def _emit_verify_error(
     session: str,
     cwd: str | None,
     extra: dict[str, Any] | None = None,
+    failure_reason: str | None = None,
 ) -> None:
     if want_json:
         fields: dict[str, Any] = {"plan_dir": plan_dir, "session": session}
@@ -833,6 +915,14 @@ def _emit_verify_error(
             fields["cwd"] = cwd
         if extra:
             fields.update(extra)
+        fields.update(
+            _verify_remediation_fields(
+                reason=reason,
+                failure_reason=failure_reason,
+                plan_dir=plan_dir,
+                cwd=cwd,
+            )
+        )
         responses.print_json(
             responses.error_payload(
                 "verify",
@@ -934,22 +1024,30 @@ def verify_from_args(args: argparse.Namespace) -> int:
                 )
             )
         else:
-            responses.print_json(
-                responses.error_payload(
-                    "verify",
-                    reason=VERIFY_EXIT_REASON_FAILED,
-                    error=(
-                        f"{len(result.failures)} of {len(result.checks)} "
-                        "verification check(s) failed"
-                    ),
-                    paused=False,
-                    plan_dir=str(plan_dir_arg),
-                    session=result.session_id.value,
-                    cwd=str(canonical_cwd),
-                    passed=False,
-                    recipe=_recipe_summary(contract),
-                    checks=[_check_result_payload(check) for check in result.checks],
-                )
+            first_failure = result.failures[0] if result.failures else None
+            _emit_verify_error(
+                want_json=True,
+                reason=VERIFY_EXIT_REASON_FAILED,
+                error=(
+                    f"{len(result.failures)} of {len(result.checks)} "
+                    "verification check(s) failed"
+                ),
+                plan_dir=str(plan_dir_arg),
+                session=result.session_id.value,
+                cwd=str(canonical_cwd),
+                failure_reason=(
+                    first_failure.failure_reason
+                    if first_failure is not None
+                    else None
+                ),
+                extra={
+                    "passed": False,
+                    "recipe": _recipe_summary(contract),
+                    "checks": [
+                        _check_result_payload(check)
+                        for check in result.checks
+                    ],
+                },
             )
     else:
         _print_text_verify_success(
@@ -957,3 +1055,280 @@ def verify_from_args(args: argparse.Namespace) -> int:
         )
 
     return 0 if result.passed else 1
+
+
+# ---------------------------------------------------------------------------
+# `asl contract-check` — static per-check contract diagnosis
+# ---------------------------------------------------------------------------
+
+CONTRACT_CHECK_EXIT_REASON_OK = "ok"
+CONTRACT_CHECK_EXIT_REASON_ISSUES = "contract-issues"
+CONTRACT_CHECK_EXIT_REASON_INVALID_SESSION = "invalid-session"
+CONTRACT_CHECK_EXIT_REASON_CWD_ERROR = "cwd-error"
+CONTRACT_CHECK_EXIT_REASON_PLAN_ERROR = "plan-error"
+
+#: Per-check row statuses.
+CONTRACT_CHECK_ROW_OK = "ok"
+CONTRACT_CHECK_ROW_SCHEMA_ERROR = "schema-error"
+CONTRACT_CHECK_ROW_MISSING_CONTRACT = "missing-contract"
+CONTRACT_CHECK_ROW_FACTUAL_ISSUE = "factual-issue"
+
+#: ``factual-issue`` sub-reasons.
+CONTRACT_CHECK_ISSUE_COMMAND_NOT_RUNNABLE = "command-not-runnable"
+CONTRACT_CHECK_ISSUE_FILE_MISSING = "file-missing"
+CONTRACT_CHECK_ISSUE_REGEX_NOT_MATCHED = "regex-not-matched"
+CONTRACT_CHECK_ISSUE_BARE_PYTHON = "bare-python"
+
+
+def _contract_check_session_row(
+    session: str, status: str, detail: str
+) -> dict[str, Any]:
+    return {
+        "session": session,
+        "name": None,
+        "type": None,
+        "status": status,
+        "reason": None,
+        "detail": detail,
+    }
+
+
+def _diagnose_contract_check(
+    check: VerificationCheck, *, repo_root: Path
+) -> tuple[str, str | None, str]:
+    """Statically diagnose one check; return ``(status, reason, detail)``.
+
+    No command is executed and no file is written: command runnability is
+    diagnosed by :func:`diagnose_command`/:func:`diagnose_command_scope` (both
+    mapped to ``command-not-runnable``), an unversioned ``python`` interpreter
+    invocation is flagged ``bare-python``, and file/regex checks are resolved
+    against ``repo_root`` for existence and pattern-match.
+    """
+    if isinstance(check, CommandCheck):
+        if _is_bare_python_invocation(check.argv):
+            return (
+                CONTRACT_CHECK_ROW_FACTUAL_ISSUE,
+                CONTRACT_CHECK_ISSUE_BARE_PYTHON,
+                (
+                    "unversioned `python` is frequently unavailable where "
+                    f"`python3` exists: {' '.join(check.argv)}; use `python3`"
+                ),
+            )
+        scope = diagnose_command_scope(check)
+        if scope is not None:
+            return (
+                CONTRACT_CHECK_ROW_FACTUAL_ISSUE,
+                CONTRACT_CHECK_ISSUE_COMMAND_NOT_RUNNABLE,
+                scope.detail,
+            )
+        diagnostic = diagnose_command(check, repo_root=repo_root)
+        if diagnostic is not None:
+            return (
+                CONTRACT_CHECK_ROW_FACTUAL_ISSUE,
+                CONTRACT_CHECK_ISSUE_COMMAND_NOT_RUNNABLE,
+                diagnostic.detail,
+            )
+        return (CONTRACT_CHECK_ROW_OK, None, f"command is runnable: {' '.join(check.argv)}")
+
+    if isinstance(check, FileExistsCheck):
+        target = _resolve_under_root(repo_root, check.path)
+        try:
+            exists = target.exists()
+        except OSError as error:
+            return (
+                CONTRACT_CHECK_ROW_FACTUAL_ISSUE,
+                CONTRACT_CHECK_ISSUE_FILE_MISSING,
+                f"cannot stat {check.path}: {error}",
+            )
+        if exists:
+            return (CONTRACT_CHECK_ROW_OK, None, f"file exists: {check.path}")
+        return (
+            CONTRACT_CHECK_ROW_FACTUAL_ISSUE,
+            CONTRACT_CHECK_ISSUE_FILE_MISSING,
+            f"file does not exist: {check.path}",
+        )
+
+    if isinstance(check, RegexInFileCheck):
+        target = _resolve_under_root(repo_root, check.path)
+        try:
+            text = target.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return (
+                CONTRACT_CHECK_ROW_FACTUAL_ISSUE,
+                CONTRACT_CHECK_ISSUE_FILE_MISSING,
+                f"file does not exist: {check.path}",
+            )
+        except OSError as error:
+            return (
+                CONTRACT_CHECK_ROW_FACTUAL_ISSUE,
+                CONTRACT_CHECK_ISSUE_FILE_MISSING,
+                f"cannot read {check.path}: {error}",
+            )
+        if re.compile(check.pattern, re.MULTILINE).search(text) is None:
+            return (
+                CONTRACT_CHECK_ROW_FACTUAL_ISSUE,
+                CONTRACT_CHECK_ISSUE_REGEX_NOT_MATCHED,
+                f"pattern did not match in {check.path}: {check.pattern}",
+            )
+        return (CONTRACT_CHECK_ROW_OK, None, f"pattern matched in {check.path}")
+
+    return (CONTRACT_CHECK_ROW_OK, None, "")
+
+
+def _contract_check_rows(
+    plan_dir: str | Path, session_id: SessionId, *, repo_root: Path
+) -> list[dict[str, Any]]:
+    """Return per-check rows for one session's completion contract."""
+    try:
+        contract = read_completion_contract(plan_dir, session_id)
+    except plans.PlanError as error:
+        return [
+            _contract_check_session_row(
+                session_id.value, CONTRACT_CHECK_ROW_SCHEMA_ERROR, str(error)
+            )
+        ]
+    if contract is None:
+        return [
+            _contract_check_session_row(
+                session_id.value,
+                CONTRACT_CHECK_ROW_MISSING_CONTRACT,
+                f"session {session_id.value} has no Completion Contract section",
+            )
+        ]
+
+    rows: list[dict[str, Any]] = []
+    for check in contract.verify.checks:
+        status, reason, detail = _diagnose_contract_check(check, repo_root=repo_root)
+        rows.append(
+            {
+                "session": session_id.value,
+                "name": check.name,
+                "type": check.kind,
+                "status": status,
+                "reason": reason,
+                "detail": detail,
+            }
+        )
+    return rows
+
+
+def contract_check_from_args(args: argparse.Namespace) -> int:
+    """Run the ``contract-check`` subcommand from CLI arguments.
+
+    Statically checks each session's completion-contract ``Verify`` recipe
+    without executing any command: it wraps
+    :func:`agent_session_loop.contracts.read_completion_contract`,
+    :func:`diagnose_command`/:func:`diagnose_command_scope`, and file/regex
+    resolution. ``--session ID`` narrows to one session (the single-file mode
+    plan-wide preflight cannot express). Every check produces a row whose status
+    is ``ok``, ``schema-error``, ``missing-contract``, or ``factual-issue`` (with
+    a ``command-not-runnable``/``file-missing``/``regex-not-matched``/
+    ``bare-python`` reason). Exit 0 only when every row is ``ok``.
+    """
+    plan_dir_arg = str(args.plan_dir)
+    raw_session = getattr(args, "session", None)
+    cwd_arg = args.cwd
+    want_json = bool(args.json)
+    common_fields: dict[str, Any] = {
+        "plan_dir": plan_dir_arg,
+        "session": str(raw_session) if raw_session is not None else None,
+    }
+
+    def _emit_error(reason: str, error: str) -> int:
+        if want_json:
+            responses.print_json(
+                responses.error_payload(
+                    "contract-check",
+                    reason=reason,
+                    error=error,
+                    paused=False,
+                    **common_fields,
+                )
+            )
+        else:
+            print(f"agent-session-loop contract-check: {error}", file=sys.stderr)
+        return 1
+
+    try:
+        canonical_cwd = canonicalize_path(cwd_arg)
+    except (plans.PlanError, OSError) as error:
+        return _emit_error(CONTRACT_CHECK_EXIT_REASON_CWD_ERROR, str(error))
+
+    try:
+        snapshot = plans.inspect_plan(plan_dir_arg)
+    except plans.PlanError as error:
+        return _emit_error(CONTRACT_CHECK_EXIT_REASON_PLAN_ERROR, str(error))
+
+    known_ids = {status.id for status in snapshot.sessions}
+    if raw_session is not None:
+        try:
+            session_id = plans.parse_session_id(raw_session)
+        except (ValueError, plans.PlanError) as error:
+            return _emit_error(
+                CONTRACT_CHECK_EXIT_REASON_INVALID_SESSION, str(error)
+            )
+        if session_id.value not in known_ids:
+            return _emit_error(
+                CONTRACT_CHECK_EXIT_REASON_INVALID_SESSION,
+                f"session {session_id.value} is not present in {plan_dir_arg}",
+            )
+        session_ids = [session_id]
+    else:
+        session_ids = [
+            plans.parse_session_id(status.id) for status in snapshot.sessions
+        ]
+
+    rows: list[dict[str, Any]] = []
+    for session_id in session_ids:
+        rows.extend(
+            _contract_check_rows(plan_dir_arg, session_id, repo_root=canonical_cwd)
+        )
+
+    issues = [row for row in rows if row["status"] != CONTRACT_CHECK_ROW_OK]
+    result_fields = {
+        "cwd": str(canonical_cwd),
+        "checks": rows,
+        "issue_count": len(issues),
+    }
+
+    if not issues:
+        if want_json:
+            responses.print_json(
+                responses.success_payload(
+                    "contract-check",
+                    reason=CONTRACT_CHECK_EXIT_REASON_OK,
+                    **{**common_fields, **result_fields},
+                )
+            )
+        else:
+            print(f"Plan: {plan_dir_arg}")
+            print(f"Repo root: {canonical_cwd}")
+            print(f"Checks: {len(rows)} (all ok)")
+        return 0
+
+    if want_json:
+        responses.print_json(
+            responses.error_payload(
+                "contract-check",
+                reason=CONTRACT_CHECK_EXIT_REASON_ISSUES,
+                error=f"{len(issues)} of {len(rows)} contract check(s) have issues",
+                paused=False,
+                **{**common_fields, **result_fields},
+            )
+        )
+    else:
+        print(f"Plan: {plan_dir_arg}")
+        print(f"Repo root: {canonical_cwd}")
+        for row in rows:
+            marker = "OK" if row["status"] == CONTRACT_CHECK_ROW_OK else "ISSUE"
+            label = row["name"] or row["status"]
+            reason = f" ({row['reason']})" if row["reason"] else ""
+            print(
+                f"  [{marker}] session {row['session']} {label}{reason}: "
+                f"{row['detail']}"
+            )
+        print(
+            f"contract-check: {len(issues)} of {len(rows)} check(s) have issues",
+            file=sys.stderr,
+        )
+    return 1

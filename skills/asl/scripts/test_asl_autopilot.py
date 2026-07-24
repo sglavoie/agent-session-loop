@@ -195,6 +195,34 @@ class ParseCommandTest(unittest.TestCase):
             "--review-harness-model requires --review-harness",
         )
 
+    def test_resume_defers_review_harness_model_cross_field(self) -> None:
+        # On a --resume command the review harness may be rehydrated from the
+        # persisted run_config, so a model-only override must not be rejected at
+        # parse time; the cross-field check is deferred to the child, which the
+        # runner re-runs after applying the resume overlay. This mirrors runner
+        # behavior (`_apply_resume_config` runs before `_validate_run_inputs`).
+        result = autopilot.parse_command(
+            "asl run /tmp/plan --resume --review-harness-model gpt-5"
+        )
+        self.assertTrue(result["ok"], result)
+        args = result["run_args"]
+        self.assertIn("--resume", args)
+        self.assertEqual(
+            args[args.index("--review-harness-model") + 1], "gpt-5"
+        )
+
+    def test_non_resume_still_rejects_model_only_override(self) -> None:
+        # The deferral is scoped to --resume: without it, a model-only override
+        # is still a parse-time invalid-argument.
+        result = autopilot.parse_command(
+            "asl run /tmp/plan --review-harness-model gpt-5"
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "invalid-argument")
+        self.assertEqual(
+            result["error"], "--review-harness-model requires --review-harness"
+        )
+
     def test_review_fix_cycles_forwarded_to_child(self) -> None:
         result = autopilot.parse_command(
             "asl run /tmp/plan --review-harness codex --max-review-fix-cycles 3"
@@ -252,6 +280,16 @@ class ParseCommandTest(unittest.TestCase):
         result = autopilot.parse_command("asl run $(echo /tmp/plan)")
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "shell-syntax")
+
+    def test_resume_parsed_and_forwarded_to_child(self) -> None:
+        result = autopilot.parse_command("asl run /tmp/plan --resume")
+        self.assertTrue(result["ok"])
+        self.assertIn("--resume", result["run_args"])
+
+    def test_resume_absent_by_default(self) -> None:
+        result = autopilot.parse_command("asl run /tmp/plan")
+        self.assertTrue(result["ok"])
+        self.assertNotIn("--resume", result["run_args"])
 
     def test_rejects_dry_run(self) -> None:
         result = autopilot.parse_command("asl run /tmp/plan --dry-run")
@@ -976,6 +1014,150 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["chunks"], 0)
 
+    def _seed_run_config(self, run_config):
+        """Write a persisted ``state.json`` and return its path.
+
+        Mirrors the on-disk shape the runner persists so a ``--resume``
+        supervised command can resolve the effective review harness/cap from it.
+        """
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        state_path = os.path.join(tmp, "state.json")
+        with open(state_path, "w", encoding="utf-8") as handle:
+            json.dump({"run_config": run_config}, handle)
+        return state_path
+
+    def _resume_parsed(self, state_path):
+        """Parsed model for a resume-only command (no review harness/cap)."""
+        return {
+            "plan_dir": "/tmp/plan",
+            "argv": ["asl", "run", "/tmp/plan", "--resume", "--json"],
+            "review_harness": None,
+            "max_review_fix_cycles": autopilot.DEFAULT_MAX_REVIEW_FIX_CYCLES,
+            "max_review_fix_cycles_explicit": False,
+            "resume": True,
+        }
+
+    def test_resume_command_honors_persisted_review_harness_for_initial_review(
+        self,
+    ) -> None:
+        # A resume-only command has no --review-harness of its own; the runner
+        # would rehydrate it from run_config. The supervisor must resolve the
+        # same persisted harness so it launches the initial review instead of
+        # stopping complete.
+        state_path = self._seed_run_config(
+            {"review_harness": "codex", "max_review_fix_cycles": 2}
+        )
+        initial = _status_payload(0)
+        initial["state_path"] = state_path
+        initial["review_resume"] = _review_resume(
+            "initial-review", eligible=False, blocker="review-harness-required"
+        )
+        terminal = _status_payload(0)
+        terminal["state_path"] = state_path
+        terminal["review_resume"] = _review_resume(
+            "terminal",
+            eligible=False,
+            blocker="all-clear",
+            source_disposition="all-clear",
+        )
+        status = _StatusScript([initial, terminal])
+        run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
+        result = self._supervise(
+            status, run, parsed=self._resume_parsed(state_path)
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(run.chunks, [1])
+
+    def test_resume_command_honors_persisted_higher_cap_for_materialization(
+        self,
+    ) -> None:
+        # The persisted cap (3) is high enough for a materialize-repairs
+        # continuation whose minimum required cap is 3; the resume-only
+        # command's default cap of 2 would otherwise wrongly stop it.
+        state_path = self._seed_run_config(
+            {"review_harness": "codex", "max_review_fix_cycles": 3}
+        )
+        resumable = _status_payload(0)
+        resumable["state_path"] = state_path
+        resumable["review_resume"] = _review_resume(
+            "materialize-repairs",
+            eligible=False,
+            blocker="higher-cap-required",
+            minimum_required_cap=3,
+            source_disposition="cycle-cap-exhausted",
+        )
+        terminal = _status_payload(0)
+        terminal["state_path"] = state_path
+        terminal["review_resume"] = _review_resume(
+            "terminal",
+            eligible=False,
+            blocker="findings-repeated",
+            minimum_required_cap=4,
+            source_disposition="findings-repeated",
+        )
+        status = _StatusScript([resumable, terminal])
+        run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
+        result = self._supervise(
+            status, run, parsed=self._resume_parsed(state_path)
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(run.chunks, [1])
+
+    def test_resume_command_stops_when_persisted_cap_too_low(self) -> None:
+        # Persisted cap (2) is below the minimum required cap (3): the resume
+        # command must not launch, matching what the resumed runner (which keeps
+        # the persisted cap) would decide.
+        state_path = self._seed_run_config(
+            {"review_harness": "codex", "max_review_fix_cycles": 2}
+        )
+        blocked = _status_payload(0)
+        blocked["state_path"] = state_path
+        blocked["review_resume"] = _review_resume(
+            "materialize-repairs",
+            eligible=False,
+            blocker="higher-cap-required",
+            minimum_required_cap=3,
+            source_disposition="cycle-cap-exhausted",
+        )
+        result = self._supervise(
+            _StatusScript([blocked]), _never_run, parsed=self._resume_parsed(state_path)
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["chunks"], 0)
+
+    def test_resume_explicit_cap_overrides_persisted_lower_cap(self) -> None:
+        # An explicit --max-review-fix-cycles on the resume command wins over the
+        # lower persisted cap, mirroring the runner's resume overlay.
+        state_path = self._seed_run_config(
+            {"review_harness": "codex", "max_review_fix_cycles": 1}
+        )
+        resumable = _status_payload(0)
+        resumable["state_path"] = state_path
+        resumable["review_resume"] = _review_resume(
+            "materialize-repairs",
+            eligible=False,
+            blocker="higher-cap-required",
+            minimum_required_cap=3,
+            source_disposition="cycle-cap-exhausted",
+        )
+        terminal = _status_payload(0)
+        terminal["state_path"] = state_path
+        terminal["review_resume"] = _review_resume(
+            "terminal",
+            eligible=False,
+            blocker="findings-repeated",
+            source_disposition="findings-repeated",
+        )
+        parsed = self._resume_parsed(state_path)
+        parsed["max_review_fix_cycles"] = 3
+        parsed["max_review_fix_cycles_explicit"] = True
+        status = _StatusScript([resumable, terminal])
+        run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
+        result = self._supervise(status, run, parsed=parsed)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(run.chunks, [1])
+
     def test_paused_run_stops_with_paused(self) -> None:
         status = _StatusScript([_status_payload(1)])
         run = _RunScript([
@@ -1083,6 +1265,60 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         self.assertEqual(run.chunks, [1])
         self.assertEqual(result["retries"]["count"], 0)
         self.assertFalse(result["retries"]["exhausted"])
+
+    def test_payload_pause_policy_overrides_recoverable_constants(self) -> None:
+        # verify-failed is recoverable by the imported constants, but a payload
+        # that carries pause_policy={recoverable: false} is the single source of
+        # truth and wins: the supervisor surfaces the pause without relaunching.
+        status = _StatusScript([_status_payload(1)])
+        run = _RunScript([
+            {
+                "ok": False,
+                "paused": True,
+                "reason": "verify-failed",
+                "pause_reason": "verify-failed",
+                "pause_message": "checks failed",
+                "pause_policy": {
+                    "reason": "verify-failed",
+                    "recoverable": False,
+                    "requires_user": False,
+                    "max_retries": 0,
+                    "backoff_seconds": [],
+                },
+            }
+        ])
+        result = self._supervise(status, run, max_retries=2)
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["reason"], "paused")
+        # No retry consumed even though the constant set marks it recoverable.
+        self.assertEqual(run.chunks, [1])
+        self.assertEqual(result["retries"]["count"], 0)
+        self.assertFalse(result["retries"]["exhausted"])
+
+    def test_payload_pause_policy_requires_user_overrides_constants(self) -> None:
+        # A reason absent from the user-required constant set still surfaces as
+        # user_required when the payload's pause_policy says so.
+        status = _StatusScript([_status_payload(1)])
+        run = _RunScript([
+            {
+                "ok": False,
+                "paused": True,
+                "reason": "runner-pause",
+                "pause_reason": "runner-pause",
+                "pause_message": "needs a human",
+                "pause_policy": {
+                    "reason": "runner-pause",
+                    "recoverable": False,
+                    "requires_user": True,
+                    "max_retries": 0,
+                    "backoff_seconds": [],
+                },
+            }
+        ])
+        result = self._supervise(status, run)
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["reason"], "user_required")
+        self.assertEqual(run.chunks, [1])
 
     def test_verify_failed_exhausted_flag_stops_without_retry(self) -> None:
         # The runner marked the verification repair exhausted (an identical
@@ -1391,6 +1627,92 @@ class SuperviseRunAttachHeartbeatTest(unittest.TestCase):
         self.assertIn("pending 1", joined)
 
 
+def _sequence_clock(values):
+    """Clock returning each value in turn, repeating the final value."""
+    seq = list(values)
+
+    def clock():
+        return seq.pop(0) if len(seq) > 1 else seq[0]
+
+    return clock
+
+
+class AttachEventsWaitTest(unittest.TestCase):
+    """`_attach_events_wait` watches events.jsonl by os.stat between probes."""
+
+    def test_no_events_path_degrades_to_single_poll(self) -> None:
+        sleeps: list = []
+        autopilot._attach_events_wait(
+            None,
+            poll_interval=5.0,
+            heartbeat_interval=30.0,
+            clock=lambda: 0.0,
+            sleep=sleeps.append,
+            events_stat=lambda _p: None,
+        )
+        # No file to watch -> exactly one legacy poll_interval sleep, no clock use.
+        self.assertEqual(sleeps, [5.0])
+
+    def test_returns_early_when_events_file_grows(self) -> None:
+        sizes = iter([100, 140])
+        sleeps: list = []
+        autopilot._attach_events_wait(
+            "events.jsonl",
+            poll_interval=1.0,
+            heartbeat_interval=30.0,
+            clock=lambda: 0.0,
+            sleep=sleeps.append,
+            events_stat=lambda _p: next(sizes),
+        )
+        # Growth (140 != baseline 100) breaks the wait after a single slice.
+        self.assertEqual(sleeps, [1.0])
+
+    def test_returns_when_heartbeat_interval_elapses(self) -> None:
+        clock = _sequence_clock([0.0, 31.0])
+        sleeps: list = []
+        autopilot._attach_events_wait(
+            "events.jsonl",
+            poll_interval=1.0,
+            heartbeat_interval=30.0,
+            clock=clock,
+            sleep=sleeps.append,
+            events_stat=lambda _p: 100,
+        )
+        # Size never changes; the wait ends once the heartbeat interval elapses.
+        self.assertEqual(sleeps, [1.0])
+
+
+class SuperviseRunAttachEventsStatTest(unittest.TestCase):
+    """Attach mode consults the events_stat seam on the payload's events_path."""
+
+    def test_attach_wait_stats_the_events_path(self) -> None:
+        attach = _attach_status(20)
+        attach["events_path"] = "/tmp/plan/events.jsonl"
+        status = _StatusScript([attach, attach, _status_payload(0)])
+        stat_paths: list = []
+
+        def events_stat(path):
+            stat_paths.append(path)
+            return 100
+
+        result = autopilot.supervise_run(
+            {"plan_dir": "/tmp/plan", "argv": ["asl", "run", "/tmp/plan", "--json"]},
+            status_invoker=status,
+            run_invoker=_never_run,
+            clock=_counter_clock(),
+            sleep=lambda *_: None,
+            heartbeat=lambda *_: None,
+            events_stat=events_stat,
+            heartbeat_interval=3.0,
+            poll_interval=1.0,
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "complete")
+        # The attach waits watched the advertised events path by os.stat.
+        self.assertTrue(stat_paths)
+        self.assertTrue(all(p == "/tmp/plan/events.jsonl" for p in stat_paths))
+
+
 class FakeTimeoutPopen:
     """Fake ``subprocess.Popen`` whose ``communicate`` times out N times.
 
@@ -1538,6 +1860,332 @@ class InvokeRunHeartbeatTest(unittest.TestCase):
         self.assertIn("running, elapsed", tick)
         self.assertNotIn("session", tick)
         self.assertNotIn("|", tick)
+
+
+def _batch_follower(batches):
+    """A `follow_events` stand-in yielding each batch, then empty batches."""
+
+    def follow(_path):
+        for batch in batches:
+            yield batch
+        while True:
+            yield []
+
+    return follow
+
+
+def _clock_from(values):
+    """Deterministic clock returning each value in turn (last value repeats)."""
+    seq = list(values)
+
+    def clock():
+        return seq.pop(0) if len(seq) > 1 else seq[0]
+
+    return clock
+
+
+def _turn_heartbeat_record(idle, *, session_id="tidy-db-writes", number=3, total=8):
+    return {
+        "name": "turn_heartbeat",
+        "payload": {
+            "session_id": session_id,
+            "session_number": number,
+            "total_sessions": total,
+            "idle_seconds": idle,
+            "elapsed_seconds": 120,
+        },
+    }
+
+
+class EventsTailerTest(unittest.TestCase):
+    """`_EventsTailer` folds appended events into per-tick heartbeat snapshots."""
+
+    def test_fresh_events_suppress_stall_despite_high_idle(self) -> None:
+        # Construction reads the clock once, then one snapshot per call.
+        clock = _clock_from([0.0, 1.0, 2.0])
+        tailer = autopilot._EventsTailer(
+            "events.jsonl",
+            clock=clock,
+            stall_threshold=90.0,
+            follow=_batch_follower([[_turn_heartbeat_record(96)]]),
+        )
+        snapshot, events_stale = tailer.snapshot()
+        self.assertEqual(snapshot["state"], "running")
+        self.assertEqual(snapshot["idle_seconds"], 96)
+        # A just-seen event keeps the stream fresh even though idle >= threshold.
+        self.assertFalse(events_stale)
+        message = autopilot._format_heartbeat(
+            1, 10.0, snapshot, 90.0, events_stale=events_stale
+        )
+        self.assertNotIn("WARN", message)
+        self.assertIn("idle 96s", message)
+
+    def test_event_silence_past_threshold_triggers_stall(self) -> None:
+        clock = _clock_from([0.0, 1.0, 200.0])
+        tailer = autopilot._EventsTailer(
+            "events.jsonl",
+            clock=clock,
+            stall_threshold=90.0,
+            follow=_batch_follower([[_turn_heartbeat_record(96)]]),
+        )
+        # First snapshot folds the heartbeat and marks the stream fresh (t=1).
+        tailer.snapshot()
+        # Second snapshot at t=200 sees no new events -> silent for 199s.
+        snapshot, events_stale = tailer.snapshot()
+        self.assertEqual(snapshot["idle_seconds"], 96)
+        self.assertTrue(events_stale)
+        message = autopilot._format_heartbeat(
+            1, 10.0, snapshot, 90.0, events_stale=events_stale
+        )
+        self.assertIn("WARN possibly stalled", message)
+        self.assertIn("idle 96s (no output)", message)
+
+    def test_below_threshold_idle_then_silence_triggers_stall(self) -> None:
+        # Regression for F4: a heartbeat sampled with idle *below* the threshold
+        # must still surface a stall once the event stream goes silent past the
+        # threshold. The frozen sub-threshold idle value must not suppress it.
+        clock = _clock_from([0.0, 1.0, 200.0])
+        tailer = autopilot._EventsTailer(
+            "events.jsonl",
+            clock=clock,
+            stall_threshold=90.0,
+            follow=_batch_follower([[_turn_heartbeat_record(30)]]),
+        )
+        # First snapshot folds the heartbeat (idle 30, below threshold) at t=1.
+        snapshot, events_stale = tailer.snapshot()
+        self.assertEqual(snapshot["idle_seconds"], 30)
+        self.assertFalse(events_stale)
+        fresh = autopilot._format_heartbeat(
+            1, 10.0, snapshot, 90.0, events_stale=events_stale
+        )
+        self.assertNotIn("WARN", fresh)
+        # Second snapshot at t=200 sees no new events -> silent for 199s. The
+        # idle sample is still frozen at 30 (< threshold), yet event silence
+        # alone must now drive the stall verdict.
+        snapshot, events_stale = tailer.snapshot()
+        self.assertEqual(snapshot["idle_seconds"], 30)
+        self.assertTrue(events_stale)
+        message = autopilot._format_heartbeat(
+            1, 10.0, snapshot, 90.0, events_stale=events_stale
+        )
+        self.assertIn("WARN possibly stalled", message)
+        self.assertIn("no new events for 90s+ (no output)", message)
+
+    def test_fresh_events_below_threshold_idle_stay_quiet(self) -> None:
+        # A fresh stream with a below-threshold idle sample is a healthy running
+        # tick — no stall, enriched line carries the idle fragment.
+        clock = _clock_from([0.0, 1.0, 2.0])
+        tailer = autopilot._EventsTailer(
+            "events.jsonl",
+            clock=clock,
+            stall_threshold=90.0,
+            follow=_batch_follower([[_turn_heartbeat_record(30)]]),
+        )
+        snapshot, events_stale = tailer.snapshot()
+        self.assertFalse(events_stale)
+        message = autopilot._format_heartbeat(
+            1, 10.0, snapshot, 90.0, events_stale=events_stale
+        )
+        self.assertNotIn("WARN", message)
+        self.assertIn("idle 30s", message)
+
+    def test_verification_and_pause_records_change_state(self) -> None:
+        clock = _clock_from([0.0, 1.0, 2.0])
+        tailer = autopilot._EventsTailer(
+            "events.jsonl",
+            clock=clock,
+            follow=_batch_follower(
+                [
+                    [{"name": "verification_heartbeat", "payload": {}}],
+                    [{"name": "run_paused", "payload": {"reason": "quota-exhausted"}}],
+                ]
+            ),
+        )
+        snapshot, _ = tailer.snapshot()
+        self.assertEqual(snapshot["state"], "verifying")
+        snapshot, _ = tailer.snapshot()
+        self.assertEqual(snapshot["state"], "paused")
+        self.assertEqual(snapshot["reason"], "quota-exhausted")
+
+    def test_fresh_verification_stream_stays_quiet(self) -> None:
+        # Regression for F4: a verifying snapshot from a fresh event stream keeps
+        # the normal verifying heartbeat (no stall warning).
+        clock = _clock_from([0.0, 1.0, 2.0])
+        tailer = autopilot._EventsTailer(
+            "events.jsonl",
+            clock=clock,
+            stall_threshold=90.0,
+            follow=_batch_follower(
+                [[{"name": "verification_heartbeat", "payload": {}}]]
+            ),
+        )
+        snapshot, events_stale = tailer.snapshot()
+        self.assertEqual(snapshot["state"], "verifying")
+        self.assertFalse(events_stale)
+        message = autopilot._format_heartbeat(
+            1, 10.0, snapshot, 90.0, events_stale=events_stale
+        )
+        self.assertNotIn("WARN", message)
+        self.assertIn("verifying", message)
+
+    def test_silent_verification_stream_triggers_stall(self) -> None:
+        # Regression for F4: once a verification heartbeat is folded and the
+        # stream goes silent past the threshold, the verifying snapshot must
+        # surface a stall warning instead of a healthy verifying heartbeat.
+        clock = _clock_from([0.0, 1.0, 200.0])
+        tailer = autopilot._EventsTailer(
+            "events.jsonl",
+            clock=clock,
+            stall_threshold=90.0,
+            follow=_batch_follower(
+                [[{"name": "verification_heartbeat", "payload": {}}]]
+            ),
+        )
+        # First snapshot folds the verification heartbeat and marks it fresh.
+        tailer.snapshot()
+        # Second snapshot at t=200 sees no new events -> silent for 199s.
+        snapshot, events_stale = tailer.snapshot()
+        self.assertEqual(snapshot["state"], "verifying")
+        self.assertTrue(events_stale)
+        message = autopilot._format_heartbeat(
+            1, 10.0, snapshot, 90.0, events_stale=events_stale
+        )
+        self.assertIn("WARN possibly stalled", message)
+        self.assertIn("no new events for 90s+ (no output)", message)
+
+    def test_starts_unknown_before_any_folded_event(self) -> None:
+        tailer = autopilot._EventsTailer(
+            "events.jsonl",
+            clock=_clock_from([0.0, 1.0]),
+            follow=_batch_follower([[]]),
+        )
+        snapshot, events_stale = tailer.snapshot()
+        self.assertEqual(snapshot["state"], "unknown")
+        self.assertFalse(events_stale)
+
+
+class InvokeRunEventsTailerTest(unittest.TestCase):
+    """`_invoke_run` prefers the events tailer and falls back to the probe."""
+
+    FINAL_JSON = '{"ok": true, "paused": false, "reason": "all-complete"}'
+
+    def _parsed(self) -> dict:
+        return {"argv": ["asl", "run", "/tmp/plan", "--json"], "plan_dir": "/tmp/plan"}
+
+    def _run(self, *, popen, tailer=None, status_probe=None, stall_threshold=90.0):
+        beats: list = []
+        payload = autopilot._invoke_run(
+            self._parsed(),
+            chunk_index=1,
+            clock=_counter_clock(),
+            heartbeat=beats.append,
+            heartbeat_interval=0.01,
+            popen=popen,
+            status_probe=status_probe,
+            events_tailer=tailer,
+            stall_threshold=stall_threshold,
+        )
+        return payload, beats
+
+    def test_tailer_snapshot_drives_the_tick_line(self) -> None:
+        tailer = _FakeTailer([({"state": "running", "session_id": "s7",
+                                "session_number": 2, "total_sessions": 5,
+                                "idle_seconds": 96}, False)])
+        popen = FakeTimeoutPopen(timeout_count=1, stdout=self.FINAL_JSON)
+        payload, beats = self._run(popen=popen, tailer=tailer)
+        self.assertEqual(payload["reason"], "all-complete")
+        tick = beats[1]
+        self.assertIn("session s7", tick)
+        self.assertIn("(2/5)", tick)
+        self.assertIn("idle 96s", tick)
+        # Fresh stream (events_stale False) suppresses the WARN despite high idle.
+        self.assertNotIn("WARN", tick)
+
+    def test_tailer_stall_flag_renders_warning(self) -> None:
+        tailer = _FakeTailer([({"state": "running", "session_id": "s7",
+                                "idle_seconds": 96}, True)])
+        popen = FakeTimeoutPopen(timeout_count=1, stdout=self.FINAL_JSON)
+        _payload, beats = self._run(popen=popen, tailer=tailer)
+        self.assertIn("WARN possibly stalled", beats[1])
+        self.assertIn("idle 96s (no output)", beats[1])
+
+    def test_tailer_failure_falls_back_to_status_probe(self) -> None:
+        class _BoomTailer:
+            def snapshot(self):
+                raise RuntimeError("tailer blew up")
+
+        popen = FakeTimeoutPopen(timeout_count=2, stdout=self.FINAL_JSON)
+        payload, beats = self._run(
+            popen=popen,
+            tailer=_BoomTailer(),
+            status_probe=lambda: _running_status(30),
+        )
+        self.assertEqual(payload["reason"], "all-complete")
+        # Both ticks fell back to the status probe (idle 30, enriched line).
+        self.assertIn("session tidy-db-writes", beats[1])
+        self.assertIn("idle 30s", beats[1])
+        self.assertIn("idle 30s", beats[2])
+
+    def test_unknown_tailer_snapshot_falls_back_to_status_probe(self) -> None:
+        # A missing/unreadable events file makes `follow_events` yield empty
+        # batches (never raising), so the tailer snapshot stays "unknown". The
+        # tick must then fall back to the authoritative status probe instead of
+        # emitting a plain line, so enriched progress and stall detection are
+        # not permanently suppressed. The tailer is not disabled, so it resumes
+        # on later ticks once the events file appears.
+        tailer = _FakeTailer([({"state": "unknown"}, False)])
+        popen = FakeTimeoutPopen(timeout_count=1, stdout=self.FINAL_JSON)
+        payload, beats = self._run(
+            popen=popen,
+            tailer=tailer,
+            status_probe=lambda: _running_status(41),
+        )
+        self.assertEqual(payload["reason"], "all-complete")
+        tick = beats[1]
+        self.assertIn("session tidy-db-writes", tick)
+        self.assertIn("idle 41s", tick)
+        self.assertNotIn("running, elapsed", tick)
+
+    def test_unknown_tailer_snapshot_with_stalled_probe_warns(self) -> None:
+        # The recovered fallback still surfaces a stall: an unknown tailer
+        # snapshot with a status probe reporting idle past the threshold must
+        # render the WARN line rather than a suppressed plain line.
+        tailer = _FakeTailer([({"state": "unknown"}, False)])
+        popen = FakeTimeoutPopen(timeout_count=1, stdout=self.FINAL_JSON)
+        _payload, beats = self._run(
+            popen=popen,
+            tailer=tailer,
+            status_probe=lambda: _running_status(96),
+        )
+        self.assertIn("WARN possibly stalled", beats[1])
+        self.assertIn("idle 96s (no output)", beats[1])
+
+    def test_builds_tailer_from_status_events_path(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="asl-tailer-wire-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        events_path = os.path.join(tmp, "events.jsonl")
+        with open(events_path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(_turn_heartbeat_record(42, session_id="wired")) + "\n")
+        status = {"ok": True, "events_path": events_path}
+        popen = FakeTimeoutPopen(timeout_count=1, stdout=self.FINAL_JSON)
+        payload, beats = self._run(popen=popen, status_probe=lambda: status)
+        self.assertEqual(payload["reason"], "all-complete")
+        # The tick was derived from the events file, not a per-tick status probe.
+        self.assertIn("session wired", beats[1])
+        self.assertIn("idle 42s", beats[1])
+
+
+class _FakeTailer:
+    """Return scripted ``(snapshot, events_stale)`` pairs (last pair repeats)."""
+
+    def __init__(self, results):
+        self._results = list(results)
+        self._index = 0
+
+    def snapshot(self):
+        pair = self._results[min(self._index, len(self._results) - 1)]
+        self._index += 1
+        return pair
 
 
 _FAKE_ASL = textwrap.dedent(
@@ -1895,6 +2543,21 @@ class ReadReviewVerdictTest(unittest.TestCase):
             os.path.join(self.tmp, autopilot.FINAL_REVIEW_FILENAME),
         )
         self.assertIn("Details.", verdict["summary"])
+        # A short review is not truncated, but still names the full-review
+        # escape hatch so callers can always reach the untruncated verdict.
+        self.assertFalse(verdict["summary_truncated"])
+        self.assertIn("asl review-verdict", verdict["full_review"])
+        self.assertIn(self.tmp, verdict["full_review"])
+
+    def test_bounded_review_summary_returns_text_and_flag(self) -> None:
+        short, truncated = autopilot._bounded_review_summary("body\n")
+        self.assertEqual("body", short)
+        self.assertFalse(truncated)
+
+        big = "x" * (autopilot.REVIEW_SUMMARY_MAX_CHARS + 500)
+        clipped, truncated = autopilot._bounded_review_summary(big)
+        self.assertTrue(truncated)
+        self.assertTrue(clipped.endswith("… (truncated)"))
 
     def test_summary_is_bounded(self) -> None:
         big = "x" * (autopilot.REVIEW_SUMMARY_MAX_CHARS + 500)
@@ -1906,6 +2569,10 @@ class ReadReviewVerdictTest(unittest.TestCase):
             autopilot.REVIEW_SUMMARY_MAX_CHARS + len("\n… (truncated)"),
         )
         self.assertTrue(verdict["summary"].endswith("… (truncated)"))
+        # Truncation is now flagged explicitly instead of silently dropping
+        # the tail, and the full-review escape hatch is named.
+        self.assertTrue(verdict["summary_truncated"])
+        self.assertIn("asl review-verdict", verdict["full_review"])
 
     def test_missing_file_reports_review_missing(self) -> None:
         verdict = autopilot._read_review_verdict(self.parsed)
@@ -1949,6 +2616,80 @@ class RunAutopilotReviewTest(unittest.TestCase):
         # The runner owns repair cycles now; the helper attaches no follow-up
         # fix-plan guidance.
         self.assertNotIn("review_fix", result)
+
+    def test_resume_only_review_findings_retag_via_persisted_harness(self) -> None:
+        # A resume-only command carries no --review-harness of its own; the
+        # effective harness lives in the persisted run_config. The completed run
+        # must still read the findings verdict and re-tag review_findings rather
+        # than returning a bare complete (F1). The supervisor result carries the
+        # `state_path` `_effective_review_config` reads to resolve that harness.
+        tmp = tempfile.mkdtemp(prefix="asl-autopilot-resume-review-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        state_path = os.path.join(tmp, "state.json")
+        with open(state_path, "w", encoding="utf-8") as handle:
+            json.dump({"run_config": {"review_harness": "codex"}}, handle)
+
+        verdict = {
+            "ok": True,
+            "outcome": "findings",
+            "status_line": "Status: 1 Findings (1 high, 0 med, 0 low)",
+            "total_findings": 1,
+            "findings_by_severity": {"high": 1, "med": 0, "low": 0},
+            "review_output_path": "/tmp/plan/final-review.md",
+            "summary": "…",
+        }
+
+        def complete_resume(parsed):
+            return {
+                "ok": True,
+                "stage": autopilot.RUN_STAGE,
+                "reason": "complete",
+                "chunks": 1,
+                "status": {"ok": True, "state_path": state_path},
+            }
+
+        result = autopilot.run_autopilot(
+            self._args(command="asl run /tmp/plan --resume"),
+            supervisor=complete_resume,
+            review_reader=lambda parsed: verdict,
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["reason"], "review_findings")
+        self.assertEqual(result["review"]["total_findings"], 1)
+
+    def test_resume_without_persisted_harness_stays_complete(self) -> None:
+        # No effective review harness (resume run_config has none, no explicit
+        # flag): the completed run is left complete and the review verdict is not
+        # even read, preserving the historical non-review complete behavior.
+        tmp = tempfile.mkdtemp(prefix="asl-autopilot-resume-noreview-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        state_path = os.path.join(tmp, "state.json")
+        with open(state_path, "w", encoding="utf-8") as handle:
+            json.dump({"run_config": {"harness": "codex"}}, handle)
+
+        reads: list = []
+
+        def reader(parsed):
+            reads.append(parsed)
+            return {"ok": True, "outcome": "findings", "total_findings": 1}
+
+        def complete_resume(parsed):
+            return {
+                "ok": True,
+                "stage": autopilot.RUN_STAGE,
+                "reason": "complete",
+                "chunks": 1,
+                "status": {"ok": True, "state_path": state_path},
+            }
+
+        result = autopilot.run_autopilot(
+            self._args(command="asl run /tmp/plan --resume"),
+            supervisor=complete_resume,
+            review_reader=reader,
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "complete")
+        self.assertEqual(reads, [])
 
     def test_findings_carry_review_resume_cap_guidance(self) -> None:
         review_resume = _review_resume(
@@ -2012,6 +2753,59 @@ class RunAutopilotReviewTest(unittest.TestCase):
         summary = autopilot._human_summary(result)
         self.assertIn("with a review harness", summary)
         self.assertIn("--max-review-fix-cycles 3 or higher", summary)
+
+    def test_resume_only_higher_cap_guidance_uses_persisted_harness(self) -> None:
+        # A resume-only command carries no explicit --review-harness; the
+        # effective harness lives in the persisted run_config. Human
+        # continuation guidance must derive review-harness activity from that
+        # same effective config (F8), so it does NOT ask the operator to add a
+        # review harness the runner already rehydrates — while still surfacing
+        # the higher-cap prerequisite.
+        tmp = tempfile.mkdtemp(prefix="asl-autopilot-resume-guidance-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        state_path = os.path.join(tmp, "state.json")
+        with open(state_path, "w", encoding="utf-8") as handle:
+            json.dump({"run_config": {"review_harness": "codex"}}, handle)
+
+        review_resume = _review_resume(
+            "materialize-repairs",
+            eligible=False,
+            blocker="higher-cap-required",
+            minimum_required_cap=3,
+            source_disposition="cycle-cap-exhausted",
+        )
+
+        def complete_resume(parsed):
+            return {
+                "ok": True,
+                "stage": autopilot.RUN_STAGE,
+                "reason": "complete",
+                "chunks": 1,
+                "status": {
+                    "ok": True,
+                    "state_path": state_path,
+                    "review_resume": review_resume,
+                },
+            }
+
+        verdict = {
+            "ok": True,
+            "outcome": "findings",
+            "status_line": "Status: 1 Findings (0 high, 1 med, 0 low)",
+            "total_findings": 1,
+            "findings_by_severity": {"high": 0, "med": 1, "low": 0},
+            "review_output_path": "/tmp/plan/final-review.md",
+            "summary": "…",
+        }
+        result = autopilot.run_autopilot(
+            self._args(command="asl run /tmp/plan --resume"),
+            supervisor=complete_resume,
+            review_reader=lambda parsed: verdict,
+        )
+        self.assertEqual(result["reason"], "review_findings")
+        summary = autopilot._human_summary(result)
+        self.assertIn("--max-review-fix-cycles 3 or higher", summary)
+        self.assertNotIn("with a review harness", summary)
 
     def test_eligible_guidance_honors_existing_review_harness(self) -> None:
         result = {

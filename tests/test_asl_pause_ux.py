@@ -43,6 +43,7 @@ from agent_session_loop import (
     events,
     harnesses,
     install_verify,
+    pause_policy,
     plans,
     preflight,
     prepare,
@@ -132,6 +133,95 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             state_dir=str(state_dir) if state_dir is not None else None,
         )
 
+    def test_set_pause_attaches_pause_policy_block(self) -> None:
+        payload: dict[str, object] = {}
+        runner._set_pause(
+            payload, reason="verify-failed", message="checks failed"
+        )
+        policy = payload["pause_policy"]
+        self.assertEqual(pause_policy.classify_pause("verify-failed"), policy)
+        self.assertTrue(policy["recoverable"])
+        self.assertFalse(policy["requires_user"])
+        self.assertEqual(2, policy["max_retries"])
+        self.assertEqual([], policy["backoff_seconds"])
+
+    def test_set_pause_pause_policy_marks_user_required_harness_failure(
+        self,
+    ) -> None:
+        payload: dict[str, object] = {}
+        runner._set_pause(
+            payload, reason="quota-exhausted", message="out of quota"
+        )
+        policy = payload["pause_policy"]
+        self.assertFalse(policy["recoverable"])
+        self.assertTrue(policy["requires_user"])
+        self.assertEqual(0, policy["max_retries"])
+
+    def test_questions_payload_carries_pause_policy_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir, _ = self._seed_paused_plan(Path(tmp))
+            context = qna.load_qna_context(
+                str(plan_dir), state_dir=str(state_dir)
+            )
+            payload = qna.questions_payload(context)
+            self.assertIn("pause_policy", payload)
+            self.assertEqual(
+                pause_policy.classify_pause(payload["pause_reason"]),
+                payload["pause_policy"],
+            )
+
+    def test_runner_state_payload_classifies_paused_reason(self) -> None:
+        # An older paused state file with no persisted pause_policy block still
+        # surfaces one, classified from its reason (fallback path).
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir, _ = self._seed_paused_plan(
+                Path(tmp), statuses=("pending",)
+            )
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            state_path = plan_state / events.STATE_FILE_NAME
+            runner_state = state._runner_state_payload(state_path)
+            self.assertEqual(
+                pause_policy.classify_pause("runner-pause"),
+                runner_state["pause_policy"],
+            )
+
+    def test_runner_state_payload_prefers_persisted_pause_policy(self) -> None:
+        # When the state file already carries a pause_policy block (written by
+        # the runner), status echoes it verbatim rather than reclassifying.
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir, _ = self._seed_paused_plan(
+                Path(tmp), statuses=("pending",)
+            )
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            state_path = plan_state / events.STATE_FILE_NAME
+            raw = json.loads(state_path.read_text(encoding="utf-8"))
+            persisted = {
+                "reason": "runner-pause",
+                "recoverable": False,
+                "requires_user": True,
+                "max_retries": 7,
+                "backoff_seconds": [1.0],
+            }
+            raw["pause_policy"] = persisted
+            state_path.write_text(json.dumps(raw), encoding="utf-8")
+            runner_state = state._runner_state_payload(state_path)
+            self.assertEqual(persisted, runner_state["pause_policy"])
+
+    def test_runner_state_payload_omits_pause_policy_when_not_paused(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_state = tmp_dir / "state"
+            plan_state.mkdir(parents=True)
+            state_path = plan_state / events.STATE_FILE_NAME
+            state_path.write_text(
+                json.dumps({"ok": True, "paused": False, "reason": None}),
+                encoding="utf-8",
+            )
+            runner_state = state._runner_state_payload(state_path)
+            self.assertIsNone(runner_state["pause_policy"])
+
     def test_questions_command_text_includes_state_dir_when_provided(self) -> None:
         self.assertEqual(
             "asl questions /tmp/plan",
@@ -144,11 +234,11 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
 
     def test_reply_command_text_includes_state_dir_when_provided(self) -> None:
         self.assertEqual(
-            "asl run /tmp/plan --reply TEXT",
+            "asl run /tmp/plan --resume --reply TEXT",
             runner._reply_command_text("/tmp/plan", None),
         )
         self.assertEqual(
-            "asl run /tmp/plan --state-dir /tmp/state --reply TEXT",
+            "asl run /tmp/plan --resume --state-dir /tmp/state --reply TEXT",
             runner._reply_command_text("/tmp/plan", "/tmp/state"),
         )
 
@@ -167,7 +257,8 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             questions,
         )
         self.assertEqual(
-            "asl run '/tmp/plan dir' --state-dir '/tmp/state dir' --reply TEXT",
+            "asl run '/tmp/plan dir' --resume "
+            "--state-dir '/tmp/state dir' --reply TEXT",
             reply,
         )
         self.assertEqual(
@@ -185,6 +276,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 "asl",
                 "run",
                 "/tmp/plan dir",
+                "--resume",
                 "--state-dir",
                 "/tmp/state dir",
                 "--reply",

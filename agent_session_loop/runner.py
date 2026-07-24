@@ -34,6 +34,7 @@ from . import (
     control_queue,
     events,
     harnesses,
+    pause_policy,
     plans,
     preflight,
     progress_repair,
@@ -43,6 +44,7 @@ from . import (
     review_continuation,
     review_repair,
     run_control,
+    run_flags,
     state,
     tail,
     verification,
@@ -1017,7 +1019,10 @@ def _questions_command_text(plan_dir: str, state_dir_arg: str | None) -> str:
 
 
 def _reply_command_text(plan_dir: str, state_dir_arg: str | None) -> str:
-    parts = ["asl", "run", plan_dir]
+    # ``--resume`` rehydrates harness/model/effort from the persisted
+    # run_config so a paused non-default-harness run never silently resumes on
+    # the ``codex`` default.
+    parts = ["asl", "run", plan_dir, "--resume"]
     if state_dir_arg:
         parts.extend(["--state-dir", state_dir_arg])
     parts.extend(["--reply", "TEXT"])
@@ -1563,46 +1568,15 @@ def _validate_run_inputs(
 
     commit_mode = _commit_mode(args)
 
-    timeout = args.timeout
-    if timeout is not None and timeout <= 0:
-        raise RunError("--timeout must be a positive integer")
+    # The numeric/harness cross-field checks live in ``run_flags`` so the CLI
+    # runner and the supervisor helper enforce identical rules; cwd existence
+    # and commit-mode resolution stay here because they are CLI-runner specific.
+    errors = run_flags.validate_run_namespace(args)
+    if errors:
+        raise RunError(errors[0].message)
 
-    max_sessions = args.max_sessions
-    if max_sessions is not None and max_sessions <= 0:
-        raise RunError("--max-sessions must be a positive integer")
-
-    max_pending_sessions = getattr(args, "max_pending_sessions", None)
-    if max_pending_sessions is not None and max_pending_sessions <= 0:
-        raise RunError("--max-pending-sessions must be a positive integer")
-
-    review_harness = getattr(args, "review_harness", None)
-    if review_harness is not None and review_harness == args.harness:
-        raise RunError(
-            "--review-harness must differ from --harness "
-            f"(both set to {args.harness!r})"
-        )
-    if (
-        getattr(args, "review_harness_model", None) is not None
-        and review_harness is None
-    ):
-        raise RunError("--review-harness-model requires --review-harness")
-
-    cycles = getattr(args, "max_review_fix_cycles", None)
-    legacy_cycles = getattr(args, "max_review_fix_plans", None)
-    if cycles is not None and cycles < 0:
-        raise RunError(
-            "--max-review-fix-cycles must be zero or a positive integer"
-        )
-    if legacy_cycles is not None and legacy_cycles < 0:
-        raise RunError(
-            "--max-review-fix-plans must be zero or a positive integer"
-        )
-    if cycles is not None and legacy_cycles is not None:
-        raise RunError(
-            "--max-review-fix-plans is a deprecated alias of "
-            "--max-review-fix-cycles; pass only one"
-        )
-
+    timeout = getattr(args, "timeout", None)
+    max_sessions = getattr(args, "max_sessions", None)
     return cwd, timeout, max_sessions, commit_mode
 
 
@@ -3068,6 +3042,22 @@ class _ProgressReporter:
             f"events {payload['events_path']}"
         )
 
+    def orphaned_state(self, candidates: list[dict[str, Any]]) -> None:
+        if not candidates:
+            return
+        count = len(candidates)
+        director = "y" if count == 1 else "ies"
+        self._emit(
+            f"warning: {count} orphaned state director{director} from a moved "
+            "plan match this plan's content"
+        )
+        for candidate in candidates:
+            self._emit(
+                f"  {candidate['state_dir']} "
+                f"(old plan {candidate['old_plan_dir']}); "
+                f"migrate with: {candidate['migrate_command']}"
+            )
+
     def turn_started(self, active_turn: dict[str, Any]) -> None:
         self._emit(format_turn_started_message(active_turn))
 
@@ -4097,6 +4087,10 @@ def _set_pause(
     payload["pause_message"] = message
     payload["pause_details"] = {} if details is None else details
     payload["details"] = payload["pause_details"]
+    # Carry the single-source-of-truth pause classification so consumers
+    # (the supervisor helper, `asl status`, `asl questions`) stop hardcoding
+    # the recoverable/user-required reason sets.
+    payload["pause_policy"] = pause_policy.classify_pause(reason)
 
 
 def _pause_run(
@@ -5691,6 +5685,42 @@ def _append_handoff_note(
     return lines[:insert_at] + [new_bullet] + lines[insert_at:]
 
 
+def _run_config_payload(
+    args: argparse.Namespace,
+    *,
+    cwd: Path,
+    commit_mode: str | None,
+) -> dict[str, Any]:
+    """Snapshot the resolved run flags so ``asl run --resume`` can rehydrate.
+
+    Keys mirror ``RUN_FLAG_SPEC`` dests one-to-one so the resume overlay in
+    :func:`_resume_config_overlay` can seed a namespace by attribute name
+    without any translation. This is the additive ``run_config`` block persisted
+    at the top level of ``state.json``; it captures the flags that were
+    previously invisible to a paused-run resume (``timeout``, ``max_sessions``,
+    the resolved ``unsafe_bypass``, and the ``state_dir`` override) alongside the
+    harness/model/effort selection that a default resume would otherwise reset
+    to the ``codex`` defaults.
+    """
+    return {
+        "harness": args.harness,
+        "harness_model": getattr(args, "harness_model", None),
+        "review_harness": getattr(args, "review_harness", None),
+        "review_harness_model": getattr(args, "review_harness_model", None),
+        "effort": getattr(args, "effort", None),
+        "timeout": getattr(args, "timeout", None),
+        "max_sessions": getattr(args, "max_sessions", None),
+        "max_pending_sessions": getattr(args, "max_pending_sessions", None),
+        "max_review_fix_cycles": _max_review_fix_cycles(args),
+        "commit_mode": commit_mode,
+        "unsafe_bypass": _unsafe_bypass(args),
+        "allow_not_loop_ready": _allow_not_loop_ready(args),
+        "note": getattr(args, "note", None),
+        "cwd": str(cwd),
+        "state_dir_override": getattr(args, "state_dir", None),
+    }
+
+
 def _initial_payload(
     *,
     args: argparse.Namespace,
@@ -5733,6 +5763,7 @@ def _initial_payload(
         commit_mode=commit_mode,
         max_pending_sessions=getattr(args, "max_pending_sessions", None),
         note=getattr(args, "note", None),
+        run_config=_run_config_payload(args, cwd=cwd, commit_mode=commit_mode),
         plan_dir=str(snapshot.plan_dir),
         cwd=str(cwd),
         kitty_window_id=_kitty_window_id_from_env(),
@@ -5890,6 +5921,16 @@ def _run_locked(
     event_path = state_dir / events.EVENTS_FILE_NAME
     state_path = state_dir / events.STATE_FILE_NAME
 
+    # Detect state stranded under a moved plan's old path hash *before* this
+    # run writes its own state.json (which would suppress the scan). A scan
+    # failure must never block the run, so any error yields no candidates.
+    try:
+        orphan_candidates = state.orphaned_state_candidates(
+            snapshot, args.state_dir
+        )
+    except Exception:  # pragma: no cover - defensive; scan is best-effort
+        orphan_candidates = []
+
     reply_context: qna.QnAContext | None = None
     if reply_text is not None:
         try:
@@ -5972,6 +6013,7 @@ def _run_locked(
     persistence.write_state(payload)
     _notify_agent_mux_loop_started(payload, persistence)
     progress.run_started(payload)
+    progress.orphaned_state(orphan_candidates)
 
     invalid_pause = _invalid_status_pause(snapshot)
     if invalid_pause is not None:
@@ -7558,6 +7600,10 @@ def _error_payload(
         review_skipped_reason=reason if review_requested else None,
     )
     payload.update(_selected_model_effort_payload(args))
+    if paused:
+        # Match `_set_pause`: a paused error payload carries the same
+        # single-source-of-truth pause classification block.
+        payload["pause_policy"] = pause_policy.classify_pause(reason)
     if snapshot is not None:
         state_dir = state.plan_state_dir(snapshot.plan_dir, args.state_dir)
         payload["state_dir"] = str(state_dir)
@@ -7709,8 +7755,199 @@ def _emit_run_payload(args: argparse.Namespace, payload: dict[str, Any]) -> None
         _print_text_outcome(payload)
 
 
-def run_from_args(args: argparse.Namespace) -> int:
-    """Run one or more pending sessions from CLI arguments."""
+# Flag dests rehydrated from a persisted ``run_config`` by ``asl run --resume``.
+# Kept in lockstep with ``_run_config_payload`` (minus ``state_dir_override``,
+# which located the state file and is not itself a rehydratable flag).
+_RESUME_OVERLAY_DESTS: tuple[str, ...] = (
+    "cwd",
+    "harness",
+    "harness_model",
+    "review_harness",
+    "review_harness_model",
+    "effort",
+    "timeout",
+    "max_sessions",
+    "max_pending_sessions",
+    "max_review_fix_cycles",
+    "commit_mode",
+    "note",
+    "unsafe_bypass",
+    "allow_not_loop_ready",
+)
+
+
+class _ResumeUnavailable(Exception):
+    """Raised when ``--resume`` cannot rehydrate flags from persisted state.
+
+    Carries a best-effort ``asl run`` command reconstructed from whatever fields
+    the state file does persist, so the operator can re-run with explicit flags.
+    """
+
+    def __init__(self, message: str, *, command: str) -> None:
+        super().__init__(message)
+        self.command = command
+
+
+def _resume_run_tokens(run_argv: list[str] | None) -> list[str]:
+    """Return the ``run`` subcommand's argv tokens, minus the subcommand name."""
+    tokens = list(sys.argv[1:] if run_argv is None else run_argv)
+    if tokens and tokens[0] == "run":
+        tokens = tokens[1:]
+    return tokens
+
+
+def _explicit_resume_dests(run_argv: list[str] | None) -> set[str]:
+    """Return the flag dests the operator passed explicitly on this resume.
+
+    Re-parsing with ``mode="resume"`` (``argparse.SUPPRESS`` defaults) leaves
+    only operator-supplied flags on the namespace, so ``vars()`` names exactly
+    the flags whose values must win over the persisted ``run_config``.
+    """
+    parser = argparse.ArgumentParser(prog="asl run", add_help=False)
+    run_flags.add_run_arguments(parser, mode="resume")
+    try:
+        namespace, _unknown = parser.parse_known_args(_resume_run_tokens(run_argv))
+    except SystemExit:
+        return set()
+    explicit = set(vars(namespace))
+    # The deprecated alias shares intent with the canonical flag; treat passing
+    # either as an explicit cap so the persisted value never clobbers it.
+    if "max_review_fix_plans" in explicit:
+        explicit.add("max_review_fix_cycles")
+    return explicit
+
+
+def _reconstruct_resume_command(
+    plan_dir: str,
+    state_dir_override: str | None,
+    payload: dict[str, Any],
+) -> str:
+    """Best-effort ``asl run`` command from top-level persisted state fields.
+
+    Used only when ``run_config`` is absent (legacy or missing state): it re-emits
+    the flags recoverable from the fields ``_initial_payload`` has always written
+    at the top level, so the operator can resume manually with explicit flags.
+    """
+    argv = ["asl", "run", str(plan_dir)]
+    if state_dir_override:
+        argv += ["--state-dir", str(state_dir_override)]
+    cwd = payload.get("cwd")
+    if cwd:
+        argv += ["--cwd", str(cwd)]
+    harness = payload.get("harness")
+    if harness:
+        argv += ["--harness", str(harness)]
+    review_harness = payload.get("review_harness")
+    if review_harness:
+        argv += ["--review-harness", str(review_harness)]
+    model = payload.get("model")
+    if model:
+        argv += ["--harness-model", str(model)]
+    effort = payload.get("effort")
+    if effort:
+        argv += ["--effort", str(effort)]
+    commit_mode = payload.get("commit_mode")
+    if commit_mode == "per-session":
+        argv.append("--commit-per-session")
+    elif commit_mode == "end":
+        argv.append("--commit-at-end")
+    max_pending = payload.get("max_pending_sessions")
+    if isinstance(max_pending, int):
+        argv += ["--max-pending-sessions", str(max_pending)]
+    note = payload.get("note")
+    if note:
+        argv += ["--note", str(note)]
+    if payload.get("allow_not_loop_ready") is True:
+        argv.append("--allow-not-loop-ready")
+    return shlex.join(argv)
+
+
+def _load_resume_state(
+    plan_dir: str,
+    state_dir_arg: str | None,
+) -> dict[str, Any] | None:
+    """Best-effort read of a plan's persisted ``state.json`` payload."""
+    plan_state = state.plan_state_dir(plan_dir, state_dir_arg)
+    state_path = plan_state / events.STATE_FILE_NAME
+    try:
+        raw = state_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _apply_resume_config(
+    args: argparse.Namespace,
+    run_argv: list[str] | None,
+) -> argparse.Namespace:
+    """Overlay a persisted ``run_config`` onto ``args`` for ``asl run --resume``.
+
+    Explicitly-passed flags win; every other flag is restored from the
+    ``run_config`` the plan's last run persisted. Raises :class:`_ResumeUnavailable`
+    when no usable config exists so the caller can emit a structured
+    ``resume-unavailable`` error.
+    """
+    state_dir_arg = getattr(args, "state_dir", None)
+    payload = _load_resume_state(args.plan_dir, state_dir_arg)
+    if payload is None:
+        raise _ResumeUnavailable(
+            "no runner state found for this plan; run it once so its "
+            "run_config is persisted before resuming",
+            command=_reconstruct_resume_command(args.plan_dir, state_dir_arg, {}),
+        )
+    run_config = payload.get("run_config")
+    if not isinstance(run_config, dict):
+        raise _ResumeUnavailable(
+            "runner state predates run_config persistence; re-run with "
+            "explicit flags instead of --resume",
+            command=_reconstruct_resume_command(
+                args.plan_dir, state_dir_arg, payload
+            ),
+        )
+    explicit = _explicit_resume_dests(run_argv)
+    for dest in _RESUME_OVERLAY_DESTS:
+        if dest in explicit or dest not in run_config:
+            continue
+        setattr(args, dest, run_config[dest])
+    return args
+
+
+def run_from_args(
+    args: argparse.Namespace,
+    *,
+    run_argv: list[str] | None = None,
+) -> int:
+    """Run one or more pending sessions from CLI arguments.
+
+    ``run_argv`` is the raw ``run`` subcommand argv used to detect which flags
+    the operator passed explicitly during ``--resume`` rehydration. When it is
+    not supplied, the argv the CLI parser recorded on the namespace
+    (``args._run_argv``) is used, and only if that is absent does detection fall
+    back to the process-global ``sys.argv``. This keeps explicit-flag provenance
+    correct through ``cli.main(argv)`` and direct resolved-handler dispatch,
+    where ``sys.argv`` may name an unrelated command.
+    """
+    if run_argv is None:
+        run_argv = getattr(args, "_run_argv", None)
+    if getattr(args, "resume", False):
+        try:
+            args = _apply_resume_config(args, run_argv)
+        except _ResumeUnavailable as error:
+            payload = _error_payload(
+                args,
+                reason="resume-unavailable",
+                message=str(error),
+                paused=False,
+            )
+            payload["resume_command"] = error.command
+            payload["details"] = {"resume_command": error.command}
+            _emit_run_payload(args, payload)
+            return 1
+
     try:
         cwd, timeout, max_sessions, commit_mode = _validate_run_inputs(args)
     except (plans.PlanError, RunError) as error:

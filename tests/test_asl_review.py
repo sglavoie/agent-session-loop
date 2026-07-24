@@ -409,6 +409,12 @@ class StructuredReviewArtifactTests(unittest.TestCase):
 
             summary = autopilot_verdict.pop("summary")
             self.assertIn("Status: 1 Findings", summary)
+            # The helper additionally flags truncation and points at the full
+            # review; drop those before comparing the shared verdict payload.
+            self.assertFalse(autopilot_verdict.pop("summary_truncated"))
+            self.assertIn(
+                "asl review-verdict", autopilot_verdict.pop("full_review")
+            )
             self.assertEqual(runner_verdict, autopilot_verdict)
             self.assertIs(
                 autopilot.parse_review_verdict, review.parse_review_verdict
@@ -498,6 +504,325 @@ class StructuredReviewArtifactTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(1, run_check())
+
+
+class ReviewVerdictCommandTests(unittest.TestCase):
+    """`asl review-verdict` authoritative, untruncated verdict surface."""
+
+    def _artifact(self, **overrides: object) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "version": review.REVIEW_ARTIFACT_VERSION,
+            "outcome": "findings",
+            "findings": [_structured_review_finding()],
+        }
+        payload.update(overrides)
+        return payload
+
+    def _write_review(
+        self, plan_dir: Path, body: str, artifact: dict | None = None
+    ) -> None:
+        (plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
+            body, encoding="utf-8"
+        )
+        if artifact is not None:
+            (plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+                json.dumps(artifact), encoding="utf-8"
+            )
+
+    def test_all_clear_payload_has_no_findings_and_no_next_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("complete",))
+            self._write_review(
+                plan_dir, f"body\n{review.REVIEW_STATUS_ALL_CLEAR}\n"
+            )
+
+            payload = review.review_verdict_payload(plan_dir, state_dir)
+
+            self.assertTrue(payload["ok"], payload)
+            self.assertEqual("review-verdict", payload["command"])
+            self.assertEqual("all-clear", payload["outcome"])
+            self.assertIsNone(payload["findings"])
+            self.assertFalse(payload["summary_truncated"])
+            self.assertEqual([], payload["next_steps"])
+            self.assertIn("review_resume", payload)
+
+    def test_findings_payload_carries_full_untruncated_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("complete",))
+            big_body = "detail " * 1000
+            self._write_review(
+                plan_dir,
+                f"{big_body}\nStatus: 1 Findings (1 high, 0 med, 0 low)\n",
+                artifact=self._artifact(),
+            )
+
+            payload = review.review_verdict_payload(plan_dir, state_dir)
+
+            self.assertTrue(payload["ok"], payload)
+            self.assertEqual("findings", payload["outcome"])
+            self.assertEqual("F1", payload["findings"][0]["id"])
+            # The summary is never truncated by this surface, even well past
+            # the helper's bounded excerpt limit.
+            self.assertFalse(payload["summary_truncated"])
+            self.assertEqual(
+                payload["summary_total_chars"], len(payload["summary"])
+            )
+            self.assertGreater(payload["summary_total_chars"], 2000)
+            self.assertTrue(payload["next_steps"])
+
+    def test_missing_review_reports_stable_reason_and_generate_step(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("complete",))
+
+            payload = review.review_verdict_payload(plan_dir, state_dir)
+
+            self.assertFalse(payload["ok"])
+            self.assertEqual(review.REVIEW_REASON_MISSING, payload["reason"])
+            self.assertEqual("", payload["summary"])
+            self.assertEqual(1, len(payload["next_steps"]))
+            self.assertIn("--review-harness", payload["next_steps"][0])
+
+    def test_malformed_review_reports_stable_reason_and_correct_step(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("complete",))
+            self._write_review(plan_dir, "no status line here\n")
+
+            payload = review.review_verdict_payload(plan_dir, state_dir)
+
+            self.assertFalse(payload["ok"])
+            self.assertEqual(
+                review.REVIEW_REASON_MALFORMED, payload["reason"]
+            )
+            self.assertEqual(1, len(payload["next_steps"]))
+            self.assertIn(
+                review.FINAL_REVIEW_FILENAME, payload["next_steps"][0]
+            )
+
+    def test_malformed_artifact_reports_stable_reason_and_correct_step(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("complete",))
+            self._write_review(
+                plan_dir, "body\nStatus: 1 Findings (1 high, 0 med, 0 low)\n"
+            )
+            (plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+                "{not json", encoding="utf-8"
+            )
+
+            payload = review.review_verdict_payload(plan_dir, state_dir)
+
+            self.assertFalse(payload["ok"])
+            self.assertEqual(
+                review.REVIEW_REASON_MALFORMED_ARTIFACT, payload["reason"]
+            )
+            self.assertIn(
+                review.FINAL_REVIEW_ARTIFACT_FILENAME,
+                payload["next_steps"][0],
+            )
+
+    def test_missing_review_step_keeps_metacharacter_plan_path_one_arg(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "weird plan dir; echo $HOME"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("complete",))
+
+            payload = review.review_verdict_payload(plan_dir, state_dir)
+
+            self.assertEqual(review.REVIEW_REASON_MISSING, payload["reason"])
+            command = payload["next_steps"][0]
+            # The whitespace/metacharacter plan path round-trips as exactly one
+            # argument under shlex.split instead of splitting apart.
+            self.assertIn(payload["plan_dir"], shlex.split(command))
+
+    def test_findings_fallback_step_keeps_metacharacter_plan_path_one_arg(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "weird plan dir; echo $HOME"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("complete",))
+            # A plain findings review (no generated-review marker, no events)
+            # yields no continuation guidance, so the findings-without-guidance
+            # fallback command is emitted.
+            self._write_review(
+                plan_dir,
+                "body\nStatus: 1 Findings (1 high, 0 med, 0 low)\n",
+                artifact=self._artifact(),
+            )
+
+            payload = review.review_verdict_payload(plan_dir, state_dir)
+
+            self.assertEqual("findings", payload["outcome"])
+            command = payload["next_steps"][0]
+            self.assertIn("--review-harness", command)
+            self.assertIn(payload["plan_dir"], shlex.split(command))
+
+    def test_from_args_json_round_trips_and_rejects_malformed_plan(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("complete",))
+            self._write_review(
+                plan_dir, f"body\n{review.REVIEW_STATUS_ALL_CLEAR}\n"
+            )
+
+            args = argparse.Namespace(
+                plan_dir=str(plan_dir), state_dir=str(state_dir), json=True
+            )
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = review.review_verdict_from_args(args)
+            self.assertEqual(0, code)
+            payload = json.loads(out.getvalue())
+            self.assertEqual("review-verdict", payload["command"])
+            self.assertTrue(payload["ok"])
+
+            missing = argparse.Namespace(
+                plan_dir=str(Path(tmp) / "nope"),
+                state_dir=str(state_dir),
+                json=True,
+            )
+            err_out = io.StringIO()
+            with redirect_stdout(err_out):
+                code = review.review_verdict_from_args(missing)
+            self.assertEqual(1, code)
+            err_payload = json.loads(err_out.getvalue())
+            self.assertFalse(err_payload["ok"])
+            self.assertEqual("malformed-plan", err_payload["reason"])
+
+    def _run_from_args(self, plan_dir: Path, state_dir: Path) -> tuple[
+        int, dict
+    ]:
+        args = argparse.Namespace(
+            plan_dir=str(plan_dir), state_dir=str(state_dir), json=True
+        )
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = review.review_verdict_from_args(args)
+        return code, json.loads(out.getvalue())
+
+    def test_from_args_exit_status_tracks_verdict_validity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+
+            # Valid all-clear → ok, exit 0.
+            clear_dir = Path(tmp) / "clear"
+            write_plan(clear_dir, ("complete",))
+            self._write_review(
+                clear_dir, f"body\n{review.REVIEW_STATUS_ALL_CLEAR}\n"
+            )
+            code, payload = self._run_from_args(clear_dir, state_dir)
+            self.assertEqual(0, code)
+            self.assertTrue(payload["ok"])
+            self.assertEqual("all-clear", payload["outcome"])
+
+            # Valid findings → ok, exit 0.
+            findings_dir = Path(tmp) / "findings"
+            write_plan(findings_dir, ("complete",))
+            self._write_review(
+                findings_dir,
+                "body\nStatus: 1 Findings (1 high, 0 med, 0 low)\n",
+                artifact=self._artifact(),
+            )
+            code, payload = self._run_from_args(findings_dir, state_dir)
+            self.assertEqual(0, code)
+            self.assertTrue(payload["ok"])
+            self.assertEqual("findings", payload["outcome"])
+
+            # Missing review → non-ok, exit 1.
+            missing_dir = Path(tmp) / "missing"
+            write_plan(missing_dir, ("complete",))
+            code, payload = self._run_from_args(missing_dir, state_dir)
+            self.assertEqual(1, code)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(review.REVIEW_REASON_MISSING, payload["reason"])
+
+            # Malformed review → non-ok, exit 1.
+            malformed_dir = Path(tmp) / "malformed"
+            write_plan(malformed_dir, ("complete",))
+            self._write_review(malformed_dir, "no status line here\n")
+            code, payload = self._run_from_args(malformed_dir, state_dir)
+            self.assertEqual(1, code)
+            self.assertEqual(review.REVIEW_REASON_MALFORMED, payload["reason"])
+
+            # Contradictory artifact → non-ok, exit 1.
+            contra_dir = Path(tmp) / "contra"
+            write_plan(contra_dir, ("complete",))
+            self._write_review(
+                contra_dir,
+                f"body\n{review.REVIEW_STATUS_ALL_CLEAR}\n",
+                artifact=self._artifact(),
+            )
+            code, payload = self._run_from_args(contra_dir, state_dir)
+            self.assertEqual(1, code)
+            self.assertEqual(
+                review.REVIEW_REASON_CONTRADICTORY_ARTIFACT, payload["reason"]
+            )
+
+    def test_generated_v2_review_without_artifact_reports_missing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            # A completed generated v2 review with an all-clear Markdown
+            # verdict but the structured artifact removed.
+            write_completed_review_plan(plan_dir, [])
+            (plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).unlink()
+
+            code, payload = self._run_from_args(plan_dir, state_dir)
+
+            self.assertEqual(1, code)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(
+                review.REVIEW_REASON_MISSING_ARTIFACT, payload["reason"]
+            )
+            self.assertIn(
+                review.FINAL_REVIEW_ARTIFACT_FILENAME,
+                payload["next_steps"][0],
+            )
+
+    def test_legacy_v1_markdown_only_review_stays_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_completed_review_plan(plan_dir, [])
+            # Downgrade the generated review session to legacy v1 (base marker
+            # only) and drop the structured artifact: v1 reviews are
+            # Markdown-only, so the all-clear verdict must remain valid.
+            session_two = plan_dir / "session-2.md"
+            body = session_two.read_text(encoding="utf-8")
+            body = body.replace(
+                review.review_session_version_marker() + "\n", ""
+            )
+            session_two.write_text(body, encoding="utf-8")
+            (plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).unlink()
+
+            code, payload = self._run_from_args(plan_dir, state_dir)
+
+            self.assertEqual(0, code)
+            self.assertTrue(payload["ok"], payload)
+            self.assertEqual("all-clear", payload["outcome"])
+            self.assertEqual([], payload["next_steps"])
 
 
 class ReviewRepairMaterializationTests(unittest.TestCase):

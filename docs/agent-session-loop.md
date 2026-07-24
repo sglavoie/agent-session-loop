@@ -253,6 +253,22 @@ non-zero exit is a hard pause. The JSON body carries a stable `reason` field
 the skill reverts the session handoff back to `pending` and the runner pauses
 with `reason: verify-failed`.
 
+`asl contract-check` statically diagnoses the same `Verify` recipes without
+executing any command — the single-file mode plan-wide `asl preflight` cannot
+express (`--session ID` narrows to one session; omit it to sweep the whole
+plan). It wraps `contracts.read_completion_contract`, the fail-open
+`diagnose_command`/`diagnose_command_scope` runnability probes, and file/regex
+resolution against `--cwd`. Every check becomes a row whose `status` is `ok`,
+`schema-error` (the contract failed to parse), `missing-contract` (no
+`## Completion Contract`), or `factual-issue`. A `factual-issue` row carries a
+`reason` enum: `command-not-runnable` (executable off PATH, module not
+importable, or an overly broad operator-health command), `file-missing`,
+`regex-not-matched`, or `bare-python` (an unversioned `python` interpreter,
+frequently unavailable where `python3` exists — use `python3`; versioned
+`python3 -c`/`python3 -m`/script invocations are fine). Exit 0 only when every
+row is `ok`; otherwise exit 1 with
+`reason: contract-issues` and the full `checks` list plus an `issue_count`.
+
 ## Migration From Older Split Plans
 
 Older split plans that pre-date this lifecycle lack the three `**Readiness**`
@@ -308,16 +324,21 @@ without running the final `--commit-at-end` commit.
 asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--review-harness codex|claude|copilot] [--review-harness-model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--max-pending-sessions N] [--max-review-fix-cycles N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--allow-not-loop-ready] [--reply TEXT|--reply-stdin] [--json] [--dry-run]
 asl preflight PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--max-pending-sessions N] [--mark-loop-ready] [--json]
 asl verify PLAN_DIR --session ID [--cwd REPO_ROOT] [--artifact-dir DIR] [--json]
+asl contract-check PLAN_DIR [--session ID] [--cwd REPO_ROOT] [--json]
 asl baseline PLAN_DIR [--cwd REPO_ROOT] [--per-check-timeout SECONDS] [--total-timeout SECONDS] [--json]
+asl split (--plan-file PATH | --inline-stdin) --contracts-file PATH [--base-dir DIR] [--skill-prefix auto|codex|claude|copilot] [--analysis-file PATH] [--json]
 asl prepare PLAN.md [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--validator-harness H] [--review-harness H] [--review-harness-model MODEL] [--base-dir DIR] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--json]
 asl prepare --resume PLAN_DIR [...]
+asl expand-ingest PLAN_DIR --batch-file PATH [--json]
 asl status PLAN_DIR_OR_ID [--state-dir DIR] [--json]
 asl questions PLAN_DIR [--state-dir DIR] [--json]
+asl review-verdict PLAN_DIR [--state-dir DIR] [--json]
 asl tail PLAN_DIR [--state-dir DIR] [--lines N] [--no-follow]
 asl sessions [--running] [--recent] [--limit N] [--state-dir DIR] [--verbose] [--json]
 asl doctor --harness codex|claude|copilot [--harness-model MODEL] [--effort EFFORT] [--cwd REPO_ROOT] --plan-dir PLAN_DIR [--unsafe-bypass|--no-unsafe-bypass] [--json]
 asl unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
 asl compact-state PLAN_DIR [--state-dir DIR] [--apply] [--json]
+asl migrate-state PLAN_DIR --from OLD_PLAN_PATH [--state-dir DIR] [--apply] [--json]
 asl metrics [--since-days N] [--state-dir DIR] [--json]
 ```
 
@@ -576,6 +597,26 @@ Every rewrite is atomic (temp-file + rename), so an interrupted compaction never
 leaves a partially written JSON file, and re-running is idempotent. `--json`
 emits the full `CompactionReport` payload.
 
+`migrate-state` repairs the state orphaning that a plan-directory move causes:
+because operational state is keyed by the SHA-256 of the plan's canonical path,
+renaming or moving a plan directory strands its state under the old path hash.
+`asl status` (and the start of `asl run`) surface these strays as
+`orphaned_state_candidates` — matched by comparing each stranded state's
+recorded `initial_snapshot.content_sha256` against the current plan content and
+confirming the recorded `plan_dir` no longer exists — each carrying the exact
+`asl migrate-state PLAN_DIR --from OLD_PLAN_PATH` command to run. The scan is
+skipped whenever the plan already has its own `state.json` (the common case).
+`migrate-state` renames the state directory to the new path hash and rewrites
+the absolute `plan_dir`/`state_dir`/`state_path`/`events_path`/`lock_path`
+fields inside `state.json`, then appends a `state_migrated` event. Historical
+per-turn `result.json` paths are left untouched and reported as an
+`unmigrated_artifacts_note`. It refuses (in both dry-run and apply, leaving both
+state directories untouched) when the source plan directory still exists on disk
+(`source-plan-exists` — its state is not orphaned, so migrating would steal a
+live plan's state), the source holds an active lock, or the destination state
+directory already exists. The default is a dry-run; pass `--apply` to perform the
+rename and rewrite, and `--json` for the machine payload.
+
 `baseline` executes every contract check that declares a `baseline_expectation`
 of `pass` or `fail` (checks with the default `skip` carry no baseline
 obligation) and records the observed outcome as evidence in the derived
@@ -590,9 +631,28 @@ recording evidence never invalidates a loop-ready manifest. Preflight requires
 current baseline evidence only while no session is complete; once
 implementation has started, baseline findings are suppressed.
 
+`split` runs the deterministic session-split authoring chain as one command:
+`capture_inline_plan` (for `--inline-stdin`) or an explicit `--plan-file` →
+`parse_plan_document` → one `contract_from_payload` per session from the
+`--contracts-file` JSON (keyed by canonical session id) → an atomic
+`PlanTransaction` staging `context.md`, `progress.md`, each `session-N.md`, and
+a serial-only `manifest.md` → `refresh_readiness_metadata(state="draft")`. It
+resolves a fresh collision-safe `output_dir` itself and never overwrites an
+existing one. `--skill-prefix auto` detects the invoking harness for generated
+skill invocations (erroring when detection is ambiguous); `--analysis-file` is
+appended verbatim to the manifest execution note. The `--json` payload reports
+`output_dir`, `plan_id`, `source_path`, `session_ids`, `files`, `readiness`,
+`next_steps` (per-harness `session-expand` invocations), and `skill_prefix`.
+Stable failure reasons: `single-session` (splitting is not needed),
+`malformed-plan` (the parser's line-specific `PlanError` verbatim),
+`missing-contract:<id>`, `invalid-contract:<id>` (a present contract entry that
+is not a JSON object or is missing `done_when`/`verify`), and `input-error`. The
+`session-split` skill is a thin
+wrapper that authors the per-session contracts and then calls `asl split`.
+
 `prepare` runs the whole preparation pipeline in one deterministic command:
 structure gate (at least two session headings, each with a parseable inline
-`## Completion Contract`) → deterministic authoring (the session-split Step 8
+`## Completion Contract`) → deterministic authoring (the `asl split` Step 8
 sequence through one atomic plan transaction) → batched validator workers →
 expansion rendering and exact factual corrections → baseline execution →
 `--mark-loop-ready` preflight. A source plan that fails the structure gate is
@@ -603,6 +663,20 @@ command; success prints the exact `asl run` command. `--resume` reruns
 validation only for sessions missing from the stored
 `prepare-validation.json` aggregate and reuses recorded baseline evidence
 whose repository fingerprint still matches; it never creates another split.
+
+`asl expand-ingest` is the standalone ingestion step `prepare` runs internally,
+exposed for the manual `session-expand` path: it reads one validator-output
+batch file (`--batch-file`), parses it fail-closed, merges it into the stored
+`prepare-validation.json` aggregate (`ingest_validator_output`), (re)renders the
+batch's `session-<id>.expand.md` files (`write_expansions`), and applies every
+proposed factual correction for the batch (`apply_corrections`). The success
+payload reports the ingested `sessions`, the written `files`, and per-correction
+`corrections` outcomes — `applied`/`already-applied`/`blocked`, where a blocked
+correction carries a stable `blocker` (`not-found`, `ambiguous`,
+`contract-body`, `handoff-body`, or `structural`) — plus a `correction_summary`
+count. A malformed payload exits 1 with `reason: validator-schema` and the
+`PlanError` message verbatim before any correction reaches disk; an unreadable
+batch file exits 1 with `reason: input-error`.
 
 `prepare` also writes `PLAN_DIR/plan-metadata.json` as soon as the authored or
 resumed plan directory is bound to a repository, including plans retained after
@@ -701,6 +775,17 @@ external operator-facing prompt headed
 `# Paused Agent Session - Resolver Prompt`; it is intentionally distinct from
 the in-harness resume block headed `## ASL reply context`, though both surfaces
 include the paused question text and metadata needed to answer it.
+
+`asl review-verdict` is the authoritative, read-only surface for a plan's
+final-review verdict. It merges the shared `load_review_verdict` payload (its
+`ok`/`reason` and, when the structured `final-review.json` is present, the full
+untruncated `findings` list) with the read-only continuation evaluation under
+`review_resume`, then attaches the complete `summary` of `final-review.md` with
+`summary_truncated: false` and `summary_total_chars`, plus `next_steps`
+remediation commands. Unlike the autopilot helper's bounded excerpt — which
+flags `summary_truncated` and points here via a `full_review` hint — this
+command never truncates, so it is the escape hatch when a long review would
+otherwise be clipped. It never mutates state, events, or plan directories.
 
 `asl run --reply TEXT` resumes a paused plan by injecting the operator's
 verbatim reply as a one-shot prefix on the next harness turn only. The reply is

@@ -864,6 +864,63 @@ def _resume(
     )
 
 
+def review_resume_guidance(
+    review_resume: Mapping[str, Any] | None,
+    *,
+    review_harness_active: bool,
+) -> str | None:
+    """Return concise operator guidance for a continuation projection.
+
+    ``review_resume`` is a :meth:`ReviewResume.to_payload` mapping (or ``None``
+    when the surface carries no projection).  ``review_harness_active`` is True
+    when the surfacing command already ran with a review harness, so the
+    guidance omits the "resume with a review harness" prerequisite.  This is the
+    single renderer shared by the runner, the CLI, and the autopilot helper so
+    all three describe the same continuation identically.
+    """
+    if not isinstance(review_resume, Mapping):
+        return None
+    needs_review_harness = not review_harness_active
+    blocker = review_resume.get("blocker")
+    if blocker == "higher-cap-required":
+        minimum = review_resume.get("minimum_required_cap")
+        if type(minimum) is int:
+            requirements = []
+            if needs_review_harness:
+                requirements.append("a review harness")
+            requirements.append(f"--max-review-fix-cycles {minimum} or higher")
+            return "resume the same plan with " + " and ".join(requirements)
+    if blocker == "artifact-invalid":
+        artifact_error = review_resume.get("artifact_error")
+        detail = f": {artifact_error}" if artifact_error else ""
+        guidance = f"correct the review artifact{detail}"
+        if needs_review_harness:
+            guidance += ", then resume the same plan with a review harness"
+        return guidance
+    if review_resume.get("action") == "terminal" and blocker:
+        if blocker in TERMINAL_REVIEW_DISPOSITIONS:
+            return None
+        return f"no automatic continuation ({blocker})"
+    if review_resume.get("eligible") is True:
+        action = review_resume.get("action") or "review"
+        minimum = review_resume.get("minimum_required_cap")
+        cap_guidance = (
+            f" and --max-review-fix-cycles {minimum} or higher"
+            if action == "materialize-repairs" and type(minimum) is int
+            else ""
+        )
+        command_guidance = (
+            "resume the same plan with a review harness"
+            if needs_review_harness
+            else "rerun the same review-enabled command"
+        )
+        return (
+            f"{command_guidance}{cap_guidance} "
+            f"to run the eligible {action} continuation"
+        )
+    return None
+
+
 def evaluate_review_continuation(
     snapshot_or_plan_dir: plans.PlanSnapshot | str | Path,
     event_path: str | Path,

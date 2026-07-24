@@ -38,7 +38,14 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from agent_session_loop import authoring, contracts, plans, state  # noqa: E402
+from agent_session_loop import (  # noqa: E402
+    authoring,
+    contracts,
+    harnesses,
+    plans,
+    responses,
+    state,
+)
 
 
 MIN_PARTS = 2
@@ -48,6 +55,62 @@ ARCHIVE_ROOT_NAME = authoring.ARCHIVE_ROOT_NAME
 CHILD_SPEC_KEYS = frozenset(
     {"title", "instructions", "done_when", "checks", "inherit_checks"}
 )
+
+#: One-line remediation per pause reason so a supervising agent (or human) can
+#: recover without re-reading the skill. Keyed by every ``ResplitError.reason``
+#: this script raises (plus ``malformed-plan`` from a bubbled ``PlanError``).
+PAUSE_REMEDIATION: dict[str, str] = {
+    "no-contract": (
+        "Add a parseable `## Completion Contract` to the parent session, or "
+        "pass --child-spec with explicit 'done_when' and "
+        "'checks'/'inherit_checks' per child."
+    ),
+    "ambiguous-contract": (
+        "Fix --child-spec so every parent check is inherited or replaced and "
+        "each child states explicit 'done_when' plus checks."
+    ),
+    "ambiguous-input": (
+        "Re-run with an explicit plan directory or session-<id>.md file and a "
+        f"child count between {MIN_PARTS} and {MAX_PARTS}."
+    ),
+    "blocked": (
+        "Select a pending session to resplit; the chosen session is already "
+        "complete or the plan has no pending session."
+    ),
+    "unknown-status": (
+        "Repair the session's final handoff `- **Status**:` line to a known "
+        "value (pending/complete) before resplitting."
+    ),
+    "malformed-plan": (
+        "Repair the malformed session or plan file (missing handoff, contract, "
+        "or instructions above the handoff) and re-run."
+    ),
+    "collision": (
+        "Remove or rename the conflicting descendant/child files, then re-run "
+        "the resplit."
+    ),
+    "cannot-split": (
+        "Add implementation instructions above the parent handoff, or resplit a "
+        "different session."
+    ),
+    "lock-contention": (
+        "Another live runner holds an active lock on this plan (the helper "
+        "already self-cleared any stale lock). Wait for that runner to finish, "
+        "or investigate and stop it, then re-run the resplit."
+    ),
+}
+
+
+def _next_steps(plan_dir: str) -> list[dict[str, Any]]:
+    """Per-harness `session-expand` invocations to run after a resplit."""
+    step = responses.invocation_step(
+        (
+            "Rerun session-expand so expansion notes match the nested child "
+            "sessions before continuing execution."
+        ),
+        harnesses.skill_invocations("session-expand", f"{plan_dir}/"),
+    )
+    return responses.next_steps_payload([step])["next_steps"]
 
 
 class ResplitError(Exception):
@@ -1073,6 +1136,7 @@ def resplit_session(
                 "checked_at": readiness.checked_at,
             },
             "next_command": f"{skill_prefix}session-expand {locked_snapshot.plan_dir}/",
+            "next_steps": _next_steps(str(locked_snapshot.plan_dir)),
         }
     finally:
         if lock_acquired:
@@ -1193,11 +1257,24 @@ def main(argv: list[str] | None = None) -> int:
     except (plans.PlanError, ResplitError) as error:
         reason = error.reason if isinstance(error, ResplitError) else "malformed-plan"
         detail = error.detail if isinstance(error, ResplitError) else str(error)
+        remediation = PAUSE_REMEDIATION.get(reason)
         if args.json:
-            print(json.dumps({"ok": False, "reason": reason, "detail": detail}, sort_keys=True))
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "reason": reason,
+                        "detail": detail,
+                        "remediation": remediation,
+                    },
+                    sort_keys=True,
+                )
+            )
         else:
             print("RESPLIT_STATUS: paused")
             print(f"RESPLIT_PAUSE: {reason} - {detail}")
+            if remediation:
+                print(f"RESPLIT_REMEDIATION: {remediation}")
         return 1
 
     if args.json:

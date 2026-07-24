@@ -49,6 +49,7 @@ from agent_session_loop import (
     progress_cli,
     progress_repair,
     qna,
+    responses,
     review,
     review_repair,
     run_control,
@@ -3241,6 +3242,105 @@ class ResolvePlanReferenceTests(unittest.TestCase):
             ):
                 with self.assertRaises(state.StateError):
                     state.resolve_plan_reference("label", state_root)
+
+
+class HarnessSkillInvocationTests(unittest.TestCase):
+    def test_skill_prefixes_derive_from_adapter_classes(self) -> None:
+        self.assertEqual(
+            {
+                harnesses.CodexAdapter.name: harnesses.CodexAdapter.skill_prefix,
+                harnesses.ClaudeAdapter.name: harnesses.ClaudeAdapter.skill_prefix,
+                harnesses.CopilotAdapter.name: harnesses.CopilotAdapter.skill_prefix,
+            },
+            harnesses.SKILL_PREFIXES,
+        )
+        self.assertEqual("$", harnesses.SKILL_PREFIXES["codex"])
+        self.assertEqual("/", harnesses.SKILL_PREFIXES["claude"])
+        self.assertEqual("/", harnesses.SKILL_PREFIXES["copilot"])
+
+    def test_detect_invoking_harness_matches_single_marker(self) -> None:
+        self.assertEqual(
+            "claude", harnesses.detect_invoking_harness({"CLAUDECODE": "1"})
+        )
+        self.assertEqual(
+            "codex", harnesses.detect_invoking_harness({"CODEX_SANDBOX": "1"})
+        )
+        self.assertEqual(
+            "copilot",
+            harnesses.detect_invoking_harness({"COPILOT_AGENT": "1"}),
+        )
+        self.assertEqual(
+            "copilot",
+            harnesses.detect_invoking_harness({"GITHUB_COPILOT_TOKEN": "x"}),
+        )
+
+    def test_detect_invoking_harness_none_when_ambiguous_or_empty(self) -> None:
+        self.assertIsNone(harnesses.detect_invoking_harness({}))
+        self.assertIsNone(
+            harnesses.detect_invoking_harness(
+                {"CLAUDECODE": "1", "CODEX_SANDBOX": "1"}
+            )
+        )
+        self.assertIsNone(
+            harnesses.detect_invoking_harness({"CLAUDECODE": ""})
+        )
+
+    def test_skill_invocations_applies_prefix_and_argument(self) -> None:
+        invocations = harnesses.skill_invocations(
+            "session-run", "/plans/p/", env={}
+        )
+        self.assertEqual(
+            {
+                "codex": "$session-run /plans/p/",
+                "claude": "/session-run /plans/p/",
+                "copilot": "/session-run /plans/p/",
+            },
+            invocations,
+        )
+
+    def test_skill_invocations_orders_detected_harness_first(self) -> None:
+        invocations = harnesses.skill_invocations(
+            "session-run", "/plans/p/", env={"CLAUDECODE": "1"}
+        )
+        self.assertEqual("claude", next(iter(invocations)))
+        # Ordering never drops harnesses.
+        self.assertEqual({"codex", "claude", "copilot"}, set(invocations))
+
+    def test_skill_invocations_without_argument_omits_suffix(self) -> None:
+        self.assertEqual(
+            {"codex": "$foo", "claude": "/foo", "copilot": "/foo"},
+            harnesses.skill_invocations("foo", env={}),
+        )
+
+
+class NextStepsPayloadBuilderTests(unittest.TestCase):
+    def test_invocation_and_command_steps_wrap_in_envelope(self) -> None:
+        payload = responses.next_steps_payload(
+            [
+                responses.invocation_step(
+                    "run it", {"codex": "$foo", "claude": "/foo"}
+                ),
+                responses.command_step("asl status"),
+            ]
+        )
+        self.assertEqual(
+            {
+                "next_steps": [
+                    {
+                        "description": "run it",
+                        "invocations": {"codex": "$foo", "claude": "/foo"},
+                    },
+                    {"command": "asl status"},
+                ]
+            },
+            payload,
+        )
+
+    def test_invocation_step_copies_invocations_mapping(self) -> None:
+        source = {"codex": "$foo"}
+        step = responses.invocation_step("d", source)
+        source["codex"] = "mutated"
+        self.assertEqual("$foo", step["invocations"]["codex"])
 
 
 if __name__ == "__main__":

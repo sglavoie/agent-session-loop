@@ -43,15 +43,18 @@ from agent_session_loop import (
     events,
     harnesses,
     install_verify,
+    metrics,
     plans,
     preflight,
     prepare,
     progress_cli,
     progress_repair,
     qna,
+    responses,
     review,
     review_repair,
     run_control,
+    run_flags,
     runner,
     state,
     tail,
@@ -653,6 +656,124 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertEqual(0, raised.exception.code)
         self.assertIn("usage: asl run", stdout.getvalue())
 
+    def test_review_verdict_subcommand_registers_handler(self) -> None:
+        parser = cli.build_parser()
+
+        args = parser.parse_args(
+            [
+                "review-verdict",
+                "/tmp/plan",
+                "--state-dir",
+                "/tmp/state",
+                "--json",
+            ]
+        )
+
+        self.assertEqual("review-verdict", args.command)
+        self.assertEqual("/tmp/plan", args.plan_dir)
+        self.assertEqual("/tmp/state", args.state_dir)
+        self.assertTrue(args.json)
+        self.assertEqual("review:review_verdict_from_args", args.handler_ref)
+        self.assertIs(
+            cli.resolve_handler(args), review.review_verdict_from_args
+        )
+
+    def test_contract_check_subcommand_registers_handler(self) -> None:
+        parser = cli.build_parser()
+
+        args = parser.parse_args(
+            ["contract-check", "/tmp/plan", "--session", "3", "--cwd", "/repo"]
+        )
+
+        self.assertEqual("contract-check", args.command)
+        self.assertEqual("/tmp/plan", args.plan_dir)
+        self.assertEqual("3", args.session)
+        self.assertEqual("/repo", args.cwd)
+        self.assertEqual("verification:contract_check_from_args", args.handler_ref)
+        self.assertIs(
+            cli.resolve_handler(args), verification.contract_check_from_args
+        )
+
+    def test_expand_ingest_subcommand_registers_handler(self) -> None:
+        parser = cli.build_parser()
+
+        args = parser.parse_args(
+            ["expand-ingest", "/tmp/plan", "--batch-file", "/tmp/batch.json"]
+        )
+
+        self.assertEqual("expand-ingest", args.command)
+        self.assertEqual("/tmp/plan", args.plan_dir)
+        self.assertEqual("/tmp/batch.json", args.batch_file)
+        self.assertEqual("prepare:expand_ingest_from_args", args.handler_ref)
+        self.assertIs(
+            cli.resolve_handler(args), prepare.expand_ingest_from_args
+        )
+
+    def test_importing_cli_does_not_import_heavy_handler_modules(self) -> None:
+        # Guard: `import agent_session_loop.cli` must not eagerly pull in the
+        # heavy handler subsystems. This keeps light probes like `asl status`
+        # fast — they only import their own handler module, resolved lazily
+        # from `handler_ref`. Run in a clean interpreter because sys.modules is
+        # process-global and other tests import these modules.
+        probe = (
+            "import sys\n"
+            "import agent_session_loop.cli\n"
+            "heavy = [\n"
+            "    name\n"
+            "    for name in (\n"
+            "        'workbench_server',\n"
+            "        'workbench',\n"
+            "        'runner',\n"
+            "        'review',\n"
+            "        'metrics',\n"
+            "        'prepare',\n"
+            "        'preflight',\n"
+            "    )\n"
+            "    if 'agent_session_loop.' + name in sys.modules\n"
+            "]\n"
+            "print(','.join(heavy))\n"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", probe],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        self.assertEqual("", completed.stdout.strip(), completed.stdout)
+
+    def test_cli_build_time_default_constants_match_source_modules(self) -> None:
+        # cli.py mirrors these defaults locally so building the parser does not
+        # import the heavy `workbench_server`/`metrics` modules. Keep the copies
+        # honest against their authoritative definitions.
+        self.assertEqual(
+            workbench_server.DEFAULT_HOST, cli._WORKBENCH_DEFAULT_HOST
+        )
+        self.assertEqual(
+            workbench_server.DEFAULT_PORT, cli._WORKBENCH_DEFAULT_PORT
+        )
+        self.assertEqual(
+            metrics.DEFAULT_SINCE_DAYS, cli._METRICS_DEFAULT_SINCE_DAYS
+        )
+
+    def test_expand_ingest_requires_batch_file(self) -> None:
+        parser = cli.build_parser()
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            parser.parse_args(["expand-ingest", "/tmp/plan"])
+
+        self.assertEqual(2, raised.exception.code)
+
+    def test_review_verdict_requires_plan_dir(self) -> None:
+        parser = cli.build_parser()
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            parser.parse_args(["review-verdict"])
+
+        self.assertEqual(2, raised.exception.code)
+
     def test_tail_interactive_flag_is_rejected(self) -> None:
         parser = cli.build_parser()
         stderr = io.StringIO()
@@ -669,6 +790,31 @@ class CommandAndConfigTests(unittest.TestCase):
         args = parser.parse_args(["preflight", "/tmp/plan", "-m"])
 
         self.assertTrue(args.mark_loop_ready)
+
+    def test_run_subparser_actions_match_run_flag_spec(self) -> None:
+        # Tripwire: the real `asl run` subparser surface must equal the set the
+        # declarative RUN_FLAG_SPEC describes, so a flag can never be added to
+        # the CLI (or the helper's supervisor parser) without going through the
+        # shared spec.
+        parser = cli.build_parser()
+        subparsers_action = next(
+            action
+            for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        run_subparser = subparsers_action.choices["run"]
+
+        real = {
+            (tuple(action.option_strings), action.dest)
+            for action in run_subparser._actions
+            if action.dest not in ("help", "handler")
+        }
+        expected = {
+            (tuple(flag.option_strings), flag.dest)
+            for flag in run_flags.RUN_FLAG_SPEC
+        }
+
+        self.assertEqual(expected, real)
 
     def test_run_parser_review_harness_defaults_to_none(self) -> None:
         parser = cli.build_parser()
@@ -1487,6 +1633,57 @@ class JsonCliTests(unittest.TestCase):
             self.assertEqual("1.1", nested["id"])
             self.assertNotIn("number", nested)
 
+    def test_status_next_command_pending_shows_per_harness_invocations(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("complete", "pending"))
+
+            payload = state.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
+            next_command = payload["next_command"]
+            self.assertFalse(next_command["complete"])
+            self.assertEqual("2", next_command["next_pending_id"])
+            invocations = next_command["next_steps"][0]["invocations"]
+            resolved_plan_dir = payload["plan_dir"]
+            self.assertEqual(
+                f"$session-run {resolved_plan_dir}/", invocations["codex"]
+            )
+            self.assertEqual(
+                f"/session-run {resolved_plan_dir}/", invocations["claude"]
+            )
+            self.assertEqual(
+                f"/session-run {resolved_plan_dir}/", invocations["copilot"]
+            )
+
+    def test_status_next_command_complete_uses_exact_session_run_message(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("complete", "complete"))
+
+            payload = state.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
+            self.assertEqual(
+                {
+                    "complete": True,
+                    "message": "All sessions implemented - nothing left to run.",
+                },
+                payload["next_command"],
+            )
+            self.assertEqual(
+                responses.ALL_SESSIONS_COMPLETE_MESSAGE,
+                payload["next_command"]["message"],
+            )
+
     def test_dry_run_json_no_unsafe_bypass_uses_harness_default_argv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -2138,6 +2335,397 @@ def _register_plan_in_state(state_dir: Path, plan_dir: Path) -> None:
         json.dumps({"plan_dir": str(canonical)}, sort_keys=True),
         encoding="utf-8",
     )
+
+
+class SplitCliTests(unittest.TestCase):
+    """`asl split`: authoring chain, JSON payload, and stable failure reasons.
+
+    Also carries the CLI-surface coverage migrated from the retired
+    ``capture-inline-plan.py`` / ``resolve-plan-output.py`` script tests.
+    """
+
+    _TWO_SESSION_PLAN = (
+        "# My Plan\n\nShared context.\n\n"
+        "## Session 1: First\n\nDo one.\n\n"
+        "## Session 2: Second\n\nDo two.\n"
+    )
+
+    def _split_args(self, **overrides: object) -> argparse.Namespace:
+        args = argparse.Namespace(
+            plan_file=None,
+            inline_stdin=False,
+            base_dir=None,
+            contracts_file=None,
+            skill_prefix="codex",
+            analysis_file=None,
+            json=True,
+        )
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        return args
+
+    def _write_contracts(self, path: Path, ids: tuple[str, ...]) -> None:
+        payload = {
+            sid: {
+                "done_when": [f"Session {sid} lands."],
+                "verify": {
+                    "session": sid,
+                    "checks": [
+                        {
+                            "type": "command",
+                            "argv": ["python3", "-m", "unittest", "-q"],
+                            "timeout_seconds": 60,
+                        }
+                    ],
+                },
+            }
+            for sid in ids
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def _run_split(
+        self, args: argparse.Namespace, *, stdin: str | None = None
+    ) -> tuple[int, str, str]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            if stdin is not None:
+                with mock.patch("sys.stdin", io.StringIO(stdin)):
+                    code = authoring.split_from_args(args)
+            else:
+                code = authoring.split_from_args(args)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_split_subparser_is_wired_with_defaults(self) -> None:
+        parser = cli.build_parser()
+        parsed = parser.parse_args(
+            ["split", "--plan-file", "P.md", "--contracts-file", "c.json"]
+        )
+        self.assertEqual("authoring:split_from_args", parsed.handler_ref)
+        self.assertIs(cli.resolve_handler(parsed), authoring.split_from_args)
+        self.assertEqual("auto", parsed.skill_prefix)
+        self.assertFalse(parsed.inline_stdin)
+        # A source is required and the two sources are mutually exclusive.
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["split", "--contracts-file", "c.json"])
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "split",
+                    "--plan-file",
+                    "P.md",
+                    "--inline-stdin",
+                    "--contracts-file",
+                    "c.json",
+                ]
+            )
+
+    def test_split_happy_path_produces_preflight_clean_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan = tmp_dir / "PLAN.md"
+            plan.write_text(self._TWO_SESSION_PLAN, encoding="utf-8")
+            contracts_file = tmp_dir / "contracts.json"
+            self._write_contracts(contracts_file, ("1", "2"))
+            base = tmp_dir / "out"
+
+            code, out, err = self._run_split(
+                self._split_args(
+                    plan_file=str(plan),
+                    contracts_file=str(contracts_file),
+                    base_dir=str(base),
+                )
+            )
+
+            self.assertEqual(0, code, err)
+            payload = json.loads(out)
+            self.assertTrue(payload["ok"])
+            self.assertEqual("split", payload["command"])
+            self.assertEqual(["1", "2"], payload["session_ids"])
+            self.assertEqual("draft", payload["readiness"]["state"])
+            self.assertEqual("$", payload["skill_prefix"])
+            self.assertIn(
+                "session-expand", payload["next_steps"][0]["invocations"]["codex"]
+            )
+
+            output_dir = Path(payload["output_dir"])
+            self.assertTrue(output_dir.is_dir())
+            self.assertTrue((output_dir / "session-1.md").is_file())
+            self.assertTrue((output_dir / "session-2.md").is_file())
+            self.assertTrue((output_dir / "manifest.md").is_file())
+            self.assertTrue((output_dir / "progress.md").is_file())
+            self.assertEqual(
+                sorted(str(output_dir / name) for name in (
+                    "context.md",
+                    "manifest.md",
+                    "progress.md",
+                    "session-1.md",
+                    "session-2.md",
+                )),
+                sorted(payload["files"]),
+            )
+
+            report = preflight.run_core_preflight(output_dir)
+            self.assertEqual((), report.red_findings)
+
+    def test_split_single_session_reports_not_needed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan = tmp_dir / "PLAN.md"
+            plan.write_text("# Plan\n\n## Session 1: Only\n\nDo.\n", encoding="utf-8")
+            contracts_file = tmp_dir / "contracts.json"
+            self._write_contracts(contracts_file, ("1",))
+
+            code, out, _ = self._run_split(
+                self._split_args(
+                    plan_file=str(plan),
+                    contracts_file=str(contracts_file),
+                    base_dir=str(tmp_dir / "out"),
+                )
+            )
+
+            self.assertEqual(1, code)
+            payload = json.loads(out)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("single-session", payload["reason"])
+            self.assertIn("splitting is not needed", payload["error"])
+
+    def test_split_malformed_plan_passes_through_line_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan = tmp_dir / "PLAN.md"
+            plan.write_text("# Plan\n\n## Session foo\n\nBody\n", encoding="utf-8")
+            contracts_file = tmp_dir / "contracts.json"
+            self._write_contracts(contracts_file, ("1",))
+
+            code, out, _ = self._run_split(
+                self._split_args(
+                    plan_file=str(plan),
+                    contracts_file=str(contracts_file),
+                    base_dir=str(tmp_dir / "out"),
+                )
+            )
+
+            self.assertEqual(1, code)
+            payload = json.loads(out)
+            self.assertEqual("malformed-plan", payload["reason"])
+            self.assertIn("line", payload["error"])
+            self.assertIn("invalid session id", payload["error"])
+
+    def test_split_missing_contract_reason_and_no_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan = tmp_dir / "PLAN.md"
+            plan.write_text(self._TWO_SESSION_PLAN, encoding="utf-8")
+            contracts_file = tmp_dir / "contracts.json"
+            self._write_contracts(contracts_file, ("1",))
+            base = tmp_dir / "out"
+
+            code, out, _ = self._run_split(
+                self._split_args(
+                    plan_file=str(plan),
+                    contracts_file=str(contracts_file),
+                    base_dir=str(base),
+                )
+            )
+
+            self.assertEqual(1, code)
+            payload = json.loads(out)
+            self.assertEqual("missing-contract:2", payload["reason"])
+            # Contracts are validated before the output dir is created.
+            self.assertFalse(base.exists())
+
+    def test_split_malformed_contract_reason_and_no_dir(self) -> None:
+        # A malformed contract entry (a non-object, or one missing a required
+        # field) must fail closed with a stable structured reason and no
+        # traceback — never as an uncaught TypeError/KeyError — and must not
+        # strand an output directory.
+        valid_entry = {
+            "done_when": ["Session 1 lands."],
+            "verify": {
+                "session": "1",
+                "checks": [
+                    {
+                        "type": "command",
+                        "argv": ["python3", "-m", "unittest", "-q"],
+                        "timeout_seconds": 60,
+                    }
+                ],
+            },
+        }
+        cases = (
+            # A non-object entry for the first session (subscripting it would
+            # otherwise raise TypeError).
+            ({"1": "not-an-object", "2": "also-not"}, "invalid-contract:1"),
+            # A present-but-incomplete entry (missing done_when) reached only
+            # after the first session's valid contract builds cleanly.
+            (
+                {"1": valid_entry, "2": {"verify": {"checks": []}}},
+                "invalid-contract:2",
+            ),
+        )
+        for index, (contract_payload, expected_reason) in enumerate(cases):
+            with self.subTest(reason=expected_reason):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_dir = Path(tmp)
+                    plan = tmp_dir / "PLAN.md"
+                    plan.write_text(self._TWO_SESSION_PLAN, encoding="utf-8")
+                    contracts_file = tmp_dir / "contracts.json"
+                    contracts_file.write_text(
+                        json.dumps(contract_payload), encoding="utf-8"
+                    )
+                    base = tmp_dir / f"out{index}"
+
+                    code, out, _ = self._run_split(
+                        self._split_args(
+                            plan_file=str(plan),
+                            contracts_file=str(contracts_file),
+                            base_dir=str(base),
+                        )
+                    )
+
+                    self.assertEqual(1, code)
+                    payload = json.loads(out)
+                    self.assertFalse(payload["ok"])
+                    self.assertEqual(expected_reason, payload["reason"])
+                    self.assertIn("invalid contract", payload["error"])
+                    self.assertFalse(base.exists())
+
+    def test_split_inline_stdin_captures_durable_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            contracts_file = tmp_dir / "contracts.json"
+            self._write_contracts(contracts_file, ("1", "2"))
+            base = tmp_dir / "out"
+
+            code, out, err = self._run_split(
+                self._split_args(
+                    inline_stdin=True,
+                    contracts_file=str(contracts_file),
+                    base_dir=str(base),
+                ),
+                stdin=self._TWO_SESSION_PLAN,
+            )
+
+            self.assertEqual(0, code, err)
+            payload = json.loads(out)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(["1", "2"], payload["session_ids"])
+            self.assertTrue(payload["source_path"].endswith(".md"))
+            self.assertIn("sources", payload["source_path"])
+            self.assertTrue(Path(payload["source_path"]).is_file())
+
+    def test_split_output_naming_is_collision_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan = tmp_dir / "PLAN.md"
+            plan.write_text(self._TWO_SESSION_PLAN, encoding="utf-8")
+            contracts_file = tmp_dir / "contracts.json"
+            self._write_contracts(contracts_file, ("1", "2"))
+            base = tmp_dir / "out"
+            args = self._split_args(
+                plan_file=str(plan),
+                contracts_file=str(contracts_file),
+                base_dir=str(base),
+            )
+
+            _, out1, _ = self._run_split(args)
+            _, out2, _ = self._run_split(args)
+
+            first = Path(json.loads(out1)["output_dir"])
+            second = Path(json.loads(out2)["output_dir"])
+            self.assertNotEqual(first, second)
+            self.assertEqual(f"{first.name}-2", second.name)
+
+    def test_split_skill_prefix_auto_uses_detected_harness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan = tmp_dir / "PLAN.md"
+            plan.write_text(self._TWO_SESSION_PLAN, encoding="utf-8")
+            contracts_file = tmp_dir / "contracts.json"
+            self._write_contracts(contracts_file, ("1", "2"))
+
+            with mock.patch.object(
+                harnesses, "detect_invoking_harness", return_value="claude"
+            ):
+                code, out, err = self._run_split(
+                    self._split_args(
+                        plan_file=str(plan),
+                        contracts_file=str(contracts_file),
+                        base_dir=str(tmp_dir / "out"),
+                        skill_prefix="auto",
+                    )
+                )
+
+            self.assertEqual(0, code, err)
+            self.assertEqual("/", json.loads(out)["skill_prefix"])
+
+    def test_split_skill_prefix_auto_undetectable_is_input_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan = tmp_dir / "PLAN.md"
+            plan.write_text(self._TWO_SESSION_PLAN, encoding="utf-8")
+            contracts_file = tmp_dir / "contracts.json"
+            self._write_contracts(contracts_file, ("1", "2"))
+
+            with mock.patch.object(
+                harnesses, "detect_invoking_harness", return_value=None
+            ):
+                code, out, _ = self._run_split(
+                    self._split_args(
+                        plan_file=str(plan),
+                        contracts_file=str(contracts_file),
+                        base_dir=str(tmp_dir / "out"),
+                        skill_prefix="auto",
+                    )
+                )
+
+            self.assertEqual(1, code)
+            payload = json.loads(out)
+            self.assertEqual("input-error", payload["reason"])
+            self.assertIn("auto-detect", payload["error"])
+
+    def test_split_analysis_file_appends_to_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan = tmp_dir / "PLAN.md"
+            plan.write_text(self._TWO_SESSION_PLAN, encoding="utf-8")
+            contracts_file = tmp_dir / "contracts.json"
+            self._write_contracts(contracts_file, ("1", "2"))
+            analysis = tmp_dir / "analysis.md"
+            analysis.write_text("## Token Budget\n\nSaved 42%.\n", encoding="utf-8")
+
+            code, out, err = self._run_split(
+                self._split_args(
+                    plan_file=str(plan),
+                    contracts_file=str(contracts_file),
+                    base_dir=str(tmp_dir / "out"),
+                    analysis_file=str(analysis),
+                )
+            )
+
+            self.assertEqual(0, code, err)
+            output_dir = Path(json.loads(out)["output_dir"])
+            manifest = (output_dir / "manifest.md").read_text(encoding="utf-8")
+            self.assertIn("Saved 42%.", manifest)
+
+    def test_split_missing_contracts_file_is_input_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan = tmp_dir / "PLAN.md"
+            plan.write_text(self._TWO_SESSION_PLAN, encoding="utf-8")
+
+            code, out, _ = self._run_split(
+                self._split_args(
+                    plan_file=str(plan),
+                    contracts_file=str(tmp_dir / "does-not-exist.json"),
+                    base_dir=str(tmp_dir / "out"),
+                )
+            )
+
+            self.assertEqual(1, code)
+            payload = json.loads(out)
+            self.assertEqual("input-error", payload["reason"])
 
 
 class StatusLabelResolutionCliTests(unittest.TestCase):

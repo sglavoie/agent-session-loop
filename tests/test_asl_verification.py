@@ -1202,6 +1202,110 @@ class VerifyCliTests(unittest.TestCase):
             self.assertEqual(0, payload["recipe"]["check_count"])
             self.assertFalse(payload["passed"])
 
+    def test_verify_json_no_contract_attaches_skill_remediation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            write_plan(plan_dir, ("pending",))
+
+            completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
+
+            payload = json.loads(completed.stdout)
+            self.assertEqual("no-contract", payload["reason"])
+            # The runtime repair hint resolves for no-contract.
+            self.assertEqual(
+                "runtime.no-contract", payload["repair_hint"]["check_id"]
+            )
+            remediation = payload["skill_remediation"]
+            # Names both escape hatches with the plan directory substituted.
+            self.assertIn("--allow-not-loop-ready", remediation["message"])
+            self.assertIn("--mark-loop-ready", remediation["message"])
+            commands = [
+                step["command"] for step in remediation["next_steps"]
+            ]
+            self.assertIn(
+                f"asl run {plan_dir} --allow-not-loop-ready", commands
+            )
+            self.assertIn(
+                f"asl preflight {plan_dir} --json --mark-loop-ready", commands
+            )
+
+    def test_no_contract_remediation_commands_are_shell_safe(self) -> None:
+        # A plan directory carrying whitespace and shell metacharacters must
+        # still round-trip as a single argument in every advertised no-contract
+        # remediation command (both next_steps commands and the message text).
+        weird_plan = "/plans/de mo; rm -rf $(evil) 'q'"
+        remediation = verification._no_contract_skill_remediation(weird_plan)
+        commands = [step["command"] for step in remediation["next_steps"]]
+        self.assertEqual(
+            [
+                ["asl", "run", weird_plan, "--allow-not-loop-ready"],
+                ["asl", "preflight", weird_plan, "--json", "--mark-loop-ready"],
+            ],
+            [shlex.split(command) for command in commands],
+        )
+        # The prose message embeds the same shell-safe command strings, so a
+        # reader copy-pasting them into a shell also preserves the path.
+        for command in commands:
+            self.assertIn(f"`{command}`", remediation["message"])
+            self.assertNotIn(weird_plan, remediation["message"].replace(command, ""))
+
+    def test_verify_json_command_not_found_hint_names_interpreter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            argv = ["definitely-not-a-real-binary-xyz", "--version"]
+            contract = _contract_block(
+                '{"type": "command", "name": "cmd", '
+                f'"argv": {json.dumps(argv)}, "timeout_seconds": 30}}'
+            )
+            write_plan(
+                plan_dir, ("pending",), contracts_by_id={"1": contract}
+            )
+
+            completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
+
+            self.assertEqual(1, completed.returncode)
+            payload = json.loads(completed.stdout)
+            self.assertEqual("verify-failed", payload["reason"])
+            self.assertEqual(
+                "command-not-found", payload["checks"][0]["failure_reason"]
+            )
+            hint = payload["repair_hint"]
+            self.assertEqual(
+                "runtime.verify-failed.command-not-found", hint["check_id"]
+            )
+            # Interpreter guidance now lives authoritatively in the hint.
+            self.assertIn("python3", hint["message"])
+
+    def test_verify_json_failure_attaches_repair_hint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            contract = _contract_block(
+                '{"type": "file_exists", "path": "absent.txt", "name": "absent"}'
+            )
+            write_plan(
+                plan_dir, ("pending",), contracts_by_id={"1": contract}
+            )
+
+            completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
+
+            payload = json.loads(completed.stdout)
+            self.assertEqual("verify-failed", payload["reason"])
+            self.assertEqual(
+                "runtime.verify-failed.file-missing",
+                payload["repair_hint"]["check_id"],
+            )
+            # A non-no-contract failure carries no skill_remediation.
+            self.assertNotIn("skill_remediation", payload)
+
     def test_verify_json_malformed_contract_reports_plan_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -1822,6 +1926,231 @@ class ArtifactStorageTests(unittest.TestCase):
         capture.discard()
 
         self.assertFalse(spool_path.exists())
+
+
+class ContractCheckCliTests(unittest.TestCase):
+    """`asl contract-check` static per-check contract diagnosis."""
+
+    def _run(self, plan_dir: Path, cwd: Path, *extra: str) -> tuple[int, dict]:
+        args = cli.build_parser().parse_args(
+            ["contract-check", str(plan_dir), "--cwd", str(cwd), "--json", *extra]
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = cli.resolve_handler(args)(args)
+        return code, json.loads(stdout.getvalue())
+
+    def test_parser_wiring(self) -> None:
+        args = cli.build_parser().parse_args(
+            ["contract-check", "/plan", "--session", "2"]
+        )
+        self.assertIs(verification.contract_check_from_args, cli.resolve_handler(args))
+        self.assertEqual("/plan", args.plan_dir)
+        self.assertEqual("2", args.session)
+        self.assertEqual(".", args.cwd)
+        self.assertFalse(args.json)
+
+    def test_all_ok_exits_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            (repo_root / "target.txt").write_text("hello\n", encoding="utf-8")
+            contract = _contract_block(
+                '{"type": "file_exists", "path": "target.txt", "name": "f"}, '
+                '{"type": "command", "name": "c", "argv": ["true"]}'
+            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
+
+            code, payload = self._run(plan_dir, repo_root)
+
+            self.assertEqual(0, code)
+            self.assertTrue(payload["ok"])
+            self.assertEqual("ok", payload["reason"])
+            self.assertEqual(0, payload["issue_count"])
+            self.assertEqual(
+                {"ok"}, {row["status"] for row in payload["checks"]}
+            )
+
+    def test_file_missing_is_factual_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            contract = _contract_block(
+                '{"type": "file_exists", "path": "absent.txt", "name": "f"}'
+            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
+
+            code, payload = self._run(plan_dir, repo_root)
+
+            self.assertEqual(1, code)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("contract-issues", payload["reason"])
+            row = payload["checks"][0]
+            self.assertEqual("factual-issue", row["status"])
+            self.assertEqual("file-missing", row["reason"])
+            self.assertEqual("1", row["session"])
+
+    def test_regex_not_matched_is_factual_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            (repo_root / "target.txt").write_text("nothing here\n", encoding="utf-8")
+            contract = _contract_block(
+                '{"type": "regex_in_file", "path": "target.txt", '
+                '"pattern": "WANTED", "name": "r"}'
+            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
+
+            code, payload = self._run(plan_dir, repo_root)
+
+            self.assertEqual(1, code)
+            row = payload["checks"][0]
+            self.assertEqual("regex-not-matched", row["reason"])
+
+    def test_command_not_runnable_is_factual_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            contract = _contract_block(
+                '{"type": "command", "name": "c", '
+                '"argv": ["asl-contract-check-missing-xyz"]}'
+            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
+
+            code, payload = self._run(plan_dir, repo_root)
+
+            self.assertEqual(1, code)
+            row = payload["checks"][0]
+            self.assertEqual("command-not-runnable", row["reason"])
+
+    def test_unversioned_python_is_factual_issue(self) -> None:
+        # An unversioned ``python`` interpreter is frequently unavailable where
+        # ``python3`` exists, so it stays actionable with the ``bare-python``
+        # reason and a "use `python3`" detail (matching session-expand).
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            contract = _contract_block(
+                '{"type": "command", "name": "c", '
+                '"argv": ["python", "-c", "raise SystemExit(0)"]}'
+            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
+
+            code, payload = self._run(plan_dir, repo_root)
+
+            self.assertEqual(1, code)
+            row = payload["checks"][0]
+            self.assertEqual("factual-issue", row["status"])
+            self.assertEqual("bare-python", row["reason"])
+            self.assertIn("use `python3`", row["detail"])
+
+    def test_versioned_python3_inline_check_is_ok(self) -> None:
+        # ``python3 -c`` and ``python3 <script>`` are valid inline evidence
+        # checks and must not be rejected solely for lacking ``-m``.
+        for argv in (
+            '["python3", "-c", "raise SystemExit(0)"]',
+            '["python3", "check_evidence.py"]',
+            '["python3.11", "-c", "raise SystemExit(0)"]',
+        ):
+            with self.subTest(argv=argv):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_dir = Path(tmp)
+                    plan_dir = tmp_dir / "plan"
+                    repo_root = tmp_dir / "repo"
+                    repo_root.mkdir()
+                    contract = _contract_block(
+                        f'{{"type": "command", "name": "c", "argv": {argv}}}'
+                    )
+                    write_plan(
+                        plan_dir, ("pending",), contracts_by_id={"1": contract}
+                    )
+
+                    code, payload = self._run(plan_dir, repo_root)
+
+                    row = payload["checks"][0]
+                    self.assertNotEqual("bare-python", row["reason"])
+
+    def test_missing_contract_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            write_plan(plan_dir, ("pending",))
+
+            code, payload = self._run(plan_dir, repo_root)
+
+            self.assertEqual(1, code)
+            row = payload["checks"][0]
+            self.assertEqual("missing-contract", row["status"])
+            self.assertIsNone(row["name"])
+
+    def test_schema_error_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            # A command check with no argv fails the contract parser.
+            contract = _contract_block('{"type": "command", "name": "c"}')
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
+
+            code, payload = self._run(plan_dir, repo_root)
+
+            self.assertEqual(1, code)
+            row = payload["checks"][0]
+            self.assertEqual("schema-error", row["status"])
+
+    def test_session_flag_narrows_to_single_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            (repo_root / "ok.txt").write_text("x\n", encoding="utf-8")
+            good = _contract_block(
+                '{"type": "file_exists", "path": "ok.txt", "name": "f"}'
+            )
+            bad = _contract_block(
+                '{"type": "file_exists", "path": "absent.txt", "name": "f"}',
+                session="2",
+            )
+            write_plan(
+                plan_dir,
+                ("pending", "pending"),
+                contracts_by_id={"1": good, "2": bad},
+            )
+
+            # Session 1 alone is clean even though session 2 has an issue.
+            code, payload = self._run(plan_dir, repo_root, "--session", "1")
+            self.assertEqual(0, code)
+            self.assertEqual(
+                {"1"}, {row["session"] for row in payload["checks"]}
+            )
+            self.assertEqual("1", payload["session"])
+
+    def test_unknown_session_is_invalid_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            write_plan(plan_dir, ("pending",))
+
+            code, payload = self._run(plan_dir, repo_root, "--session", "9")
+            self.assertEqual(1, code)
+            self.assertEqual("invalid-session", payload["reason"])
 
 
 if __name__ == "__main__":

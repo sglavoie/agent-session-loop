@@ -823,7 +823,8 @@ class ProgressCliTests(unittest.TestCase):
                 ["backfill-progress", str(plan_dir)]
             )
             self.assertEqual(
-                progress_cli.backfill_progress_from_args, args.handler
+                progress_cli.backfill_progress_from_args,
+                cli.resolve_handler(args),
             )
             self.assertEqual(str(plan_dir), args.plan_dir)
             self.assertFalse(args.force)
@@ -834,7 +835,7 @@ class ProgressCliTests(unittest.TestCase):
         args = parser.parse_args(
             ["progress", "/tmp/example", "--tail", "--json"]
         )
-        self.assertEqual(progress_cli.progress_from_args, args.handler)
+        self.assertEqual(progress_cli.progress_from_args, cli.resolve_handler(args))
         self.assertEqual("/tmp/example", args.plan_dir)
         self.assertTrue(args.tail)
         self.assertTrue(args.json)

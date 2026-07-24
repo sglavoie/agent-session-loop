@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -427,6 +429,72 @@ class ResplitSessionTest(unittest.TestCase):
                 state.release_lock(plan_dir, state_dir)
 
             self.assertEqual("lock-contention", raised.exception.reason)
+            self.assertTrue((plan_dir / "session-2.md").is_file())
+            self.assertFalse((plan_dir / "session-2.1.md").exists())
+            self.assertFalse((plan_dir / "resplit-archive").exists())
+
+    def test_active_lock_remediation_advises_waiting_not_unlock(self) -> None:
+        # A live active lock is never stale, so the helper cannot self-clear it
+        # and must refuse. Its remediation must point at the active runner, not
+        # at unlock/--force (which the skill policy forbids for an active lock).
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_resplit_plan(plan_dir)
+            state.acquire_lock(plan_dir, state_dir, owner="other-runner")
+            try:
+                json_out = io.StringIO()
+                with redirect_stdout(json_out):
+                    json_code = resplit.main(
+                        [
+                            str(plan_dir),
+                            "--session",
+                            "2",
+                            "--parts",
+                            "2",
+                            "--state-dir",
+                            str(state_dir),
+                            "--json",
+                        ]
+                    )
+                text_out = io.StringIO()
+                with redirect_stdout(text_out):
+                    text_code = resplit.main(
+                        [
+                            str(plan_dir),
+                            "--session",
+                            "2",
+                            "--parts",
+                            "2",
+                            "--state-dir",
+                            str(state_dir),
+                        ]
+                    )
+            finally:
+                state.release_lock(plan_dir, state_dir)
+
+            self.assertEqual(1, json_code)
+            self.assertEqual(1, text_code)
+
+            payload = json.loads(json_out.getvalue())
+            self.assertFalse(payload["ok"])
+            self.assertEqual("lock-contention", payload["reason"])
+            remediation = payload["remediation"]
+            self.assertEqual(
+                resplit.PAUSE_REMEDIATION["lock-contention"], remediation
+            )
+            lowered = remediation.lower()
+            self.assertIn("wait", lowered)
+            self.assertIn("active", lowered)
+            self.assertNotIn("unlock", lowered)
+            self.assertNotIn("force", lowered)
+
+            text = text_out.getvalue()
+            self.assertIn("RESPLIT_STATUS: paused", text)
+            self.assertIn("RESPLIT_PAUSE: lock-contention", text)
+            self.assertIn(f"RESPLIT_REMEDIATION: {remediation}", text)
+
+            # A refused active lock leaves the plan untouched.
             self.assertTrue((plan_dir / "session-2.md").is_file())
             self.assertFalse((plan_dir / "session-2.1.md").exists())
             self.assertFalse((plan_dir / "resplit-archive").exists())

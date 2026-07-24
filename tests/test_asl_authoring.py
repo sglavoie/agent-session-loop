@@ -139,41 +139,67 @@ class PlanAuthoringTests(unittest.TestCase):
                 f"{first['plan_id']}-2", os.path.basename(second["output_dir"])
             )
 
-    def test_resolve_plan_output_matches_script_helper(self) -> None:
-        script_path = os.path.join(
-            REPO_ROOT,
-            "skills",
-            "session-split",
-            "scripts",
-            "resolve-plan-output.py",
-        )
-        spec = importlib.util.spec_from_file_location("resolve_plan_output", script_path)
-        resolver = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        spec.loader.exec_module(resolver)
-
+    def test_resolve_plan_output_fingerprints_content_and_path(self) -> None:
+        # Migrated from the retired resolve-plan-output.py script tests.
         with tempfile.TemporaryDirectory() as tmp:
-            plan = os.path.join(tmp, "PLAN.md")
-            with open(plan, "w", encoding="utf-8") as handle:
-                handle.write("# Plan\n\n## Session 1\n")
+            base = os.path.join(tmp, "out")
+            left_dir = os.path.join(tmp, "left")
+            right_dir = os.path.join(tmp, "right")
+            os.mkdir(left_dir)
+            os.mkdir(right_dir)
+            for directory in (left_dir, right_dir):
+                with open(os.path.join(directory, "PLAN.md"), "w", encoding="utf-8") as h:
+                    h.write("# Shared Name\n")
 
-            module_result = authoring.resolve_plan_output(
-                plan, os.path.join(tmp, "module-out")
-            )
-            script_result = resolver.resolve_plan_output(
-                plan, os.path.join(tmp, "script-out")
+            left = authoring.resolve_plan_output(os.path.join(left_dir, "PLAN.md"), base)
+            right = authoring.resolve_plan_output(
+                os.path.join(right_dir, "PLAN.md"), base
             )
 
-        for key in (
-            "content_sha256",
-            "source_fingerprint",
-            "plan_id",
-            "content_hash_prefix",
-            "fingerprint_prefix",
-            "hash_prefix",
-            "slug",
-        ):
-            self.assertEqual(script_result[key], module_result[key], key)
+            # Same content => identical content prefix; distinct paths => distinct id.
+            self.assertEqual(left["content_hash_prefix"], right["content_hash_prefix"])
+            self.assertNotEqual(left["fingerprint_prefix"], right["fingerprint_prefix"])
+            self.assertNotEqual(left["plan_id"], right["plan_id"])
+
+    def test_slug_from_source_path_sanitizes_unsafe_filenames(self) -> None:
+        # Migrated from the retired resolve-plan-output.py script tests.
+        cases = {
+            "My PLAN!! v2.md": "my-plan-v2",
+            "___###.md": "plan",
+            "Spacing_AND.symbols.md": "spacing-and-symbols",
+        }
+        for filename, expected in cases.items():
+            with self.subTest(filename=filename):
+                self.assertEqual(expected, authoring.slug_from_source_path(filename))
+
+    def test_default_base_dir_resolution_precedence(self) -> None:
+        # Migrated from the retired capture/resolve script tests.
+        with tempfile.TemporaryDirectory() as tmp:
+            agent_dir = os.path.join(tmp, "agent")
+            xdg_dir = os.path.join(tmp, "xdg")
+            with mock.patch.dict(
+                os.environ,
+                {"AGENT_PLANS_DIR": agent_dir, "XDG_DATA_HOME": xdg_dir},
+            ):
+                self.assertEqual(
+                    os.path.realpath(agent_dir), authoring.default_base_dir()
+                )
+            with mock.patch.dict(
+                os.environ, {"XDG_DATA_HOME": xdg_dir}, clear=False
+            ):
+                os.environ.pop("AGENT_PLANS_DIR", None)
+                self.assertEqual(
+                    os.path.realpath(os.path.join(xdg_dir, "agent-plans")),
+                    authoring.default_base_dir(),
+                )
+            with mock.patch.dict(os.environ, {"TMPDIR": tmp}, clear=False):
+                os.environ.pop("AGENT_PLANS_DIR", None)
+                os.environ.pop("XDG_DATA_HOME", None)
+                result = authoring.default_base_dir()
+                self.assertTrue(
+                    result.endswith(os.path.join(".local", "share", "agent-plans"))
+                )
+                self.assertFalse(result.startswith(os.path.realpath(tmp)))
 
     # -- fenced-code-aware parsing ------------------------------------------
 
@@ -388,7 +414,59 @@ class PlanAuthoringTests(unittest.TestCase):
         self.assertIn(authoring.CONTEXT_REFERENCE_LINE, rendered)
         self.assertNotIn("Previous session", rendered)
         self.assertIn("## Completion Contract", rendered)
-        self.assertTrue(rendered.rstrip().endswith("- **Notes**:"))
+        # The handoff ends with the optional-headings documentation comment that
+        # follows the empty `- **Notes**:` line.
+        self.assertIn("- **Notes**:\n", rendered)
+        self.assertTrue(rendered.rstrip().endswith("-->"))
+        self.assertIn(plans.DISCOVERED_FACTS_HEADING, rendered)
+        self.assertIn(plans.OPEN_QUESTIONS_HEADING, rendered)
+
+    def test_handoff_template_documentation_comment_is_ignored_by_parser(
+        self,
+    ) -> None:
+        rendered = authoring.render_session_file(
+            session_id="1",
+            title="First",
+            instruction_lines=["Do the first thing."],
+            is_first=True,
+            contract=self._command_contract("1"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            session_path = plan_dir / "session-1.md"
+            session_path.write_text(rendered, encoding="utf-8")
+            session_file = plans.SessionFile(
+                session_id=plans.parse_session_id("1"), path=session_path
+            )
+
+            # The fresh template's documentation comment names the optional
+            # headings and a `- ` bullet example; none of it may leak into the
+            # parsed handoff.
+            fresh = plans.read_session_handoff(session_file)
+            self.assertEqual("pending", fresh.status)
+            self.assertEqual((), fresh.discovered_facts)
+            self.assertEqual((), fresh.open_questions)
+
+            # Completing the session below the comment round-trips cleanly: the
+            # real headings/bullets are captured and the comment is still skipped.
+            completed = rendered.replace(
+                "- **Status**: pending", "- **Status**: complete"
+            ) + "\n".join(
+                [
+                    "",
+                    plans.DISCOVERED_FACTS_HEADING,
+                    "- a verified fact",
+                    "",
+                    plans.OPEN_QUESTIONS_HEADING,
+                    "- an open question",
+                    "",
+                ]
+            )
+            session_path.write_text(completed, encoding="utf-8")
+            handoff = plans.read_session_handoff(session_file)
+            self.assertEqual("complete", handoff.status)
+            self.assertEqual(("a verified fact",), handoff.discovered_facts)
+            self.assertEqual(("an open question",), handoff.open_questions)
 
     def test_render_session_file_includes_previous_reference(self) -> None:
         rendered = authoring.render_session_file(
@@ -667,20 +745,6 @@ class PlanAuthoringResplitTests(unittest.TestCase):
             "scripts",
             "resplit-session.py",
         )
-        cls.capture = _load_script_module(
-            "capture_inline_plan_module",
-            "skills",
-            "session-split",
-            "scripts",
-            "capture-inline-plan.py",
-        )
-        cls.resolver = _load_script_module(
-            "resolve_plan_output_module",
-            "skills",
-            "session-split",
-            "scripts",
-            "resolve-plan-output.py",
-        )
 
     # -- shared structural operations ----------------------------------------
 
@@ -773,17 +837,13 @@ class PlanAuthoringResplitTests(unittest.TestCase):
                 ["Done."],
                 {"session": "3", "checks": [{"type": "file_exists", "path": "x"}]},
             )
+        # A non-array done_when fails closed as PlanError rather than raising a
+        # TypeError when the payload builder tries to iterate it.
+        with self.assertRaises(plans.PlanError):
+            authoring.contract_from_payload(
+                "2.1", 5, {"checks": [{"type": "command"}]}  # type: ignore[arg-type]
+            )
 
-    # -- split scripts are thin authoring wrappers ---------------------------
-
-    def test_split_scripts_delegate_to_authoring(self) -> None:
-        self.assertIs(self.capture.capture_inline_plan, authoring.capture_inline_plan)
-        self.assertIs(self.capture.extract_plan, authoring.extract_inline_plan)
-        self.assertIs(self.capture.default_base_dir, authoring.default_base_dir)
-        self.assertIs(self.capture.sanitize_slug, authoring.slugify)
-        self.assertIs(self.resolver.resolve_plan_output, authoring.resolve_plan_output)
-        self.assertIs(self.resolver.sanitize_slug, authoring.slug_from_source_path)
-        self.assertIs(self.resolver.source_fingerprint, authoring.source_fingerprint)
 
     # -- resplit fixture ------------------------------------------------------
 
@@ -881,6 +941,74 @@ class PlanAuthoringResplitTests(unittest.TestCase):
             )
 
     # -- resplit behavior on shared authoring seams ---------------------------
+
+    def test_resplit_success_emits_next_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            self._write_resplit_plan(plan_dir)
+
+            result = self.resplit.resplit_session(
+                plan_dir, session_id="2", parts=2, state_dir=state_dir
+            )
+
+            self.assertIn("next_steps", result)
+            steps = result["next_steps"]
+            self.assertEqual(1, len(steps))
+            invocations = steps[0]["invocations"]
+            self.assertEqual(
+                set(harnesses.HARNESS_NAMES), set(invocations)
+            )
+            for command in invocations.values():
+                self.assertIn("session-expand", command)
+                self.assertTrue(command.rstrip().endswith("/"))
+
+    def test_resplit_pause_emits_remediation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            self._write_resplit_plan(plan_dir, parent_contract=False)
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = self.resplit.main(
+                    [
+                        str(plan_dir),
+                        "--session",
+                        "2",
+                        "--parts",
+                        "2",
+                        "--state-dir",
+                        str(state_dir),
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(1, code)
+            payload = json.loads(stdout.getvalue())
+            self.assertFalse(payload["ok"])
+            self.assertEqual("no-contract", payload["reason"])
+            self.assertEqual(
+                self.resplit.PAUSE_REMEDIATION["no-contract"],
+                payload["remediation"],
+            )
+
+    def test_pause_remediation_covers_every_resplit_reason(self) -> None:
+        # Every reason the script raises must have a one-line remediation.
+        raised_reasons = {
+            "ambiguous-input",
+            "blocked",
+            "unknown-status",
+            "malformed-plan",
+            "collision",
+            "cannot-split",
+            "no-contract",
+            "ambiguous-contract",
+            "lock-contention",
+        }
+        self.assertTrue(
+            raised_reasons.issubset(set(self.resplit.PAUSE_REMEDIATION))
+        )
 
     def test_resplit_derives_child_contracts_and_refreshes_readiness(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

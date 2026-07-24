@@ -175,6 +175,34 @@ class StateCompactionTests(unittest.TestCase):
         self.assertNotIn("stdout", check)
         self.assertNotIn("stderr", check)
 
+    def test_compaction_preserves_unknown_top_level_run_config(self) -> None:
+        # ``run_config`` is an additive top-level key the runner persists for
+        # ``asl run --resume``; the compact projection must copy it through
+        # unchanged so a resume after compaction still rehydrates.
+        run_config = {
+            "harness": "claude",
+            "harness_model": "claude-opus-4",
+            "effort": "high",
+            "unsafe_bypass": True,
+            "state_dir_override": "/tmp/state",
+        }
+        state_path = self._write_state(
+            {"run_id": "r", "run_config": run_config, "turns": [self._v1_turn()]}
+        )
+
+        # Unit-level: the in-memory projection keeps the key verbatim.
+        compact = runner._compact_state_payload(
+            json.loads(state_path.read_text(encoding="utf-8"))
+        )
+        self.assertEqual(run_config, compact["run_config"])
+
+        # On-disk: a real compaction round-trip preserves it too.
+        compact_state.compact_plan_state(
+            self.plan_dir, state_dir=self.state_dir, apply=True
+        )
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(run_config, payload["run_config"])
+
     def test_apply_extracts_failed_output_and_strips_pass_output(self) -> None:
         result_path = self._write_result(
             [

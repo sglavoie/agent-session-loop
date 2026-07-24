@@ -33,10 +33,12 @@ the discipline ``asl verify`` already uses for its JSON ``ok`` field.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -233,8 +235,8 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
         check_id="manifest-readiness.repair",
         severity_hint="red",
         message=(
-            "Re-run `asl preflight --mark-loop-ready` to refresh the manifest "
-            "readiness block, or fix the manifest by hand."
+            "Re-run `asl preflight <plan-dir> --json --mark-loop-ready` to "
+            "refresh the manifest readiness block, or fix the manifest by hand."
         ),
         question_template=(
             "Manifest readiness metadata needs attention: {message}. "
@@ -334,9 +336,9 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
         check_id="progress-journal-missing.backfill",
         severity_hint="yellow",
         message=(
-            "Run `asl backfill-progress <plan>` to reconstruct missing "
-            "progress.md, or `asl backfill-progress --force <plan>` when "
-            "the journal already exists but is stale or malformed."
+            "Run `asl backfill-progress --force <plan-dir>` to reconstruct "
+            "missing progress.md, or the same command when the journal "
+            "already exists but is stale or malformed."
         ),
         question_template=(
             "Progress journal problem: {message}. "
@@ -350,7 +352,7 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
         severity_hint="red",
         message=(
             "Record baseline evidence before the first session by running "
-            "`asl baseline <plan> --cwd <repo-root>`; the readiness gate "
+            "`asl baseline <plan-dir> --cwd <repo-root>`; the readiness gate "
             "requires current evidence when no session is complete."
         ),
         question_template=(
@@ -365,8 +367,8 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
         severity_hint="yellow",
         message=(
             "Refresh stale baseline evidence with "
-            "`asl baseline <plan> --cwd <repo-root>`; the recorded repository "
-            "fingerprint no longer matches the working tree."
+            "`asl baseline <plan-dir> --cwd <repo-root>`; the recorded "
+            "repository fingerprint no longer matches the working tree."
         ),
         question_template=(
             "Session {session_id} baseline evidence is stale ({detail}). "
@@ -479,12 +481,13 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
         check_id="env-lock.repair",
         severity_hint="red",
         message=(
-            "Run `asl unlock <plan>` to clear a stale lock, or wait for the "
-            "active runner to finish."
+            "Run `asl unlock <plan-dir> --json` to clear a stale lock, or "
+            "wait for the active runner to finish."
         ),
         question_template=(
             "Lock contention: {message}. "
-            "Should I run `asl unlock` or wait for the runner?"
+            "Should I run `asl unlock <plan-dir> --json` or wait for the "
+            "runner?"
         ),
         fix_category="env-state",
     ),
@@ -523,11 +526,13 @@ _CATEGORY_HINT_OVERRIDES: dict[str, RepairHint] = {
         severity_hint="red",
         message=(
             "Add **Readiness**, **Readiness SHA-256**, and **Readiness checked "
-            "at** lines to manifest.md, or run `asl preflight --mark-loop-ready`."
+            "at** lines to manifest.md, or run "
+            "`asl preflight <plan-dir> --json --mark-loop-ready`."
         ),
         question_template=(
             "Manifest is missing readiness metadata. "
-            "Should I run `asl preflight --mark-loop-ready` to add it?"
+            "Should I run `asl preflight <plan-dir> --json --mark-loop-ready` "
+            "to add it?"
         ),
         fix_category="manifest-update",
     ),
@@ -536,8 +541,9 @@ _CATEGORY_HINT_OVERRIDES: dict[str, RepairHint] = {
         check_id="manifest-readiness.sha-mismatch",
         severity_hint="red",
         message=(
-            "Re-run `asl preflight --mark-loop-ready` after reviewing plan "
-            "edits; the recorded SHA-256 no longer matches the plan content."
+            "Re-run `asl preflight <plan-dir> --json --mark-loop-ready` after "
+            "reviewing plan edits; the recorded SHA-256 no longer matches the "
+            "plan content."
         ),
         question_template=(
             "Manifest readiness SHA-256 is stale ({detail}). "
@@ -551,8 +557,8 @@ _CATEGORY_HINT_OVERRIDES: dict[str, RepairHint] = {
         severity_hint="yellow",
         message=(
             "Advance readiness state from `draft` or `reviewed` to "
-            "`loop-ready` with `asl preflight --mark-loop-ready` once all "
-            "checks pass."
+            "`loop-ready` with `asl preflight <plan-dir> --json "
+            "--mark-loop-ready` once all checks pass."
         ),
         question_template=(
             "Plan readiness state is not loop-ready ({message}). "
@@ -593,11 +599,11 @@ _CATEGORY_HINT_OVERRIDES: dict[str, RepairHint] = {
         check_id="env-lock.stale",
         severity_hint="yellow",
         message=(
-            "Run `asl unlock <plan>` to clear the stale lock."
+            "Run `asl unlock <plan-dir> --json` to clear the stale lock."
         ),
         question_template=(
             "A stale lock is present at {path} ({detail}). "
-            "Clear it with `asl unlock`?"
+            "Clear it with `asl unlock <plan-dir> --json`?"
         ),
         fix_category="env-state",
     ),
@@ -606,8 +612,9 @@ _CATEGORY_HINT_OVERRIDES: dict[str, RepairHint] = {
         check_id="env-lock.active",
         severity_hint="red",
         message=(
-            "Wait for the active runner to finish, or run `asl unlock <plan>` "
-            "if you are certain the pid is gone."
+            "Wait for the active runner to finish, or run "
+            "`asl unlock <plan-dir> --json` if you are certain the pid is "
+            "gone. Never pass `--force` from an automated repair."
         ),
         question_template=(
             "An active lock is held at {path} ({detail}). "
@@ -727,12 +734,20 @@ RUNTIME_REPAIR_HINTS: dict[str, RepairHint] = {
         check_id="runtime.verify-failed.command-not-found",
         severity_hint="red",
         message=(
-            "Install the missing binary or add it to PATH; alternatively, "
-            "change the recipe to invoke an available command."
+            "The contract's command names an executable that is not on PATH "
+            "— commonly a wrong interpreter (bare `python` instead of "
+            "`python3`) or a tool that is not installed (e.g. `pytest`). Fix "
+            "the interpreter/tool in the recipe (name `argv[0]` and its likely "
+            "replacement), install the missing binary, or switch to the repo's "
+            "own convention (e.g. `python3 -m unittest`). This class is caught "
+            "earlier by the `command-not-runnable` preflight check, so seeing "
+            "it at verify time usually means the plan predates that gate or "
+            "the environment changed after preflight."
         ),
         question_template=(
-            "Verification command was not found on PATH. "
-            "Install the binary or rewrite the recipe?"
+            "Verification command's executable was not found on PATH (likely a "
+            "bare `python` that should be `python3`, or an uninstalled tool). "
+            "Fix the interpreter/tool in the recipe or install the binary?"
         ),
         fix_category="env-install",
     ),
@@ -1421,7 +1436,13 @@ def _check_baselines(
     canonical_cwd = canonicalize_path(cwd)
     cache = BaselineCache.load(plan_dir / BASELINE_RESULTS_FILENAME)
     current_fingerprint = baseline.repository_fingerprint(canonical_cwd)
-    refresh_hint = f"run `asl baseline {plan_dir} --cwd {canonical_cwd}`"
+    refresh_hint = (
+        "run `"
+        + responses.format_command(
+            ["asl", "baseline", str(plan_dir), "--cwd", str(canonical_cwd)]
+        )
+        + "`"
+    )
 
     findings: list[PreflightFinding] = []
     seen_keys: set[str] = set()
@@ -2103,6 +2124,212 @@ class AutoRepair:
     target_state: str = ""
 
 
+# ── Repair-hint command substitution ───────────────────────────────────────
+#
+# Static hints in ``REPAIR_HINTS``/``_CATEGORY_HINT_OVERRIDES`` carry
+# ``<plan-dir>`` (and ``<repo-root>`` for baseline evidence) placeholders in
+# any embedded command so a single definition works for every plan. The
+# serialized payload substitutes the concrete plan directory (and cwd) so
+# consuming skills receive a ready-to-run command, not a template. Each
+# substituted path is shell-quoted (:func:`shlex.quote`) so a plan or repo
+# path containing whitespace or shell metacharacters stays a single argument
+# in the emitted command; ordinary paths are left untouched.
+
+def _substitute_command_placeholders(
+    text: str, *, plan_dir: str, cwd: str | None
+) -> str:
+    result = text.replace("<plan-dir>", shlex.quote(plan_dir))
+    if cwd is not None:
+        result = result.replace("<repo-root>", shlex.quote(cwd))
+    return result
+
+
+def repair_hint_payload(
+    hint: RepairHint, *, plan_dir: str, cwd: str | None = None
+) -> dict[str, Any]:
+    """Serialize a :class:`RepairHint`, substituting command placeholders.
+
+    ``<plan-dir>`` in the hint ``message``/``question_template`` becomes the
+    concrete plan directory and ``<repo-root>`` becomes ``cwd`` (left as the
+    placeholder when ``cwd`` is ``None``), so every emitted hint embeds its
+    exact plan-dir-substituted command.
+    """
+    data = asdict(hint)
+    data["message"] = _substitute_command_placeholders(
+        data["message"], plan_dir=plan_dir, cwd=cwd
+    )
+    data["question_template"] = _substitute_command_placeholders(
+        data["question_template"], plan_dir=plan_dir, cwd=cwd
+    )
+    return data
+
+
+# ── Manual-mode auto-repair plan (mirrors session-run Step 4a) ──────────────
+#
+# ``asl preflight --json`` emits an ordered ``auto_repair_plan`` and a
+# ``suggested_pause`` so a skill can drive the exact bounded repairs that
+# ``skills/session-run/SKILL.md`` Step 4a prescribes, without re-encoding the
+# ordering or pause vocabulary in prose:
+#   1. stale env-lock -> `asl unlock <plan-dir> --json` (one attempt); an
+#      active lock never unlocks/`--force` — it emits a ``blocked`` step and a
+#      ``lock-contention`` suggested pause.
+#   2. progress-journal-missing -> `asl backfill-progress --force <plan-dir>`.
+#   3. readiness-only residue -> `asl preflight <plan-dir> --json
+#      --mark-loop-ready`.
+# Any residual blocker the plan cannot clear becomes an ``unsafe`` suggested
+# pause so the skill emits ``RUNNER_PAUSE: <reason> - <detail>`` verbatim.
+
+LOCK_CONTENTION_PAUSE_DETAIL = (
+    "active plan lock remains; wait for the runner or unlock manually if safe"
+)
+
+_AUTO_REPAIR_HANDLED_LOCK_IDS: frozenset[str] = frozenset(
+    {"env-lock.active", "env-lock.stale"}
+)
+
+
+def _blocking_findings(
+    report: PreflightReport,
+) -> tuple[PreflightFinding, ...]:
+    return tuple(
+        finding
+        for finding in report.findings
+        if finding.severity in {"red", "yellow"}
+    )
+
+
+def _residual_blocking_findings(
+    report: PreflightReport,
+) -> tuple[PreflightFinding, ...]:
+    """Blockers not already handled by the lock/progress repair steps."""
+    return tuple(
+        finding
+        for finding in _blocking_findings(report)
+        if _override_check_id_for_finding(finding)
+        not in _AUTO_REPAIR_HANDLED_LOCK_IDS
+        and finding.category != "progress-journal-missing"
+    )
+
+
+def _command_repair_step(
+    argv: Sequence[str], *, category: str, pause_reason: str
+) -> dict[str, Any]:
+    """Build one bounded repair step from an authoritative argv list.
+
+    ``argv`` is the single source of truth: it is surfaced verbatim as the
+    ``argv`` field (so a machine consumer never re-parses a string) and
+    rendered into the human/shell ``command`` via the shared shell-safe
+    :func:`agent_session_loop.responses.format_command` builder, so a plan path
+    with whitespace or shell metacharacters round-trips as one argument.
+    """
+    return {
+        "command": responses.format_command(list(argv)),
+        "argv": list(argv),
+        "max_attempts": 1,
+        "category": category,
+        "pause_reason": pause_reason,
+    }
+
+
+def build_auto_repair_plan(
+    report: PreflightReport, *, plan_dir: str
+) -> tuple[dict[str, Any], ...]:
+    """Ordered bounded repairs mirroring session-run Step 4a, or ``()``.
+
+    Empty when the report is already ok. An active lock short-circuits to a
+    single ``blocked`` step (never unlock, never ``--force``). Otherwise the
+    plan lists the applicable stale-lock, progress-journal, and readiness
+    repairs in Step 4a order, each with ``max_attempts: 1``.
+    """
+    if report.ok:
+        return ()
+
+    blocking = _blocking_findings(report)
+    active_lock = None
+    stale_lock = None
+    for finding in blocking:
+        override_id = _override_check_id_for_finding(finding)
+        if override_id == "env-lock.active":
+            active_lock = finding
+        elif override_id == "env-lock.stale":
+            stale_lock = finding
+
+    if active_lock is not None:
+        return (
+            {
+                "blocked": True,
+                "pause_reason": "lock-contention",
+                "detail": LOCK_CONTENTION_PAUSE_DETAIL,
+            },
+        )
+
+    steps: list[dict[str, Any]] = []
+    if stale_lock is not None:
+        steps.append(
+            _command_repair_step(
+                ["asl", "unlock", plan_dir, "--json"],
+                category="env-lock",
+                pause_reason="lock-contention",
+            )
+        )
+    if any(
+        finding.category == "progress-journal-missing" for finding in blocking
+    ):
+        steps.append(
+            _command_repair_step(
+                ["asl", "backfill-progress", "--force", plan_dir],
+                category="progress-journal-missing",
+                pause_reason="unsafe",
+            )
+        )
+
+    residual = _residual_blocking_findings(report)
+    readiness = [f for f in residual if f.category == "manifest-readiness"]
+    hard = [f for f in residual if f.category != "manifest-readiness"]
+    if readiness and not hard:
+        steps.append(
+            _command_repair_step(
+                ["asl", "preflight", plan_dir, "--json", "--mark-loop-ready"],
+                category="manifest-readiness",
+                pause_reason="unsafe",
+            )
+        )
+    return tuple(steps)
+
+
+def build_suggested_pause(
+    report: PreflightReport, *, plan_dir: str
+) -> dict[str, str] | None:
+    """The pause a skill should emit if the auto-repair plan cannot clear it.
+
+    ``None`` when the report is ok or every blocker is auto-repairable
+    (stale lock, progress journal, readiness-only). An active lock yields a
+    ``lock-contention`` pause; any other residual blocker yields ``unsafe``
+    with the failing categories named — matching Step 4a's fallback pause.
+    """
+    if report.ok:
+        return None
+    blocking = _blocking_findings(report)
+    if any(
+        _override_check_id_for_finding(finding) == "env-lock.active"
+        for finding in blocking
+    ):
+        return {
+            "reason": "lock-contention",
+            "detail": LOCK_CONTENTION_PAUSE_DETAIL,
+        }
+    residual = _residual_blocking_findings(report)
+    hard = sorted(
+        {f.category for f in residual if f.category != "manifest-readiness"}
+    )
+    if hard:
+        return {
+            "reason": "unsafe",
+            "detail": f"automatic plan repair failed: {', '.join(hard)}",
+        }
+    return None
+
+
 def _finding_payload(finding: PreflightFinding) -> dict[str, Any]:
     return asdict(finding)
 
@@ -2156,8 +2383,17 @@ def _preflight_payload_fields(
         "expected_readiness_sha256": report.expected_readiness_sha256,
         "mark_loop_ready_requested": mark_loop_ready,
         "marked_loop_ready": bool(marked) if marked is not None else False,
-        "repair_hints": [asdict(hint) for hint in report.repair_hints],
+        "repair_hints": [
+            repair_hint_payload(hint, plan_dir=plan_dir_arg, cwd=cwd)
+            for hint in report.repair_hints
+        ],
         "auto_repairs": [asdict(repair) for repair in auto_repairs],
+        "auto_repair_plan": list(
+            build_auto_repair_plan(report, plan_dir=plan_dir_arg)
+        ),
+        "suggested_pause": build_suggested_pause(
+            report, plan_dir=plan_dir_arg
+        ),
     }
     if mark_error is not None:
         fields["mark_error"] = mark_error

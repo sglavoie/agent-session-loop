@@ -14,10 +14,11 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import shlex
 import sys
 from typing import Any
 
-from . import config, events, plans, responses
+from . import artifacts, config, events, harnesses, pause_policy, plans, responses
 from .formatting import format_duration_seconds
 
 
@@ -25,6 +26,20 @@ LOCK_FILE_NAME = "lock.json"
 RUNS_DIR_NAME = "runs"
 RESULT_FILE_NAME = "result.json"
 TURN_DIR_PREFIX = "turn-"
+STATE_MIGRATED_EVENT = "state_migrated"
+
+# state.json path fields the migration rewrites to point at the new state dir.
+# ``event_path`` is the legacy duplicate of ``events_path``; both are rewritten
+# so neither is left dangling at the old location. Historical per-turn
+# ``result.json`` paths are intentionally excluded (see ``migrate_plan_state``).
+_MIGRATION_PATH_FIELDS: tuple[str, ...] = (
+    "plan_dir",
+    "state_dir",
+    "state_path",
+    "events_path",
+    "event_path",
+    "lock_path",
+)
 
 
 class StateError(Exception):
@@ -136,6 +151,24 @@ def _nonempty_str(value: Any) -> str | None:
         text = value.strip()
         if text:
             return text
+    return None
+
+
+def _recorded_content_hash(state_obj: dict[str, Any]) -> str | None:
+    """Return the plan content hash a stored state should match against.
+
+    Prefers ``final_snapshot.content_sha256``: a successful run mutates session
+    handoffs, so the on-disk plan content matches the snapshot taken when the
+    run finished, not the one taken at its start. Falls back to
+    ``initial_snapshot.content_sha256`` only for legacy state written before a
+    final snapshot was persisted. Returns ``None`` when neither is present.
+    """
+    for section_key in ("final_snapshot", "initial_snapshot"):
+        section = state_obj.get(section_key)
+        if isinstance(section, dict):
+            recorded = _nonempty_str(section.get("content_sha256"))
+            if recorded is not None:
+                return recorded
     return None
 
 
@@ -558,6 +591,15 @@ def _runner_state_payload(state_path: Path) -> dict[str, Any]:
     if not isinstance(active_verification, dict):
         active_verification = None
 
+    # Prefer the pause_policy block the runner persisted alongside the pause;
+    # fall back to classifying the reason for older state files that predate it,
+    # and leave it absent when the run is not paused.
+    runner_pause_policy = raw.get("pause_policy")
+    if not isinstance(runner_pause_policy, dict) and raw.get("paused"):
+        runner_pause_policy = pause_policy.classify_pause(raw.get("reason"))
+    if not isinstance(runner_pause_policy, dict):
+        runner_pause_policy = None
+
     return {
         "present": True,
         "path": str(state_path),
@@ -567,6 +609,7 @@ def _runner_state_payload(state_path: Path) -> dict[str, Any]:
         "ok": raw.get("ok"),
         "paused": raw.get("paused"),
         "reason": raw.get("reason"),
+        "pause_policy": runner_pause_policy,
         "run_started_at": raw.get("run_started_at"),
         "run_finished_at": raw.get("run_finished_at"),
         "duration_seconds": raw.get("duration_seconds"),
@@ -640,6 +683,103 @@ def _stale_runner_state(
     )
 
 
+def _migrate_command_text(
+    plan_dir: str,
+    from_plan_dir: str,
+    state_dir: str | Path | None,
+) -> str:
+    """Build the ``asl migrate-state`` command that relocates orphaned state."""
+    parts = ["asl", "migrate-state", plan_dir, "--from", from_plan_dir]
+    if state_dir:
+        parts.extend(["--state-dir", str(state_dir)])
+    return shlex.join(parts)
+
+
+def orphaned_state_candidates(
+    snapshot: plans.PlanSnapshot,
+    state_dir: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Find moved-plan state directories whose content matches this plan.
+
+    When this plan's own state directory already holds ``state.json`` the scan
+    is skipped (the common case) and an empty list is returned. Otherwise every
+    per-plan state directory under the state root is inspected for a recorded
+    ``plan_dir`` that no longer exists on disk whose recorded content hash
+    matches the current plan content hash; each match is a migration candidate.
+    The recorded hash prefers ``final_snapshot.content_sha256`` (a completed run
+    mutates handoffs, so the moved plan matches its final content) and falls
+    back to ``initial_snapshot.content_sha256`` only for legacy state. Discovery
+    is read-only and tolerates malformed or concurrently removed records.
+    """
+    root = state_root(state_dir)
+    plan_state = plan_state_dir(snapshot.plan_dir, state_dir)
+    if (plan_state / events.STATE_FILE_NAME).exists():
+        return []
+    try:
+        state_dirs = list(_iter_plan_state_dirs(root))
+    except StateError:
+        return []
+    candidates: list[dict[str, Any]] = []
+    for candidate_dir in state_dirs:
+        if candidate_dir == plan_state:
+            continue
+        state_obj = _read_json_object_safe(
+            candidate_dir / events.STATE_FILE_NAME
+        )
+        if state_obj is None:
+            continue
+        recorded_plan_dir = _nonempty_str(state_obj.get("plan_dir"))
+        if recorded_plan_dir is None:
+            continue
+        recorded_hash = _recorded_content_hash(state_obj)
+        if recorded_hash != snapshot.content_sha256:
+            continue
+        try:
+            still_exists = plans.canonicalize_path(recorded_plan_dir).is_dir()
+        except (OSError, ValueError):
+            still_exists = False
+        if still_exists:
+            continue
+        candidates.append(
+            {
+                "old_plan_dir": recorded_plan_dir,
+                "state_dir": str(candidate_dir),
+                "run_finished_at": state_obj.get("run_finished_at"),
+                "migrate_command": _migrate_command_text(
+                    str(snapshot.plan_dir), recorded_plan_dir, state_dir
+                ),
+            }
+        )
+    candidates.sort(key=lambda item: item["state_dir"])
+    return candidates
+
+
+def _next_command(snapshot: plans.PlanSnapshot) -> dict[str, Any]:
+    """Describe what to run next for ``asl status``.
+
+    When a pending session remains, returns per-harness ``session-run``
+    invocations under the shared ``next_steps`` envelope, ordered by best-effort
+    invoking-harness detection so the most likely command surfaces first. When
+    every session is complete, returns the exact ``{"complete": true,
+    "message": ...}`` payload whose message matches what ``session-run`` prints.
+    """
+    next_pending = snapshot.next_pending
+    if next_pending is None:
+        return {
+            "complete": True,
+            "message": responses.ALL_SESSIONS_COMPLETE_MESSAGE,
+        }
+    step = responses.invocation_step(
+        f"Implement pending session {next_pending.id} with session-run",
+        harnesses.skill_invocations("session-run", f"{snapshot.plan_dir}/"),
+    )
+    return {
+        "complete": False,
+        "next_pending_id": next_pending.id,
+        **responses.next_steps_payload([step]),
+    }
+
+
 def status_payload(
     snapshot: plans.PlanSnapshot,
     state_dir: str | Path | None = None,
@@ -688,6 +828,8 @@ def status_payload(
         lock=_lock_payload(lock_info, lock_path),
         progress_journal=progress_journal,
         review_resume=review_resume,
+        orphaned_state_candidates=orphaned_state_candidates(snapshot, state_dir),
+        next_command=_next_command(snapshot),
     )
 
 
@@ -798,6 +940,27 @@ def _print_text_status(payload: dict[str, Any]) -> None:
     else:
         next_pending = payload.get("next_pending_id") or payload["next_pending"]
         print(f"Next pending: session {next_pending}")
+
+    next_command = payload.get("next_command")
+    if isinstance(next_command, dict):
+        if next_command.get("complete"):
+            print(f"Next command: {next_command.get('message')}")
+        else:
+            for step in next_command.get("next_steps", []):
+                for harness_name, command in (step.get("invocations") or {}).items():
+                    print(f"Next command ({harness_name}): {command}")
+
+    orphaned = payload.get("orphaned_state_candidates")
+    if orphaned:
+        count = len(orphaned)
+        plural = "y" if count == 1 else "ies"
+        print(f"Orphaned state: {count} candidate director{plural} from a moved plan")
+        for candidate in orphaned:
+            print(
+                f"  {candidate['state_dir']} "
+                f"(old plan {candidate['old_plan_dir']}); "
+                f"migrate with: {candidate['migrate_command']}"
+            )
 
 
 def status_from_args(args: argparse.Namespace) -> int:
@@ -935,4 +1098,322 @@ def unlock_from_args(args: argparse.Namespace) -> int:
         )
     else:
         print(result.message)
+    return 0
+
+
+class MigrationError(StateError):
+    """Raised when a state-directory migration cannot proceed safely.
+
+    Carries a machine-readable ``reason`` and structured ``details`` so the
+    ``migrate-state`` CLI handler can surface an actionable JSON payload while
+    ``except StateError`` guards keep working.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        message: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.details = details or {}
+
+
+@dataclass(frozen=True)
+class MigrationReport:
+    """Outcome of migrating one plan's operational state directory."""
+
+    plan_dir: str
+    from_plan_dir: str
+    state_dir: str
+    from_state_dir: str
+    applied: bool
+    rewritten_fields: tuple[str, ...]
+    result_artifacts: int
+    unmigrated_artifacts_note: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "command": "migrate-state",
+            "plan_dir": self.plan_dir,
+            "from_plan_dir": self.from_plan_dir,
+            "state_dir": self.state_dir,
+            "from_state_dir": self.from_state_dir,
+            "applied": self.applied,
+            "rewritten_fields": list(self.rewritten_fields),
+            "result_artifacts": self.result_artifacts,
+            "unmigrated_artifacts_note": self.unmigrated_artifacts_note,
+        }
+
+
+def _dump_state_bytes(payload: dict[str, Any]) -> bytes:
+    """Serialize a state payload the way the runner persists it on disk."""
+    return (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode("utf-8")
+
+
+def migrate_plan_state(
+    plan_dir: str | Path,
+    *,
+    from_plan_dir: str | Path,
+    state_dir: str | Path | None = None,
+    apply: bool = False,
+) -> MigrationReport:
+    """Relocate an orphaned state directory from an old plan path to a new one.
+
+    SHA-of-path keying means moving a plan directory strands its operational
+    state under the hash of its old path. This renames that state directory to
+    the hash of the current path and rewrites the absolute path fields inside
+    ``state.json`` so ``asl status`` and resume work again. Historical per-turn
+    ``result.json`` paths are intentionally left untouched and reported via
+    ``unmigrated_artifacts_note``. The default is a dry-run; ``apply`` performs
+    the rename, rewrite, and ``state_migrated`` event append.
+
+    Refuses (in both dry-run and apply, before touching either directory) on a
+    source plan directory that still exists on disk (its state is not orphaned),
+    an active source lock, an already-occupied destination, a target that is not
+    a valid plan, a source state that does not record the requested old plan, or
+    a source whose content hash is incompatible with the target plan. The
+    content check prefers ``final_snapshot.content_sha256`` and falls back to
+    ``initial_snapshot.content_sha256`` only for legacy state.
+    """
+    # Inspecting the target validates it is a real plan (raising PlanError,
+    # surfaced as ``malformed-plan``) and yields the content hash the source
+    # state must be compatible with.
+    target_snapshot = plans.inspect_plan(plan_dir)
+    new_plan_dir = target_snapshot.plan_dir
+    old_plan_dir = plans.canonicalize_path(from_plan_dir)
+    old_state_dir = plan_state_dir(old_plan_dir, state_dir)
+    new_state_dir = plan_state_dir(new_plan_dir, state_dir)
+
+    if old_state_dir == new_state_dir:
+        raise MigrationError(
+            "noop-migration",
+            "source and destination state directories are identical: "
+            f"{old_state_dir}",
+            {"state_dir": str(old_state_dir)},
+        )
+
+    old_state_path = old_state_dir / events.STATE_FILE_NAME
+    if not old_state_dir.is_dir() or not old_state_path.is_file():
+        raise MigrationError(
+            "no-source-state",
+            f"no source state to migrate at {old_state_dir}",
+            {
+                "from_state_dir": str(old_state_dir),
+                "from_state_path": str(old_state_path),
+            },
+        )
+
+    # Refuse when the source plan directory still exists on disk: its state is
+    # not orphaned, so migrating would steal a live plan's operational state.
+    # Discovery already skips still-existing source plans; this keeps the
+    # mutating API consistent with read-only discovery. Two identical plans
+    # otherwise satisfy the identity and content checks below, and --apply would
+    # rename the source's state dir out from under it.
+    try:
+        source_plan_exists = old_plan_dir.is_dir()
+    except OSError:
+        source_plan_exists = False
+    if source_plan_exists:
+        raise MigrationError(
+            "source-plan-exists",
+            "source plan directory still exists and is not orphaned: "
+            f"{old_plan_dir}",
+            {"from_plan_dir": str(old_plan_dir)},
+        )
+
+    # Refuse to migrate a live run out from under itself.
+    old_lock = _read_lock_path(old_state_dir / LOCK_FILE_NAME, old_plan_dir)
+    if old_lock is not None and old_lock.active:
+        raise MigrationError(
+            "active-lock",
+            f"source plan is locked by pid {old_lock.pid} at {old_lock.path}",
+            {"lock_path": str(old_lock.path), "pid": old_lock.pid},
+        )
+
+    if new_state_dir.exists():
+        raise MigrationError(
+            "destination-occupied",
+            f"destination state directory already exists: {new_state_dir}",
+            {"state_dir": str(new_state_dir)},
+        )
+
+    state_obj = _read_json_object_safe(old_state_path)
+    if state_obj is None:
+        raise MigrationError(
+            "malformed-source-state",
+            f"source state file is not a JSON object: {old_state_path}",
+            {"from_state_path": str(old_state_path)},
+        )
+
+    # Confirm the source state truly belongs to the requested old plan, so a
+    # mistaken --from cannot attach unrelated operational state to this target.
+    recorded_plan_dir = _nonempty_str(state_obj.get("plan_dir"))
+    recorded_matches = False
+    if recorded_plan_dir is not None:
+        try:
+            recorded_matches = (
+                plans.canonicalize_path(recorded_plan_dir) == old_plan_dir
+            )
+        except (OSError, ValueError):
+            recorded_matches = False
+    if not recorded_matches:
+        raise MigrationError(
+            "source-plan-mismatch",
+            "source state records plan directory "
+            f"{recorded_plan_dir!r}, not the requested {old_plan_dir}",
+            {
+                "recorded_plan_dir": recorded_plan_dir,
+                "from_plan_dir": str(old_plan_dir),
+            },
+        )
+
+    # Confirm the source content belongs to the target plan (final snapshot
+    # preferred, initial snapshot as the legacy fallback).
+    recorded_hash = _recorded_content_hash(state_obj)
+    if recorded_hash != target_snapshot.content_sha256:
+        raise MigrationError(
+            "content-mismatch",
+            "source state content hash "
+            f"{recorded_hash!r} does not match target plan content hash "
+            f"{target_snapshot.content_sha256}",
+            {
+                "recorded_content_sha256": recorded_hash,
+                "target_content_sha256": target_snapshot.content_sha256,
+            },
+        )
+
+    # Count historical per-turn result.json artifacts; their embedded paths
+    # point at the old plan directory and are intentionally left unrewritten.
+    result_artifacts = sum(
+        1 for _ in _iter_result_paths(old_state_dir / RUNS_DIR_NAME)
+    )
+    unmigrated_note = None
+    if result_artifacts:
+        plural = "" if result_artifacts == 1 else "s"
+        unmigrated_note = (
+            f"{result_artifacts} per-turn result.json artifact{plural} under "
+            f"runs/ retain references to the old plan directory "
+            f"{old_plan_dir}; they are historical and were not rewritten."
+        )
+
+    rewritten_fields = tuple(
+        field for field in _MIGRATION_PATH_FIELDS if field in state_obj
+    )
+
+    if not apply:
+        return MigrationReport(
+            plan_dir=str(new_plan_dir),
+            from_plan_dir=str(old_plan_dir),
+            state_dir=str(new_state_dir),
+            from_state_dir=str(old_state_dir),
+            applied=False,
+            rewritten_fields=rewritten_fields,
+            result_artifacts=result_artifacts,
+            unmigrated_artifacts_note=unmigrated_note,
+        )
+
+    new_state_dir.parent.mkdir(parents=True, exist_ok=True)
+    os.rename(old_state_dir, new_state_dir)
+
+    new_state_path = new_state_dir / events.STATE_FILE_NAME
+    new_events_path = new_state_dir / events.EVENTS_FILE_NAME
+    migrated = _read_json_object_safe(new_state_path)
+    if migrated is None:
+        migrated = state_obj
+    field_targets = {
+        "plan_dir": str(new_plan_dir),
+        "state_dir": str(new_state_dir),
+        "state_path": str(new_state_path),
+        "events_path": str(new_events_path),
+        "event_path": str(new_events_path),
+        "lock_path": str(new_state_dir / LOCK_FILE_NAME),
+    }
+    for field, value in field_targets.items():
+        if field in migrated:
+            migrated[field] = value
+    artifacts.atomic_write_bytes(new_state_path, _dump_state_bytes(migrated))
+
+    events.append_event(
+        new_events_path,
+        events.Event(
+            STATE_MIGRATED_EVENT,
+            {
+                "from_plan_dir": str(old_plan_dir),
+                "to_plan_dir": str(new_plan_dir),
+                "from_state_dir": str(old_state_dir),
+                "to_state_dir": str(new_state_dir),
+            },
+        ),
+    )
+
+    return MigrationReport(
+        plan_dir=str(new_plan_dir),
+        from_plan_dir=str(old_plan_dir),
+        state_dir=str(new_state_dir),
+        from_state_dir=str(old_state_dir),
+        applied=True,
+        rewritten_fields=rewritten_fields,
+        result_artifacts=result_artifacts,
+        unmigrated_artifacts_note=unmigrated_note,
+    )
+
+
+def _print_migration_report(report: MigrationReport) -> None:
+    mode = "applied" if report.applied else "dry-run"
+    print(f"Migrate state ({mode})")
+    print(f"From plan: {report.from_plan_dir}")
+    print(f"To plan:   {report.plan_dir}")
+    print(f"From state dir: {report.from_state_dir}")
+    print(f"To state dir:   {report.state_dir}")
+    if report.rewritten_fields:
+        print(f"Rewritten fields: {', '.join(report.rewritten_fields)}")
+    if report.unmigrated_artifacts_note:
+        print(report.unmigrated_artifacts_note)
+    if not report.applied:
+        print("Re-run with --apply to migrate the state directory.")
+
+
+def _migrate_state_error_reason(error: Exception) -> str:
+    if isinstance(error, MigrationError):
+        return error.reason
+    if isinstance(error, plans.PlanError):
+        return "malformed-plan"
+    if isinstance(error, OSError):
+        return "os-error"
+    return "state-error"
+
+
+def migrate_state_from_args(args: argparse.Namespace) -> int:
+    """CLI handler for ``asl migrate-state``."""
+    try:
+        report = migrate_plan_state(
+            args.plan_dir,
+            from_plan_dir=args.from_plan_dir,
+            state_dir=getattr(args, "state_dir", None),
+            apply=args.apply,
+        )
+    except (MigrationError, plans.PlanError, StateError, OSError) as error:
+        if getattr(args, "json", False):
+            responses.print_json(
+                responses.error_payload(
+                    "migrate-state",
+                    reason=_migrate_state_error_reason(error),
+                    error=str(error),
+                    paused=False,
+                    details=getattr(error, "details", {}),
+                    plan_dir=str(args.plan_dir),
+                    from_plan_dir=str(args.from_plan_dir),
+                )
+            )
+        else:
+            print(f"agent-session-loop migrate-state: {error}", file=sys.stderr)
+        return 1
+
+    if getattr(args, "json", False):
+        responses.print_json(report.to_dict())
+    else:
+        _print_migration_report(report)
     return 0

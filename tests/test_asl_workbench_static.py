@@ -2287,7 +2287,7 @@ class WorkbenchServeCliTests(unittest.TestCase):
         self.assertTrue(args.open)
         self.assertTrue(args.json)
         self.assertIs(
-            workbench_server.workbench_serve_from_args, args.handler
+            workbench_server.workbench_serve_from_args, cli.resolve_handler(args)
         )
 
     def test_parser_defaults_bare_workbench_to_serve(self) -> None:
@@ -2311,7 +2311,7 @@ class WorkbenchServeCliTests(unittest.TestCase):
         self.assertEqual(["/tmp/plans"], args.plan_root)
         self.assertTrue(args.json)
         self.assertIs(
-            workbench_server.workbench_serve_from_args, args.handler
+            workbench_server.workbench_serve_from_args, cli.resolve_handler(args)
         )
 
     def test_parser_preserves_parent_position_flags_before_serve(self) -> None:
@@ -2346,7 +2346,7 @@ class WorkbenchServeCliTests(unittest.TestCase):
             any(name.startswith("_workbench_serve_") for name in vars(args))
         )
         self.assertIs(
-            workbench_server.workbench_serve_from_args, args.handler
+            workbench_server.workbench_serve_from_args, cli.resolve_handler(args)
         )
 
     def test_parser_merges_plan_roots_split_around_serve(self) -> None:
@@ -2408,7 +2408,7 @@ class WorkbenchServeCliTests(unittest.TestCase):
         self.assertEqual("/tmp/plan", args.plan_dir)
         self.assertEqual("/repo", args.cwd)
         self.assertEqual("Alpha", args.label)
-        self.assertIs(workbench.workbench_pin_from_args, args.handler)
+        self.assertIs(workbench.workbench_pin_from_args, cli.resolve_handler(args))
 
     def test_parser_pin_supports_minimal_invocation(self) -> None:
         parser = cli.build_parser()
@@ -2422,14 +2422,14 @@ class WorkbenchServeCliTests(unittest.TestCase):
         args = parser.parse_args(["workbench", "unpin", "/tmp/plan"])
         self.assertEqual("unpin", args.workbench_command)
         self.assertEqual("/tmp/plan", args.plan_dir)
-        self.assertIs(workbench.workbench_unpin_from_args, args.handler)
+        self.assertIs(workbench.workbench_unpin_from_args, cli.resolve_handler(args))
 
     def test_parser_registers_workbench_registry_subcommand(self) -> None:
         parser = cli.build_parser()
         args = parser.parse_args(["workbench", "registry", "--json"])
         self.assertEqual("registry", args.workbench_command)
         self.assertTrue(args.json)
-        self.assertIs(workbench.workbench_registry_from_args, args.handler)
+        self.assertIs(workbench.workbench_registry_from_args, cli.resolve_handler(args))
 
 
 class WorkbenchCliHandlerTests(unittest.TestCase):

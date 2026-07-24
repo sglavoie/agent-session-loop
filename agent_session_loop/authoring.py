@@ -6,10 +6,9 @@ plan directories. Previously the rendering rules lived only in the
 the collision-safe path helpers lived only in standalone scripts. This module
 turns all of that into importable, unit-tested Python:
 
-- **Inline-source capture and output resolution** — importable equivalents of
-  ``capture-inline-plan.py`` and ``resolve-plan-output.py``. The scripts remain
-  as thin wrappers (migrated in a later session); the canonical logic lives
-  here so callers get one deterministic implementation.
+- **Inline-source capture and output resolution** — the canonical deterministic
+  implementation behind the ``asl split`` subcommand (formerly the standalone
+  ``capture-inline-plan.py`` / ``resolve-plan-output.py`` scripts, now retired).
 - **Fenced-code-aware session parsing** — split a plan document into shared
   context plus per-session blocks, honoring ```` ``` ````/``~~~`` fences so a
   ``## Session`` line inside a code block is never mistaken for structure.
@@ -30,6 +29,7 @@ Canonical session identities come from :mod:`agent_session_loop.plans`
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -37,9 +37,11 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
+from typing import Any
 
 from . import contracts as _contracts
-from . import plans
+from . import harnesses, plans, responses
 from .plans import (
     PlanError,
     ReadinessMetadata,
@@ -100,6 +102,16 @@ HANDOFF_TEMPLATE = (
     "- **Key decisions**: (none yet)\n"
     "- **Blockers for next session**: (none)\n"
     "- **Notes**:\n"
+    "\n"
+    "<!--\n"
+    "Optional: record verified facts and open uncertainties as flat, top-level\n"
+    f"bullets under `{plans.DISCOVERED_FACTS_HEADING}` and "
+    f"`{plans.OPEN_QUESTIONS_HEADING}` headings added below this comment. The\n"
+    "handoff parser reads only top-level `- ` bullets directly under those exact\n"
+    "headings; indented or nested bullets are ignored. Keep each bullet on one\n"
+    "line and never put a comma inside a file path (the Files modified list is\n"
+    "comma-separated).\n"
+    "-->\n"
 )
 EMPTY_CONTEXT_TEMPLATE = (
     "# Context\n"
@@ -230,8 +242,8 @@ def capture_inline_plan(
 ) -> dict[str, object]:
     """Persist pasted plan markdown as a durable source file.
 
-    Importable equivalent of ``capture-inline-plan.py``; returns the same
-    JSON-serializable keys so the script can become a thin wrapper.
+    Canonical implementation behind ``asl split --inline-stdin`` (formerly the
+    retired ``capture-inline-plan.py`` script); returns JSON-serializable keys.
     """
     selected_base_dir = _resolve_base_dir(base_dir)
     sources_dir = os.path.join(selected_base_dir, "sources")
@@ -274,8 +286,8 @@ def resolve_plan_output(
 ) -> dict[str, object]:
     """Create a fresh collision-safe output directory for a split plan.
 
-    Importable equivalent of ``resolve-plan-output.py``; returns the same
-    JSON-serializable keys so the script can become a thin wrapper.
+    Canonical implementation behind ``asl split`` output resolution (formerly
+    the retired ``resolve-plan-output.py`` script); returns JSON-serializable keys.
     """
     canonical_source = os.path.realpath(
         os.path.abspath(os.path.expanduser(os.fspath(plan_file)))
@@ -662,6 +674,11 @@ def contract_from_payload(
     malformed input, mirroring the markdown contract parser.
     """
     canonical_id = parse_session_id(session_id)
+    if not isinstance(done_when, (list, tuple)):
+        raise PlanError(
+            f"session {canonical_id.value} contract 'done_when' must be a JSON "
+            f"array, got {type(done_when).__name__}"
+        )
     bullets = tuple(str(item).strip() for item in done_when if str(item).strip())
     if not bullets:
         raise PlanError(
@@ -1243,3 +1260,359 @@ def _silent_unlink(path: Path) -> None:
         path.unlink()
     except OSError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# `asl split` end-to-end orchestration
+# ---------------------------------------------------------------------------
+
+SPLIT_REASON_OK = "ok"
+SPLIT_REASON_SINGLE_SESSION = "single-session"
+SPLIT_REASON_MALFORMED_PLAN = "malformed-plan"
+SPLIT_REASON_INPUT_ERROR = "input-error"
+
+#: Message emitted when a plan has fewer than two sessions.
+SINGLE_SESSION_MESSAGE = "splitting is not needed"
+
+
+class SingleSessionError(PlanError):
+    """Raised when a plan defines fewer than two sessions to split."""
+
+    def __init__(self, session_count: int) -> None:
+        self.session_count = session_count
+        super().__init__(
+            f"only {session_count} session found — {SINGLE_SESSION_MESSAGE}"
+        )
+
+
+class MissingContractError(PlanError):
+    """Raised when no contract is supplied for a session being rendered."""
+
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+        super().__init__(f"missing contract for session {session_id}")
+
+
+class InvalidContractError(PlanError):
+    """Raised when a supplied contract entry is not a well-formed object.
+
+    A contract entry must be a JSON object carrying both a ``done_when`` array
+    and a ``verify`` recipe. A non-object entry or one missing either field
+    would otherwise raise ``TypeError``/``KeyError`` when the fields are indexed;
+    this fails closed with a stable structured reason instead.
+    """
+
+    def __init__(self, session_id: str, detail: str) -> None:
+        self.session_id = session_id
+        self.detail = detail
+        super().__init__(f"invalid contract for session {session_id}: {detail}")
+
+
+@dataclass(frozen=True)
+class SplitResult:
+    """The authoritative outcome of one deterministic ``asl split`` run."""
+
+    output_dir: Path
+    plan_id: str
+    source_path: str
+    session_ids: tuple[str, ...]
+    files: tuple[Path, ...]
+    readiness: ReadinessMetadata
+    skill_prefix: str
+
+
+def split_plan(
+    *,
+    plan_file: str | os.PathLike[str],
+    contracts_by_id: Mapping[str, Mapping[str, Any]],
+    base_dir: str | os.PathLike[str] | None = None,
+    skill_prefix: str = "/",
+    analysis_note: str | None = None,
+    now: datetime | None = None,
+) -> SplitResult:
+    """Author a split plan directory from a source plan and Step 7 contracts.
+
+    Chains the existing authoring APIs end to end: read the source plan, parse
+    it into shared context plus per-session blocks
+    (:func:`parse_plan_document`), build one validated
+    :class:`~agent_session_loop.contracts.CompletionContract` per session from
+    ``contracts_by_id`` (:func:`contract_from_payload`), stage context.md /
+    progress.md / session files / manifest.md through one atomic
+    :class:`PlanTransaction`, and refresh readiness metadata to ``draft``.
+
+    Contracts are validated *before* the collision-safe output directory is
+    created, so a :class:`MissingContractError` (no contract for a session) or a
+    malformed contract leaves no empty directory behind. A plan with fewer than
+    two sessions raises :class:`SingleSessionError`; a malformed source heading
+    raises the line-specific :class:`PlanError` from the parser verbatim.
+    """
+    canonical_source = os.path.realpath(
+        os.path.abspath(os.path.expanduser(os.fspath(plan_file)))
+    )
+    try:
+        text = Path(canonical_source).read_text(encoding="utf-8")
+    except OSError as error:
+        raise PlanError(f"cannot read source plan {canonical_source}: {error}") from error
+
+    parsed = parse_plan_document(text)
+    if len(parsed.sessions) < 2:
+        raise SingleSessionError(len(parsed.sessions))
+
+    # Build (and validate) every contract before creating any directory so a
+    # missing or malformed contract never leaves a stranded empty output dir.
+    contracts: dict[str, _contracts.CompletionContract] = {}
+    for session in parsed.sessions:
+        session_id = session.session_id.value
+        spec = contracts_by_id.get(session_id)
+        if spec is None:
+            raise MissingContractError(session_id)
+        # Validate the entry as an object with both fields before indexing so a
+        # non-object entry or a missing field fails closed as a PlanError rather
+        # than escaping as an uncaught TypeError/KeyError.
+        if not isinstance(spec, Mapping):
+            raise InvalidContractError(
+                session_id,
+                f"expected a JSON object, got {type(spec).__name__}",
+            )
+        missing = [field for field in ("done_when", "verify") if field not in spec]
+        if missing:
+            raise InvalidContractError(
+                session_id,
+                f"missing required field(s): {', '.join(missing)}",
+            )
+        contracts[session_id] = contract_from_payload(
+            session_id, spec["done_when"], spec["verify"]
+        )
+
+    resolver = resolve_plan_output(canonical_source, base_dir)
+    output_dir = Path(str(resolver["output_dir"]))
+
+    transaction = PlanTransaction(output_dir)
+    transaction.stage(
+        "context.md",
+        render_context(parsed.context_lines, str(resolver["source_path"])),
+    )
+    transaction.stage("progress.md", render_progress_skeleton())
+
+    manifest_sessions: list[ManifestSession] = []
+    for index, session in enumerate(parsed.sessions):
+        session_id = session.session_id.value
+        transaction.stage(
+            session.session_id.filename,
+            render_session_file(
+                session_id=session_id,
+                title=session.title,
+                instruction_lines=session.instruction_lines,
+                heading_level=session.heading_level,
+                is_first=index == 0,
+                previous_session_id=(
+                    parsed.sessions[index - 1].session_id if index else None
+                ),
+                contract=contracts[session_id],
+            ),
+        )
+        manifest_sessions.append(
+            ManifestSession(
+                session_id=session.session_id,
+                title=session.title or f"Session {session_id}",
+            )
+        )
+
+    split_date = (now or datetime.now(timezone.utc)).date().isoformat()
+    transaction.stage(
+        "manifest.md",
+        render_manifest(
+            ManifestSpec(
+                plan_title=title_from_plan(text),
+                source_path=str(resolver["source_path"]),
+                output_dir=str(output_dir),
+                plan_id=str(resolver["plan_id"]),
+                source_fingerprint=str(resolver["source_fingerprint"]),
+                content_sha256=str(resolver["content_sha256"]),
+                sessions=tuple(manifest_sessions),
+                split_date=split_date,
+                readiness=ReadinessMetadata(
+                    state="draft",
+                    readiness_sha256="pending",
+                    checked_at="pending",
+                ),
+                skill_prefix=skill_prefix,
+                execution_note=analysis_note,
+            )
+        ),
+    )
+    written = transaction.commit()
+    metadata = refresh_readiness_metadata(output_dir, state="draft")
+
+    return SplitResult(
+        output_dir=output_dir,
+        plan_id=str(resolver["plan_id"]),
+        source_path=str(resolver["source_path"]),
+        session_ids=parsed.session_ids,
+        files=written,
+        readiness=metadata,
+        skill_prefix=skill_prefix,
+    )
+
+
+def _readiness_payload(metadata: ReadinessMetadata) -> dict[str, Any]:
+    return {
+        "state": metadata.state,
+        "readiness_sha256": metadata.readiness_sha256,
+        "checked_at": metadata.checked_at,
+    }
+
+
+def _split_next_steps(output_dir: Path) -> list[dict[str, Any]]:
+    """Session-expand invocations offered as the split plan's next step."""
+    step = responses.invocation_step(
+        (
+            "Validate the split plan against the codebase and mark it "
+            "loop-ready before running it."
+        ),
+        harnesses.skill_invocations("session-expand", str(output_dir)),
+    )
+    return responses.next_steps_payload([step])["next_steps"]
+
+
+def _resolve_skill_prefix(
+    skill_prefix: str,
+) -> tuple[str | None, str | None]:
+    """Resolve a ``--skill-prefix`` choice to a prefix char.
+
+    Returns ``(prefix, error)``. ``auto`` detects the invoking harness and
+    errors when detection is ambiguous; a named harness maps directly to its
+    prefix.
+    """
+    if skill_prefix == "auto":
+        detected = harnesses.detect_invoking_harness()
+        if detected is None:
+            return None, (
+                "could not auto-detect the invoking harness; pass "
+                "--skill-prefix {codex,claude,copilot}"
+            )
+        return harnesses.SKILL_PREFIXES[detected], None
+    prefix = harnesses.SKILL_PREFIXES.get(skill_prefix)
+    if prefix is None:
+        return None, f"unknown skill prefix harness: {skill_prefix}"
+    return prefix, None
+
+
+def split_from_args(args: Any) -> int:
+    """Run the ``split`` subcommand from CLI arguments."""
+    want_json = bool(args.json)
+    base_dir = args.base_dir
+    common_fields: dict[str, Any] = {}
+
+    def _emit_error(reason: str, error: str, **fields: Any) -> int:
+        if want_json:
+            responses.print_json(
+                responses.error_payload(
+                    "split",
+                    reason=reason,
+                    error=error,
+                    paused=False,
+                    **{**common_fields, **fields},
+                )
+            )
+        else:
+            print(f"agent-session-loop split: {error}", file=sys.stderr)
+        return 1
+
+    prefix, prefix_error = _resolve_skill_prefix(args.skill_prefix)
+    if prefix_error is not None:
+        return _emit_error(SPLIT_REASON_INPUT_ERROR, prefix_error)
+
+    # Resolve the source plan (inline stdin capture or an explicit file).
+    if args.inline_stdin:
+        raw_input = sys.stdin.read()
+        try:
+            captured = capture_inline_plan(raw_input, base_dir)
+        except ValueError as error:
+            return _emit_error(SPLIT_REASON_INPUT_ERROR, str(error))
+        source_path = str(captured["source_path"])
+    else:
+        source_path = os.path.expanduser(str(args.plan_file))
+        if not Path(source_path).is_file():
+            return _emit_error(
+                SPLIT_REASON_INPUT_ERROR,
+                f"source plan file does not exist: {args.plan_file}",
+            )
+    common_fields["source_path"] = source_path
+
+    # Load the Step 7 contracts keyed by canonical session id.
+    try:
+        contracts_text = Path(
+            os.path.expanduser(str(args.contracts_file))
+        ).read_text(encoding="utf-8")
+    except OSError as error:
+        return _emit_error(
+            SPLIT_REASON_INPUT_ERROR,
+            f"cannot read contracts file {args.contracts_file}: {error}",
+        )
+    try:
+        contracts_by_id = json.loads(contracts_text)
+    except json.JSONDecodeError as error:
+        return _emit_error(
+            SPLIT_REASON_INPUT_ERROR,
+            f"contracts file is not valid JSON: {error.msg} at line {error.lineno}",
+        )
+    if not isinstance(contracts_by_id, dict):
+        return _emit_error(
+            SPLIT_REASON_INPUT_ERROR,
+            "contracts file must be a JSON object keyed by session id",
+        )
+
+    analysis_note: str | None = None
+    if args.analysis_file:
+        try:
+            analysis_note = Path(
+                os.path.expanduser(str(args.analysis_file))
+            ).read_text(encoding="utf-8")
+        except OSError as error:
+            return _emit_error(
+                SPLIT_REASON_INPUT_ERROR,
+                f"cannot read analysis file {args.analysis_file}: {error}",
+            )
+
+    try:
+        result = split_plan(
+            plan_file=source_path,
+            contracts_by_id=contracts_by_id,
+            base_dir=base_dir,
+            skill_prefix=prefix,
+            analysis_note=analysis_note,
+        )
+    except SingleSessionError as error:
+        return _emit_error(SPLIT_REASON_SINGLE_SESSION, str(error))
+    except MissingContractError as error:
+        return _emit_error(
+            f"missing-contract:{error.session_id}", str(error)
+        )
+    except InvalidContractError as error:
+        return _emit_error(
+            f"invalid-contract:{error.session_id}", str(error)
+        )
+    except PlanError as error:
+        return _emit_error(SPLIT_REASON_MALFORMED_PLAN, str(error))
+
+    payload = {
+        "output_dir": str(result.output_dir),
+        "plan_id": result.plan_id,
+        "source_path": result.source_path,
+        "session_ids": list(result.session_ids),
+        "files": [str(path) for path in result.files],
+        "readiness": _readiness_payload(result.readiness),
+        "next_steps": _split_next_steps(result.output_dir),
+        "skill_prefix": result.skill_prefix,
+    }
+    if want_json:
+        responses.print_json(responses.success_payload("split", **payload))
+    else:
+        print(f"Split {len(result.session_ids)} sessions from {result.source_path}")
+        print(f"Output directory: {result.output_dir}")
+        print(f"Plan ID: {result.plan_id}")
+        for path in result.files:
+            print(f"  {path}")
+        print(f"Readiness: {result.readiness.state}")
+    return 0

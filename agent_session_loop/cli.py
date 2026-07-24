@@ -3,28 +3,26 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from . import (
-    baseline,
-    compact_state,
-    contracts,
-    harnesses,
-    metrics,
-    preflight,
-    prepare,
-    progress_cli,
-    qna,
-    runner,
-    session_overview,
-    state,
-    tail,
-    verification,
-    workbench,
-    workbench_server,
-)
+# Only modules whose constants/helpers are needed to *construct* the parser are
+# imported eagerly, and all of these are light (they do not pull in the runner,
+# workbench, or review subsystems). Every subcommand handler is resolved lazily
+# from its `handler_ref` in `resolve_handler()` so that a light command such as
+# `asl status` never imports the ~21k-line handler graph just to dispatch.
+from . import contracts, harnesses, run_flags, session_overview, tail
+
+# Build-time defaults mirrored from heavier modules so light commands do not
+# import `metrics` (pulls in review/compact-state) or `workbench_server` (pulls
+# in the whole workbench subsystem) merely to build the parser. The
+# `test_cli_build_time_default_constants_match_source_modules` guard keeps these
+# in sync with their authoritative definitions.
+_WORKBENCH_DEFAULT_HOST = "127.0.0.1"  # workbench_server.DEFAULT_HOST
+_WORKBENCH_DEFAULT_PORT = 8765  # workbench_server.DEFAULT_PORT
+_METRICS_DEFAULT_SINCE_DAYS = 7  # metrics.DEFAULT_SINCE_DAYS
 
 
 _WORKBENCH_SERVE_CHILD_DESTS = {
@@ -80,7 +78,15 @@ class _AgentSessionLoopArgumentParser(argparse.ArgumentParser):
         namespace: argparse.Namespace | None = None,
     ) -> argparse.Namespace:
         parsed = super().parse_args(args, namespace)
-        return _normalize_workbench_serve_args(parsed)
+        parsed = _normalize_workbench_serve_args(parsed)
+        # Record the exact tokens that produced this namespace so lazy handler
+        # dispatch (e.g. `runner.run_from_args`) can detect which flags were
+        # passed explicitly without falling back to the process-global
+        # `sys.argv`. This keeps `--resume` explicit-flag provenance correct
+        # through `cli.main(argv)` and direct resolved-handler dispatch.
+        if not hasattr(parsed, "_run_argv"):
+            parsed._run_argv = list(sys.argv[1:] if args is None else args)
+        return parsed
 
 
 def _add_workbench_serve_args(
@@ -90,11 +96,11 @@ def _add_workbench_serve_args(
         "--host",
         dest=_workbench_dest("host", child_parser=child_parser),
         default=_workbench_default(
-            workbench_server.DEFAULT_HOST, child_parser=child_parser
+            _WORKBENCH_DEFAULT_HOST, child_parser=child_parser
         ),
         metavar="HOST",
         help=(
-            f"Host interface to bind (default: {workbench_server.DEFAULT_HOST})"
+            f"Host interface to bind (default: {_WORKBENCH_DEFAULT_HOST})"
         ),
     )
     parser.add_argument(
@@ -102,11 +108,11 @@ def _add_workbench_serve_args(
         dest=_workbench_dest("port", child_parser=child_parser),
         type=int,
         default=_workbench_default(
-            workbench_server.DEFAULT_PORT, child_parser=child_parser
+            _WORKBENCH_DEFAULT_PORT, child_parser=child_parser
         ),
         metavar="PORT",
         help=(
-            f"TCP port to bind (default: {workbench_server.DEFAULT_PORT}; "
+            f"TCP port to bind (default: {_WORKBENCH_DEFAULT_PORT}; "
             "use 0 for an ephemeral port)"
         ),
     )
@@ -171,140 +177,8 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         "run",
         help="Run pending session IDs from a split plan directory.",
     )
-    run_parser.add_argument("plan_dir", help="Split plan directory to execute")
-    run_parser.add_argument(
-        "--cwd",
-        default=".",
-        help="Repository root where the harness should run (default: current directory)",
-    )
-    run_parser.add_argument(
-        "--harness",
-        choices=harnesses.HARNESS_NAMES,
-        default="codex",
-        help="Agent harness to invoke",
-    )
-    run_parser.add_argument(
-        "--review-harness",
-        choices=harnesses.HARNESS_NAMES,
-        default=None,
-        help=(
-            "Append a generated final-review session to the plan and run it "
-            "with this harness after all implementation sessions complete; "
-            "must differ from --harness"
-        ),
-    )
-    run_parser.add_argument(
-        "--harness-model",
-        dest="harness_model",
-        help="Implementation harness model to request",
-    )
-    run_parser.add_argument(
-        "--review-harness-model",
-        dest="review_harness_model",
-        help="Generated review harness model to request",
-    )
-    run_parser.add_argument(
-        "--effort",
-        help="Harness reasoning effort to request",
-    )
-    run_parser.add_argument(
-        "--timeout",
-        type=int,
-        help="Per-session harness timeout in seconds",
-    )
-    run_parser.add_argument(
-        "--max-sessions",
-        type=int,
-        help="Maximum sessions to complete before stopping",
-    )
-    run_parser.add_argument(
-        "--max-pending-sessions",
-        type=int,
-        help=(
-            "Override the preflight pending-session budget gate "
-            "(default: 24, which turns yellow at 25 pending sessions)"
-        ),
-    )
-    run_parser.add_argument(
-        "--max-review-fix-cycles",
-        dest="max_review_fix_cycles",
-        type=int,
-        default=None,
-        help=(
-            "Maximum automatic repair/rereview cycles after a findings "
-            "review (default: 2). 0 still runs the review but creates no "
-            "repair sessions"
-        ),
-    )
-    run_parser.add_argument(
-        "--max-review-fix-plans",
-        dest="max_review_fix_plans",
-        type=int,
-        default=None,
-        help="Deprecated compatibility alias for --max-review-fix-cycles",
-    )
-    commit_group = run_parser.add_mutually_exclusive_group()
-    commit_group.add_argument(
-        "--commit-per-session",
-        dest="commit_mode",
-        action="store_const",
-        const="per-session",
-        default=None,
-        help="Run 'spec commit --yes --no-verify' after each completed session",
-    )
-    commit_group.add_argument(
-        "--commit-at-end",
-        dest="commit_mode",
-        action="store_const",
-        const="end",
-        help="Run 'spec commit --yes --no-verify' once after all sessions complete",
-    )
-    run_parser.add_argument(
-        "--state-dir",
-        help="Override operational state directory",
-    )
-    run_parser.add_argument(
-        "--note",
-        help="Reference note to show in run status and final output",
-    )
-    _add_unsafe_bypass_flags(run_parser)
-    run_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Print machine-readable JSON output",
-    )
-    run_parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Validate inputs and show planned work without invoking a harness",
-    )
-    run_parser.add_argument(
-        "--allow-not-loop-ready",
-        action="store_true",
-        help=(
-            "Bypass the readiness gate and run even when the plan is not "
-            "marked loop-ready (preflight findings are still reported)"
-        ),
-    )
-    reply_group = run_parser.add_mutually_exclusive_group()
-    reply_group.add_argument(
-        "--reply",
-        help=(
-            "Resume the latest paused session with an inline reply; the "
-            "text is sent as the operator answer for the first resumed turn"
-        ),
-    )
-    reply_group.add_argument(
-        "--reply-stdin",
-        dest="reply_stdin",
-        action="store_true",
-        help=(
-            "Read the operator reply from stdin instead of --reply, so the "
-            "text never appears in argv; behaves identically to --reply TEXT "
-            "otherwise"
-        ),
-    )
-    run_parser.set_defaults(handler=runner.run_from_args, reply_stdin=False)
+    run_flags.add_run_arguments(run_parser, mode="cli")
+    run_parser.set_defaults(handler_ref="runner:run_from_args")
 
     questions_parser = subparsers.add_parser(
         "questions",
@@ -325,7 +199,29 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         action="store_true",
         help="Print machine-readable JSON output",
     )
-    questions_parser.set_defaults(handler=qna.questions_from_args)
+    questions_parser.set_defaults(handler_ref="qna:questions_from_args")
+
+    review_verdict_parser = subparsers.add_parser(
+        "review-verdict",
+        help=(
+            "Print the authoritative final-review verdict: full untruncated "
+            "findings and summary, continuation evaluation, and remediation "
+            "commands."
+        ),
+    )
+    review_verdict_parser.add_argument(
+        "plan_dir", help="Split plan directory whose review verdict to inspect"
+    )
+    review_verdict_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    review_verdict_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    review_verdict_parser.set_defaults(handler_ref="review:review_verdict_from_args")
 
     status_parser = subparsers.add_parser(
         "status",
@@ -348,7 +244,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         action="store_true",
         help="Print machine-readable JSON output",
     )
-    status_parser.set_defaults(handler=state.status_from_args)
+    status_parser.set_defaults(handler_ref="state:status_from_args")
 
     tail_parser = subparsers.add_parser(
         "tail",
@@ -370,7 +266,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         action="store_true",
         help="Print recent activity and exit without waiting",
     )
-    tail_parser.set_defaults(handler=tail.tail_from_args)
+    tail_parser.set_defaults(handler_ref="tail:tail_from_args")
 
     sessions_help = (
         "Show running and recent ASL-managed sessions across plan directories."
@@ -409,7 +305,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         action="store_true",
         help="Print machine-readable JSON output",
     )
-    sessions_parser.set_defaults(handler=session_overview.sessions_from_args)
+    sessions_parser.set_defaults(handler_ref="session_overview:sessions_from_args")
 
     doctor_parser = subparsers.add_parser(
         "doctor",
@@ -446,7 +342,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Print machine-readable JSON output",
     )
     _add_unsafe_bypass_flags(doctor_parser)
-    doctor_parser.set_defaults(handler=runner.doctor_from_args)
+    doctor_parser.set_defaults(handler_ref="runner:doctor_from_args")
 
     verify_parser = subparsers.add_parser(
         "verify",
@@ -476,7 +372,39 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         action="store_true",
         help="Print machine-readable JSON output",
     )
-    verify_parser.set_defaults(handler=verification.verify_from_args)
+    verify_parser.set_defaults(handler_ref="verification:verify_from_args")
+
+    contract_check_parser = subparsers.add_parser(
+        "contract-check",
+        help=(
+            "Statically diagnose each session's completion-contract Verify "
+            "recipe without running any command."
+        ),
+    )
+    contract_check_parser.add_argument(
+        "plan_dir", help="Split plan directory to inspect"
+    )
+    contract_check_parser.add_argument(
+        "--session",
+        default=None,
+        help=(
+            "Restrict the check to a single session id (single-file mode; "
+            "default: every session in the plan)"
+        ),
+    )
+    contract_check_parser.add_argument(
+        "--cwd",
+        default=".",
+        help="Repository root for file/regex/command checks (default: current directory)",
+    )
+    contract_check_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    contract_check_parser.set_defaults(
+        handler_ref="verification:contract_check_from_args"
+    )
 
     baseline_parser = subparsers.add_parser(
         "baseline",
@@ -522,7 +450,70 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         action="store_true",
         help="Print machine-readable JSON output",
     )
-    baseline_parser.set_defaults(handler=baseline.baseline_from_args)
+    baseline_parser.set_defaults(handler_ref="baseline:baseline_from_args")
+
+    split_parser = subparsers.add_parser(
+        "split",
+        help=(
+            "Split a multi-session plan into a collision-safe per-session "
+            "directory using the deterministic authoring API."
+        ),
+    )
+    split_source = split_parser.add_mutually_exclusive_group(required=True)
+    split_source.add_argument(
+        "--plan-file",
+        dest="plan_file",
+        help="Path to the source plan markdown file to split",
+    )
+    split_source.add_argument(
+        "--inline-stdin",
+        dest="inline_stdin",
+        action="store_true",
+        help=(
+            "Capture the source plan from stdin (the last <proposed_plan> "
+            "block, else the raw input) as a durable source file"
+        ),
+    )
+    split_parser.add_argument(
+        "--base-dir",
+        dest="base_dir",
+        default=None,
+        help=(
+            "Base directory for the captured source and split output "
+            "(default: the persistent agent-plans directory)"
+        ),
+    )
+    split_parser.add_argument(
+        "--contracts-file",
+        dest="contracts_file",
+        required=True,
+        help=(
+            "JSON file of completion contracts keyed by canonical session id "
+            "({\"1\": {\"done_when\": [...], \"verify\": {...}}, ...})"
+        ),
+    )
+    split_parser.add_argument(
+        "--skill-prefix",
+        dest="skill_prefix",
+        choices=("auto", "codex", "claude", "copilot"),
+        default="auto",
+        help=(
+            "Skill-invocation prefix for generated files (auto detects the "
+            "invoking harness; errors if undetectable)"
+        ),
+    )
+    split_parser.add_argument(
+        "--analysis-file",
+        dest="analysis_file",
+        default=None,
+        help="Optional markdown appended verbatim to the manifest execution note",
+    )
+    split_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    split_parser.set_defaults(handler_ref="authoring:split_from_args")
 
     prepare_parser = subparsers.add_parser(
         "prepare",
@@ -606,7 +597,30 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         action="store_true",
         help="Print machine-readable JSON output",
     )
-    prepare_parser.set_defaults(handler=prepare.prepare_from_args)
+    prepare_parser.set_defaults(handler_ref="prepare:prepare_from_args")
+
+    expand_ingest_parser = subparsers.add_parser(
+        "expand-ingest",
+        help=(
+            "Ingest one validator-output batch file: merge it into the stored "
+            "aggregate, render its expansions, and apply its factual corrections."
+        ),
+    )
+    expand_ingest_parser.add_argument(
+        "plan_dir", help="Split plan directory to ingest validator output into"
+    )
+    expand_ingest_parser.add_argument(
+        "--batch-file",
+        dest="batch_file",
+        required=True,
+        help="JSON file of validator output for one batch of sessions",
+    )
+    expand_ingest_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    expand_ingest_parser.set_defaults(handler_ref="prepare:expand_ingest_from_args")
 
     preflight_parser = subparsers.add_parser(
         "preflight",
@@ -664,7 +678,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         action="store_true",
         help="When checks pass, mark the plan readiness state as loop-ready",
     )
-    preflight_parser.set_defaults(handler=preflight.preflight_from_args)
+    preflight_parser.set_defaults(handler_ref="preflight:preflight_from_args")
 
     compact_state_parser = subparsers.add_parser(
         "compact-state",
@@ -691,8 +705,40 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Print machine-readable JSON output",
     )
     compact_state_parser.set_defaults(
-        handler=compact_state.compact_state_from_args
+        handler_ref="compact_state:compact_state_from_args"
     )
+
+    migrate_state_parser = subparsers.add_parser(
+        "migrate-state",
+        help=(
+            "Relocate an orphaned state directory after a plan directory move "
+            "(default: dry-run)."
+        ),
+    )
+    migrate_state_parser.add_argument(
+        "plan_dir", help="Current (new) plan directory whose state to restore"
+    )
+    migrate_state_parser.add_argument(
+        "--from",
+        dest="from_plan_dir",
+        required=True,
+        help="Old plan directory path the state was keyed under",
+    )
+    migrate_state_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    migrate_state_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Rename and rewrite state on disk (default: dry-run, no writes)",
+    )
+    migrate_state_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    migrate_state_parser.set_defaults(handler_ref="state:migrate_state_from_args")
 
     metrics_parser = subparsers.add_parser(
         "metrics",
@@ -704,10 +750,10 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     metrics_parser.add_argument(
         "--since-days",
         type=int,
-        default=metrics.DEFAULT_SINCE_DAYS,
+        default=_METRICS_DEFAULT_SINCE_DAYS,
         help=(
             "Number of days of history to aggregate "
-            f"(default: {metrics.DEFAULT_SINCE_DAYS})"
+            f"(default: {_METRICS_DEFAULT_SINCE_DAYS})"
         ),
     )
     metrics_parser.add_argument(
@@ -719,7 +765,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         action="store_true",
         help="Print machine-readable JSON output",
     )
-    metrics_parser.set_defaults(handler=metrics.metrics_from_args)
+    metrics_parser.set_defaults(handler_ref="metrics:metrics_from_args")
 
     unlock_parser = subparsers.add_parser(
         "unlock",
@@ -740,7 +786,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         action="store_true",
         help="Print machine-readable JSON output",
     )
-    unlock_parser.set_defaults(handler=state.unlock_from_args)
+    unlock_parser.set_defaults(handler_ref="state:unlock_from_args")
 
     backfill_parser = subparsers.add_parser(
         "backfill-progress",
@@ -763,7 +809,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Print the would-be journal contents to stdout without writing",
     )
     backfill_parser.set_defaults(
-        handler=progress_cli.backfill_progress_from_args
+        handler_ref="progress_cli:backfill_progress_from_args"
     )
 
     progress_parser = subparsers.add_parser(
@@ -783,7 +829,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         action="store_true",
         help="Print parsed entries as machine-readable JSON",
     )
-    progress_parser.set_defaults(handler=progress_cli.progress_from_args)
+    progress_parser.set_defaults(handler_ref="progress_cli:progress_from_args")
 
     workbench_parser = subparsers.add_parser(
         "workbench",
@@ -792,7 +838,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     _add_workbench_serve_args(workbench_parser)
     workbench_parser.set_defaults(
         workbench_command=None,
-        handler=workbench_server.workbench_serve_from_args,
+        handler_ref="workbench_server:workbench_serve_from_args",
     )
     workbench_sub = workbench_parser.add_subparsers(
         dest="workbench_command",
@@ -804,7 +850,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     )
     _add_workbench_serve_args(workbench_serve_parser, child_parser=True)
     workbench_serve_parser.set_defaults(
-        handler=workbench_server.workbench_serve_from_args,
+        handler_ref="workbench_server:workbench_serve_from_args",
     )
 
     workbench_pin_parser = workbench_sub.add_parser(
@@ -826,7 +872,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Human-readable label for the pin",
     )
     workbench_pin_parser.set_defaults(
-        handler=workbench.workbench_pin_from_args,
+        handler_ref="workbench:workbench_pin_from_args",
     )
 
     workbench_unpin_parser = workbench_sub.add_parser(
@@ -838,7 +884,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Plan directory to unpin",
     )
     workbench_unpin_parser.set_defaults(
-        handler=workbench.workbench_unpin_from_args,
+        handler_ref="workbench:workbench_unpin_from_args",
     )
 
     workbench_registry_parser = workbench_sub.add_parser(
@@ -851,13 +897,27 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Emit the registry payload as machine-readable JSON",
     )
     workbench_registry_parser.set_defaults(
-        handler=workbench.workbench_registry_from_args,
+        handler_ref="workbench:workbench_registry_from_args",
     )
 
     return parser
 
 
+def resolve_handler(
+    args: argparse.Namespace,
+) -> Callable[[argparse.Namespace], int]:
+    """Import and return the handler named by ``args.handler_ref``.
+
+    Handlers are stored on the parser as ``"module:function"`` strings and only
+    resolved when a command actually dispatches, so building or parsing the CLI
+    never imports the heavy handler modules (runner, workbench, review, ...).
+    """
+    module_name, _, attr = args.handler_ref.partition(":")
+    module = importlib.import_module(f".{module_name}", __package__)
+    return getattr(module, attr)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser(prog=Path(sys.argv[0]).name)
     args = parser.parse_args(sys.argv[1:] if argv is None else list(argv))
-    return args.handler(args)
+    return resolve_handler(args)(args)

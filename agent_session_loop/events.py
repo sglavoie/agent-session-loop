@@ -56,9 +56,10 @@ RUN_CONTROL_ACTIONS: tuple[str, ...] = (
 # Stable, evidence-based harness-failure categories produced by
 # ``agent_session_loop.runner.classify_harness_failure``. A nonzero harness
 # exit is classified into exactly one of these; ``nonzero-exit`` remains the
-# fail-closed fallback for unrecognized (and legacy) failures. Keep these in
-# sync with the classifier and with the supervisor's recoverable-pause set in
-# ``skills/asl/scripts/asl_autopilot.py``.
+# fail-closed fallback for unrecognized (and legacy) failures. The higher-level
+# recoverable / user-required pause policy that composes from these atoms lives
+# in ``agent_session_loop.pause_policy`` (the single source of truth consumed by
+# the runner, ``asl status``/``asl questions``, and the supervisor helper).
 PAUSE_REASON_NONZERO_EXIT = "nonzero-exit"
 PAUSE_REASON_QUOTA_EXHAUSTED = "quota-exhausted"
 PAUSE_REASON_AUTH_FAILED = "auth-failed"
