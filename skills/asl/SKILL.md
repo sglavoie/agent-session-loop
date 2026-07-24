@@ -41,6 +41,12 @@ flags — including `--max-review-fix-cycles N` (deprecated alias
 cycles. Shell operators, pipes, redirects, `--dry-run`, and user-supplied
 `--reply` / `--reply-stdin` are not accepted — the helper owns resume behavior.
 
+`--max-sessions N` is a **global** budget: the helper stops the whole supervised
+run after `N` implementation sessions have completed, not `N` per relaunch. With
+no `--max-sessions`, a single `asl run` process drives every pending session to
+completion (there is no per-chunk restarting). See Step 4 for how a budget stop
+is reported.
+
 ## Instructions
 
 ### Step 1: Run the bundled helper
@@ -115,6 +121,13 @@ follow-up fix plan. Instead:
 
 Summarize the outcome: which run was supervised, whether it completed or paused,
 and any blocker that needs the user's attention.
+
+When the supervised command set `--max-sessions N` and the budget is spent with
+sessions still pending, the helper returns `reason: max-sessions` with `ok: true`,
+plus `completed` and `pending` counts. This is an **intentional, clean early
+stop** — not a pause and not a failure. Report the progress (e.g. "completed N of
+M sessions; K pending") and do **not** auto-resume, reply, or run `asl questions`;
+re-running the same command later continues from the remaining sessions.
 
 ## Notes
 

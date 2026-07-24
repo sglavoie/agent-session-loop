@@ -625,6 +625,14 @@ def _never_run(parsed, chunk_index):  # pragma: no cover - guard for attach path
     raise AssertionError("run_invoker must not be called")
 
 
+def _max_sessions_of(argv):
+    """Return the ``--max-sessions`` value in an argv list, or None if absent."""
+    for index, token in enumerate(argv):
+        if token == "--max-sessions" and index + 1 < len(argv):
+            return argv[index + 1]
+    return None
+
+
 class ClassifyLockTest(unittest.TestCase):
     def _classify(self, parsed_extra, status):
         parsed = {"plan_dir": "/tmp/plan"}
@@ -1188,14 +1196,98 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "status-error")
 
-    def test_capped_relaunches_stop_at_budget(self) -> None:
-        # Pending never decreases, so the loop must stop at max_chunks.
+    def test_runaway_relaunch_caps_at_max_chunks(self) -> None:
+        # Safety net: with no session budget, a run that keeps returning a clean
+        # stop while pending never decreases would relaunch forever; max_chunks
+        # bounds it and surfaces `capped`.
         status = _StatusScript([_status_payload(1)])
-        run = _RunScript([{"ok": True, "paused": False, "reason": "max-sessions"}])
+        run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
         result = self._supervise(status, run, max_chunks=3)
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "capped")
         self.assertEqual(result["chunks"], 3)
+
+    def _budget_parsed(self, max_sessions):
+        return {
+            "plan_dir": "/tmp/plan",
+            "argv": ["asl", "run", "/tmp/plan", "--max-sessions", str(max_sessions), "--json"],
+            "max_sessions": max_sessions,
+        }
+
+    def test_max_sessions_budget_stops_cleanly(self) -> None:
+        # Global budget of 1 on a 3-session plan: after one completed session
+        # (pending 3 -> 2) the supervisor stops cleanly without chunking through
+        # the remaining sessions.
+        status = _StatusScript([_status_payload(3), _status_payload(2)])
+        run = _RunScript([{"ok": True, "paused": False, "reason": "max-sessions"}])
+        result = self._supervise(status, run, parsed=self._budget_parsed(1))
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "max-sessions")
+        self.assertEqual(result["chunks"], 1)
+        self.assertEqual(result["completed"], 1)
+        self.assertEqual(result["pending"], 2)
+        self.assertEqual(run.chunks, [1])
+
+    def test_budget_equal_to_pending_completes(self) -> None:
+        # Budget covering every pending session must finish as `complete`, not
+        # pre-empt with `max-sessions`, when pending reaches 0.
+        status = _StatusScript([_status_payload(2), _status_payload(0)])
+        run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
+        result = self._supervise(status, run, parsed=self._budget_parsed(2))
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "complete")
+        self.assertEqual(run.chunks, [1])
+
+    def test_no_budget_completes_in_one_chunk(self) -> None:
+        # Without `--max-sessions`, the runner drives all pending sessions in a
+        # single chunk and the supervisor reports `complete`.
+        status = _StatusScript([_status_payload(4), _status_payload(0)])
+        run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
+        result = self._supervise(status, run)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "complete")
+        self.assertEqual(run.chunks, [1])
+
+    def test_budget_injection_caps_relaunch_after_pause(self) -> None:
+        # Budget 3: chunk 1 completes 2 sessions (pending 3 -> 1) then pauses on
+        # a recoverable verify-failed; the retry must be capped at the 1 session
+        # still in budget so total completions never exceed 3.
+        status = _StatusScript([
+            _status_payload(3),
+            _status_payload(1),
+            _status_payload(0),
+        ])
+        payloads = [
+            {"ok": False, "paused": True, "reason": "verify-failed"},
+            {"ok": True, "paused": False, "reason": "all-complete"},
+        ]
+        seen = []
+
+        def run(parsed, chunk_index):
+            seen.append(list(parsed["argv"]))
+            return payloads[min(chunk_index - 1, len(payloads) - 1)]
+
+        result = self._supervise(status, run, parsed=self._budget_parsed(3))
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "complete")
+        # Chunk 1 launched with the full budget; the retry capped at the remainder.
+        self.assertEqual(_max_sessions_of(seen[0]), "3")
+        self.assertEqual(_max_sessions_of(seen[1]), "1")
+
+    def test_budget_injection_passes_full_budget_without_pause(self) -> None:
+        # No pause: a single chunk carries the full budget and completes.
+        status = _StatusScript([_status_payload(2), _status_payload(0)])
+        seen = []
+
+        def run(parsed, chunk_index):
+            seen.append(list(parsed["argv"]))
+            return {"ok": True, "paused": False, "reason": "all-complete"}
+
+        result = self._supervise(status, run, parsed=self._budget_parsed(5))
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "complete")
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(_max_sessions_of(seen[0]), "5")
 
     def test_run_invoke_error_stops_with_run_error(self) -> None:
         status = _StatusScript([_status_payload(1)])
@@ -2216,8 +2308,14 @@ _FAKE_ASL = textwrap.dedent(
         sys.exit(0)
 
     if sub == "run":
-        per = state.get("per_chunk", 1)
-        took = min(per, state["pending"])
+        # Model the real runner: drain every pending session in one process
+        # unless `--max-sessions N` caps it, in which case take at most N and
+        # report the runner's own `max-sessions` stop.
+        max_sessions = None
+        for i, tok in enumerate(argv):
+            if tok == "--max-sessions" and i + 1 < len(argv):
+                max_sessions = int(argv[i + 1])
+        took = state["pending"] if max_sessions is None else min(max_sessions, state["pending"])
         state["pending"] -= took
         state["complete"] += took
         state["chunks_run"] = state.get("chunks_run", 0) + 1
@@ -2256,16 +2354,15 @@ class SuperviseRunFakeAslTest(unittest.TestCase):
         with open(self.state_path, encoding="utf-8") as fh:
             return json.load(fh)
 
-    def _parsed(self) -> dict:
-        parsed = autopilot.parse_command(
-            f"FAKE_ASL_STATE={self.state_path} {self.asl} run /tmp/plan"
-        )
+    def _parsed(self, extra: str = "") -> dict:
+        command = f"FAKE_ASL_STATE={self.state_path} {self.asl} run /tmp/plan {extra}".strip()
+        parsed = autopilot.parse_command(command)
         self.assertTrue(parsed["ok"], parsed)
         return parsed
 
-    def _supervise(self, **kwargs):
+    def _supervise(self, *, command_extra: str = "", **kwargs):
         return autopilot.supervise_run(
-            self._parsed(),
+            self._parsed(command_extra),
             clock=_counter_clock(),
             sleep=lambda *_: None,
             heartbeat=lambda *_: None,
@@ -2273,7 +2370,7 @@ class SuperviseRunFakeAslTest(unittest.TestCase):
         )
 
     def test_starts_and_completes_single_chunk(self) -> None:
-        self._write_state(pending=1, complete=0, per_chunk=1, chunks_run=0)
+        self._write_state(pending=1, complete=0, chunks_run=0)
         result = self._supervise()
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["reason"], "complete")
@@ -2281,31 +2378,56 @@ class SuperviseRunFakeAslTest(unittest.TestCase):
         self.assertEqual(self._read_state()["chunks_run"], 1)
 
     def test_already_complete_never_runs(self) -> None:
-        self._write_state(pending=0, complete=2, per_chunk=1, chunks_run=0)
+        self._write_state(pending=0, complete=2, chunks_run=0)
         result = self._supervise()
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["reason"], "complete")
         self.assertEqual(result["chunks"], 0)
         self.assertEqual(self._read_state()["chunks_run"], 0)
 
-    def test_repeated_capped_chunks_until_complete(self) -> None:
-        self._write_state(pending=3, complete=0, per_chunk=1, chunks_run=0)
+    def test_uncapped_drains_all_pending_in_one_chunk(self) -> None:
+        # Without `--max-sessions`, the runner completes every pending session in
+        # a single process — the supervisor does not chunk through them.
+        self._write_state(pending=3, complete=0, chunks_run=0)
         result = self._supervise()
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["reason"], "complete")
-        self.assertEqual(result["chunks"], 3)
-        self.assertEqual(self._read_state()["chunks_run"], 3)
+        self.assertEqual(result["chunks"], 1)
+        self.assertEqual(self._read_state()["chunks_run"], 1)
+        self.assertEqual(self._read_state()["complete"], 3)
 
-    def test_max_chunks_budget_caps_relaunches(self) -> None:
-        self._write_state(pending=5, complete=0, per_chunk=1, chunks_run=0)
-        result = self._supervise(max_chunks=2)
-        self.assertFalse(result["ok"], result)
-        self.assertEqual(result["reason"], "capped")
-        self.assertEqual(result["chunks"], 2)
-        self.assertEqual(self._read_state()["chunks_run"], 2)
+    def test_max_sessions_is_a_global_budget(self) -> None:
+        # End-to-end through parse -> argv -> child: `--max-sessions 2` on a
+        # 5-session plan completes exactly 2 and stops cleanly with the remaining
+        # sessions still pending — a single chunk, no relaunching.
+        self._write_state(pending=5, complete=0, chunks_run=0)
+        result = self._supervise(command_extra="--max-sessions 2")
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "max-sessions")
+        self.assertEqual(result["chunks"], 1)
+        self.assertEqual(result["completed"], 2)
+        self.assertEqual(result["pending"], 3)
+        state = self._read_state()
+        self.assertEqual(state["complete"], 2)
+        self.assertEqual(state["pending"], 3)
+        self.assertEqual(state["chunks_run"], 1)
+
+    def test_budget_stop_is_a_resumable_checkpoint(self) -> None:
+        # A budget stop leaves a clean checkpoint: re-running the same command
+        # continues from the remaining sessions rather than a dead end.
+        self._write_state(pending=5, complete=0, chunks_run=0)
+        first = self._supervise(command_extra="--max-sessions 2")
+        self.assertEqual(first["reason"], "max-sessions")
+        self.assertEqual(self._read_state()["complete"], 2)
+
+        second = self._supervise(command_extra="--max-sessions 2")
+        self.assertEqual(second["reason"], "max-sessions")
+        self.assertEqual(second["completed"], 2)
+        self.assertEqual(self._read_state()["complete"], 4)
+        self.assertEqual(self._read_state()["pending"], 1)
 
     def test_heartbeats_stay_off_stdout(self) -> None:
-        self._write_state(pending=2, complete=0, per_chunk=1, chunks_run=0)
+        self._write_state(pending=2, complete=0, chunks_run=0)
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
             result = autopilot.supervise_run(
@@ -2988,6 +3110,18 @@ class RunAutopilotReviewTest(unittest.TestCase):
         summary = autopilot._human_summary(result)
         self.assertIn("review_findings", summary)
         self.assertIn("2 Findings", summary)
+
+    def test_human_summary_reports_max_sessions_progress(self) -> None:
+        result = {
+            "ok": True,
+            "reason": "max-sessions",
+            "completed": 1,
+            "pending": 30,
+        }
+        summary = autopilot._human_summary(result)
+        self.assertIn("max-sessions", summary)
+        self.assertIn("completed 1", summary)
+        self.assertIn("30 still pending", summary)
 
 
 if __name__ == "__main__":

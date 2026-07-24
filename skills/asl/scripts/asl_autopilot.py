@@ -9,8 +9,11 @@ that lets the skill drive an ``asl run`` invocation end to end.
 The supervision seam (``supervise_run`` behind ``run_autopilot``) polls
 ``asl status --json`` for authoritative state, starts a run when no active
 matching lock exists, attaches to an already-running lock when the plan/state
-match, clears only stale locks, and relaunches capped runs (``--max-sessions``)
-until the plan completes or the run pauses. On top of that loop the helper
+match, clears only stale locks, and drives the plan to completion. ``--max-sessions``
+is a *global* session budget: the supervisor stops cleanly with
+``reason: "max-sessions"`` once that many implementation sessions have completed
+across the whole run, rather than treating the cap as a per-chunk relaunch knob.
+On top of that loop the helper
 handles recoverable-pause retries, reply resume, and — for runs that use
 ``--review-harness`` — classifies the ``final-review.md`` verdict so a run that
 completes with review findings surfaces as ``review_findings`` with any
@@ -82,9 +85,10 @@ _ENV_ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 # Supervision loop tuning. `POLL_INTERVAL` is how long the supervisor waits
 # between `asl status` probes while attached to a run someone else is driving.
 # `HEARTBEAT_INTERVAL` throttles the concise stderr progress lines (stdout stays
-# reserved for the final JSON). `MAX_CHUNKS` bounds how many capped
-# (`--max-sessions`) relaunches or attach-waits we perform before giving up, so
-# a stalled plan can never loop forever.
+# reserved for the final JSON). `MAX_CHUNKS` bounds how many self-launched
+# relaunches (pause retries and review continuations) or attach-waits we perform
+# before giving up, so a stalled plan can never loop forever. (`--max-sessions`
+# is a separate global session budget, not this safety bound.)
 DEFAULT_POLL_INTERVAL = 5.0
 DEFAULT_HEARTBEAT_INTERVAL = 30.0
 DEFAULT_MAX_CHUNKS = 50
@@ -391,6 +395,11 @@ def parse_command(command: str) -> dict:
         # supervisor resolves the effective review harness/cap from that config
         # before an all-complete review-continuation decision.
         "resume": bool(getattr(namespace, "resume", False)),
+        # The requested `--max-sessions` cap (or `None`). The supervisor treats
+        # this as a *global* session budget for the whole run, not a per-chunk
+        # cap: once this many implementation sessions have completed across the
+        # supervision it stops cleanly with `reason: "max-sessions"`.
+        "max_sessions": namespace.max_sessions,
     }
 
 
@@ -1018,6 +1027,26 @@ def _pending_count(status: dict) -> int:
     return sum(1 for entry in sessions if entry.get("status") == "pending")
 
 
+def _argv_with_max_sessions(argv: Sequence[str], value: int) -> list:
+    """Return a copy of ``argv`` with the ``--max-sessions`` value set to ``value``.
+
+    ``--max-sessions`` is a *global* budget, so each relaunch must be capped at
+    the sessions still remaining rather than the original request; otherwise a
+    retry after a pause that already completed some sessions could overshoot the
+    budget. ``parse_command`` always emits ``--max-sessions`` when the operator
+    passed one, but the insert branch keeps this correct even if that ever
+    changes.
+    """
+    out = list(argv)
+    for index, token in enumerate(out):
+        if token == "--max-sessions" and index + 1 < len(out):
+            out[index + 1] = str(value)
+            return out
+    insert_at = out.index("--json") if "--json" in out else len(out)
+    out[insert_at:insert_at] = ["--max-sessions", str(value)]
+    return out
+
+
 def _review_resume_payload(payload: Optional[dict]) -> Optional[dict]:
     """Return a payload's additive ``review_resume`` projection, if present."""
     if not isinstance(payload, dict):
@@ -1179,9 +1208,15 @@ def _run_result(
     chunks: int = 0,
     error: Optional[str] = None,
     retries: Optional[dict] = None,
+    completed: Optional[int] = None,
+    pending: Optional[int] = None,
 ) -> dict:
     """Build a stable ``stage: run`` supervision result payload."""
     result: dict = {"ok": ok, "stage": RUN_STAGE, "reason": reason, "chunks": chunks}
+    if completed is not None:
+        result["completed"] = completed
+    if pending is not None:
+        result["pending"] = pending
     if error is not None:
         result["error"] = error
     if status is not None:
@@ -1325,7 +1360,7 @@ def supervise_run(
     max_chunks: int = DEFAULT_MAX_CHUNKS,
     max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> dict:
-    """Drive an ``asl run`` to completion, relaunching capped chunks.
+    """Drive an ``asl run`` to completion within a global session budget.
 
     Polls ``asl status --json`` for authoritative state, then on each iteration:
 
@@ -1334,6 +1369,12 @@ def supervise_run(
     - an active matching lock means another run is driving the plan, so the
       supervisor sleeps ``poll_interval`` and re-polls (attach), even when the
       transient status snapshot reports zero pending sessions;
+    - ``--max-sessions`` is a global budget: the drop in pending across chunks
+      accumulates the implementation sessions completed this run, and once that
+      count reaches the cap with impl sessions still pending the run stops
+      cleanly with ``max-sessions`` (``ok: true``, reporting ``completed`` and
+      ``pending``). A budget spent exactly as pending reaches 0 falls through to
+      the normal complete/review path rather than pre-empting it;
     - without a lock, pending sessions launch normally, while an all-complete
       plan launches only a ``review_resume`` initial-review requested by the
       command's review harness, a materialize-repairs action allowed by the
@@ -1351,11 +1392,12 @@ def supervise_run(
       immediately with ``user_required`` — carrying any reset (``retry_at``)
       information — and is never retried. Any other pause stops with ``paused``
       for agent/user reply handling. A non-paused failure stops with
-      ``blocked``, and a clean stop with pending sessions remaining (the
-      ``--max-sessions`` cap) relaunches on the next iteration.
+      ``blocked``. A clean stop re-polls: the runner drives every pending session
+      in one chunk, so relaunching normally only recurs for review continuations
+      (or recoverable pause retries), never to chunk through pending sessions.
 
     The per-(session, reason) retry counts and accumulated backoff delay persist
-    across attach polls and capped-chunk relaunches, and the surfaced result's
+    across attach polls and self-launched relaunches, and the surfaced result's
     ``retries`` records the attempted delay (``delayed_seconds``), the runner's
     failure ``classification``, and whether the recoverable budget was
     ``exhausted``.
@@ -1400,6 +1442,16 @@ def supervise_run(
     last_attach_beat: Optional[float] = None
     retry_counts: dict = {}
     retry_delays: dict = {}
+    # `--max-sessions` is a global budget: `budget` is the requested cap (or
+    # `None`), `completed_total` accumulates implementation sessions completed
+    # across every chunk (measured by the drop in pending between launches, an
+    # exact classification-free mirror of the runner's own impl-session count),
+    # and `launched_pending` records the pending count at the last launch so the
+    # next iteration can attribute the delta. Once `completed_total` reaches the
+    # budget with impl sessions still pending, the run stops cleanly.
+    budget: Optional[int] = parsed.get("max_sessions")
+    completed_total = 0
+    launched_pending: Optional[int] = None
 
     while True:
         status = status_invoker(parsed)
@@ -1477,6 +1529,29 @@ def supervise_run(
             )
             continue
 
+        # Attribute sessions completed by the previous chunk to the global
+        # budget. Pending strictly decreases through the implementation phase
+        # (review sessions are only appended once pending hits 0, which the
+        # budget stops us reaching), so the drop is an exact count of completed
+        # impl sessions; clamp at 0 defensively.
+        if launched_pending is not None:
+            completed_total += max(0, launched_pending - pending)
+            launched_pending = None
+
+        # A spent budget with impl sessions still pending is a clean, intentional
+        # early stop — never a failure or a pause. When the budget is spent
+        # exactly as pending reaches 0, `pending > 0` is false so we fall through
+        # to the normal complete/review path instead of pre-empting it.
+        if budget is not None and completed_total >= budget and pending > 0:
+            return _run_result(
+                True,
+                "max-sessions",
+                status=status,
+                chunks=chunks,
+                completed=completed_total,
+                pending=pending,
+            )
+
         if not _should_launch_for_status(parsed, status, pending):
             return _run_result(True, "complete", status=status, chunks=chunks)
 
@@ -1493,7 +1568,23 @@ def supervise_run(
                 ),
             )
         chunks += 1
-        run_payload = run_invoker(parsed, chunks)
+        # Record pending at launch so the next iteration can attribute the drop
+        # to the global session budget.
+        launched_pending = pending
+        # Cap this chunk at the sessions still remaining in the budget. The
+        # budget-exhausted guard above guarantees `budget - completed_total >= 1`
+        # here, so a relaunch after a pause that already completed some sessions
+        # (the only case that recurs now that the runner drains all pending in
+        # one chunk) cannot overshoot the total.
+        if budget is not None:
+            remaining = budget - completed_total
+            launch_parsed = {
+                **parsed,
+                "argv": _argv_with_max_sessions(parsed["argv"], remaining),
+            }
+        else:
+            launch_parsed = parsed
+        run_payload = run_invoker(launch_parsed, chunks)
         if not isinstance(run_payload, dict) or run_payload.get("_invoke_error"):
             return _run_result(
                 False,
@@ -1605,8 +1696,10 @@ def supervise_run(
                     f"{run_payload.get('reason')}"
                 ),
             )
-        # Clean stop; loop re-polls. Pending 0 -> complete, else relaunch the
-        # next capped chunk.
+        # Clean stop; loop re-polls. Pending 0 -> complete/review continuation;
+        # a spent `--max-sessions` budget -> clean `max-sessions` stop; otherwise
+        # relaunch (the runner drives all pending sessions in one chunk, so this
+        # normally only recurs for review continuations).
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -1708,10 +1801,10 @@ def run_autopilot(
 
     Command parsing runs first: an unparseable or unsupported command returns
     the structured parse-failure payload immediately. When the command parses
-    cleanly, the supervisor starts/attaches/polls the run and relaunches capped
-    chunks until the plan completes or the run pauses. The parsed ``command``
-    model is attached to the result so callers (and reply handling) can see
-    exactly what was executed.
+    cleanly, the supervisor starts/attaches/polls the run and drives it until the
+    plan completes, the ``--max-sessions`` global budget is spent, or the run
+    pauses. The parsed ``command`` model is attached to the result so callers
+    (and reply handling) can see exactly what was executed.
 
     When ``args.reply_stdin`` is set the helper reads the inferred reply text
     from stdin and resumes the paused run through ``asl run --reply-stdin``
@@ -1807,6 +1900,13 @@ def _human_summary(result: dict) -> str:
         status_line = review.get("status_line", "review reported findings")
         summary = f"stopped: review_findings - {status_line}"
         return f"{summary}; {guidance}" if guidance else summary
+    if reason == "max-sessions":
+        completed = result.get("completed")
+        pending = result.get("pending")
+        return (
+            f"ok: max-sessions - completed {completed} session(s), "
+            f"{pending} still pending; re-run the same command to continue"
+        )
     guidance = None
     if reason == "complete":
         guidance = _review_resume_guidance(result)

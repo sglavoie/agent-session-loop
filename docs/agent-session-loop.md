@@ -1331,9 +1331,12 @@ as safe to start over (ASL clears stale locks before acquiring). An active lock
 for the same plan and state means **attach**: the helper polls the foreign run
 to completion instead of starting a second one. An active lock for a different
 plan directory, or an observably different harness than the operator requested,
-stops with `user_required` for a human to resolve. Self-relaunches (for
-`--max-sessions` capped chunks) and attach polls share one bounded budget so a
-wedged plan can never loop forever.
+stops with `user_required` for a human to resolve. `--max-sessions N` is a
+global session budget: the supervisor stops cleanly with `max-sessions` once `N`
+implementation sessions have completed across the run (there is no per-chunk
+restarting — an uncapped run drives every pending session in one process).
+Self-relaunches (pause retries and runner-owned review continuations) and attach
+polls share one bounded budget so a wedged plan can never loop forever.
 
 ### Reply behavior
 
@@ -1378,6 +1381,10 @@ terminal verdict (`ok` is `true` only for a clean completion):
 
 - `complete` (`ok: true`): every session finished. With `--review-harness`, an
   all-clear review is attached under `review.outcome: all-clear`.
+- `max-sessions` (`ok: true`): the `--max-sessions N` global budget was reached
+  with sessions still pending — an intentional clean early stop, not a pause or a
+  failure. `completed` and `pending` counts are attached; re-running the same
+  command continues from the remaining sessions.
 - `needs_agent_reply` (`ok: false`): the run paused on a decision the helper
   could not auto-resolve; a `questions` block carries the resolver context and
   the driving agent must supply a reply.
@@ -1389,8 +1396,8 @@ terminal verdict (`ok` is `true` only for a clean completion):
   for a different run; a human must resolve the conflict before supervising.
 - `blocked` (`ok: false`): a chunk stopped without completing and without a
   recoverable pause (the child's non-paused failure reason is attached).
-- `capped` (`ok: false`): the supervision budget (self-relaunch chunks or
-  attach polls) was exhausted with sessions still pending.
+- `capped` (`ok: false`): the `max_chunks` safety budget (pause-retry/review
+  relaunches or attach polls) was exhausted before the plan settled.
 - `status-error` / `run-error` (`ok: false`): `asl status --json` or `asl run`
   itself failed to produce a usable payload.
 - `empty-reply` (`ok: false`): `--reply-stdin` was requested but stdin carried
