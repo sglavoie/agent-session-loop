@@ -1,11 +1,12 @@
-"""Paused-run question-and-answer context loader.
+"""Paused and live-wait question-and-answer context loader.
 
 The runner pauses a session when its harness ends without completing the
-session, often because the agent is asking the human a clarifying question.
-This module loads the latest paused turn's context from the runner state file
-and exposes a structured payload that downstream commands (``asl questions``,
-``asl run --reply``, resolver prompt builders) can consume without duplicating
-state parsing logic.
+session, often because the agent is asking the human a clarifying question. A
+mailbox-enabled run can instead remain live while waiting for a reply. This
+module loads the latest completed turn's context from either state and exposes
+a structured payload that downstream commands (``asl questions``, reply
+producers, resolver prompt builders) can consume without duplicating state
+parsing logic.
 
 The plan directory remains the durable source of truth for completion. The
 loader only reads state and never mutates it.
@@ -27,6 +28,7 @@ from . import events, pause_policy, plans, responses, state
 REASON_NO_PAUSED_RUN = "no-paused-run"
 REASON_MISSING_QUESTION_CONTEXT = "missing-question-context"
 REASON_REPLY_CONTEXT_MISMATCH = "reply-context-mismatch"
+EXPIRED_WAIT_PAUSE_REASON = "wait-expired"
 
 QNA_ERROR_REASONS: tuple[str, ...] = (
     REASON_NO_PAUSED_RUN,
@@ -36,7 +38,7 @@ QNA_ERROR_REASONS: tuple[str, ...] = (
 
 
 class QnAError(Exception):
-    """Raised when paused-run Q&A context cannot be loaded safely."""
+    """Raised when Q&A context cannot be loaded safely."""
 
     def __init__(
         self,
@@ -53,7 +55,7 @@ class QnAError(Exception):
 
 @dataclass(frozen=True)
 class QnAContext:
-    """Structured paused-run question context for resolver prompts."""
+    """Structured latest-turn question context for resolver prompts."""
 
     plan_dir: Path
     state_dir: Path
@@ -78,6 +80,9 @@ class QnAContext:
     result_path: Path | None
     last_message: str
     state_dir_override: str | None = None
+    context_kind: str = "pause"
+    question_id: str | None = None
+    waiting_for_reply: dict[str, Any] | None = None
 
 
 def load_qna_context(
@@ -85,21 +90,86 @@ def load_qna_context(
     *,
     state_dir: str | Path | None = None,
 ) -> QnAContext:
-    """Load and validate the latest paused-run question context.
+    """Load and validate the latest paused or live-wait question context.
 
     Raises :class:`QnAError` with a stable ``reason`` on every recognized
     failure path:
 
-    - ``no-paused-run`` when the state file is missing, unreadable, not paused,
-      or has no completed turn that recorded a session id.
-    - ``missing-question-context`` when the paused turn does not point at a
-      readable, non-empty ``last-message`` artifact.
-    - ``reply-context-mismatch`` when the paused turn's session id no longer
+    - ``no-paused-run`` when the state file is missing, unreadable, neither
+      paused nor waiting, or has no completed turn that recorded a session id.
+    - ``missing-question-context`` when the selected turn or live-wait record
+      is incomplete, or its ``last-message`` artifact is not readable/nonempty.
+    - ``reply-context-mismatch`` when the selected turn's session id no longer
       matches the plan's current ``next_pending_id``.
     """
     snapshot = plans.inspect_plan(plan_dir)
     plan_state = state.plan_state_dir(snapshot.plan_dir, state_dir)
     state_path = plan_state / events.STATE_FILE_NAME
+    payload = _read_state_payload(state_path)
+
+    waiting_for_reply: dict[str, Any] | None = None
+    if not _is_paused(payload):
+        raw_waiting = payload.get("waiting_for_reply")
+        if isinstance(raw_waiting, dict):
+            waiting_for_reply = dict(raw_waiting)
+        else:
+            raise QnAError(
+                REASON_NO_PAUSED_RUN,
+                "latest runner state is not paused",
+                details={
+                    "state_path": str(state_path),
+                    "paused": payload.get("paused"),
+                },
+            )
+
+    return build_qna_context(
+        snapshot,
+        payload,
+        plan_state=plan_state,
+        state_path=state_path,
+        waiting_for_reply=waiting_for_reply,
+    )
+
+
+def build_qna_context(
+    snapshot: plans.PlanSnapshot,
+    payload: dict[str, Any],
+    *,
+    plan_state: Path,
+    state_path: Path,
+    waiting_for_reply: dict[str, Any] | None = None,
+) -> QnAContext:
+    """Build validated latest-turn context for a pause or proposed/live wait.
+
+    Passing ``waiting_for_reply`` selects the nonterminal path and permits the
+    caller to validate a proposed wait before it is persisted. Omitting it
+    preserves the terminal-pause contract and requires ``paused is True``.
+    """
+    if waiting_for_reply is not None:
+        lock_info = state._read_lock_path(
+            plan_state / state.LOCK_FILE_NAME,
+            snapshot.plan_dir,
+        )
+        wait_status = state.waiting_for_reply_status(
+            waiting_for_reply,
+            lock_info=lock_info,
+        )
+        if wait_status == state.WAITING_FOR_REPLY_STATUS_INVALID:
+            raise QnAError(
+                REASON_MISSING_QUESTION_CONTEXT,
+                "waiting-for-reply state has an invalid hard deadline",
+                details={
+                    "state_path": str(state_path),
+                    "question_id": waiting_for_reply.get("question_id"),
+                    "hard_deadline": waiting_for_reply.get("hard_deadline"),
+                },
+            )
+        if wait_status == state.WAITING_FOR_REPLY_STATUS_EXPIRED:
+            payload = _expired_wait_recovery_payload(
+                payload,
+                waiting_for_reply,
+            )
+            waiting_for_reply = None
 
     next_pending = snapshot.next_pending
     if next_pending is None:
@@ -112,9 +182,8 @@ def load_qna_context(
             },
         )
 
-    payload = _read_state_payload(state_path)
-
-    if not _is_paused(payload):
+    context_kind = "waiting" if waiting_for_reply is not None else "pause"
+    if context_kind == "pause" and not _is_paused(payload):
         raise QnAError(
             REASON_NO_PAUSED_RUN,
             "latest runner state is not paused",
@@ -127,15 +196,29 @@ def load_qna_context(
     turn = _latest_completed_turn(payload, state_path=state_path)
 
     session_id = _turn_session_id(turn, state_path=state_path)
+    question_id: str | None = None
+    if waiting_for_reply is not None:
+        question_id = _validate_waiting_identity(
+            waiting_for_reply,
+            turn=turn,
+            turn_session_id=session_id,
+            state_path=state_path,
+        )
     if session_id != next_pending.id:
+        source_label = "waiting" if context_kind == "waiting" else "paused"
+        session_detail_key = (
+            "waiting_session_id"
+            if context_kind == "waiting"
+            else "paused_session_id"
+        )
         raise QnAError(
             REASON_REPLY_CONTEXT_MISMATCH,
             (
-                f"paused session {session_id!r} no longer matches the "
+                f"{source_label} session {session_id!r} no longer matches the "
                 f"current pending session {next_pending.id!r}"
             ),
             details={
-                "paused_session_id": session_id,
+                session_detail_key: session_id,
                 "next_pending_id": next_pending.id,
                 "state_path": str(state_path),
             },
@@ -143,9 +226,13 @@ def load_qna_context(
 
     last_message_path = _coerce_path(turn.get("last_message_path"))
     if last_message_path is None:
+        source_label = "waiting" if context_kind == "waiting" else "paused"
         raise QnAError(
             REASON_MISSING_QUESTION_CONTEXT,
-            "latest paused turn does not record a last-message artifact path",
+            (
+                f"latest {source_label} turn does not record a "
+                "last-message artifact path"
+            ),
             details={
                 "state_path": str(state_path),
                 "session_id": session_id,
@@ -160,12 +247,20 @@ def load_qna_context(
         state_path=state_path,
         run_id=_optional_str(payload.get("run_id")),
         run_dir=_coerce_path(payload.get("run_dir")),
-        pause_reason=_optional_str(
-            payload.get("pause_reason") or payload.get("reason")
+        pause_reason=(
+            _optional_str(payload.get("pause_reason") or payload.get("reason"))
+            if context_kind == "pause"
+            else None
         ),
-        pause_message=_optional_str(payload.get("pause_message")),
-        pause_details=_coerce_dict(
-            payload.get("pause_details") or payload.get("details")
+        pause_message=(
+            _optional_str(payload.get("pause_message"))
+            if context_kind == "pause"
+            else None
+        ),
+        pause_details=(
+            _coerce_dict(payload.get("pause_details") or payload.get("details"))
+            if context_kind == "pause"
+            else {}
         ),
         harness=_optional_str(turn.get("harness") or payload.get("harness")),
         model=_optional_str(turn.get("model") or payload.get("model")),
@@ -186,7 +281,32 @@ def load_qna_context(
         result_path=_coerce_path(turn.get("result_path")),
         last_message=last_message,
         state_dir_override=_state_dir_override_from_payload(payload),
+        context_kind=context_kind,
+        question_id=question_id,
+        waiting_for_reply=(
+            dict(waiting_for_reply)
+            if waiting_for_reply is not None
+            else None
+        ),
     )
+
+
+def _expired_wait_recovery_payload(
+    payload: dict[str, Any],
+    waiting_for_reply: dict[str, Any],
+) -> dict[str, Any]:
+    """Project an orphaned expired wait as a resumable pause."""
+    recovery = dict(payload)
+    recovery["paused"] = True
+    recovery["pause_reason"] = EXPIRED_WAIT_PAUSE_REASON
+    recovery["pause_message"] = (
+        "the live mailbox reply wait expired; resume the session to answer"
+    )
+    recovery["pause_details"] = {
+        "question_id": waiting_for_reply.get("question_id"),
+        "hard_deadline": waiting_for_reply.get("hard_deadline"),
+    }
+    return recovery
 
 
 def _state_dir_override_from_payload(payload: dict[str, Any]) -> str | None:
@@ -206,7 +326,7 @@ def _state_dir_override_from_payload(payload: dict[str, Any]) -> str | None:
 
 def qna_context_payload(context: QnAContext) -> dict[str, Any]:
     """Render a :class:`QnAContext` as a JSON-friendly payload."""
-    return {
+    payload = {
         "plan_dir": str(context.plan_dir),
         "state_dir": str(context.state_dir),
         "state_path": str(context.state_path),
@@ -238,6 +358,19 @@ def qna_context_payload(context: QnAContext) -> dict[str, Any]:
         ),
         "last_message": context.last_message,
     }
+    if context.context_kind == "waiting":
+        payload.update(
+            {
+                "context_kind": "waiting",
+                "question_id": context.question_id,
+                "waiting_for_reply": (
+                    dict(context.waiting_for_reply)
+                    if context.waiting_for_reply is not None
+                    else None
+                ),
+            }
+        )
+    return payload
 
 
 def qna_error_payload(error: QnAError) -> dict[str, Any]:
@@ -324,6 +457,110 @@ def _turn_session_id(turn: dict[str, Any], *, state_path: Path) -> str:
     )
 
 
+def _validate_waiting_identity(
+    waiting: dict[str, Any],
+    *,
+    turn: dict[str, Any],
+    turn_session_id: str,
+    state_path: Path,
+) -> str:
+    question_id = _optional_str(waiting.get("question_id"))
+    if question_id is None:
+        raise QnAError(
+            REASON_MISSING_QUESTION_CONTEXT,
+            "waiting-for-reply state does not record a question id",
+            details={"state_path": str(state_path)},
+        )
+
+    waiting_session_id = _session_id_from_payload(waiting)
+    if waiting_session_id is None:
+        raise QnAError(
+            REASON_MISSING_QUESTION_CONTEXT,
+            "waiting-for-reply state does not record a session id",
+            details={
+                "state_path": str(state_path),
+                "question_id": question_id,
+            },
+        )
+    if waiting_session_id != turn_session_id:
+        raise QnAError(
+            REASON_REPLY_CONTEXT_MISMATCH,
+            (
+                f"waiting session {waiting_session_id!r} does not match the "
+                f"latest completed turn session {turn_session_id!r}"
+            ),
+            details={
+                "state_path": str(state_path),
+                "question_id": question_id,
+                "waiting_session_id": waiting_session_id,
+                "turn_session_id": turn_session_id,
+            },
+        )
+
+    waiting_turn_index = _optional_int(waiting.get("turn_index"))
+    turn_index = _optional_int(turn.get("turn_index"))
+    if waiting_turn_index is None:
+        raise QnAError(
+            REASON_MISSING_QUESTION_CONTEXT,
+            "waiting-for-reply state does not record a turn index",
+            details={
+                "state_path": str(state_path),
+                "question_id": question_id,
+            },
+        )
+    if turn_index is None or waiting_turn_index != turn_index:
+        raise QnAError(
+            REASON_REPLY_CONTEXT_MISMATCH,
+            (
+                f"waiting turn {waiting_turn_index!r} does not match the "
+                f"latest completed turn {turn_index!r}"
+            ),
+            details={
+                "state_path": str(state_path),
+                "question_id": question_id,
+                "waiting_turn_index": waiting_turn_index,
+                "turn_index": turn_index,
+            },
+        )
+
+    for field_name in ("started_at", "base_deadline", "hard_deadline"):
+        if _optional_str(waiting.get(field_name)) is None:
+            raise QnAError(
+                REASON_MISSING_QUESTION_CONTEXT,
+                f"waiting-for-reply state does not record {field_name}",
+                details={
+                    "state_path": str(state_path),
+                    "question_id": question_id,
+                },
+            )
+    lease_activity = waiting.get("last_lease_activity_at")
+    if lease_activity is not None and _optional_str(lease_activity) is None:
+        raise QnAError(
+            REASON_MISSING_QUESTION_CONTEXT,
+            (
+                "waiting-for-reply state has an invalid "
+                "last_lease_activity_at"
+            ),
+            details={
+                "state_path": str(state_path),
+                "question_id": question_id,
+            },
+        )
+    return question_id
+
+
+def _session_id_from_payload(payload: dict[str, Any]) -> str | None:
+    session_id = payload.get("session_id")
+    if isinstance(session_id, str) and session_id:
+        return session_id
+    session = payload.get("session")
+    if isinstance(session, str) and session:
+        return session
+    if isinstance(session, int) and not isinstance(session, bool) and session > 0:
+        return str(session)
+    return None
+
+
 def _read_last_message(path: Path, *, session_id: str) -> str:
     if not path.exists():
         raise QnAError(
@@ -383,7 +620,7 @@ def _optional_int(value: Any) -> int | None:
 
 
 def artifact_paths_payload(context: QnAContext) -> dict[str, str | None]:
-    """Render the paused turn's artifact paths as a JSON-friendly dict."""
+    """Render the selected turn's artifact paths as a JSON-friendly dict."""
     return {
         "run_dir": str(context.run_dir) if context.run_dir is not None else None,
         "artifact_dir": (
@@ -403,13 +640,16 @@ def artifact_paths_payload(context: QnAContext) -> dict[str, str | None]:
 
 
 def render_resolver_prompt(context: QnAContext) -> str:
-    """Render a paused-run context as a ready-to-send resolver prompt.
+    """Render a selected Q&A context as a ready-to-send resolver prompt.
 
     The output is plain Markdown suitable for handing to another AI agent.
     The agent is expected to ask the user the question(s) the original
-    harness paused on, then return a concise reply that ``asl run --reply``
-    can consume verbatim.
+    harness asked, then return a concise reply that the appropriate paused or
+    live reply command can consume verbatim.
     """
+    if context.context_kind == "waiting":
+        return _render_waiting_resolver_prompt(context)
+
     lines: list[str] = []
     lines.append("# Paused Agent Session - Resolver Prompt")
     lines.append("")
@@ -490,6 +730,92 @@ def render_resolver_prompt(context: QnAContext) -> str:
     return "\n".join(lines)
 
 
+def _render_waiting_resolver_prompt(context: QnAContext) -> str:
+    waiting = (
+        dict(context.waiting_for_reply)
+        if context.waiting_for_reply is not None
+        else {}
+    )
+    lines: list[str] = []
+    lines.append("# Live Agent Session - Resolver Prompt")
+    lines.append("")
+    lines.append(
+        "An agent harness is waiting in-process for a clarifying answer. "
+        "Read the context below, ask the user the question(s) the agent "
+        "needed answered, then return a concise reply suitable for "
+        "`asl inbox reply`."
+    )
+    lines.append("")
+
+    lines.append("## Plan")
+    lines.append(f"- Plan directory: {context.plan_dir}")
+    lines.append(f"- State file: {context.state_path}")
+    lines.append(f"- Run ID: {_display(context.run_id)}")
+    lines.append(f"- Session ID: {context.session_id}")
+    lines.append(f"- Turn index: {_display(context.turn_index)}")
+    lines.append("")
+
+    lines.append("## Harness")
+    lines.append(f"- Harness: {_display(context.harness)}")
+    lines.append(
+        f"- Model: {_display(context.model)}"
+        f"{_source_suffix(context.model_source)}"
+    )
+    lines.append(
+        f"- Effort: {_display(context.effort)}"
+        f"{_source_suffix(context.effort_source)}"
+    )
+    lines.append("")
+
+    lines.append("## Waiting for Reply")
+    lines.append(f"- Question ID: {_display(context.question_id)}")
+    lines.append(f"- Started: {_display(waiting.get('started_at'))}")
+    lines.append(f"- Base deadline: {_display(waiting.get('base_deadline'))}")
+    lines.append(f"- Hard deadline: {_display(waiting.get('hard_deadline'))}")
+    lines.append(
+        "- Last lease activity: "
+        f"{_display(waiting.get('last_lease_activity_at'))}"
+    )
+    lines.append("")
+
+    lines.append("## Artifacts")
+    artifacts = artifact_paths_payload(context)
+    lines.append(f"- Run dir: {_display(artifacts['run_dir'])}")
+    lines.append(f"- Artifact dir: {_display(artifacts['artifact_dir'])}")
+    lines.append(f"- Stdout: {_display(artifacts['stdout_path'])}")
+    lines.append(f"- Stderr: {_display(artifacts['stderr_path'])}")
+    lines.append(f"- Last message: {artifacts['last_message_path']}")
+    lines.append(f"- Result: {_display(artifacts['result_path'])}")
+    lines.append("")
+
+    lines.append("## Previous Agent Message")
+    lines.append("")
+    lines.append(context.last_message.rstrip("\n"))
+    lines.append("")
+
+    lines.append("## Instructions")
+    lines.append("")
+    lines.append(
+        "1. Ask the user the question(s) the previous agent needed answered. "
+        "If the message contains multiple questions, ask each in order."
+    )
+    lines.append(
+        "2. Keep the reply concise. One short answer per question is best "
+        "(e.g., `1a, 2a, 3a`)."
+    )
+    lines.append(
+        "3. Return ONLY the user's answer text. Do not add commentary, "
+        "headings, or quoted context."
+    )
+    lines.append(
+        "4. Submit the answer with the live mailbox reply command before the "
+        "hard deadline; the active runner will continue the same session."
+    )
+    lines.append("")
+
+    return "\n".join(lines)
+
+
 def _resume_command_base(context: QnAContext) -> list[str]:
     parts = ["asl", "run", str(context.plan_dir), "--resume"]
     if context.state_dir_override:
@@ -516,8 +842,63 @@ def reply_stdin_command_text(context: QnAContext) -> str:
     return shlex.join([*_resume_command_base(context), "--reply-stdin"])
 
 
+def _mailbox_reply_command_base(context: QnAContext) -> list[str]:
+    if context.question_id is None:
+        raise ValueError("live Q&A context does not record a question id")
+    parts = [
+        "asl",
+        "inbox",
+        "reply",
+        str(context.plan_dir),
+        "--to",
+        context.question_id,
+    ]
+    if context.state_dir_override:
+        parts.extend(["--state-dir", context.state_dir_override])
+    return parts
+
+
+def mailbox_reply_command_text(context: QnAContext) -> str:
+    """Return live mailbox reply guidance with an inline text placeholder."""
+    return shlex.join([*_mailbox_reply_command_base(context), "--text", "TEXT"])
+
+
+def mailbox_reply_stdin_command_text(context: QnAContext) -> str:
+    """Return live mailbox reply guidance that reads the answer from stdin."""
+    return shlex.join([*_mailbox_reply_command_base(context), "--text-stdin"])
+
+
 def questions_payload(context: QnAContext) -> dict[str, Any]:
-    """Render a paused-run context as the ``asl questions`` JSON payload."""
+    """Render a paused or live-wait context as ``asl questions`` JSON."""
+    if context.context_kind == "waiting":
+        return responses.success_payload(
+            "questions",
+            context_kind="waiting",
+            reply_command=mailbox_reply_command_text(context),
+            reply_stdin_command=mailbox_reply_stdin_command_text(context),
+            plan_dir=str(context.plan_dir),
+            state_dir=str(context.state_dir),
+            state_path=str(context.state_path),
+            run_id=context.run_id,
+            session_id=context.session_id,
+            next_pending_id=context.next_pending_id,
+            turn_index=context.turn_index,
+            question_id=context.question_id,
+            waiting_for_reply=(
+                dict(context.waiting_for_reply)
+                if context.waiting_for_reply is not None
+                else None
+            ),
+            harness=context.harness,
+            model=context.model,
+            model_source=context.model_source,
+            effort=context.effort,
+            effort_source=context.effort_source,
+            artifact_paths=artifact_paths_payload(context),
+            last_message=context.last_message,
+            rendered_prompt=render_resolver_prompt(context),
+        )
+
     return responses.success_payload(
         "questions",
         resume_command=resume_command_text(context),

@@ -2962,7 +2962,7 @@ class StatusLabelResolutionCliTests(unittest.TestCase):
                 str(plans.canonicalize_path(plan_dir)), payload["plan_dir"]
             )
 
-    def test_unknown_label_retains_malformed_plan(self) -> None:
+    def test_unknown_label_error_uses_plan_reference(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp) / "state"
             state_dir.mkdir()
@@ -2977,7 +2977,8 @@ class StatusLabelResolutionCliTests(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertEqual("status", payload["command"])
             self.assertEqual("malformed-plan", payload["reason"])
-            self.assertEqual("no-such-label-xyz", payload["plan_dir"])
+            self.assertEqual("no-such-label-xyz", payload["plan_reference"])
+            self.assertNotIn("plan_dir", payload)
 
     def test_existing_malformed_plan_dir_retains_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2992,7 +2993,7 @@ class StatusLabelResolutionCliTests(unittest.TestCase):
             payload = json.loads(completed.stdout)
             self.assertFalse(payload["ok"])
             self.assertEqual("malformed-plan", payload["reason"])
-            self.assertEqual(str(plan_dir), payload["plan_dir"])
+            self.assertEqual(str(plan_dir), payload["plan_reference"])
 
     def test_ambiguous_label_json_lists_sorted_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3016,7 +3017,7 @@ class StatusLabelResolutionCliTests(unittest.TestCase):
             self.assertFalse(payload["paused"])
             self.assertEqual("status", payload["command"])
             self.assertEqual("ambiguous-plan", payload["reason"])
-            self.assertEqual("dup-label", payload["plan_dir"])
+            self.assertEqual("dup-label", payload["plan_reference"])
             expected_candidates = sorted(
                 [
                     str(plans.canonicalize_path(first)),
@@ -3065,7 +3066,7 @@ class StatusLabelResolutionCliTests(unittest.TestCase):
             payload = json.loads(completed.stdout)
             self.assertFalse(payload["ok"])
             self.assertEqual("state-error", payload["reason"])
-            self.assertEqual("some-label", payload["plan_dir"])
+            self.assertEqual("some-label", payload["plan_reference"])
 
     def test_status_help_advertises_plan_dir_or_id(self) -> None:
         parser = cli.build_parser(prog="asl")

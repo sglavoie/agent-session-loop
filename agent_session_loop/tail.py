@@ -225,6 +225,41 @@ def _mailbox_message(payload: dict[str, Any]) -> str:
         if turn_index is not None:
             details.append(f"turn {turn_index}")
         return f"mailbox: guidance observed ({', '.join(details)})"
+    if action == events.MAILBOX_ACTION_WAIT_STARTED:
+        details = [
+            f"question {payload.get('question_id', 'unknown')}",
+            f"session {_format_session_label(payload)}",
+            f"turn {payload.get('turn_index', 'unknown')}",
+            f"pending outbox {payload.get('pending_outbox', 'unknown')}",
+            f"base deadline {payload.get('base_deadline', 'unknown')}",
+            f"hard deadline {payload.get('hard_deadline', 'unknown')}",
+        ]
+        lease_activity = payload.get("last_lease_activity_at")
+        if lease_activity is not None:
+            details.append(f"last lease activity {lease_activity}")
+        return f"mailbox: reply wait started ({', '.join(details)})"
+    if action == events.MAILBOX_ACTION_WAIT_CLEARED:
+        details = [
+            f"question {payload.get('question_id', 'unknown')}",
+            f"session {_format_session_label(payload)}",
+            f"turn {payload.get('turn_index', 'unknown')}",
+            f"reason {payload.get('reason', 'unknown')}",
+            f"pending outbox {payload.get('pending_outbox', 'unknown')}",
+        ]
+        return f"mailbox: reply wait cleared ({', '.join(details)})"
+    if action == events.MAILBOX_ACTION_WAIT_PREPARATION_FAILED:
+        details = [
+            f"reason {payload.get('reason', 'unknown')}",
+            f"session {_format_session_label(payload)}",
+            f"turn {payload.get('turn_index', 'unknown')}",
+        ]
+        run_id = payload.get("run_id")
+        if run_id is not None:
+            details.append(f"run {run_id}")
+        return (
+            "mailbox: reply wait preparation failed "
+            f"({', '.join(details)})"
+        )
     return f"mailbox: {action}"
 
 

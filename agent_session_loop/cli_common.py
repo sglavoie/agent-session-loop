@@ -34,7 +34,11 @@ def print_error(
     details: dict[str, Any] | None = None,
     hint: str | None = None,
 ) -> None:
-    """Print one deterministic error using the common command envelope."""
+    """Print one deterministic error using the common command envelope.
+
+    ``plan_reference`` is always the unresolved token supplied by the caller;
+    successful command payloads reserve ``plan_dir`` for the canonical path.
+    """
     if args.json:
         responses.print_json(
             responses.error_payload(
@@ -43,7 +47,7 @@ def print_error(
                 error=error,
                 paused=False,
                 details=details,
-                plan_dir=str(args.plan_dir),
+                plan_reference=str(args.plan_dir),
             )
         )
         return

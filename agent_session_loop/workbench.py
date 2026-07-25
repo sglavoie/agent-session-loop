@@ -2633,7 +2633,10 @@ def _build_recovery_context(
     )
     lock_path = state.lock_path_for_plan(snapshot.plan_dir, state_dir)
     lock_info = state._read_lock_path(lock_path, snapshot.plan_dir)
-    runner_state = state._runner_state_payload(state_path)
+    runner_state = state._runner_state_payload(
+        state_path,
+        lock_info=lock_info,
+    )
     raw_state, warnings, warning_details = _read_recovery_state_payload(state_path)
     stale_unfinished, stale_reason = state._stale_runner_state(
         runner_state, lock_info
@@ -2667,6 +2670,28 @@ def _build_recovery_context(
         warning_details=warning_details,
         review_resume=review_resume,
     )
+
+
+def _expired_wait_qna_context(
+    snapshot: plans.PlanSnapshot,
+    runner_state: Mapping[str, Any],
+    state_dir: str | Path | None,
+) -> qna.QnAContext | None:
+    """Load the CLI's recovery projection for a nonterminal expired wait."""
+    if runner_state.get("paused") is True:
+        return None
+    if (
+        runner_state.get("waiting_for_reply_status")
+        != state.WAITING_FOR_REPLY_STATUS_EXPIRED
+    ):
+        return None
+    try:
+        context = qna.load_qna_context(snapshot.plan_dir, state_dir=state_dir)
+    except qna.QnAError:
+        return None
+    if context.pause_reason != qna.EXPIRED_WAIT_PAUSE_REASON:
+        return None
+    return context
 
 
 _RECOVERY_ARTIFACT_FIELDS: tuple[tuple[str, str, str], ...] = (
@@ -4174,6 +4199,21 @@ def build_workbench_recovery(
         )
 
     context = _build_recovery_context(snapshot, state_dir)
+    expired_wait_context = _expired_wait_qna_context(
+        snapshot,
+        context.runner_state,
+        state_dir,
+    )
+    if expired_wait_context is not None:
+        context = replace(
+            context,
+            pause_reason=expired_wait_context.pause_reason,
+            pause_details=expired_wait_context.pause_details,
+            pause_message=(
+                expired_wait_context.pause_message
+                or qna.EXPIRED_WAIT_PAUSE_REASON
+            ),
+        )
 
     active_turn = _payload_mapping(context.raw_state, "active_turn")
     active_verification = _payload_mapping(context.raw_state, "active_verification")
@@ -4186,6 +4226,9 @@ def build_workbench_recovery(
     reason = context.pause_reason
     details = context.pause_details
     recovery_kind = _pause_reason_recovery_kind(reason)
+
+    if expired_wait_context is not None:
+        return _build_reply_needed_recovery(context, reason=reason)
 
     if context.runner_state.get("paused") is True:
         if reason == events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR:
@@ -4337,7 +4380,8 @@ def build_workbench_summary(
     1. ``invalid`` - plan directory missing or unparseable.
     2. ``verifying`` - active lock and ``active_verification`` set.
     3. ``running`` - active lock and ``active_turn`` set.
-    4. ``paused-for-reply`` - runner state ``paused=True``.
+    4. ``paused-for-reply`` - runner state ``paused=True`` or an expired
+       nonterminal reply wait can be resumed with an operator answer.
     5. ``failed`` - finished run with ``ok=False``.
     6. ``stale`` - stale lock or stale-unfinished runner state.
     7. ``recent`` - review continuation is ready despite zero pending sessions.
@@ -4374,7 +4418,15 @@ def build_workbench_summary(
     ).to_payload()
     lock_path = state.lock_path_for_plan(snapshot.plan_dir, state_dir)
     lock_info = state._read_lock_path(lock_path, snapshot.plan_dir)
-    runner_state = state._runner_state_payload(state_path)
+    runner_state = state._runner_state_payload(
+        state_path,
+        lock_info=lock_info,
+    )
+    expired_wait_context = _expired_wait_qna_context(
+        snapshot,
+        runner_state,
+        state_dir,
+    )
     stale_unfinished, stale_reason = state._stale_runner_state(
         runner_state, lock_info
     )
@@ -4552,7 +4604,7 @@ def build_workbench_summary(
             ),
         )
 
-    if runner_state.get("paused") is True:
+    if runner_state.get("paused") is True or expired_wait_context is not None:
         pause_reason = (
             runner_state.get("pause_reason")
             or runner_state.get("reason")
@@ -4609,7 +4661,10 @@ def build_workbench_summary(
             (runner_state.get("run_started_at"), "run-started"),
         ))
         try:
-            context = qna.load_qna_context(snapshot.plan_dir, state_dir=state_dir)
+            context = expired_wait_context or qna.load_qna_context(
+                snapshot.plan_dir,
+                state_dir=state_dir,
+            )
         except qna.QnAError as error:
             warnings.append(
                 f"paused-q&a context unreadable ({error.reason}): {error.error}"

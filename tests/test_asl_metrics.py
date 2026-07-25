@@ -273,6 +273,40 @@ class MetricsCollectionTests(unittest.TestCase):
         self.assertEqual(1, report.pauses["classified_never_retry"])
         self.assertEqual(1, report.pauses["classified_retryable"])
 
+    def test_answered_mailbox_wait_does_not_count_as_a_pause(self) -> None:
+        state_dir = _make_state_dir(
+            self.state_root, self.tmp_path / "plan-mailbox-reply"
+        )
+        question_id = "00000000-0000-0000-0000-000000000010"
+        _append_event(
+            state_dir,
+            created_at=_iso(self.now, hours_ago=2),
+            name=events.MAILBOX_EVENT,
+            payload={
+                "action": events.MAILBOX_ACTION_WAIT_STARTED,
+                "question_id": question_id,
+                "session_id": "1",
+                "turn_index": 1,
+            },
+        )
+        _append_event(
+            state_dir,
+            created_at=_iso(self.now, hours_ago=1),
+            name=events.REPLY_PROVIDED_EVENT,
+            payload={
+                "session_id": "1",
+                "turn_index": 2,
+                "source": {
+                    "origin": "mailbox",
+                    "question_id": question_id,
+                },
+            },
+        )
+
+        report = self._collect()
+        self.assertEqual(0, report.pauses["total"])
+        self.assertEqual({}, report.pauses["by_reason"])
+
     def test_agent_mux_failures_are_visible_without_changing_lifecycle_metrics(
         self,
     ) -> None:

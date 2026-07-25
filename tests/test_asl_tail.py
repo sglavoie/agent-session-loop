@@ -168,6 +168,96 @@ class TailFollowerTests(unittest.TestCase):
             message,
         )
 
+    def test_mailbox_wait_started_event_renders_as_nonterminal_wait(self) -> None:
+        message = tail._event_message(
+            events.MAILBOX_EVENT,
+            {
+                "action": events.MAILBOX_ACTION_WAIT_STARTED,
+                "question_id": "question-1",
+                "session_id": "9",
+                "turn_index": 3,
+                "pending_outbox": 2,
+                "base_deadline": "2026-07-24T12:05:00+00:00",
+                "hard_deadline": "2026-07-24T12:15:00+00:00",
+                "last_lease_activity_at": "2026-07-24T12:01:00+00:00",
+            },
+        )
+
+        self.assertEqual(
+            "mailbox: reply wait started "
+            "(question question-1, session 9, turn 3, "
+            "pending outbox 2, "
+            "base deadline 2026-07-24T12:05:00+00:00, "
+            "hard deadline 2026-07-24T12:15:00+00:00, "
+            "last lease activity 2026-07-24T12:01:00+00:00)",
+            message,
+        )
+        self.assertNotIn("paused", message)
+
+    def test_mailbox_wait_cleared_event_renders_reason_and_count(self) -> None:
+        message = tail._event_message(
+            events.MAILBOX_EVENT,
+            {
+                "action": events.MAILBOX_ACTION_WAIT_CLEARED,
+                "question_id": "question-1",
+                "session_id": "9",
+                "turn_index": 3,
+                "reason": "supervisor-lost",
+                "pending_outbox": 2,
+            },
+        )
+
+        self.assertEqual(
+            "mailbox: reply wait cleared "
+            "(question question-1, session 9, turn 3, "
+            "reason supervisor-lost, pending outbox 2)",
+            message,
+        )
+        self.assertNotIn("paused", message)
+
+    def test_mailbox_wait_preparation_failed_renders_reason_and_identity(
+        self,
+    ) -> None:
+        message = tail._event_message(
+            events.MAILBOX_EVENT,
+            {
+                "action": events.MAILBOX_ACTION_WAIT_PREPARATION_FAILED,
+                "reason": "expired",
+                "session_id": "9",
+                "turn_index": 3,
+                "run_id": "run-abc",
+            },
+        )
+
+        self.assertEqual(
+            "mailbox: reply wait preparation failed "
+            "(reason expired, session 9, turn 3, run run-abc)",
+            message,
+        )
+
+    def test_every_mailbox_action_has_a_specific_tail_renderer(self) -> None:
+        payload = {
+            "message_id": "message-1",
+            "seq": 1,
+            "length": 12,
+            "digest": "abc123",
+            "session_id": "1",
+            "turn_index": 1,
+            "question_id": "question-1",
+            "pending_outbox": 0,
+            "base_deadline": "base",
+            "hard_deadline": "hard",
+            "reason": "expired",
+            "run_id": "run-abc",
+        }
+
+        for action in events.MAILBOX_ACTIONS:
+            with self.subTest(action=action):
+                rendered = tail._mailbox_message(
+                    {"action": action, **payload}
+                )
+                self.assertNotEqual(f"mailbox: {action}", rendered)
+
     def cleanup_follower(self, follower: tail.TailFollower) -> None:
         follower.stop()
         follower.join(1.0)

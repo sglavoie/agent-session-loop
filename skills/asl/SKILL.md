@@ -12,7 +12,9 @@ Supervise a single `asl run` invocation from start to finish. The user hands
 this skill the exact `asl run ...` command they would type; the skill runs the
 bundled helper, which starts or attaches to the run, polls `asl status --json`,
 streams concise progress, and stops for a human answer only when the run pauses
-on an interactive decision it cannot resolve.
+on an interactive decision it cannot resolve. Unless the command carries
+`--no-mailbox`, it establishes a supervisor lease before launch, discovers live
+worker questions, and keeps supervising while the runner waits for a reply.
 
 The helper owns command parsing, safety rejection, run start/attach/poll, pause
 detection and the recoverable-pause retry budget (see payload `pause_policy`),
@@ -40,6 +42,9 @@ flags — including `--max-review-fix-cycles N` (deprecated alias
 `--max-review-fix-plans N`), which bounds the runner's own repair/rereview
 cycles. Shell operators, pipes, redirects, `--dry-run`, and user-supplied
 `--reply` / `--reply-stdin` are not accepted — the helper owns resume behavior.
+`--no-mailbox` is accepted and disables watcher construction, lease writes,
+live guidance, and mailbox question/reply continuation for both launch and
+attach behavior.
 
 `--max-sessions N` is a **global** budget: the helper stops the whole supervised
 run after `N` implementation sessions have completed, not `N` per relaunch. With
@@ -68,6 +73,32 @@ to a `WARN possibly stalled` line once idle time crosses the stall threshold. To
 override the runner's cycle cap at launch, include `--max-review-fix-cycles N`
 inside the `--command` string (`0` still reviews but creates no repair sessions).
 
+With mailbox supervision enabled, the helper writes a fresh fixed-size lease
+before starting the child, polls questions every five seconds, and renews the
+lease every 30 seconds using the existing child/attach wait loops—no watcher
+thread is added. A question appears on stderr as one bounded, JSON-escaped
+`QUESTION id=... preview=...` record; its complete body is retained in the
+final structured `outbox`. The watcher keeps one physical-sequence cursor
+across attach and self-launch transitions, then stops renewing and lets the
+lease expire when supervision returns.
+
+#### Send live guidance or future-turn controls
+
+The helper owns the foreground, so send live commands from a separate shell (or
+start it in the background):
+
+```text
+asl inbox guidance <plan-dir> --text '<guidance>' [--state-dir DIR] --json
+asl control set-model <plan-dir> [--harness codex|claude|copilot] --harness-model MODEL [--effort EFFORT] [--state-dir DIR] --json
+```
+
+Guidance may steer implementation decisions inside the selected session, but
+cannot override its fixed scope, completion contract, safety requirements, or
+runner-owned mutation rules. It remains pending until the worker runs
+`asl inbox read`. Model/effort controls are observed on the five-second control
+cadence but affect only the next implementation invocation in the current
+runner process; they never modify the active subprocess or a review turn.
+
 #### Request a graceful stop mid-run
 
 To stop a supervised run early without waiting for it to finish, request the
@@ -93,6 +124,27 @@ it; re-running the same command later continues from the remaining sessions.
 See Step 4.
 
 ### Step 2: Handle pauses
+
+First distinguish a live mailbox question from a terminal pause. A
+`QUESTION id=...` progress record and `waiting_for_reply` status are
+nonterminal, healthy bounded activity. Infer an answer only under the same
+discipline below, then submit it from a separate shell:
+
+```text
+asl inbox reply <plan-dir> --to <question-id> --text '<answer>' [--state-dir DIR] --json
+```
+
+Use `--text-stdin` when the answer should not appear in argv. The first
+concurrent reply wins, and the runner consumes it once to continue the same
+session. Do not stop the helper, invoke `--reply-stdin`, or report a terminal
+pause while this live wait is active. The runner waits five minutes initially.
+Lease freshness is checked only at an active deadline: a fresh lease extends
+the wait by 60 seconds, while an absent or stale lease ends it. The runner
+never waits beyond 15 minutes. An already-committed reply takes precedence over
+mailbox exhaustion and is delivered even when the mailbox is full. If no reply
+is available, timeout, mailbox fullness/unavailability, or a stale lease at an
+active deadline falls back to the existing terminal pause flow below; there is
+no mailbox-only terminal status.
 
 Retry mechanics are helper-owned — see the result payload's `pause_policy`.
 The helper auto-retries recoverable same-session pauses (`verify-failed`, `transport-failed`, `timeout`, `no-status-change`) up to twice per session and reason. Only `transport-failed` backs off before relaunching (5 seconds, then 30 seconds); the other recoverable pauses retry immediately. An unclassified `nonzero-exit` pause is never retried. When a pause genuinely needs an answer, the result carries `reason: needs_agent_reply` with a `questions` block holding the resolver prompt, the paused agent's last message, the pause metadata, and artifact paths.
@@ -174,3 +226,7 @@ that re-running the same command continues from the remaining sessions.
   this skill never creates follow-up fix plans.
 - Keep the Q&A discipline: infer only clearly defensible replies from the
   plan/repo/artifacts; otherwise relay the question and ask the user.
+- Mailbox failure is fail-open for supervision: continue owning the child and
+  let the runner use the ordinary pause/resume flow. Never invent a mailbox
+  reply, truncate the append-only log, delete a lease, or add Workbench
+  mailbox/model-control endpoints.

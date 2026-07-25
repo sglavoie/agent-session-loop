@@ -1017,11 +1017,8 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Append implementation guidance for the active worker.",
     )
     _add_plan_reference_args(inbox_guidance_parser)
-    guidance_text = inbox_guidance_parser.add_mutually_exclusive_group(
-        required=True
-    )
-    guidance_text.add_argument("--text", help="Guidance body")
-    guidance_text.add_argument(
+    inbox_guidance_parser.add_argument("--text", help="Guidance body")
+    inbox_guidance_parser.add_argument(
         "--text-stdin",
         action="store_true",
         help="Read the guidance body from standard input",
@@ -1041,9 +1038,8 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         metavar="QUESTION_ID",
         help="Question UUID to answer",
     )
-    reply_text = inbox_reply_parser.add_mutually_exclusive_group(required=True)
-    reply_text.add_argument("--text", help="Reply body")
-    reply_text.add_argument(
+    inbox_reply_parser.add_argument("--text", help="Reply body")
+    inbox_reply_parser.add_argument(
         "--text-stdin",
         action="store_true",
         help="Read the reply body from standard input",
@@ -1071,13 +1067,12 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Append or resume a worker question and optionally wait for a reply.",
     )
     _add_plan_reference_args(ask_parser)
-    question_source = ask_parser.add_mutually_exclusive_group(required=True)
-    question_source.add_argument(
+    ask_parser.add_argument(
         "text",
         nargs="?",
         help="New question body",
     )
-    question_source.add_argument(
+    ask_parser.add_argument(
         "--question-id",
         metavar="QUESTION_ID",
         help="Resume an existing question without appending it again",
@@ -1090,9 +1085,12 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     ask_parser.add_argument(
         "--wait-timeout",
         type=float,
-        default=90.0,
+        default=None,
         metavar="SECONDS",
-        help="Reply wait timeout in seconds (default: 90; maximum: 900)",
+        help=(
+            "Reply wait timeout in seconds; requires --wait "
+            "(default: 90; maximum: 900)"
+        ),
     )
     ask_parser.set_defaults(handler_ref="mailbox_cli:ask_from_args")
 

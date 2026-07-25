@@ -18,7 +18,15 @@ import shlex
 import sys
 from typing import Any
 
-from . import artifacts, config, events, harnesses, pause_policy, plans, responses
+from . import (
+    artifacts,
+    config,
+    events,
+    harnesses,
+    pause_policy,
+    plans,
+    responses,
+)
 from .formatting import format_duration_seconds
 
 
@@ -27,6 +35,14 @@ RUNS_DIR_NAME = "runs"
 RESULT_FILE_NAME = "result.json"
 TURN_DIR_PREFIX = "turn-"
 STATE_MIGRATED_EVENT = "state_migrated"
+WAITING_FOR_REPLY_STATUS_LIVE = "live"
+WAITING_FOR_REPLY_STATUS_EXPIRED = "expired"
+WAITING_FOR_REPLY_STATUS_INVALID = "invalid"
+WAITING_FOR_REPLY_STATUSES: tuple[str, ...] = (
+    WAITING_FOR_REPLY_STATUS_LIVE,
+    WAITING_FOR_REPLY_STATUS_EXPIRED,
+    WAITING_FOR_REPLY_STATUS_INVALID,
+)
 
 # state.json path fields the migration rewrites to point at the new state dir.
 # ``event_path`` is the legacy duplicate of ``events_path``; both are rewritten
@@ -542,7 +558,40 @@ def _lock_payload(lock_info: LockInfo | None, lock_path: Path) -> dict[str, Any]
     }
 
 
-def _runner_state_payload(state_path: Path) -> dict[str, Any]:
+def waiting_for_reply_status(
+    waiting_for_reply: dict[str, Any],
+    *,
+    lock_info: LockInfo | None,
+    now: datetime | None = None,
+) -> str:
+    """Classify whether a persisted wait still has a runner to accept a reply."""
+    raw_deadline = waiting_for_reply.get("hard_deadline")
+    if not isinstance(raw_deadline, str) or not raw_deadline.strip():
+        return WAITING_FOR_REPLY_STATUS_INVALID
+    deadline_text = raw_deadline.strip()
+    if deadline_text.endswith("Z"):
+        deadline_text = deadline_text[:-1] + "+00:00"
+    try:
+        hard_deadline = datetime.fromisoformat(deadline_text)
+    except ValueError:
+        return WAITING_FOR_REPLY_STATUS_INVALID
+    if hard_deadline.tzinfo is None:
+        hard_deadline = hard_deadline.replace(tzinfo=timezone.utc)
+    resolved_now = now if now is not None else datetime.now(timezone.utc)
+    if resolved_now.tzinfo is None:
+        resolved_now = resolved_now.replace(tzinfo=timezone.utc)
+    if hard_deadline <= resolved_now:
+        return WAITING_FOR_REPLY_STATUS_EXPIRED
+    if lock_info is None or not lock_info.active:
+        return WAITING_FOR_REPLY_STATUS_EXPIRED
+    return WAITING_FOR_REPLY_STATUS_LIVE
+
+
+def _runner_state_payload(
+    state_path: Path,
+    *,
+    lock_info: LockInfo | None,
+) -> dict[str, Any]:
     if not state_path.exists():
         return {
             "present": False,
@@ -551,6 +600,7 @@ def _runner_state_payload(state_path: Path) -> dict[str, Any]:
             "active_turn": None,
             "active_verification": None,
             "waiting_for_reply": None,
+            "waiting_for_reply_status": None,
         }
 
     try:
@@ -566,6 +616,7 @@ def _runner_state_payload(state_path: Path) -> dict[str, Any]:
             "active_turn": None,
             "active_verification": None,
             "waiting_for_reply": None,
+            "waiting_for_reply_status": None,
         }
     except (OSError, json.JSONDecodeError) as error:
         return {
@@ -575,6 +626,7 @@ def _runner_state_payload(state_path: Path) -> dict[str, Any]:
             "active_turn": None,
             "active_verification": None,
             "waiting_for_reply": None,
+            "waiting_for_reply_status": None,
         }
 
     if not isinstance(raw, dict):
@@ -585,6 +637,7 @@ def _runner_state_payload(state_path: Path) -> dict[str, Any]:
             "active_turn": None,
             "active_verification": None,
             "waiting_for_reply": None,
+            "waiting_for_reply_status": None,
         }
 
     active_turn = raw.get("active_turn")
@@ -598,6 +651,11 @@ def _runner_state_payload(state_path: Path) -> dict[str, Any]:
     waiting_for_reply = raw.get("waiting_for_reply")
     if not isinstance(waiting_for_reply, dict):
         waiting_for_reply = None
+    waiting_status = (
+        waiting_for_reply_status(waiting_for_reply, lock_info=lock_info)
+        if waiting_for_reply is not None
+        else None
+    )
 
     # Prefer the pause_policy block the runner persisted alongside the pause;
     # fall back to classifying the reason for older state files that predate it,
@@ -624,6 +682,7 @@ def _runner_state_payload(state_path: Path) -> dict[str, Any]:
         "active_turn": active_turn,
         "active_verification": active_verification,
         "waiting_for_reply": waiting_for_reply,
+        "waiting_for_reply_status": waiting_status,
     }
 
 
@@ -900,7 +959,7 @@ def status_payload(
     lock_path = lock_path_for_plan(snapshot.plan_dir, state_dir)
     lock_info = _read_lock_path(lock_path, snapshot.plan_dir)
     next_pending = snapshot.next_pending
-    runner_state = _runner_state_payload(state_path)
+    runner_state = _runner_state_payload(state_path, lock_info=lock_info)
     stale_unfinished, stale_reason = _stale_runner_state(runner_state, lock_info)
     runner_state["stale_unfinished"] = stale_unfinished
     runner_state["stale_reason"] = stale_reason
@@ -924,6 +983,9 @@ def status_payload(
         active_turn=runner_state.get("active_turn"),
         active_verification=runner_state.get("active_verification"),
         waiting_for_reply=runner_state.get("waiting_for_reply"),
+        waiting_for_reply_status=runner_state.get(
+            "waiting_for_reply_status"
+        ),
         mailbox=mailbox_status,
         counts=_status_counts(snapshot),
         next_pending=(
@@ -1078,6 +1140,7 @@ def _print_text_status(payload: dict[str, Any]) -> None:
 
     waiting_for_reply = payload.get("waiting_for_reply")
     if isinstance(waiting_for_reply, dict):
+        waiting_status = payload.get("waiting_for_reply_status") or "unknown"
         question_id = waiting_for_reply.get("question_id") or "unknown"
         print(
             "Waiting for reply: "
@@ -1094,6 +1157,7 @@ def _print_text_status(payload: dict[str, Any]) -> None:
                 f"base {base_deadline or 'unknown'}, "
                 f"hard {hard_deadline or 'unknown'}"
             )
+        print(f"  Status: {waiting_status}")
 
     print("Sessions:")
     for session in payload["sessions"]:
@@ -1156,7 +1220,7 @@ def status_from_args(args: argparse.Namespace) -> int:
                             str(candidate) for candidate in error.candidates
                         ],
                     },
-                    plan_dir=str(args.plan_dir),
+                    plan_reference=str(args.plan_dir),
                 )
             )
         else:
@@ -1179,7 +1243,7 @@ def status_from_args(args: argparse.Namespace) -> int:
                     reason=reason,
                     error=str(error),
                     paused=False,
-                    plan_dir=str(args.plan_dir),
+                    plan_reference=str(args.plan_dir),
                 )
             )
         else:

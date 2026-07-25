@@ -704,7 +704,14 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
                 details={"plan_dir": str(canonical)},
             )
             return
-        payload = state._runner_state_payload(state_path)
+        lock_info = state._read_lock_path(
+            plan_state / state.LOCK_FILE_NAME,
+            snapshot.plan_dir,
+        )
+        payload = state._runner_state_payload(
+            state_path,
+            lock_info=lock_info,
+        )
         next_pending = snapshot.next_pending
         self._send_success(
             reason="ok",
@@ -928,7 +935,14 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
     def _handle_verification(self, *, query: Mapping[str, list[str]]) -> None:
         canonical, plan_state = self._resolve_plan_state(query)
         state_path = plan_state / events_module.STATE_FILE_NAME
-        runner_state = state._runner_state_payload(state_path)
+        lock_info = state._read_lock_path(
+            plan_state / state.LOCK_FILE_NAME,
+            canonical,
+        )
+        runner_state = state._runner_state_payload(
+            state_path,
+            lock_info=lock_info,
+        )
         self._send_success(
             reason="ok",
             plan_dir=str(canonical),

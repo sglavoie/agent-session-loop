@@ -2418,21 +2418,95 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertIn("1 unanswered questions", output)
             self.assertIn("Mailbox lease: fresh", output)
 
-    def test_status_payload_surfaces_full_and_malformed_mailboxes(self) -> None:
+    def test_min_append_bytes_matches_generated_acknowledgement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("pending",))
-            mailbox.append_guidance(plan_dir, "x", state_dir=state_dir)
+            message_id = "00000000-0000-4000-8000-000000000001"
+            now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+            created_at = "2026-07-25T12:00:00.000000+00:00"
 
-            with mock.patch.object(mailbox, "MAILBOX_MAX_BYTES", 1):
-                full_payload = state.status_payload(
-                    plans.inspect_plan(plan_dir), state_dir
+            with (
+                mock.patch.object(mailbox, "_new_id", return_value=message_id),
+                mock.patch.object(mailbox, "_utc_now", return_value=now),
+            ):
+                appended = mailbox.append_acknowledgement(
+                    plan_dir,
+                    0,
+                    state_dir=state_dir,
                 )
+
+            mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
+            self.assertEqual(message_id, appended.id)
+            self.assertEqual(created_at, appended.created_at)
+            self.assertEqual(
+                mailbox.MAILBOX_MIN_APPEND_BYTES,
+                len(mailbox_path.read_bytes()),
+            )
+
+    def test_status_payload_surfaces_exhausted_and_malformed_mailboxes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            created_at = "0001-01-01T00:00:00+00:00"
+            message_id = "00000000-0000-4000-8000-000000000001"
+            empty_text_record = {
+                "created_at": created_at,
+                "id": message_id,
+                "kind": mailbox.KIND_GUIDANCE,
+                "text": "",
+                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+            }
+            record_overhead = len(
+                json.dumps(
+                    empty_text_record,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+                + b"\n"
+            )
+            target_size = (
+                mailbox.MAILBOX_MAX_BYTES
+                - mailbox.MAILBOX_MIN_APPEND_BYTES
+                + 1
+            )
+            mailbox.append_guidance(
+                plan_dir,
+                "x" * (target_size - record_overhead),
+                state_dir=state_dir,
+                message_id=message_id,
+                created_at=created_at,
+            )
+
+            exhausted_view = mailbox.read_mailbox(
+                plan_dir,
+                state_dir=state_dir,
+            )
+            self.assertEqual(target_size, exhausted_view.size_bytes)
+            self.assertTrue(exhausted_view.full)
+            for append in (mailbox.append_guidance, mailbox.append_question):
+                with self.assertRaises(mailbox.MailboxError) as raised:
+                    append(plan_dir, "x", state_dir=state_dir)
+                self.assertEqual(
+                    mailbox.ERROR_MAILBOX_FULL,
+                    raised.exception.reason,
+                )
+
+            full_payload = state.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
 
             full_status = full_payload["mailbox"]
             self.assertTrue(full_status["full"])
-            self.assertEqual(1, full_status["max_bytes"])
+            self.assertEqual(target_size, full_status["size_bytes"])
+            self.assertEqual(
+                mailbox.MAILBOX_MAX_BYTES,
+                full_status["max_bytes"],
+            )
 
             mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
             mailbox_path.write_text("not-json\n", encoding="utf-8")
@@ -2532,6 +2606,10 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertEqual(
                 waiting, payload["runner_state"]["waiting_for_reply"]
             )
+            self.assertEqual(
+                state.WAITING_FOR_REPLY_STATUS_EXPIRED,
+                payload["waiting_for_reply_status"],
+            )
             self.assertTrue(payload["runner_state"]["paused"])
             self.assertEqual(
                 "blocked", payload["runner_state"]["pause_policy"]["reason"]
@@ -2549,6 +2627,86 @@ class ParserAndStateTests(unittest.TestCase):
                 "Deadlines: base 2026-07-24T12:05:00+00:00, "
                 "hard 2026-07-24T12:15:00+00:00",
                 output,
+            )
+
+    def test_status_projects_live_waiting_as_nonterminal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            plan_state.mkdir(parents=True)
+            waiting = {
+                "question_id": "question-1",
+                "session": 1,
+                "session_id": "1",
+                "turn_index": 2,
+                "started_at": "2999-07-24T12:00:00+00:00",
+                "base_deadline": "2999-07-24T12:05:00+00:00",
+                "hard_deadline": "2999-07-24T12:15:00+00:00",
+                "last_lease_activity_at": None,
+            }
+            (plan_state / events.STATE_FILE_NAME).write_text(
+                json.dumps(
+                    {
+                        "run_id": "run-1",
+                        "ok": True,
+                        "paused": False,
+                        "reason": "",
+                        "run_started_at": "2026-07-24T11:59:00+00:00",
+                        "run_finished_at": None,
+                        "waiting_for_reply": waiting,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            lock_info = state.acquire_lock(plan_dir, state_dir)
+
+            try:
+                payload = state.status_payload(
+                    plans.inspect_plan(plan_dir),
+                    state_dir,
+                )
+            finally:
+                state.release_lock(plan_dir, state_dir)
+
+            self.assertEqual(waiting, payload["waiting_for_reply"])
+            self.assertEqual(
+                waiting, payload["runner_state"]["waiting_for_reply"]
+            )
+            self.assertTrue(lock_info.active)
+            self.assertEqual(
+                state.WAITING_FOR_REPLY_STATUS_LIVE,
+                payload["waiting_for_reply_status"],
+            )
+            self.assertTrue(payload["runner_state"]["ok"])
+            self.assertFalse(payload["runner_state"]["paused"])
+            self.assertIsNone(payload["runner_state"]["pause_policy"])
+
+    def test_runner_state_payload_requires_explicit_lock_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / events.STATE_FILE_NAME
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "waiting_for_reply": {
+                            "hard_deadline": "2999-07-24T12:15:00+00:00",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(TypeError, "lock_info"):
+                state._runner_state_payload(state_path)
+
+            payload = state._runner_state_payload(
+                state_path,
+                lock_info=None,
+            )
+            self.assertEqual(
+                state.WAITING_FOR_REPLY_STATUS_EXPIRED,
+                payload["waiting_for_reply_status"],
             )
 
     def test_status_payload_progress_journal_absent(self) -> None:

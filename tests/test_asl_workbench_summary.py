@@ -765,6 +765,65 @@ class WorkbenchSummaryTests(unittest.TestCase):
             self.assertEqual(1, len(summary.warnings))
             self.assertIn("paused-q&a context unreadable", summary.warnings[0])
 
+    def test_expired_wait_matches_qna_reply_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(tmp_path)
+            state_root = tmp_path / "state"
+            artifact_dir = state.plan_state_dir(plan_dir, state_root) / "runs"
+            artifact_dir.mkdir(parents=True)
+            last_message = artifact_dir / "last-message.txt"
+            last_message.write_text(
+                "Use the strict or lenient parser?\n",
+                encoding="utf-8",
+            )
+            _write_state_payload(
+                plan_dir,
+                state_root,
+                {
+                    "ok": False,
+                    "paused": False,
+                    "run_id": "20260724T120000Z-1",
+                    "harness": "claude",
+                    "run_started_at": "2026-07-24T12:00:00+00:00",
+                    "run_finished_at": None,
+                    "active_turn": None,
+                    "active_verification": None,
+                    "turns": [
+                        {
+                            "session_id": "1",
+                            "turn_index": 2,
+                            "last_message_path": str(last_message),
+                            "harness": "claude",
+                        }
+                    ],
+                    "waiting_for_reply": {
+                        "question_id": "question-2",
+                        "session_id": "1",
+                        "turn_index": 2,
+                        "started_at": "2026-07-24T12:00:00+00:00",
+                        "base_deadline": "2026-07-24T12:05:00+00:00",
+                        "hard_deadline": "2026-07-24T12:15:00+00:00",
+                        "last_lease_activity_at": None,
+                    },
+                },
+            )
+
+            qna_context = qna.load_qna_context(
+                plan_dir,
+                state_dir=state_root,
+            )
+            summary = workbench.build_workbench_summary(
+                _discovered(plan_dir),
+                state_dir=state_root,
+            )
+
+            self.assertEqual(qna.EXPIRED_WAIT_PAUSE_REASON, qna_context.pause_reason)
+            self.assertEqual("paused-for-reply", summary.primary_state)
+            self.assertEqual("reply", summary.recommended_action)
+            self.assertEqual(qna_context.pause_reason, summary.pause_reason)
+            self.assertEqual("reply-needed", summary.recovery["kind"])
+
     def test_failed_when_last_run_finished_with_ok_false(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

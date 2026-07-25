@@ -685,7 +685,8 @@ def scan_running_rows(
             )
             continue
         state_payload = state._runner_state_payload(
-            state_dir / STATE_JSON_NAME
+            state_dir / STATE_JSON_NAME,
+            lock_info=lock_info,
         )
         rows.append(
             _build_running_row(

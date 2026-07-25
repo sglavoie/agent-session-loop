@@ -322,7 +322,7 @@ stop-after-current request before all sessions complete exits successfully
 ## Commands
 
 ```text
-asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--review-harness codex|claude|copilot] [--review-harness-model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--max-pending-sessions N] [--max-review-fix-cycles N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--allow-not-loop-ready] [--reply TEXT|--reply-stdin] [--json] [--dry-run]
+asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--review-harness codex|claude|copilot] [--review-harness-model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--max-pending-sessions N] [--max-review-fix-cycles N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--no-mailbox] [--allow-not-loop-ready] [--reply TEXT|--reply-stdin] [--json] [--dry-run]
 asl preflight PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--max-pending-sessions N] [--mark-loop-ready] [--json]
 asl verify PLAN_DIR --session ID [--cwd REPO_ROOT] [--artifact-dir DIR] [--json]
 asl contract-check PLAN_DIR [--session ID] [--cwd REPO_ROOT] [--json]
@@ -344,11 +344,250 @@ asl ask PLAN_DIR_OR_ID (TEXT | --question-id QUESTION_ID) [--wait] [--wait-timeo
 asl outbox wait PLAN_DIR_OR_ID [--since SEQ] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl control stop-after-current PLAN_DIR_OR_ID [--state-dir DIR] [--json]
 asl control select-harness PLAN_DIR_OR_ID --harness codex|claude|copilot [--state-dir DIR] [--json]
+asl control set-model PLAN_DIR_OR_ID [--harness codex|claude|copilot] [--harness-model MODEL|--clear-harness-model] [--effort EFFORT|--clear-effort] [--state-dir DIR] [--json]
 asl unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
 asl compact-state PLAN_DIR [--state-dir DIR] [--apply] [--json]
 asl migrate-state PLAN_DIR --from OLD_PLAN_PATH [--state-dir DIR] [--apply] [--json]
 asl metrics [--since-days N] [--state-dir DIR] [--json]
 ```
+
+## Live Mailbox and Future-Turn Model Control
+
+ASL's optional mailbox lets a supervisor steer a running worker without
+changing the selected session or converting every question into a terminal
+pause. It adds exactly two files below the canonical per-plan state directory:
+
+- `mailbox.jsonl` is a non-destructive JSONL log containing only `guidance`,
+  `question`, `reply`, and worker `ack` records. Physical 1-based line number is
+  the durable sequence, including malformed lines. Appends are locked, the file
+  is never truncated or rotated in v1, and an append that would exceed 4 MiB
+  fails atomically with `mailbox-full`. The `full` field in `asl status --json`
+  reports exhaustion rather than exact cap equality: it becomes true when
+  fewer bytes remain than the smallest record produced with normal generated
+  metadata. Individual larger appends can fail before that exhaustion
+  threshold.
+- `mailbox-lease.json` is a separate, locked, fixed-size 512-byte supervisor
+  lease. It is fresh for 90 seconds after its UTC `updated_at`. Supervisor
+  long-polls and the Autopilot renew it every 30 seconds; stopping supervision
+  leaves the file in place to expire naturally.
+
+Both files are created and repaired to mode `0600`. They live under
+`<state-root>/<plan-path-sha256>/`; they are not stored in the plan directory
+or repository.
+
+### Activation and precedence
+
+A direct `asl run` resolves mailbox activation once, before its first turn. An
+existing `mailbox.jsonl` or a fresh supervisor lease enables the protocol.
+`asl run --no-mailbox` always wins and disables prompt guidance, mailbox
+polling, and live question/reply continuation even when either file exists.
+That flag is part of resumable run configuration, so `asl run --resume`
+preserves the opt-out. The Autopilot establishes its lease before launching or
+attaching unless its command includes `--no-mailbox`.
+
+Mailbox presence alone continues to activate prompt guidance, but a
+reply-capable pause starts a live question/reply wait only while a fresh
+supervisor lease exists. Without one, the runner records the ordinary terminal
+pause immediately instead of waiting for a reply that no supervisor can send.
+
+Mailbox or lease read/write failure never makes an implementation run fail.
+Activation and turn-start guidance reads degrade to the ordinary non-mailbox
+path; a question that cannot be appended or observed falls back to the existing
+terminal pause/resume workflow. A stale lease alone does not activate a direct
+run, but an existing mailbox log does, so unacknowledged guidance intentionally
+survives sessions and later runs at the same canonical plan path.
+
+Supervisor guidance has deliberately narrow precedence. It may change
+implementation choices inside the selected session, but it cannot override the
+fixed session, its scope, completion contract, safety requirements,
+runner-owned files, or runner-owned mutation rules. At each turn start the
+runner snapshots all pending guidance but renders at most the newest 20 pending
+guidance records. The complete pending-guidance subsection, including its
+notices and delimiters, has a 65,536-byte UTF-8 rendering budget. If either
+bound omits records, the packet reports the omission, states that the records
+remain pending and unacknowledged, and repeats the shell-safe `asl inbox read`
+command. Records omitted by the byte budget are dropped from the prompt in
+full rather than emitted as clipped JSON, and the notice identifies each
+omitted record by physical sequence and message ID. A record that cannot fit
+within the complete subsection on its own is omitted first. If the remaining
+records exceed the budget together, the runner then evicts the oldest remaining
+record until the subsection fits, predictably preserving the newest records
+that fit. Every rendered record remains one JSON object between fixed
+delimiters; newlines and prompt-like bodies remain JSON escaped. If no record
+fits, the packet labels the delimited block as intentionally empty instead of
+promising records below it. The worker must then run `asl inbox read` to merge
+newer guidance and acknowledge the snapshot.
+
+The text form of `asl inbox read` applies the same newest-20-record and
+65,536-byte complete-section limits. It reports record-cap and byte-budget
+omissions in-band using message sequence/ID references; an extreme identity
+list is compacted with its exact omitted count and boundary identities rather
+than making the output unbounded. The command still reads one complete,
+immutable pending snapshot. Unless `--peek` is supplied, its acknowledgement
+covers that full snapshot through the highest pending sequence, including
+records omitted only from text rendering. With `--peek`, or if the
+acknowledgement append fails, omitted records remain pending. Guidance appended
+concurrently after the immutable read also remains pending. The `--json`
+payload is not rendering-truncated and continues to return the complete
+snapshot.
+
+### Mailbox commands
+
+The five mailbox commands share normal plan-reference, `--state-dir`, and
+`--json` behavior:
+
+- `asl inbox guidance` appends supervisor guidance from exactly one of `--text`
+  or `--text-stdin` and renews the supervisor lease first.
+- `asl inbox reply` atomically appends the first reply to `--to QUESTION_ID`.
+  Concurrent later replies fail with `question-already-answered`; a missing
+  target fails with `question-not-found`.
+- `asl inbox read` returns pending guidance and, unless `--peek` is supplied,
+  appends an acknowledgement through the last guidance sequence in that
+  complete snapshot, even if text-mode rendering omits records under its shared
+  count or byte budget. If that acknowledgement cannot be appended because the
+  mailbox is full or unwritable, the read still succeeds and returns the
+  guidance with `acknowledged: false` plus an `acknowledgement_error`; the
+  guidance remains pending for later runs.
+- `asl ask` appends a worker question, or resumes an existing one with
+  `--question-id`. `--wait` polls for a reply for 90 seconds by default;
+  `--wait-timeout` accepts 0 through 900 seconds and requires `--wait`.
+  Supplying `--wait-timeout` alone fails with `reason: invalid-timeout`. An
+  unanswered bounded wait returns success with `timed_out: true`, allowing the
+  worker to reuse the same question ID or emit `RUNNER_PAUSE:` as a fallback.
+  The wait polls mailbox
+  metadata every two seconds and re-parses the append-only log only when its
+  metadata changes.
+- `asl outbox wait` lets a supervisor long-poll questions after the stateless
+  physical `--since` cursor. Its default timeout is 300 seconds, its maximum is
+  900, and `next_since` advances through every physical mailbox line so
+  guidance, acknowledgements, and malformed records cannot replay questions.
+  It polls mailbox metadata every five seconds and likewise re-parses only
+  after the log changes.
+
+In text mode, `asl inbox read`, `asl ask`, and `asl outbox wait` retain their
+human-readable record headers and command trailers but render each message as
+one ASCII JSON object between `BEGIN ASL MAILBOX MESSAGE JSONL` and
+`END ASL MAILBOX MESSAGE JSONL`. Newlines, non-ASCII characters, and
+prompt-like text therefore remain escaped inside the record. Their `--json`
+payloads are unchanged; in particular, inbox-read JSON remains complete even
+when its text form would apply the guidance rendering budget.
+
+With `--json`, failures use the common error envelope and the following stable
+`reason` values:
+
+- Message-input errors are `missing-text` when a required message body is
+  absent or blank, `invalid-text-source` when both `--text` and
+  `--text-stdin` are supplied, and `stdin-read-error` when standard input
+  cannot be read as strict UTF-8.
+- Question and wait-input errors are `invalid-question-source` when `asl ask`
+  receives neither or both question text and `--question-id`,
+  `invalid-target` when a reply target is not a valid question UUID,
+  `invalid-since` when the outbox cursor is not a non-negative integer, and
+  `invalid-timeout` when a timeout is outside 0 through 900 seconds or
+  `--wait-timeout` is supplied without `--wait`.
+- Mailbox-state errors are `question-not-found`,
+  `question-already-answered`, `mailbox-full`, `mailbox-read-error`, and
+  `mailbox-write-error`. Lease I/O errors are `lease-read-error` and
+  `lease-write-error`.
+- Plan resolution shared by all five commands reports `ambiguous-plan`,
+  `malformed-plan`, `state-error`, or `os-error`.
+
+Supervisor write and wait commands establish or renew a lease. The worker
+commands do not claim supervisor ownership.
+
+### Live reply wait and fallback
+
+When an enabled worker turn exits successfully with a reply-capable
+`RUNNER_PAUSE:`, the runner publishes one retry-stable question derived from
+plan/run/session/turn identity and enters additive `waiting_for_reply` state.
+This is live bounded activity, not a real pause: it emits
+`mailbox`/`wait-started`, but does not emit `run_paused`, release the run, or
+notify Agent Mux of a pause.
+
+The runner waits five minutes initially. Lease freshness is checked only at an
+active deadline. At that checkpoint, a fresh supervisor lease extends the wait by 60 seconds,
+never beyond the absolute 15-minute limit; an absent or stale
+lease ends the live wait. The runner polls the mailbox every two seconds and
+tolerates sustained mailbox or checkpoint lease I/O failure for ten seconds
+before falling back. A first reply starts an explicit one-shot continuation of
+the same session; even a queued stop-after-current is consumed only after that
+continuation completes. An already-committed reply takes precedence over
+mailbox exhaustion and is delivered even when the mailbox is full. Every
+continuation source—mailbox, `--reply`, or `--reply-stdin`—uses the same safe
+prompt representation under `### Operator reply`: one ASCII JSON object
+between `BEGIN ASL OPERATOR REPLY JSONL` and
+`END ASL OPERATOR REPLY JSONL`. The worker consumes only its `text` value;
+newlines, non-ASCII characters, prompt headings, and control-like text remain
+escaped inside that value and cannot create runner-owned lines. If no reply is
+available, timeout, a stale lease at an active deadline, a full/unavailable
+mailbox, or missing question context clears `waiting_for_reply` and records the
+same ordinary
+terminal pause the non-mailbox flow would have recorded.
+
+If the live wait cannot be prepared, the runner first emits an additive
+`mailbox`/`wait-preparation-failed` event with the run/session/turn identity
+and the preparation `reason`, then records the ordinary terminal pause without
+changing its reason, details, notification, or exit behavior. Non-fresh lease
+reasons are `missing`, `invalid-size`, `empty`, `invalid-json`, `not-object`,
+`unsupported-version`, `invalid-supervisor-id`, `invalid-updated-at`,
+`future-updated-at`, and `expired`. I/O, capacity, and context reasons are
+`lease-read-error`, `mailbox-full`, `mailbox-read-error`,
+`mailbox-write-error`, `no-paused-run`, `missing-question-context`, and
+`reply-context-mismatch`.
+
+The `mailbox`/`wait-cleared` event reports why the live wait ended. Its reason
+is `reply` when an answer arrived, `timeout` only when the absolute hard
+deadline was reached, and `supervisor-lost` when the active deadline found an
+absent, stale, or otherwise non-fresh supervisor lease. Other fallback paths
+preserve their specific error reason, such as `mailbox-full`,
+`mailbox-read-error`, `lease-read-error`, or `missing-question-context`;
+an unexpected wait failure reports `error`.
+
+### Future implementation model control
+
+`asl control set-model` uses the existing consume-once control queue. At least
+one set/clear operation is required. `--harness` targets a specific
+implementation harness; when omitted, the runner resolves the target while
+draining accepted commands, after any earlier `select-harness` command in the
+same queue batch. `--harness-model` and `--effort` install process-local
+overrides; `--clear-harness-model` and `--clear-effort` return the target to the
+original run flag or native default.
+
+Controls are drained between turns and every five seconds during active
+implementation and review subprocesses. They never mutate an active
+subprocess: the resolved model and effort are snapshotted when the next
+implementation invocation starts. Overrides remain available to later
+implementation turns in the current runner process only, disappear when that
+process exits, and never affect generated review turns.
+
+### Surface and observability accounting
+
+The v1 net surface is two mailbox state files, five mailbox commands, one
+model-control command, and one `mailbox` event name with
+`guidance-observed`, `wait-preparation-failed`, `wait-started`, and
+`wait-cleared` action variants.
+It adds no runner or
+supervisor threads and no terminal statuses. `status --json` exposes paths,
+counts, capacity, rejected-record count, lease freshness, and compact
+`waiting_for_reply` identity/deadlines without raw message bodies.
+`guidance-observed` carries message identity, physical sequence, character
+length, and SHA-256 digest. `wait-cleared` carries the wait identity and
+deadlines, the exit `reason`, and `pending_outbox`, the measured
+unanswered-question count when a final mailbox snapshot is available.
+`wait-preparation-failed` carries run/session/turn identity and the exact
+preparation `reason`, without creating live-wait state.
+`asl tail` renders that reason and identity explicitly rather than falling back
+to the bare action name.
+`reply_provided` carries reply length and source identity. None of these events
+duplicates raw guidance or reply text, and answered waits
+do not increment pause metrics because those metrics count only `run_paused`.
+
+Workbench intentionally has no mailbox-authoring, mailbox-reply, or live
+model-control endpoint in v1. Mailbox rotation/compaction, automatic
+interrupt-and-restart, plan/session queue mutation, and live session-budget
+mutation also remain out of scope.
+
+## Command Behavior
 
 `run` acquires a per-plan lock, inspects the first pending session, invokes the
 selected harness, records turn artifacts, and verifies that exactly the expected
@@ -553,14 +792,25 @@ mutated — the runner alone owns `state.json`.
   `run_active`, and a `note` naming the harness future sessions will use. An
   unknown harness fails with `reason: invalid-harness` before anything is
   enqueued.
+- `asl control set-model PLAN_DIR_OR_ID` queues process-local model and effort
+  overrides for a future implementation turn. Its payload reports `enqueued`,
+  `command_id`, the optional target `harness`, the model and effort set/clear
+  operations, `run_active`, and `applies_to: next-implementation-turn`. At least
+  one set/clear operation is required; omitting all four fails with
+  `reason: missing-model-control-operation` before anything is enqueued. An
+  unknown target harness fails with `reason: invalid-harness`.
 
 Enqueueing succeeds for a readable plan even with no runner attached; the
-command simply waits in the queue for the next drain. Both subcommands accept
-the same `PLAN_DIR_OR_ID` compact-label resolution as `status` and reuse its
-`ambiguous-plan` / `malformed-plan` / `state-error` failure reasons. A queue the
-process cannot create or append to — an unwritable or non-directory state root —
-fails with `reason: os-error` and a `details.queue_path`, still as exactly one
-JSON object under `--json` (a single stderr line otherwise), never a traceback.
+command simply waits in the queue for the next drain. All three subcommands
+accept the same `PLAN_DIR_OR_ID` compact-label resolution as `status` and reuse
+its `ambiguous-plan` / `malformed-plan` / `state-error` failure reasons. A queue
+the process cannot create or append to — an unwritable or non-directory state
+root — fails with `reason: os-error` and a `details.queue_path`, still as exactly
+one JSON object under `--json` (a single stderr line otherwise), never a
+traceback. Any other command rejected by the durable queue fails with
+`reason: invalid-command`. The control-handler reason vocabulary is
+`invalid-command`, `invalid-harness`, `missing-model-control-operation`, and
+`os-error`.
 
 `status` reads durable plan files and prints session counts, the next pending
 session, content hashes, state paths, lock state, and any active harness turn.
@@ -574,9 +824,11 @@ precedence, and only a bare, nonexistent argument (no directory component)
 triggers a state-root lookup honoring `--state-dir`. Matching is exact and
 case-sensitive against existing plan directories: zero matches keep the current
 `malformed-plan` error, while multiple matches fail with `reason:
-ambiguous-plan`. Resolution is limited to `status` and `asl control`; `run`,
-`tail`, `unlock`, and other plan-taking commands remain path-only. Successful text and JSON output continue
-to report the canonical resolved `plan_dir`.
+ambiguous-plan`. Bare-label resolution is available to `status`, `asl control`,
+and all five mailbox commands. They are `asl inbox guidance`,
+`asl inbox reply`, `asl inbox read`, `asl ask`, and `asl outbox wait`. `run`,
+`tail`, `unlock`, and other plan-taking commands remain path-only. Successful
+text and JSON output continue to report the canonical resolved `plan_dir`.
 
 `tail` prints recent activity for the latest run and follows `events.jsonl`
 plus live harness and commit stdout/stderr logs until the observed run
@@ -822,11 +1074,14 @@ flags `summary_truncated` and points here via a `full_review` hint — this
 command never truncates, so it is the escape hatch when a long review would
 otherwise be clipped. It never mutates state, events, or plan directories.
 
-`asl run --reply TEXT` resumes a paused plan by injecting the operator's
-verbatim reply as a one-shot prefix on the next harness turn only. The reply is
-expanded into a `## ASL reply context` block above the regular session prompt;
+`asl run --reply TEXT` resumes a paused plan by injecting the operator's reply
+as a one-shot prefix on the next harness turn only. The reply is expanded into
+a `## ASL reply context` block above the regular session prompt;
 `build_reply_prompt` always reuses `build_session_prompt` byte-for-byte for the
-first line. The runner persists the resume metadata as a `reply_provided`
+first line. Under `### Operator reply`, the stripped body is the `text` value
+of one ASCII JSON object between `BEGIN ASL OPERATOR REPLY JSONL` and
+`END ASL OPERATOR REPLY JSONL`; the argv, stdin, and mailbox origins share this
+representation. The runner persists the resume metadata as a `reply_provided`
 event (no reply text) and tags the resumed turn with `prompt_kind: "reply"`
 plus a `reply_source` summary; the literal reply text is never stored in
 `state.json`, `events.jsonl`, `argv`, or turn artifacts (the persisted argv
@@ -969,6 +1224,10 @@ Runtime files include:
 - `state.json`: latest run payload.
 - `events.jsonl`: append-only run, pause, turn, and commit events.
 - `lock.json`: active per-plan runner lock.
+- `mailbox.jsonl`: optional 4 MiB-capped mailbox log; physical lines are durable
+  sequences and the file is never truncated in v1.
+- `mailbox-lease.json`: optional fixed-size supervisor activity lease, fresh for
+  90 seconds.
 - `runs/<run_id>/`: immutable artifacts for one runner invocation.
 - `runs/<run_id>/turn-0001-session-<id>/stdout.log`: stdout from the harness
   turn.
@@ -991,13 +1250,18 @@ Runtime files include:
 `state.json` is updated to the latest run and includes `run_id`, `run_dir`, and
 `turns[*]` entries with `artifact_dir`, `stdout_path`, `stderr_path`,
 `last_message_path`, and `result_path`. It also includes `commit_mode`,
-`commits`, `control`, and, after successful auto-commit preflight,
+`commits`, `control`, `mailbox_enabled`, `mailbox_activation`, and, after
+successful auto-commit preflight,
 `commit_preflight`. The `control` object reports `stop_after_current`,
-`tail_enabled`, `next_harness`, `consumed`, and `last_action`; `last_action` is
-one of `stop-after-current-requested`, `stop-after-current-canceled`,
+`tail_enabled`, `next_harness`, process-local `implementation_overrides`,
+`consumed`, and `last_action`; `last_action` is one of
+`stop-after-current-requested`, `stop-after-current-canceled`,
 `stop-after-current-consumed`, `tail-enabled`, `tail-disabled`,
-`harness-selected`, or `null`. Failed-run artifacts remain in their original
-`runs/<run_id>/` directory when a later retry succeeds.
+`harness-selected`, `implementation-model-updated`, or `null`.
+`mailbox_activation` records the once-per-run decision and its reason
+(`mailbox-present`, `fresh-lease`, `inactive`, or `disabled-by-flag`) plus the
+resolved paths and best-effort lease evidence. Failed-run artifacts remain in
+their original `runs/<run_id>/` directory when a later retry succeeds.
 
 While a harness turn is active, `state.json` also includes `active_turn` with
 the run id, turn index, session ID, harness, prompt, model and effort metadata,
@@ -1010,19 +1274,25 @@ total `check_count`, the declared `check_names` and `check_kinds`,
 `started_at`, `current_check_started_at`, `elapsed_seconds`,
 `check_elapsed_seconds`, and `heartbeat_count`. `active_turn` is cleared before
 `active_verification` is populated, so the two phases are mutually exclusive;
-both are `null` between turns and after `run_finished`. `events.jsonl` records
+both are `null` between turns and after `run_finished`. During the bounded
+nonterminal answer window, additive `waiting_for_reply` records only the
+question/session/turn identity, start time, base and hard deadlines, and the
+last observed lease activity. `events.jsonl` records
 `turn_started`, `turn_heartbeat`, `action_required`, `turn_finished`,
 `verification_started`, `verification_check_started`, `verification_heartbeat`,
 `verification_check_finished`, `verification_finished`, `commit_started`,
 `commit_finished`, `run_control`, `review_session_created`, `review_cycle`,
-`review_repair_reopened`, `run_paused`, and `run_finished` events as they
-happen. Verification heartbeats fire every 30
-seconds while a single check is in flight, so long-running checks remain
-observable in `tail` and the live status snapshot. Verification check argv is
-captured in the `verification_check_started` payload and not streamed to a
-log file; command stdout and stderr remain captured in the underlying
-`asl verify` invocation and in the turn `result.json` under the `verification`
-key. `review_session_created`
+`review_repair_reopened`, `mailbox`, `reply_provided`, `run_paused`, and
+`run_finished` events as they happen. The `mailbox` name uses
+`guidance-observed`, `wait-preparation-failed`, `wait-started`, and
+`wait-cleared` action variants; it does not add event names for raw mailbox
+records. Verification heartbeats
+fire every 30 seconds while a single check is in flight, so long-running
+checks remain observable in `tail` and the live status snapshot. Verification
+check argv is captured in the `verification_check_started` payload and not
+streamed to a log file; command stdout and stderr remain captured in the
+underlying `asl verify` invocation and in the turn `result.json` under the
+`verification` key. `review_session_created`
 fires once per run, when the runner appends a fresh generated review session;
 resuming an existing pending review session does not re-emit it. Its payload
 carries `run_id`, the review `session_id`, `review_harness`,
@@ -1040,7 +1310,8 @@ scope, session ID for per-session commits, argv, cwd, artifact paths, status
 result, duration, and commit SHA when one was created. `run_control` events
 record `stop-after-current-requested`, `stop-after-current-canceled`,
 `stop-after-current-consumed`, `tail-enabled`, `tail-disabled`, and
-`harness-selected` actions with `stop_after_current`, `tail_enabled`,
+`harness-selected`, and `implementation-model-updated` actions with
+`stop_after_current`, `tail_enabled`,
 `next_harness`, and, when available, session and turn context. Harness-selection
 events also include `current_harness` and `selected_harness`. `tail` renders
 these as `run control:` lines.
@@ -1082,9 +1353,31 @@ error fields are `ok`, `command`, `reason`, `error`, `paused`, and `details`.
 `details` fields; important run fields include `paused`, `reason`,
 `pause_reason`, `pause_details`, `harness`, `harness_config`, `model`,
 `model_source`, `effort`, `effort_source`, `commit_mode`, `note`, `commits`,
-`control`, `completed_sessions`, `completed_session_ids`, `turns`,
-`initial_snapshot`, `final_snapshot`, `state_path`, and `events_path`. Runs
-without commit flags report `commit_mode: null` and `commits: []`.
+`control`, `no_mailbox`, `mailbox_enabled`, `mailbox_activation`,
+`completed_sessions`, `completed_session_ids`, `turns`, `initial_snapshot`,
+`final_snapshot`, `state_path`, and `events_path`. Runs without commit flags
+report `commit_mode: null` and `commits: []`.
+
+`status --json` adds a read-only `mailbox` projection. It reports the canonical
+mailbox and lease paths, presence/activation, byte size and 4 MiB limit,
+physical `last_seq`, pending-guidance and unanswered-question counts, rejected
+record count, full state, and best-effort errors. Its lease fields include
+`lease_present`, `lease_fresh`, `lease_reason`, and `lease_error`. The stable
+lease-reason vocabulary is `missing`, `invalid-size`, `empty`, `invalid-json`,
+`not-object`, `unsupported-version`, `invalid-supervisor-id`,
+`invalid-updated-at`, `future-updated-at`, and `expired`. An absent lease is
+projected as `lease_present: false` with `lease_reason: null`; a fresh lease
+has `lease_fresh: true` with `lease_reason: null`. Stale or malformed leases
+carry their classification in `lease_reason`, while `lease_error` carries a
+best-effort malformed/unreadable detail and is otherwise `null`. The projection
+never returns raw message bodies. Both `status --json` and a live run's state
+expose compact `waiting_for_reply` metadata while a bounded answer wait is
+active. The adjacent top-level `waiting_for_reply_status` field is `live` when
+its hard deadline is still in the future and the plan has an active runner
+lock, `expired` when that deadline has passed or the owning runner lock is
+absent or stale, and `invalid` when the persisted hard deadline is missing or
+malformed; it is `null` when no wait is present. A terminal paused projection
+still takes precedence for legacy pause consumers.
 
 Paused `run --json` payloads also carry an `interactive_help` object whenever
 the paused turn left a non-empty `last-message.txt` body (it is `null`
@@ -1210,13 +1503,14 @@ block with `stale_unfinished` (boolean) and `stale_reason` (string or `null`).
 `stale_reason` carries a short human-readable explanation. Text output prints
 `Run state: stale/orphaned (<reason>)` immediately under the regular
 `Run state:` line whenever the runner state is orphaned. `status --json` error
-payloads echo the original argument in `plan_dir`: an uninspectable plan (or an
-unresolved label) reports `reason: malformed-plan`, an unreadable state root
-reports `reason: state-error`, and a bare label matching more than one existing
-plan directory reports `reason: ambiguous-plan` with `details.state_root` and a
-sorted `details.candidates` list of canonical paths. In text mode an ambiguous
-label prints a concise stderr error instructing the operator to pass a full
-plan directory path. `doctor
+payloads echo the original argument in `plan_reference`: an uninspectable plan
+(or an unresolved label) reports `reason: malformed-plan`, an unreadable state
+root reports `reason: state-error`, and a bare label matching more than one
+existing plan directory reports `reason: ambiguous-plan` with
+`details.state_root` and a sorted `details.candidates` list of canonical paths.
+Error payloads omit `plan_dir`, reserving that key for canonical paths in
+successful payloads. In text mode an ambiguous label prints a concise stderr
+error instructing the operator to pass a full plan directory path. `doctor
 --json` reports the resolved harness executable, generated prompt, argv, and
 model/effort metadata without invoking the harness. Text `run` and `doctor`
 output print the selected model after `Harness:` and print effort only when an
@@ -1254,6 +1548,17 @@ checkpoint and another session remains pending, the run exits successfully with
 `ok: true`, `paused: false`, and `reason: stopped`, then releases the plan
 lock. If the just-completed session was the final pending session, the run ends
 with `reason: all-complete`. Stop-after-current does not add a pause reason.
+
+An active `waiting_for_reply` mailbox window is also not a pause. The runner
+retains its lock, `paused` remains false, status/tail report healthy bounded
+activity, and no `run_paused` event or pause metric is created. A received
+mailbox reply continues the same session inside the same runner process. While
+that runner remains alive, a bounded-wait timeout or unavailable mailbox makes
+it clear the additive field before entering the ordinary pause path below. If
+the runner exits before it can perform that cleanup, the persisted wait remains
+nonterminal; once its plan lock is absent or stale, recovery surfaces classify
+it as `expired` even before its hard deadline and synthesize the
+`wait-expired` pause reason without rewriting `state.json`.
 
 A paused run exits nonzero and leaves the plan lock released. Inspect the JSON
 payload, `state.json`, `events.jsonl`, and the last turn artifacts, then rerun
@@ -1309,6 +1614,11 @@ Common pause reasons:
   body to feed the resolver prompt), and `reply-context-mismatch` (the paused
   turn references a session whose current pending status no longer matches the
   plan, typically because another runner already advanced past it).
+- `wait-expired`: `asl questions` synthesized reply-oriented recovery for an
+  orphaned nonterminal wait whose hard deadline passed or whose owning runner
+  lock is absent or stale. This recovery reason is never written into `state.json`;
+  the persisted wait remains available for read-only status and recovery
+  projection.
 - `verify-failed`: `asl verify` returned non-zero after a completed session.
   The pause payload includes the verification `reason` and per-check results.
 - `no-contract`: the completed session lacks a `## Completion Contract` and the
@@ -1334,7 +1644,10 @@ finish without a human babysitting each turn. The operator hands the skill the
 exact `asl run ...` command they would otherwise type; the bundled helper
 (`skills/asl/scripts/asl-autopilot.py`) starts or attaches to the run, polls
 `asl status --json`, streams heartbeats to stderr, auto-retries recoverable
-pauses, and stops only when a run needs a human answer or has finished.
+pauses, and stops only when a run needs a human answer or has finished. Unless
+the command carries `--no-mailbox`, it also establishes a supervisor lease
+before starting a child, discovers live worker questions, and keeps supervising
+while the runner waits for a reply.
 
 ### Install and sync
 
@@ -1358,6 +1671,10 @@ with the harness agent driving the skill. It:
   repository code directly.
 - Never persists reply text: resumes flow through `asl run --reply-stdin`, so
   the reply appears only on the child's stdin, never in argv or helper output.
+- Uses the existing child/attach wait loops for mailbox polling and lease
+  renewal; it does not create a mailbox watcher thread. Full question bodies
+  are retained only in the structured result's `outbox`, while stderr receives
+  a bounded, single-line, JSON-escaped `QUESTION id=... preview=...` record.
 
 ### Attach behavior
 
@@ -1373,7 +1690,35 @@ restarting — an uncapped run drives every pending session in one process).
 Self-relaunches (pause retries and runner-owned review continuations) and attach
 polls share one bounded budget so a wedged plan can never loop forever.
 
+Mailbox supervision uses one status-derived watcher across attach polls and
+later self-launches. It validates that the advertised mailbox and lease files
+belong to the advertised per-plan state directory, starts from the physical
+`last_seq`, polls questions every five seconds, and renews its lease every
+30 seconds. Advancing through every physical line prevents replay after
+guidance, acknowledgements, or malformed records. When supervision returns, it
+stops future watcher activity and lets the last fixed-size lease expire.
+`--no-mailbox` skips watcher construction and lease writes in both launch and
+attach modes.
+
 ### Reply behavior
+
+While the helper is running, a `QUESTION id=...` progress record is
+nonterminal. Answer it from a separate shell with:
+
+```text
+asl inbox reply <plan-dir> --to <question-id> --text '<answer>' [--state-dir DIR] --json
+```
+
+Use `--text-stdin` when the answer should not appear in argv. The first
+concurrent reply wins; the runner consumes it once and continues the same
+session. The helper keeps the complete question record in its eventual
+`outbox` payload and treats `waiting_for_reply` as healthy bounded activity,
+including the pending-outbox count, rather than a stalled or paused run.
+
+If nobody answers before the runner's five-minute, lease-extendable,
+15-minute-absolute wait expires—or mailbox I/O/fullness forces fallback—the
+runner records its ordinary terminal pause. The helper then uses the existing
+pause behavior below; no separate mailbox-only terminal status is introduced.
 
 The helper auto-retries recoverable same-session pauses (`verify-failed`,
 `transport-failed`, `timeout`, `no-status-change`) up to twice per session and
@@ -1389,6 +1734,19 @@ resumes by streaming the reply on stdin:
 ```text
 printf '%s' '<reply text>' | skills/asl/scripts/asl-autopilot.py --command '<same exact command>' --json --reply-stdin
 ```
+
+For live steering that should affect a future turn, use a separate shell while
+the helper owns the foreground:
+
+```text
+asl inbox guidance <plan-dir> --text '<scoped guidance>' [--state-dir DIR] --json
+asl control set-model <plan-dir> [--harness codex|claude|copilot] --harness-model MODEL [--effort EFFORT] [--state-dir DIR] --json
+```
+
+Guidance is delivered at the next turn start and remains pending until the
+worker acknowledges it. Model/effort controls are polled during active turns
+but affect only the next implementation invocation in the current runner
+process; they do not alter the active subprocess or generated review turns.
 
 ### Review-fix loop behavior
 
@@ -2629,6 +2987,23 @@ Manual smoke checklist:
 - Create a synthetic active lock, confirm `unlock --json` reports
   `reason: active-lock`, then run `unlock --force --json` and confirm the lock
   is removed.
+- In terminal A, start an Autopilot-supervised synthetic two-session plan. In
+  terminal B, send multiline `asl inbox guidance`, then confirm the next worker
+  prompt receives JSON-escaped guidance and `asl inbox read` acknowledges only
+  that snapshot.
+- While the first turn is active, queue `asl control set-model`; within the
+  five-second control-poll cadence confirm the runner records
+  `implementation-model-updated`, the active subprocess is unchanged, and the
+  second implementation invocation receives the override. Start a new runner
+  process and confirm it returns to the original flag/native default.
+- Have the worker emit a question and confirm the supervisor discovers one
+  `QUESTION` record. Race two `asl inbox reply` commands, confirm exactly one
+  succeeds, and verify the answer continues the same session without a
+  `run_paused` event or pause-metric increment.
+- Repeat without answering: confirm the bounded wait becomes one ordinary
+  terminal pause after timeout. Repeat with `--no-mailbox`: confirm no lease is
+  written, no live protocol is added to the prompt, and the historical
+  pause/`asl run --reply` path remains unchanged.
 
 Workbench browser workflow:
 

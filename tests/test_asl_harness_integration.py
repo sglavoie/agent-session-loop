@@ -3927,8 +3927,12 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 harness_model=None,
                 effort=None,
                 unsafe_bypass=True,
+                no_mailbox=False,
                 note=None,
                 allow_not_loop_ready=False,
+            )
+            mailbox_activation = runner._mailbox_activation_payload(
+                args, plan_dir
             )
             payload = runner._initial_payload(
                 args=args,
@@ -3941,6 +3945,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 cwd=tmp_dir,
                 run_id=run_id,
                 commit_mode=None,
+                mailbox_activation=mailbox_activation,
             )
             persistence = runner._RunPersistence()
 
@@ -3948,6 +3953,11 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             initial_state = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertIn("active_verification", initial_state)
             self.assertIsNone(initial_state["active_verification"])
+            self.assertFalse(initial_state["mailbox_enabled"])
+            self.assertEqual(
+                mailbox_activation,
+                initial_state["mailbox_activation"],
+            )
 
             active_turn = {
                 "run_id": run_id,

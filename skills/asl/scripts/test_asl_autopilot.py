@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+from datetime import datetime, timedelta, timezone
 import io
 import itertools
 import json
@@ -636,6 +637,28 @@ def _attach_status(idle, *, session_id="tidy-db-writes", number=3, total=8):
             "elapsed_seconds": 120,
         },
     }
+    return status
+
+
+def _attach_waiting_status(*, pending_outbox=1, session_id="12"):
+    """Attach-disposition status whose runner is in a bounded reply wait."""
+    status = _status_payload(1, lock=_active_lock())
+    waiting = {
+        "question_id": "00000000-0000-0000-0000-000000000012",
+        "session_id": session_id,
+        "session_number": int(session_id),
+        "turn_index": 2,
+        "base_deadline": "2099-07-24T19:05:00+00:00",
+        "hard_deadline": "2099-07-24T19:15:00+00:00",
+    }
+    status["runner_state"] = {
+        "paused": False,
+        "active_turn": None,
+        "active_verification": None,
+        "waiting_for_reply": waiting,
+    }
+    status["waiting_for_reply"] = waiting
+    status["mailbox"] = {"unanswered_questions": pending_outbox}
     return status
 
 
@@ -1865,6 +1888,239 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         self.assertEqual(calls["status"], before + 1)
         self.assertTrue(probe_payload["ok"])
 
+    def test_default_run_establishes_mailbox_lease_before_child_launch(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="asl-autopilot-prelaunch-lease-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        plan_dir = os.path.join(tmp, "plan")
+        state_root = os.path.join(tmp, "state")
+        os.makedirs(plan_dir)
+        mailbox_path = autopilot._mailbox.mailbox_path_for_plan(
+            plan_dir, state_root
+        )
+        lease_path = autopilot._mailbox.lease_path_for_plan(plan_dir, state_root)
+
+        initial = _status_payload(1)
+        initial.update(
+            {
+                "plan_dir": plan_dir,
+                "state_dir": str(lease_path.parent),
+                "mailbox": {
+                    "path": str(mailbox_path),
+                    "lease_path": str(lease_path),
+                    "last_seq": 0,
+                },
+            }
+        )
+        terminal = dict(initial)
+        terminal["counts"] = {"pending": 0, "complete": 1}
+        terminal["next_pending_id"] = None
+        status = _StatusScript([initial, terminal])
+        observed = {}
+
+        def fake_invoke_run(target, **kwargs):
+            observed["lease_present_at_launch"] = lease_path.exists()
+            observed["watcher"] = kwargs["mailbox_watcher"]
+            observed["watcher_enabled_at_launch"] = kwargs[
+                "mailbox_watcher"
+            ].enabled
+            return {"ok": True, "paused": False, "reason": "all-complete"}
+
+        original = autopilot._invoke_run
+        autopilot._invoke_run = fake_invoke_run
+        try:
+            result = autopilot.supervise_run(
+                {
+                    "plan_dir": plan_dir,
+                    "state_dir": state_root,
+                    "argv": [
+                        "asl",
+                        "run",
+                        plan_dir,
+                        "--state-dir",
+                        state_root,
+                        "--json",
+                    ],
+                },
+                status_invoker=status,
+                clock=_counter_clock(),
+                heartbeat=lambda *_: None,
+            )
+        finally:
+            autopilot._invoke_run = original
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(observed["lease_present_at_launch"])
+        self.assertTrue(observed["watcher_enabled_at_launch"])
+        self.assertFalse(observed["watcher"].enabled)
+        self.assertEqual(result["outbox"]["questions"], [])
+
+    def test_relaunch_after_expired_lease_refreshes_before_next_chunk(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="asl-autopilot-relaunch-lease-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        plan_dir = os.path.join(tmp, "plan")
+        state_root = os.path.join(tmp, "state")
+        os.makedirs(plan_dir)
+        mailbox_path = autopilot._mailbox.mailbox_path_for_plan(
+            plan_dir, state_root
+        )
+        lease_path = autopilot._mailbox.lease_path_for_plan(plan_dir, state_root)
+        clock = _ManualClock()
+        wall_start = datetime(2026, 7, 24, tzinfo=timezone.utc)
+        lease_writes = []
+        launch_times = []
+        activation_at_launch = []
+
+        initial = _status_payload(1)
+        initial.update(
+            {
+                "plan_dir": plan_dir,
+                "state_dir": str(lease_path.parent),
+                "mailbox": {
+                    "path": str(mailbox_path),
+                    "lease_path": str(lease_path),
+                    "last_seq": 0,
+                },
+            }
+        )
+        terminal = dict(initial)
+        terminal["counts"] = {"pending": 0, "complete": 1}
+        terminal["next_pending_id"] = None
+        status = _StatusScript([initial, initial, terminal])
+
+        def write_lease(plan, supervisor_id, *, state_dir=None):
+            lease_writes.append(clock())
+            updated_at = wall_start + timedelta(seconds=clock())
+            return autopilot._mailbox.write_lease(
+                plan,
+                supervisor_id,
+                state_dir=state_dir,
+                updated_at=updated_at.isoformat(),
+            )
+
+        def watcher_factory(status_payload, **kwargs):
+            return autopilot._MailboxWatcher.from_status(
+                status_payload,
+                **kwargs,
+                write_lease=write_lease,
+                supervisor_id="00000000-0000-0000-0000-000000000099",
+            )
+
+        def run_invoker(_parsed, chunk_index):
+            launch_times.append(clock())
+            now = wall_start + timedelta(seconds=clock())
+            activation_at_launch.append(
+                autopilot._mailbox.read_lease(
+                    plan_dir,
+                    state_dir=state_root,
+                    now=now,
+                ).fresh
+            )
+            if chunk_index == 1:
+                clock.advance(
+                    autopilot._mailbox.MAILBOX_LEASE_FRESH_SECONDS + 1.0
+                )
+                return {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "transport-failed",
+                    "pause_reason": "transport-failed",
+                }
+            return {"ok": True, "paused": False, "reason": "all-complete"}
+
+        result = autopilot.supervise_run(
+            {
+                "plan_dir": plan_dir,
+                "state_dir": state_root,
+                "argv": [
+                    "asl",
+                    "run",
+                    plan_dir,
+                    "--state-dir",
+                    state_root,
+                    "--json",
+                ],
+            },
+            status_invoker=status,
+            run_invoker=run_invoker,
+            clock=clock,
+            sleep=clock.advance,
+            heartbeat=lambda *_: None,
+            mailbox_watcher_factory=watcher_factory,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "complete")
+        self.assertFalse(mailbox_path.exists())
+        self.assertEqual(activation_at_launch, [True, True])
+        self.assertEqual(lease_writes, launch_times)
+        self.assertGreater(
+            launch_times[1] - launch_times[0],
+            autopilot._mailbox.MAILBOX_LEASE_FRESH_SECONDS,
+        )
+
+    def test_no_mailbox_skips_watcher_and_lease_write(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="asl-autopilot-no-mailbox-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        plan_dir = os.path.join(tmp, "plan")
+        state_root = os.path.join(tmp, "state")
+        os.makedirs(plan_dir)
+        mailbox_path = autopilot._mailbox.mailbox_path_for_plan(
+            plan_dir, state_root
+        )
+        lease_path = autopilot._mailbox.lease_path_for_plan(plan_dir, state_root)
+        initial = _status_payload(1)
+        initial.update(
+            {
+                "plan_dir": plan_dir,
+                "state_dir": str(lease_path.parent),
+                "mailbox": {
+                    "path": str(mailbox_path),
+                    "lease_path": str(lease_path),
+                    "last_seq": 0,
+                },
+            }
+        )
+        terminal = dict(initial)
+        terminal["counts"] = {"pending": 0, "complete": 1}
+        terminal["next_pending_id"] = None
+        status = _StatusScript([initial, terminal])
+        observed = {}
+
+        def fake_invoke_run(target, **kwargs):
+            observed["watcher"] = kwargs["mailbox_watcher"]
+            observed["lease_present_at_launch"] = lease_path.exists()
+            return {"ok": True, "paused": False, "reason": "all-complete"}
+
+        original = autopilot._invoke_run
+        autopilot._invoke_run = fake_invoke_run
+        try:
+            result = autopilot.supervise_run(
+                {
+                    "plan_dir": plan_dir,
+                    "state_dir": state_root,
+                    "argv": [
+                        "asl",
+                        "run",
+                        plan_dir,
+                        "--state-dir",
+                        state_root,
+                        "--no-mailbox",
+                        "--json",
+                    ],
+                    "no_mailbox": True,
+                },
+                status_invoker=status,
+                clock=_counter_clock(),
+                heartbeat=lambda *_: None,
+            )
+        finally:
+            autopilot._invoke_run = original
+
+        self.assertTrue(result["ok"], result)
+        self.assertIsNone(observed["watcher"])
+        self.assertFalse(observed["lease_present_at_launch"])
+        self.assertNotIn("outbox", result)
+
 
 class SuperviseRunTransportBackoffTest(unittest.TestCase):
     """Transient transport failures back off on the bounded 5s/30s schedule."""
@@ -2084,6 +2340,88 @@ class SuperviseRunAttachHeartbeatTest(unittest.TestCase):
         # The pending/elapsed context is preserved alongside the warning.
         self.assertIn("pending 1", joined)
 
+    def test_waiting_for_reply_is_healthy_and_reports_pending_outbox(self) -> None:
+        # Older ``asl status`` payloads do not carry
+        # ``waiting_for_reply_status``; retain their deadline-only behavior.
+        waiting = _attach_waiting_status(pending_outbox=1)
+        snapshot = autopilot._status_snapshot(waiting)
+        self.assertEqual(snapshot["state"], "waiting_for_reply")
+        self.assertEqual(snapshot["pending_outbox"], 1)
+        self.assertNotIn("waiting_for_reply_status", snapshot)
+
+        status = _StatusScript([waiting, _status_payload(0)])
+        result, beats = self._supervise(status, stall_threshold=0.0)
+        self.assertTrue(result["ok"], result)
+        joined = "\n".join(beats)
+        self.assertIn("waiting for reply for session 12", joined)
+        self.assertIn("pending outbox 1", joined)
+        self.assertNotIn("WARN possibly stalled", joined)
+
+    def test_expired_wait_status_overrides_future_deadline_and_warns(self) -> None:
+        waiting = _attach_waiting_status()
+        waiting["runner_state"]["waiting_for_reply_status"] = "expired"
+        waiting["waiting_for_reply_status"] = "expired"
+
+        snapshot = autopilot._status_snapshot(waiting)
+        self.assertEqual(snapshot["waiting_for_reply_status"], "expired")
+        is_stall, detail = autopilot._heartbeat_detail(
+            snapshot,
+            90.0,
+            events_stale=False,
+            now=datetime(2026, 7, 24, 19, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertTrue(is_stall)
+        self.assertIn("wait status expired", detail)
+        heartbeat = autopilot._format_heartbeat(
+            1,
+            10.0,
+            snapshot,
+            90.0,
+            events_stale=False,
+            now=datetime(2026, 7, 24, 19, 0, tzinfo=timezone.utc),
+        )
+        self.assertIn("WARN possibly stalled", heartbeat)
+
+    def test_terminal_pause_takes_precedence_over_stale_wait_record(self) -> None:
+        paused = _attach_waiting_status()
+        paused["runner_state"]["paused"] = True
+        paused["runner_state"]["reason"] = "needs-agent-reply"
+        snapshot = autopilot._status_snapshot(paused)
+        self.assertEqual(snapshot["state"], "paused")
+        self.assertEqual(snapshot["reason"], "needs-agent-reply")
+
+    def test_wait_fallback_keeps_the_existing_terminal_pause_reason(self) -> None:
+        run = _RunScript(
+            [
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "blocked",
+                    "pause_reason": "blocked",
+                    "pause_message": "reply wait expired",
+                }
+            ]
+        )
+        result = autopilot.supervise_run(
+            {
+                "plan_dir": "/tmp/plan",
+                "argv": ["asl", "run", "/tmp/plan", "--json"],
+            },
+            status_invoker=_StatusScript(
+                [_attach_waiting_status(), _status_payload(1)]
+            ),
+            run_invoker=run,
+            clock=_counter_clock(),
+            sleep=lambda *_: None,
+            heartbeat=lambda *_: None,
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "paused")
+        self.assertEqual(result["run"]["pause_reason"], "blocked")
+        self.assertNotEqual(result["reason"], "needs_supervisor_answer")
+
 
 def _sequence_clock(values):
     """Clock returning each value in turn, repeating the final value."""
@@ -2138,6 +2476,42 @@ class AttachEventsWaitTest(unittest.TestCase):
         )
         # Size never changes; the wait ends once the heartbeat interval elapses.
         self.assertEqual(sleeps, [1.0])
+
+    def test_quiet_events_file_still_services_mailbox_deadlines(self) -> None:
+        clock = _ManualClock()
+        polls = []
+
+        class Watcher:
+            def __init__(self):
+                self.next_at = 5.0
+
+            def next_deadline(self):
+                return self.next_at
+
+            def poll(self, *, now=None):
+                polls.append(now)
+                self.next_at = now + 5.0
+                return ()
+
+        sleeps = []
+
+        def advance(seconds):
+            sleeps.append(seconds)
+            clock.advance(seconds)
+
+        autopilot._attach_events_wait(
+            "events.jsonl",
+            poll_interval=10.0,
+            heartbeat_interval=30.0,
+            clock=clock,
+            sleep=advance,
+            events_stat=lambda _p: 100,
+            mailbox_watcher=Watcher(),
+            heartbeat=lambda *_: None,
+        )
+
+        self.assertEqual(sleeps, [5.0] * 6)
+        self.assertEqual(polls, [5.0, 10.0, 15.0, 20.0, 25.0, 30.0])
 
 
 class SuperviseRunAttachEventsStatTest(unittest.TestCase):
@@ -2208,6 +2582,581 @@ class FakeTimeoutPopen:
         return self._stdout, self._stderr
 
 
+class _ManualClock:
+    """Monotonic test clock advanced explicitly by a fake subprocess."""
+
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value += seconds
+
+
+class _DeadlinePopen:
+    """Timeout once after advancing the clock, then return final JSON."""
+
+    def __init__(self, clock, stdout):
+        self.clock = clock
+        self.stdout = stdout
+        self.returncode = 0
+        self.timeouts = []
+        self.inputs = []
+
+    def __call__(self, argv, **kwargs):
+        self.argv = argv
+        self.kwargs = kwargs
+        return self
+
+    def communicate(self, input=None, timeout=None):
+        self.inputs.append(input)
+        self.timeouts.append(timeout)
+        if len(self.timeouts) == 1:
+            self.clock.advance(timeout)
+            raise subprocess.TimeoutExpired(cmd="asl run", timeout=timeout)
+        return self.stdout, ""
+
+
+class MailboxWatcherTest(unittest.TestCase):
+    """Self-launched supervision uses one status-derived durable cursor."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="asl-autopilot-mailbox-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.plan_dir = os.path.join(self.tmp, "plan")
+        self.state_root = os.path.join(self.tmp, "state")
+        self.state_path = os.path.join(self.state_root, "plan-hash")
+        os.makedirs(self.plan_dir)
+        self.mailbox_path = os.path.join(self.state_path, "mailbox.jsonl")
+        self.lease_path = os.path.join(self.state_path, "mailbox-lease.json")
+
+    def _status(self, *, last_seq=1):
+        return {
+            "ok": True,
+            "plan_dir": self.plan_dir,
+            "state_dir": self.state_path,
+            "mailbox": {
+                "path": self.mailbox_path,
+                "lease_path": self.lease_path,
+                "last_seq": last_seq,
+            },
+        }
+
+    def _question(self, *, seq=2, text="Need a decision"):
+        return autopilot._mailbox.MailboxMessage(
+            seq=seq,
+            id="00000000-0000-0000-0000-000000000011",
+            kind=autopilot._mailbox.KIND_QUESTION,
+            created_at="2026-07-24T19:00:00+00:00",
+            text=text,
+        )
+
+    def test_resolves_paths_renews_lease_and_returns_questions_once(self) -> None:
+        writes = []
+        reads = []
+        question = self._question(text="Full question body\nwith a second line")
+        guidance = autopilot._mailbox.MailboxMessage(
+            seq=3,
+            id="00000000-0000-0000-0000-000000000012",
+            kind=autopilot._mailbox.KIND_GUIDANCE,
+            created_at="2026-07-24T19:00:01+00:00",
+            text="guidance advances the physical cursor",
+        )
+        view = autopilot._mailbox.MailboxView(
+            mailbox_path=autopilot.Path(self.mailbox_path),
+            messages=(question, guidance),
+            last_seq=3,
+        )
+
+        def write_lease(plan_dir, supervisor_id, *, state_dir=None):
+            writes.append((plan_dir, supervisor_id, state_dir))
+
+        def read_mailbox(plan_dir, *, state_dir=None):
+            reads.append((plan_dir, state_dir))
+            return view
+
+        watcher = autopilot._MailboxWatcher.from_status(
+            self._status(),
+            clock=lambda: 0.0,
+            read_mailbox=read_mailbox,
+            write_lease=write_lease,
+            supervisor_id="00000000-0000-0000-0000-000000000099",
+        )
+        self.assertIsNotNone(watcher)
+        assert watcher is not None
+        self.assertTrue(watcher.establish(now=0.0))
+        self.assertEqual(watcher.next_deadline(), 5.0)
+        self.assertEqual(writes[0][0], os.path.realpath(self.plan_dir))
+        self.assertEqual(writes[0][2], os.path.realpath(self.state_root))
+
+        self.assertEqual(watcher.poll(now=5.0), (question,))
+        self.assertEqual(watcher.poll(now=10.0), ())
+        watcher.poll(now=30.0)
+        self.assertEqual(len(writes), 2)
+        self.assertEqual(len(reads), 3)
+
+        outbox = watcher.outbox_payload()
+        self.assertEqual(outbox["since"], 1)
+        self.assertEqual(outbox["next_since"], 3)
+        self.assertEqual(len(outbox["questions"]), 1)
+        self.assertEqual(outbox["questions"][0]["text"], question.text)
+
+    def test_lease_transient_failure_recovers_and_delivers_question(self) -> None:
+        writes = []
+        reads = []
+        question = self._question(seq=1, text="question after lease recovery")
+        empty_view = autopilot._mailbox.MailboxView(
+            mailbox_path=autopilot.Path(self.mailbox_path),
+            messages=(),
+            last_seq=0,
+        )
+        question_view = autopilot._mailbox.MailboxView(
+            mailbox_path=autopilot.Path(self.mailbox_path),
+            messages=(question,),
+            last_seq=1,
+        )
+        views = iter((empty_view, question_view))
+
+        def write_lease(plan_dir, supervisor_id, *, state_dir=None):
+            writes.append((plan_dir, supervisor_id, state_dir))
+            if len(writes) == 2:
+                raise OSError("transient lease write failure")
+
+        def read_mailbox(plan_dir, *, state_dir=None):
+            reads.append((plan_dir, state_dir))
+            return next(views)
+
+        watcher = autopilot._MailboxWatcher.from_status(
+            self._status(last_seq=0),
+            clock=lambda: 0.0,
+            read_mailbox=read_mailbox,
+            write_lease=write_lease,
+            supervisor_id="00000000-0000-0000-0000-000000000099",
+        )
+        self.assertIsNotNone(watcher)
+        assert watcher is not None
+        self.assertTrue(watcher.establish(now=0.0))
+        progress = []
+
+        self.assertEqual(
+            autopilot._poll_mailbox_watcher(
+                watcher,
+                now=30.0,
+                heartbeat=progress.append,
+            ),
+            (),
+        )
+        self.assertTrue(watcher.enabled)
+        self.assertEqual(watcher.next_deadline(), 35.0)
+        self.assertIn(
+            "MAILBOX WARN lease renewal failed; retry scheduled",
+            progress,
+        )
+
+        self.assertEqual(
+            autopilot._poll_mailbox_watcher(
+                watcher,
+                now=60.0,
+                heartbeat=progress.append,
+            ),
+            (question,),
+        )
+        self.assertTrue(watcher.enabled)
+        self.assertIn("MAILBOX lease renewal recovered", progress)
+        self.assertTrue(
+            any(
+                record.startswith(f"QUESTION id={question.id} ")
+                for record in progress
+            )
+        )
+        self.assertEqual(len(writes), 3)
+        self.assertEqual(len(reads), 2)
+        self.assertEqual(
+            watcher.outbox_payload()["lease_supervision"],
+            {
+                "degraded": False,
+                "renewal_failures": 1,
+                "renewal_recoveries": 1,
+            },
+        )
+
+    def test_initial_lease_failure_stays_armed_and_recovers(self) -> None:
+        writes = []
+        empty_view = autopilot._mailbox.MailboxView(
+            mailbox_path=autopilot.Path(self.mailbox_path),
+            messages=(),
+            last_seq=0,
+        )
+
+        def write_lease(plan_dir, supervisor_id, *, state_dir=None):
+            writes.append((plan_dir, supervisor_id, state_dir))
+            if len(writes) == 1:
+                raise autopilot._mailbox.MailboxError(
+                    autopilot._mailbox.ERROR_LEASE_WRITE,
+                    "transient establishment failure",
+                )
+
+        watcher = autopilot._MailboxWatcher.from_status(
+            self._status(last_seq=0),
+            clock=lambda: 0.0,
+            read_mailbox=lambda *_args, **_kwargs: empty_view,
+            write_lease=write_lease,
+            supervisor_id="00000000-0000-0000-0000-000000000099",
+        )
+        self.assertIsNotNone(watcher)
+        assert watcher is not None
+        progress = []
+
+        self.assertTrue(watcher.establish(now=0.0))
+        self.assertTrue(watcher.enabled)
+        self.assertEqual(watcher.next_deadline(), 5.0)
+        self.assertEqual(
+            autopilot._poll_mailbox_watcher(
+                watcher,
+                now=5.0,
+                heartbeat=progress.append,
+            ),
+            (),
+        )
+        self.assertIn(
+            "MAILBOX WARN lease renewal failed; retry scheduled",
+            progress,
+        )
+
+        self.assertEqual(
+            autopilot._poll_mailbox_watcher(
+                watcher,
+                now=30.0,
+                heartbeat=progress.append,
+            ),
+            (),
+        )
+        self.assertTrue(watcher.enabled)
+        self.assertIn("MAILBOX lease renewal recovered", progress)
+        self.assertEqual(len(writes), 2)
+        self.assertEqual(
+            watcher.outbox_payload()["lease_supervision"],
+            {
+                "degraded": False,
+                "renewal_failures": 1,
+                "renewal_recoveries": 1,
+            },
+        )
+
+    def test_initial_lease_persistent_failure_remains_armed(self) -> None:
+        writes = []
+        empty_view = autopilot._mailbox.MailboxView(
+            mailbox_path=autopilot.Path(self.mailbox_path),
+            messages=(),
+            last_seq=0,
+        )
+
+        def write_lease(*_args, **_kwargs):
+            writes.append(True)
+            raise OSError("persistent lease write failure")
+
+        watcher = autopilot._MailboxWatcher.from_status(
+            self._status(last_seq=0),
+            clock=lambda: 0.0,
+            read_mailbox=lambda *_args, **_kwargs: empty_view,
+            write_lease=write_lease,
+        )
+        self.assertIsNotNone(watcher)
+        assert watcher is not None
+        progress = []
+
+        self.assertTrue(watcher.establish(now=0.0))
+        for now in (5.0, 30.0, 60.0):
+            self.assertEqual(
+                autopilot._poll_mailbox_watcher(
+                    watcher,
+                    now=now,
+                    heartbeat=progress.append,
+                ),
+                (),
+            )
+
+        self.assertTrue(watcher.enabled)
+        self.assertEqual(len(writes), 3)
+        self.assertEqual(
+            progress.count(
+                "MAILBOX WARN lease renewal failed; retry scheduled"
+            ),
+            1,
+        )
+        self.assertEqual(
+            watcher.outbox_payload()["lease_supervision"],
+            {
+                "degraded": True,
+                "renewal_failures": 3,
+                "renewal_recoveries": 0,
+            },
+        )
+
+    def test_invoke_run_polls_at_five_seconds_and_streams_reply_once(self) -> None:
+        clock = _ManualClock()
+        full_text = 'Line one\n"quoted" ' + ("x" * 500)
+        question = self._question(seq=1, text=full_text)
+        view = autopilot._mailbox.MailboxView(
+            mailbox_path=autopilot.Path(self.mailbox_path),
+            messages=(question,),
+            last_seq=1,
+        )
+        watcher = autopilot._MailboxWatcher(
+            plan_dir=self.plan_dir,
+            state_root=self.state_root,
+            state_path=self.state_path,
+            mailbox_path=self.mailbox_path,
+            lease_path=self.lease_path,
+            since=0,
+            clock=clock,
+            read_mailbox=lambda *_args, **_kwargs: view,
+            write_lease=lambda *_args, **_kwargs: None,
+            supervisor_id="00000000-0000-0000-0000-000000000099",
+        )
+        self.assertTrue(watcher.establish(now=0.0))
+        final = '{"ok": true, "paused": false, "reason": "all-complete"}'
+        popen = _DeadlinePopen(clock, final)
+        progress = []
+
+        payload = autopilot._invoke_run(
+            {
+                "argv": ["asl", "run", self.plan_dir, "--json"],
+                "plan_dir": self.plan_dir,
+            },
+            chunk_index=1,
+            reply_text="operator reply",
+            clock=clock,
+            heartbeat=progress.append,
+            popen=popen,
+            mailbox_watcher=watcher,
+        )
+
+        self.assertEqual(popen.timeouts, [5.0, 5.0])
+        self.assertEqual(popen.inputs, ["operator reply", None])
+        question_records = [line for line in progress if line.startswith("QUESTION ")]
+        self.assertEqual(len(question_records), 1)
+        self.assertNotIn("\n", question_records[0])
+        preview = question_records[0].split("preview=", 1)[1]
+        self.assertLessEqual(len(preview), autopilot.QUESTION_PREVIEW_MAX_CHARS)
+        self.assertEqual(payload["outbox"]["questions"][0]["text"], full_text)
+
+    def test_final_mailbox_drain_after_child_exit(self) -> None:
+        clock = _ManualClock()
+        question = self._question(
+            seq=1,
+            text="question appended immediately before child exit",
+        )
+        empty_view = autopilot._mailbox.MailboxView(
+            mailbox_path=autopilot.Path(self.mailbox_path),
+            messages=(),
+            last_seq=0,
+        )
+        final_view = autopilot._mailbox.MailboxView(
+            mailbox_path=autopilot.Path(self.mailbox_path),
+            messages=(question,),
+            last_seq=1,
+        )
+        child_exited = False
+        reads = []
+
+        def read_mailbox(*_args, **_kwargs):
+            reads.append(child_exited)
+            return final_view if child_exited else empty_view
+
+        class ExitAppendingPopen:
+            returncode = 0
+
+            def __call__(self, argv, **kwargs):
+                self.argv = argv
+                self.kwargs = kwargs
+                return self
+
+            def communicate(self, input=None, timeout=None):
+                nonlocal child_exited
+                child_exited = True
+                return (
+                    '{"ok": true, "paused": false, "reason": "all-complete"}',
+                    "",
+                )
+
+        watcher = autopilot._MailboxWatcher(
+            plan_dir=self.plan_dir,
+            state_root=self.state_root,
+            state_path=self.state_path,
+            mailbox_path=self.mailbox_path,
+            lease_path=self.lease_path,
+            since=0,
+            clock=clock,
+            read_mailbox=read_mailbox,
+            write_lease=lambda *_args, **_kwargs: None,
+            supervisor_id="00000000-0000-0000-0000-000000000099",
+        )
+        self.assertTrue(watcher.establish(now=0.0))
+        progress = []
+
+        payload = autopilot._invoke_run(
+            {
+                "argv": ["asl", "run", self.plan_dir, "--json"],
+                "plan_dir": self.plan_dir,
+            },
+            chunk_index=1,
+            clock=clock,
+            heartbeat=progress.append,
+            popen=ExitAppendingPopen(),
+            mailbox_watcher=watcher,
+        )
+
+        self.assertEqual(reads, [True])
+        self.assertEqual(
+            [item["id"] for item in payload["outbox"]["questions"]],
+            [question.id],
+        )
+        question_records = [
+            record for record in progress if record.startswith("QUESTION ")
+        ]
+        self.assertEqual(len(question_records), 1)
+        self.assertIn(question.id, question_records[0])
+
+
+class AttachedMailboxWatcherTest(unittest.TestCase):
+    """Attach supervision shares the durable watcher without replaying history."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="asl-autopilot-attached-mailbox-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.state_path = os.path.join(self.tmp, "state", "plan-hash")
+        self.mailbox_path = os.path.join(self.state_path, "mailbox.jsonl")
+        self.lease_path = os.path.join(self.state_path, "mailbox-lease.json")
+
+    def _attach_status(self):
+        status = _attach_status(10)
+        status.update(
+            {
+                "state_dir": self.state_path,
+                "mailbox": {
+                    "path": self.mailbox_path,
+                    "lease_path": self.lease_path,
+                    "last_seq": 3,
+                    "unanswered_questions": 1,
+                },
+            }
+        )
+        return status
+
+    def test_attach_delivers_preexisting_unanswered_question_once(self) -> None:
+        clock = _ManualClock()
+        answered = autopilot._mailbox.MailboxMessage(
+            seq=1,
+            id="00000000-0000-0000-0000-000000000010",
+            kind=autopilot._mailbox.KIND_QUESTION,
+            created_at="2026-07-24T18:59:00+00:00",
+            text="answered before this supervisor attached",
+        )
+        reply = autopilot._mailbox.MailboxMessage(
+            seq=2,
+            id="00000000-0000-0000-0000-000000000011",
+            kind=autopilot._mailbox.KIND_REPLY,
+            created_at="2026-07-24T18:59:01+00:00",
+            text="already handled",
+            to=answered.id,
+        )
+        unanswered = autopilot._mailbox.MailboxMessage(
+            seq=3,
+            id="00000000-0000-0000-0000-000000000012",
+            kind=autopilot._mailbox.KIND_QUESTION,
+            created_at="2026-07-24T19:00:00+00:00",
+            text="unanswered before this supervisor attached",
+        )
+        view = autopilot._mailbox.MailboxView(
+            mailbox_path=autopilot.Path(self.mailbox_path),
+            messages=(answered, reply, unanswered),
+            last_seq=3,
+        )
+        lease_writes = []
+        created = []
+
+        def factory(status, **kwargs):
+            watcher = autopilot._MailboxWatcher.from_status(
+                status,
+                **kwargs,
+                read_mailbox=lambda *_args, **_kwargs: view,
+                write_lease=lambda *args, **kw: lease_writes.append((args, kw)),
+                supervisor_id="00000000-0000-0000-0000-000000000099",
+            )
+            created.append(watcher)
+            return watcher
+
+        attach = self._attach_status()
+        status = _StatusScript([attach] * 7 + [_status_payload(0)])
+        beats = []
+        result = autopilot.supervise_run(
+            {
+                "plan_dir": "/tmp/plan",
+                "argv": ["asl", "run", "/tmp/plan", "--json"],
+            },
+            status_invoker=status,
+            run_invoker=_never_run,
+            clock=clock,
+            sleep=clock.advance,
+            heartbeat=beats.append,
+            poll_interval=5.0,
+            heartbeat_interval=30.0,
+            mailbox_watcher_factory=factory,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "complete")
+        self.assertEqual(len(created), 1)
+        watcher = created[0]
+        self.assertIsNotNone(watcher)
+        assert watcher is not None
+        self.assertFalse(watcher.enabled)
+        self.assertGreaterEqual(len(lease_writes), 2)
+        question_beats = [beat for beat in beats if beat.startswith("QUESTION ")]
+        self.assertEqual(len(question_beats), 1)
+        self.assertIn(unanswered.id, question_beats[0])
+        self.assertNotIn(answered.id, question_beats[0])
+        self.assertEqual(result["outbox"]["since"], 3)
+        self.assertEqual(result["outbox"]["next_since"], 3)
+        self.assertEqual(
+            [question["id"] for question in result["outbox"]["questions"]],
+            [unanswered.id],
+        )
+        self.assertIn("pending outbox 1", "\n".join(beats))
+
+    def test_no_mailbox_attach_never_constructs_a_watcher(self) -> None:
+        def fail_factory(*_args, **_kwargs):  # pragma: no cover - guard
+            raise AssertionError("disabled mailbox must not construct a watcher")
+
+        result = autopilot.supervise_run(
+            {
+                "plan_dir": "/tmp/plan",
+                "argv": [
+                    "asl",
+                    "run",
+                    "/tmp/plan",
+                    "--no-mailbox",
+                    "--json",
+                ],
+                "no_mailbox": True,
+            },
+            status_invoker=_StatusScript(
+                [self._attach_status(), _status_payload(0)]
+            ),
+            run_invoker=_never_run,
+            clock=_counter_clock(),
+            sleep=lambda *_: None,
+            heartbeat=lambda *_: None,
+            mailbox_watcher_factory=fail_factory,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertNotIn("outbox", result)
+
+
 def _running_status(idle, *, session_id="tidy-db-writes", number=3, total=8):
     """Status payload whose live turn is running with the given idle seconds."""
     return {
@@ -2274,6 +3223,13 @@ class InvokeRunHeartbeatTest(unittest.TestCase):
         tick = beats[1]
         self.assertIn("WARN possibly stalled", tick)
         self.assertIn("idle 96s (no output)", tick)
+
+    def test_running_line_includes_pending_outbox_count(self) -> None:
+        status = _running_status(34)
+        status["mailbox"] = {"unanswered_questions": 3}
+        popen = FakeTimeoutPopen(timeout_count=1, stdout=self.FINAL_JSON)
+        _payload, beats = self._run(popen=popen, status_probe=lambda: status)
+        self.assertIn("pending outbox 3", beats[1])
 
     def test_probe_that_raises_falls_back_to_plain_line(self) -> None:
         def boom():
@@ -2464,6 +3420,112 @@ class EventsTailerTest(unittest.TestCase):
         snapshot, _ = tailer.snapshot()
         self.assertEqual(snapshot["state"], "paused")
         self.assertEqual(snapshot["reason"], "quota-exhausted")
+
+    def test_wait_started_is_healthy_even_when_event_stream_goes_silent(self) -> None:
+        clock = _clock_from([0.0, 1.0, 200.0])
+        wait_started = {
+            "name": autopilot._events.MAILBOX_EVENT,
+            "payload": {
+                "action": autopilot._events.MAILBOX_ACTION_WAIT_STARTED,
+                "question_id": "question-12",
+                "session_id": "12",
+                "session_number": 12,
+                "turn_index": 2,
+                "pending_outbox": 3,
+                "base_deadline": "2099-07-24T19:05:00+00:00",
+                "hard_deadline": "2099-07-24T19:15:00+00:00",
+            },
+        }
+        tailer = autopilot._EventsTailer(
+            "events.jsonl",
+            clock=clock,
+            stall_threshold=90.0,
+            follow=_batch_follower([[wait_started]]),
+        )
+
+        snapshot, events_stale = tailer.snapshot()
+        self.assertEqual(snapshot["state"], "waiting_for_reply")
+        self.assertEqual(snapshot["pending_outbox"], 3)
+        self.assertFalse(events_stale)
+        snapshot, events_stale = tailer.snapshot()
+        self.assertTrue(events_stale)
+        message = autopilot._format_heartbeat(
+            1, 200.0, snapshot, 90.0, events_stale=events_stale
+        )
+        self.assertIn("waiting for reply for session 12", message)
+        self.assertIn("pending outbox 3", message)
+        self.assertNotIn("WARN possibly stalled", message)
+        self.assertNotEqual(snapshot["state"], "paused")
+
+    def test_wait_cleared_ends_wait_and_preserves_actual_outbox_count(self) -> None:
+        wait_started = {
+            "name": autopilot._events.MAILBOX_EVENT,
+            "payload": {
+                "action": autopilot._events.MAILBOX_ACTION_WAIT_STARTED,
+                "question_id": "question-12",
+                "session_id": "12",
+                "turn_index": 2,
+                "pending_outbox": 3,
+                "hard_deadline": "2099-07-24T19:15:00+00:00",
+            },
+        }
+        wait_cleared = {
+            "name": autopilot._events.MAILBOX_EVENT,
+            "payload": {
+                "action": autopilot._events.MAILBOX_ACTION_WAIT_CLEARED,
+                "question_id": "question-12",
+                "session_id": "12",
+                "turn_index": 2,
+                "reason": "reply",
+                "pending_outbox": 2,
+            },
+        }
+        turn_started = {
+            "name": "turn_started",
+            "payload": {
+                "session_id": "12",
+                "session_number": 12,
+                "total_sessions": 14,
+            },
+        }
+        tailer = autopilot._EventsTailer(
+            "events.jsonl",
+            clock=_clock_from([0.0, 1.0, 2.0, 3.0]),
+            follow=_batch_follower(
+                [[wait_started], [wait_cleared], [turn_started]]
+            ),
+        )
+
+        snapshot, _ = tailer.snapshot()
+        self.assertEqual(snapshot["state"], "waiting_for_reply")
+        self.assertEqual(snapshot["pending_outbox"], 3)
+        snapshot, _ = tailer.snapshot()
+        self.assertEqual(snapshot["state"], "unknown")
+        self.assertEqual(snapshot["pending_outbox"], 2)
+        snapshot, _ = tailer.snapshot()
+        self.assertEqual(snapshot["state"], "running")
+        self.assertEqual(snapshot["pending_outbox"], 2)
+
+    def test_elapsed_wait_hard_deadline_triggers_stall_warning(self) -> None:
+        snapshot = {
+            "state": "waiting_for_reply",
+            "session_id": "12",
+            "pending_outbox": 2,
+            "hard_deadline": "2026-07-24T19:15:00+00:00",
+        }
+
+        message = autopilot._format_heartbeat(
+            1,
+            900.0,
+            snapshot,
+            90.0,
+            events_stale=False,
+            now=datetime(2026, 7, 24, 19, 15, tzinfo=timezone.utc),
+        )
+
+        self.assertIn("WARN possibly stalled", message)
+        self.assertIn("hard deadline elapsed", message)
+        self.assertIn("pending outbox 2", message)
 
     def test_fresh_verification_stream_stays_quiet(self) -> None:
         # Regression for F4: a verifying snapshot from a fresh event stream keeps

@@ -33,6 +33,7 @@ import subprocess
 import sys
 import time
 from typing import Any, Optional, Sequence
+import uuid
 
 # Review verdict parsing is shared with the runner through
 # ``agent_session_loop.review`` (the same thin-wrapper pattern the
@@ -44,6 +45,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from agent_session_loop import events as _events  # noqa: E402
 from agent_session_loop import harnesses as _harnesses  # noqa: E402
+from agent_session_loop import mailbox as _mailbox  # noqa: E402
 from agent_session_loop import pause_policy as _pause_policy  # noqa: E402
 from agent_session_loop import review as _review  # noqa: E402
 from agent_session_loop import review_continuation as _review_continuation  # noqa: E402
@@ -96,6 +98,15 @@ _ENV_ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 DEFAULT_POLL_INTERVAL = 5.0
 DEFAULT_HEARTBEAT_INTERVAL = 30.0
 DEFAULT_MAX_CHUNKS = 50
+
+# Self-launched children share their process wait with mailbox supervision:
+# check for new questions every five seconds and renew the supervisor lease on
+# the same 30-second cadence as progress heartbeats. Question bodies stay in
+# the structured outbox payload; stderr receives only a one-line escaped
+# preview bounded to this many encoded characters.
+MAILBOX_POLL_INTERVAL = 5.0
+MAILBOX_LEASE_RENEW_INTERVAL = 30.0
+QUESTION_PREVIEW_MAX_CHARS = 240
 
 # Idle threshold (seconds) past which a heartbeat flags the child as possibly
 # stalled. `active_turn.idle_seconds` is the seconds since the child last wrote
@@ -498,6 +509,339 @@ def _status_argv(parsed: dict) -> list:
     return argv
 
 
+def _escaped_question_preview(
+    text: str,
+    *,
+    max_chars: int = QUESTION_PREVIEW_MAX_CHARS,
+) -> str:
+    """Return one bounded JSON string suitable for a progress record.
+
+    JSON string encoding keeps newlines, control characters, quotes, and
+    non-ASCII text from creating extra stderr records. Truncation is performed
+    against the encoded representation so the advertised bound applies after
+    escaping rather than only to the source text.
+    """
+    encoded = json.dumps(text.strip(), ensure_ascii=True)
+    if len(encoded) <= max_chars:
+        return encoded
+
+    marker = "\u2026"
+    low = 0
+    high = len(text)
+    best = json.dumps(marker, ensure_ascii=True)
+    while low <= high:
+        midpoint = (low + high) // 2
+        candidate = json.dumps(
+            text[:midpoint].rstrip() + marker,
+            ensure_ascii=True,
+        )
+        if len(candidate) <= max_chars:
+            best = candidate
+            low = midpoint + 1
+        else:
+            high = midpoint - 1
+    return best
+
+
+def _question_progress_record(question: _mailbox.MailboxMessage) -> str:
+    """Render one question as a single bounded ``QUESTION`` progress record."""
+    preview = _escaped_question_preview(question.text or "")
+    return f"QUESTION id={question.id} preview={preview}"
+
+
+class _MailboxWatcher:
+    """Poll one plan mailbox with a durable cursor and renewable lease.
+
+    The authoritative ``asl status`` payload supplies the canonical plan path,
+    per-plan state directory, mailbox paths, and initial physical sequence.
+    The watcher advances its cursor through every physical line, even when only
+    question records are returned, so non-question or malformed lines cannot
+    make a later poll repeat work. Initial and renewal lease failures keep
+    observation armed, schedule a later retry, and emit bounded progress without
+    affecting child process ownership. Mailbox read failures defer that poll so
+    the runner can still fall back to ordinary terminal pause/resume.
+    """
+
+    def __init__(
+        self,
+        *,
+        plan_dir: str,
+        state_root: str,
+        state_path: str,
+        mailbox_path: str,
+        lease_path: str,
+        since: int,
+        clock=time.monotonic,
+        read_mailbox=_mailbox.read_mailbox,
+        write_lease=_mailbox.write_lease,
+        supervisor_id: Optional[str] = None,
+        poll_interval: float = MAILBOX_POLL_INTERVAL,
+        lease_interval: float = MAILBOX_LEASE_RENEW_INTERVAL,
+        include_unanswered_backlog: bool = False,
+    ) -> None:
+        self.plan_dir = plan_dir
+        self.state_root = state_root
+        self.state_path = state_path
+        self.mailbox_path = mailbox_path
+        self.lease_path = lease_path
+        self.supervisor_id = supervisor_id or str(uuid.uuid4())
+        self.initial_seq = since
+        self.last_seq = since
+        self._clock = clock
+        self._read_mailbox = read_mailbox
+        self._write_lease = write_lease
+        self._poll_interval = poll_interval
+        self._lease_interval = lease_interval
+        self._include_unanswered_backlog = include_unanswered_backlog
+        self._next_poll_at: Optional[float] = None
+        self._next_lease_at: Optional[float] = None
+        self._questions: list[dict[str, Any]] = []
+        self._progress_records: list[str] = []
+        self._lease_degraded = False
+        self._lease_renewal_failures = 0
+        self._lease_renewal_recoveries = 0
+        self.enabled = False
+
+    @classmethod
+    def from_status(
+        cls,
+        status: object,
+        **kwargs,
+    ) -> Optional["_MailboxWatcher"]:
+        """Resolve a watcher from canonical paths advertised by status."""
+        if not isinstance(status, dict) or not status.get("ok"):
+            return None
+        plan_dir = status.get("plan_dir")
+        state_path = status.get("state_dir")
+        mailbox_status = status.get("mailbox")
+        if (
+            not isinstance(plan_dir, str)
+            or not plan_dir
+            or not isinstance(state_path, str)
+            or not state_path
+            or not isinstance(mailbox_status, dict)
+        ):
+            return None
+        mailbox_path = mailbox_status.get("path")
+        lease_path = mailbox_status.get("lease_path")
+        since = mailbox_status.get("last_seq")
+        if (
+            not isinstance(mailbox_path, str)
+            or not mailbox_path
+            or not isinstance(lease_path, str)
+            or not lease_path
+            or not isinstance(since, int)
+            or isinstance(since, bool)
+            or since < 0
+        ):
+            return None
+
+        canonical_plan = _canonical_path(plan_dir)
+        canonical_state = _canonical_path(state_path)
+        canonical_mailbox = _canonical_path(mailbox_path)
+        canonical_lease = _canonical_path(lease_path)
+        if None in (
+            canonical_plan,
+            canonical_state,
+            canonical_mailbox,
+            canonical_lease,
+        ):
+            return None
+        assert canonical_plan is not None
+        assert canonical_state is not None
+        assert canonical_mailbox is not None
+        assert canonical_lease is not None
+        # Both advertised mailbox files must live in the advertised per-plan
+        # state directory. Refuse a contradictory payload rather than writing a
+        # lease through a guessed root.
+        if (
+            os.path.dirname(canonical_mailbox) != canonical_state
+            or os.path.dirname(canonical_lease) != canonical_state
+        ):
+            return None
+        return cls(
+            plan_dir=canonical_plan,
+            state_root=os.path.dirname(canonical_state),
+            state_path=canonical_state,
+            mailbox_path=canonical_mailbox,
+            lease_path=canonical_lease,
+            since=since,
+            **kwargs,
+        )
+
+    def establish(self, *, now: Optional[float] = None) -> bool:
+        """Arm observation and attempt the initial lease before launch.
+
+        A transient write failure follows the periodic-renewal path: the
+        watcher remains usable by the active chunk, reports degraded lease
+        health, and retries at the normal renewal deadline.
+        """
+        resolved_now = self._clock() if now is None else now
+        self.enabled = True
+        self._next_poll_at = (
+            resolved_now
+            if self._include_unanswered_backlog
+            else resolved_now + self._poll_interval
+        )
+        self._next_lease_at = resolved_now + self._lease_interval
+        self._renew_lease(resolved_now)
+        return True
+
+    def renew_before_launch(self, *, now: Optional[float] = None) -> bool:
+        """Refresh an established lease immediately before another child launch.
+
+        Relaunch preparation can spend long enough in status probing and
+        transport backoff for the last periodic renewal to expire. Keep the
+        watcher armed on failure, matching periodic-renewal behavior, so
+        readable mailbox questions remain observable while a later renewal can
+        recover.
+        """
+        if not self.enabled:
+            return False
+        resolved_now = self._clock() if now is None else now
+        return self._renew_lease(resolved_now)
+
+    def _renew_lease(self, resolved_now: float) -> bool:
+        """Renew now while preserving observation after a write failure."""
+        try:
+            self._write_lease(
+                self.plan_dir,
+                self.supervisor_id,
+                state_dir=self.state_root,
+            )
+        except (OSError, _mailbox.MailboxError):
+            self._lease_renewal_failures += 1
+            if not self._lease_degraded:
+                self._progress_records.append(
+                    "MAILBOX WARN lease renewal failed; retry scheduled"
+                )
+            self._lease_degraded = True
+            self._next_lease_at = resolved_now + self._lease_interval
+            return False
+
+        if self._lease_degraded:
+            self._lease_renewal_recoveries += 1
+            self._progress_records.append("MAILBOX lease renewal recovered")
+        self._lease_degraded = False
+        self._next_lease_at = resolved_now + self._lease_interval
+        return True
+
+    def next_deadline(self) -> Optional[float]:
+        """Return the next mailbox/lease wake deadline, if observation is live."""
+        if (
+            not self.enabled
+            or self._next_poll_at is None
+            or self._next_lease_at is None
+        ):
+            return None
+        return min(self._next_poll_at, self._next_lease_at)
+
+    def stop(self) -> None:
+        """Stop future observation without deleting the last supervisor lease.
+
+        The lease is intentionally left in place to age out through the normal
+        freshness window.  Clearing the local deadlines makes supervision
+        lifetime explicit: once the autopilot returns, this watcher can no
+        longer renew the lease or read more mailbox records.
+        """
+        self.enabled = False
+        self._next_poll_at = None
+        self._next_lease_at = None
+
+    def poll(
+        self,
+        *,
+        now: Optional[float] = None,
+        force_read: bool = False,
+    ) -> tuple[_mailbox.MailboxMessage, ...]:
+        """Renew when due and return each newly observed question once.
+
+        Attach-mode watchers use one initial immutable unanswered-question view
+        so questions that predate the status cursor survive supervisor
+        reconnects without replaying already-answered history. ``force_read``
+        supports the final drain after a supervised child exits, even when the
+        regular poll deadline has not arrived yet.
+        """
+        if not self.enabled:
+            return ()
+        resolved_now = self._clock() if now is None else now
+        assert self._next_poll_at is not None
+        assert self._next_lease_at is not None
+
+        if resolved_now >= self._next_lease_at:
+            # Keep both mailbox observation and the lease deadline armed after
+            # failure. Advancing from ``resolved_now`` avoids a zero-timeout
+            # retry spin when the backing filesystem remains unavailable.
+            self._renew_lease(resolved_now)
+
+        questions: tuple[_mailbox.MailboxMessage, ...] = ()
+        if force_read or resolved_now >= self._next_poll_at:
+            self._next_poll_at = resolved_now + self._poll_interval
+            try:
+                view = self._read_mailbox(
+                    self.plan_dir,
+                    state_dir=self.state_root,
+                )
+            except (OSError, _mailbox.MailboxError):
+                return ()
+            if self._include_unanswered_backlog:
+                questions = view.unanswered_questions
+                self._include_unanswered_backlog = False
+            else:
+                questions = view.messages_since(
+                    self.last_seq,
+                    kinds=(_mailbox.KIND_QUESTION,),
+                )
+            self.last_seq = max(self.last_seq, view.last_seq)
+            self._questions.extend(question.to_payload() for question in questions)
+        return questions
+
+    def drain_progress_records(self) -> tuple[str, ...]:
+        """Return and clear watcher health records for the progress sink."""
+        records = tuple(self._progress_records)
+        self._progress_records.clear()
+        return records
+
+    def outbox_payload(self) -> dict[str, Any]:
+        """Return the full-text structured response accumulated so far."""
+        return {
+            "command": "outbox-wait",
+            "plan_dir": self.plan_dir,
+            "mailbox_path": self.mailbox_path,
+            "lease_path": self.lease_path,
+            "supervisor_id": self.supervisor_id,
+            "since": self.initial_seq,
+            "next_since": self.last_seq,
+            "questions": list(self._questions),
+            "lease_supervision": {
+                "degraded": self._lease_degraded,
+                "renewal_failures": self._lease_renewal_failures,
+                "renewal_recoveries": self._lease_renewal_recoveries,
+            },
+        }
+
+
+def _poll_mailbox_watcher(
+    watcher: _MailboxWatcher,
+    *,
+    now: float,
+    heartbeat,
+    force_read: bool = False,
+) -> tuple[_mailbox.MailboxMessage, ...]:
+    """Poll one watcher and emit its health records and question previews."""
+    if force_read:
+        questions = watcher.poll(now=now, force_read=True)
+    else:
+        questions = watcher.poll(now=now)
+    drain_progress = getattr(watcher, "drain_progress_records", None)
+    if callable(drain_progress):
+        for record in drain_progress():
+            heartbeat(record)
+    for question in questions:
+        heartbeat(_question_progress_record(question))
+    return questions
+
+
 def _emit_heartbeat(message: str) -> None:
     """Default heartbeat sink: concise progress on stderr, never stdout.
 
@@ -553,21 +897,66 @@ def _status_snapshot(status: object) -> dict:
     """Distill an ``asl status --json`` payload into a heartbeat snapshot.
 
     Returns a small dict describing what the supervised run is doing right now:
-    its ``state`` (``running``/``verifying``/``paused``/``unknown``), the live
+    its ``state`` (``running``/``verifying``/``waiting_for_reply``/
+    ``paused``/``unknown``), the live
     ``session_id``/``session_number``/``total_sessions`` labels, and the
-    ``idle_seconds``/``elapsed_seconds`` health signals. A missing, non-dict, or
-    ``ok: False`` payload — or one with no ``active_turn`` and no
-    ``active_verification`` — degrades to ``{"state": "unknown"}`` so callers can
-    fall back to the plain heartbeat without special-casing every failure mode.
-    A paused run yields ``{"state": "paused"}``, which :func:`_format_heartbeat`
-    also renders as the plain line.
+    ``idle_seconds``/``elapsed_seconds`` health signals.  A readable mailbox
+    projection also contributes ``pending_outbox`` from its unanswered-question
+    count. A missing, non-dict, or ``ok: False`` payload — or one with no live
+    activity — degrades to ``{"state": "unknown"}`` so callers can fall back to
+    the plain heartbeat without special-casing every failure mode. A paused run
+    yields ``{"state": "paused"}``, which :func:`_format_heartbeat` also renders
+    as the plain line. Pause takes precedence over a stale wait record.
     """
     if not isinstance(status, dict) or not status.get("ok"):
         return {"state": "unknown"}
 
-    runner_state = status.get("runner_state") if isinstance(status.get("runner_state"), dict) else {}
+    runner_state = (
+        status.get("runner_state")
+        if isinstance(status.get("runner_state"), dict)
+        else {}
+    )
+    mailbox_status = status.get("mailbox")
+    pending_outbox = (
+        mailbox_status.get("unanswered_questions")
+        if isinstance(mailbox_status, dict)
+        else None
+    )
+    common = {}
+    if (
+        isinstance(pending_outbox, int)
+        and not isinstance(pending_outbox, bool)
+        and pending_outbox >= 0
+    ):
+        common["pending_outbox"] = pending_outbox
+
     if runner_state.get("paused") or status.get("paused"):
-        return {"state": "paused", "reason": runner_state.get("reason") or status.get("reason")}
+        return {
+            "state": "paused",
+            "reason": runner_state.get("reason") or status.get("reason"),
+            **common,
+        }
+
+    waiting_for_reply = (
+        runner_state.get("waiting_for_reply") or status.get("waiting_for_reply")
+    )
+    if isinstance(waiting_for_reply, dict) and waiting_for_reply:
+        waiting_status = runner_state.get("waiting_for_reply_status")
+        if waiting_status is None:
+            waiting_status = status.get("waiting_for_reply_status")
+        snapshot = {
+            "state": "waiting_for_reply",
+            "question_id": waiting_for_reply.get("question_id"),
+            "session_id": waiting_for_reply.get("session_id"),
+            "session_number": waiting_for_reply.get("session_number"),
+            "turn_index": waiting_for_reply.get("turn_index"),
+            "base_deadline": waiting_for_reply.get("base_deadline"),
+            "hard_deadline": waiting_for_reply.get("hard_deadline"),
+            **common,
+        }
+        if isinstance(waiting_status, str) and waiting_status:
+            snapshot["waiting_for_reply_status"] = waiting_status
+        return snapshot
 
     active_turn = runner_state.get("active_turn") or status.get("active_turn")
     if isinstance(active_turn, dict) and active_turn:
@@ -578,13 +967,16 @@ def _status_snapshot(status: object) -> dict:
             "total_sessions": active_turn.get("total_sessions"),
             "idle_seconds": active_turn.get("idle_seconds"),
             "elapsed_seconds": active_turn.get("elapsed_seconds"),
+            **common,
         }
 
-    active_verification = runner_state.get("active_verification") or status.get("active_verification")
+    active_verification = runner_state.get("active_verification") or status.get(
+        "active_verification"
+    )
     if isinstance(active_verification, dict) and active_verification:
-        return {"state": "verifying"}
+        return {"state": "verifying", **common}
 
-    return {"state": "unknown"}
+    return {"state": "unknown", **common}
 
 
 def _events_path_from_status(status: object) -> Optional[str]:
@@ -607,8 +999,9 @@ class _EventsTailer:
     Constructed with the ``events_path`` named by the first authoritative
     ``asl status`` payload, it follows the JSONL file with
     :func:`agent_session_loop.tail.follow_events`, folding each newly appended
-    ``turn_heartbeat``/``verification_heartbeat``/``run_paused``/``run_finished``
-    record into a running view of the supervised child. :meth:`snapshot`
+    ``turn_heartbeat``/``verification_heartbeat``/mailbox wait lifecycle/
+    ``run_paused``/``run_finished`` record into a running view of the supervised
+    child. :meth:`snapshot`
     returns a :func:`_status_snapshot`-shaped dict plus whether the event stream
     has gone silent for at least ``stall_threshold`` seconds — the authoritative
     stall signal for the event-driven path, so the 30s ``state.json`` refresh lag
@@ -639,6 +1032,7 @@ class _EventsTailer:
         self._clock = clock
         self._stall_threshold = stall_threshold
         self._snapshot: dict = {"state": "unknown"}
+        self._pending_outbox: int | None = None
         self._last_event_at = clock()
 
     def snapshot(self):
@@ -667,21 +1061,74 @@ class _EventsTailer:
         payload = record.get("payload")
         if not isinstance(payload, dict):
             payload = {}
+        pending_outbox = payload.get("pending_outbox")
+        if (
+            isinstance(pending_outbox, int)
+            and not isinstance(pending_outbox, bool)
+            and pending_outbox >= 0
+        ):
+            self._pending_outbox = pending_outbox
+
+        def update_snapshot(snapshot: dict) -> None:
+            if self._pending_outbox is not None:
+                snapshot["pending_outbox"] = self._pending_outbox
+            self._snapshot = snapshot
+
         if name == _events.TURN_HEARTBEAT_EVENT:
-            self._snapshot = {
-                "state": "running",
-                "session_id": payload.get("session_id"),
-                "session_number": payload.get("session_number"),
-                "total_sessions": payload.get("total_sessions"),
-                "idle_seconds": payload.get("idle_seconds"),
-                "elapsed_seconds": payload.get("elapsed_seconds"),
-            }
+            update_snapshot(
+                {
+                    "state": "running",
+                    "session_id": payload.get("session_id"),
+                    "session_number": payload.get("session_number"),
+                    "total_sessions": payload.get("total_sessions"),
+                    "idle_seconds": payload.get("idle_seconds"),
+                    "elapsed_seconds": payload.get("elapsed_seconds"),
+                }
+            )
+        elif name == "turn_started":
+            update_snapshot(
+                {
+                    "state": "running",
+                    "session_id": payload.get("session_id"),
+                    "session_number": payload.get("session_number"),
+                    "total_sessions": payload.get("total_sessions"),
+                    "idle_seconds": 0,
+                    "elapsed_seconds": 0,
+                }
+            )
         elif name == _events.VERIFICATION_HEARTBEAT_EVENT:
-            self._snapshot = {"state": "verifying"}
+            update_snapshot({"state": "verifying"})
+        elif (
+            name == _events.MAILBOX_EVENT
+            and payload.get("action") == _events.MAILBOX_ACTION_WAIT_STARTED
+        ):
+            # A reply wait is live, bounded runner activity, not a terminal
+            # pause. The runner records the actual unanswered-question count
+            # from the same mailbox snapshot that established the wait.
+            update_snapshot(
+                {
+                    "state": "waiting_for_reply",
+                    "question_id": payload.get("question_id"),
+                    "session_id": payload.get("session_id"),
+                    "session_number": payload.get("session_number"),
+                    "turn_index": payload.get("turn_index"),
+                    "base_deadline": payload.get("base_deadline"),
+                    "hard_deadline": payload.get("hard_deadline"),
+                }
+            )
+        elif (
+            name == _events.MAILBOX_EVENT
+            and payload.get("action") == _events.MAILBOX_ACTION_WAIT_CLEARED
+        ):
+            # The next turn or terminal pause follows immediately, but clearing
+            # here prevents the old wait from surviving until that next event.
+            update_snapshot({"state": "unknown"})
         elif name == _events.RUN_PAUSED_EVENT:
-            self._snapshot = {"state": "paused", "reason": payload.get("reason")}
+            update_snapshot(
+                {"state": "paused", "reason": payload.get("reason")}
+            )
         elif name == "run_finished":
-            self._snapshot = {"state": "unknown"}
+            update_snapshot({"state": "unknown"})
 
 
 def _build_events_tailer(
@@ -711,7 +1158,13 @@ def _build_events_tailer(
         return None
 
 
-def _heartbeat_detail(snapshot: dict, stall_threshold: float, events_stale=None):
+def _heartbeat_detail(
+    snapshot: dict,
+    stall_threshold: float,
+    events_stale=None,
+    *,
+    now: Optional[datetime] = None,
+):
     """Distill a snapshot into a ``(is_stall, detail)`` pair for a heartbeat.
 
     ``detail`` is the enrichment fragment shared by every heartbeat site so the
@@ -728,6 +1181,12 @@ def _heartbeat_detail(snapshot: dict, stall_threshold: float, events_stale=None)
       fresh; ``(True, "no new events for <n>s+ (no output)")`` when the events
       tailer reports the verification stream went silent past the threshold (the
       heartbeat carries no ``idle_seconds``, so event silence is the only signal).
+    - ``waiting_for_reply``: healthy when the authoritative
+      ``waiting_for_reply_status`` is ``live`` and its valid hard deadline
+      remains in the future. An explicitly non-live status, elapsed deadline, or
+      malformed deadline is reported as a stall. When the status is absent for
+      compatibility with older ``asl`` builds, the deadline-only behavior is
+      preserved. Event silence alone is ignored inside that bound.
     - any other snapshot (``paused``/``unknown``/errored): ``(False, None)`` so
       callers fall back to their plain line, preserving pre-enrichment behavior.
 
@@ -745,6 +1204,22 @@ def _heartbeat_detail(snapshot: dict, stall_threshold: float, events_stale=None)
     sampled idle is high (the 30s ``state.json`` refresh lag can never raise a
     false positive on its own).
     """
+    pending_outbox = snapshot.get("pending_outbox")
+    outbox_fragment = (
+        f"pending outbox {pending_outbox}"
+        if (
+            isinstance(pending_outbox, int)
+            and not isinstance(pending_outbox, bool)
+            and pending_outbox >= 0
+        )
+        else None
+    )
+
+    def with_outbox(detail: str) -> str:
+        if outbox_fragment is None:
+            return detail
+        return f"{detail} | {outbox_fragment}"
+
     state = snapshot.get("state")
     if state == "running":
         idle = snapshot.get("idle_seconds")
@@ -752,8 +1227,10 @@ def _heartbeat_detail(snapshot: dict, stall_threshold: float, events_stale=None)
         stalled = idle_high if events_stale is None else bool(events_stale)
         if stalled:
             if idle_high:
-                return True, f"idle {int(idle)}s (no output)"
-            return True, f"no new events for {int(stall_threshold)}s+ (no output)"
+                return True, with_outbox(f"idle {int(idle)}s (no output)")
+            return True, with_outbox(
+                f"no new events for {int(stall_threshold)}s+ (no output)"
+            )
         label = f"session {snapshot.get('session_id')}"
         number = snapshot.get("session_number")
         total = snapshot.get("total_sessions")
@@ -762,7 +1239,7 @@ def _heartbeat_detail(snapshot: dict, stall_threshold: float, events_stale=None)
         idle_fragment = (
             f" | idle {int(idle)}s" if isinstance(idle, (int, float)) else ""
         )
-        return False, f"{label}{idle_fragment}"
+        return False, with_outbox(f"{label}{idle_fragment}")
     if state == "verifying":
         # The verification heartbeat carries no ``idle_seconds``, so event
         # silence is the only stall signal available for this phase. As with
@@ -771,8 +1248,37 @@ def _heartbeat_detail(snapshot: dict, stall_threshold: float, events_stale=None)
         # never-stall behavior; an explicit ``True`` from the events tailer means
         # the verification stream itself went silent past the threshold, so warn.
         if events_stale:
-            return True, f"no new events for {int(stall_threshold)}s+ (no output)"
-        return False, "verifying"
+            return True, with_outbox(
+                f"no new events for {int(stall_threshold)}s+ (no output)"
+            )
+        return False, with_outbox("verifying")
+    if state == "waiting_for_reply":
+        session_id = snapshot.get("session_id")
+        detail = "waiting for reply"
+        if session_id is not None:
+            detail += f" for session {session_id}"
+        waiting_status = snapshot.get("waiting_for_reply_status")
+        if waiting_status is not None and waiting_status != "live":
+            return True, with_outbox(
+                f"{detail}: wait status {waiting_status} (no output)"
+            )
+        hard_deadline = _parse_timestamp(snapshot.get("hard_deadline"))
+        if hard_deadline is None:
+            return True, with_outbox(
+                f"{detail}: invalid hard deadline (no output)"
+            )
+        current = datetime.now(timezone.utc) if now is None else now
+        if current.tzinfo is None or current.utcoffset() is None:
+            current = current.replace(tzinfo=timezone.utc)
+        else:
+            current = current.astimezone(timezone.utc)
+        if current >= hard_deadline:
+            return True, with_outbox(
+                f"{detail}: hard deadline elapsed (no output)"
+            )
+        # Within the runner's absolute bound, ordinary event silence does not
+        # imply a stall because the reply poll intentionally emits no heartbeat.
+        return False, with_outbox(detail)
     return False, None
 
 
@@ -782,6 +1288,8 @@ def _format_heartbeat(
     snapshot: dict,
     stall_threshold: float,
     events_stale=None,
+    *,
+    now: Optional[datetime] = None,
 ) -> str:
     """Render a per-tick heartbeat line from a :func:`_status_snapshot`.
 
@@ -792,11 +1300,20 @@ def _format_heartbeat(
       ``WARN possibly stalled`` line naming the idle and elapsed seconds.
     - ``verifying`` (review phase): the same running line with a ``verifying``
       label instead of a session.
+    - ``waiting_for_reply``: a healthy line while its wait status is live and
+      before its hard deadline, or under the legacy deadline-only fallback when
+      the status is absent; a non-live status, elapsed deadline, or malformed
+      deadline produces a stall warning.
     - any other snapshot (``paused``/``unknown``/errored): the legacy plain
       ``running, elapsed Ns`` line, preserving pre-enrichment behavior.
     """
     plain = f"chunk {chunk_index}: running, elapsed {int(elapsed)}s"
-    is_stall, detail = _heartbeat_detail(snapshot, stall_threshold, events_stale)
+    is_stall, detail = _heartbeat_detail(
+        snapshot,
+        stall_threshold,
+        events_stale,
+        now=now,
+    )
     if detail is None:
         return plain
     if is_stall:
@@ -818,6 +1335,7 @@ def _invoke_run(
     popen=subprocess.Popen,
     status_probe=None,
     events_tailer=None,
+    mailbox_watcher: Optional[_MailboxWatcher] = None,
     stall_threshold: float = DEFAULT_STALL_IDLE_THRESHOLD,
 ) -> dict:
     """Start one ``asl run`` chunk, wait with heartbeats, return its JSON.
@@ -825,8 +1343,12 @@ def _invoke_run(
     The child's ``argv`` already carries ``--json`` (guaranteed by
     :func:`parse_command`), so its stdout is the final run payload. We emit a
     concise heartbeat when the run starts and every ``heartbeat_interval``
-    seconds it stays alive, keeping stdout clear for the parsed result. A child
-    that crashes or prints non-JSON yields a synthetic ``run-error`` payload.
+    seconds it stays alive, keeping stdout clear for the parsed result. When a
+    mailbox watcher is supplied, the same ``communicate`` loop also wakes at
+    its five-second poll/lease deadlines, emits each newly observed question as
+    one bounded ``QUESTION`` progress record, and retains full question bodies
+    in the returned ``outbox`` object. A child that crashes or prints non-JSON
+    yields a synthetic ``run-error`` payload.
 
     Heartbeat ticks derive their live snapshot from the plan's ``events.jsonl``
     rather than re-probing ``asl status`` every 30s: when ``status_probe`` is
@@ -880,6 +1402,7 @@ def _invoke_run(
         tailer = _build_events_tailer(status_probe, clock, stall_threshold)
 
     start = clock()
+    heartbeat_deadline = start + heartbeat_interval
     heartbeat(
         f"chunk {chunk_index}: "
         + ("resumed `asl run --reply-stdin`" if is_reply else "started `asl run`")
@@ -891,8 +1414,15 @@ def _invoke_run(
     # avoid re-sending the reply.
     pending_input: Optional[str] = reply_text
     while True:
+        now = clock()
+        deadlines = [heartbeat_deadline]
+        if mailbox_watcher is not None:
+            mailbox_deadline = mailbox_watcher.next_deadline()
+            if mailbox_deadline is not None:
+                deadlines.append(mailbox_deadline)
+        timeout = max(0.0, min(deadlines) - now)
         try:
-            out, err = proc.communicate(input=pending_input, timeout=heartbeat_interval)
+            out, err = proc.communicate(input=pending_input, timeout=timeout)
             if out:
                 stdout_parts.append(out)
             if err:
@@ -900,7 +1430,17 @@ def _invoke_run(
             break
         except subprocess.TimeoutExpired:
             pending_input = None
-            elapsed = clock() - start
+            now = clock()
+            if mailbox_watcher is not None:
+                _poll_mailbox_watcher(
+                    mailbox_watcher,
+                    now=now,
+                    heartbeat=heartbeat,
+                )
+            if now < heartbeat_deadline:
+                continue
+
+            elapsed = now - start
             message: Optional[str] = None
             if tailer is not None:
                 try:
@@ -942,6 +1482,19 @@ def _invoke_run(
             if message is None:
                 message = f"chunk {chunk_index}: running, elapsed {int(elapsed)}s"
             heartbeat(message)
+            steps = max(
+                1,
+                int((now - heartbeat_deadline) // heartbeat_interval) + 1,
+            )
+            heartbeat_deadline += steps * heartbeat_interval
+
+    if mailbox_watcher is not None:
+        _poll_mailbox_watcher(
+            mailbox_watcher,
+            now=clock(),
+            heartbeat=heartbeat,
+            force_read=True,
+        )
 
     stdout = "".join(stdout_parts).strip()
     stderr = "".join(stderr_parts).strip()
@@ -952,7 +1505,7 @@ def _invoke_run(
         except json.JSONDecodeError:
             payload = None
     if not isinstance(payload, dict):
-        return {
+        result = {
             "ok": False,
             "paused": False,
             "reason": "run-error",
@@ -963,7 +1516,12 @@ def _invoke_run(
             "_invoke_error": True,
             "returncode": proc.returncode,
         }
+        if mailbox_watcher is not None:
+            result["outbox"] = mailbox_watcher.outbox_payload()
+        return result
     payload.setdefault("returncode", proc.returncode)
+    if mailbox_watcher is not None:
+        payload["outbox"] = mailbox_watcher.outbox_payload()
     return payload
 
 
@@ -1322,6 +1880,7 @@ def _run_result(
     retries: Optional[dict] = None,
     completed: Optional[int] = None,
     pending: Optional[int] = None,
+    outbox: Optional[dict] = None,
 ) -> dict:
     """Build a stable ``stage: run`` supervision result payload."""
     result: dict = {"ok": ok, "stage": RUN_STAGE, "reason": reason, "chunks": chunks}
@@ -1337,6 +1896,8 @@ def _run_result(
         result["run"] = run
     if retries is not None:
         result["retries"] = retries
+    if outbox is not None:
+        result["outbox"] = outbox
     # Runner JSON is the freshest projection after a chunk; status is the
     # durable source when no chunk launched.  Expose either at the top level so
     # callers do not have to know which supervision path produced the result.
@@ -1432,23 +1993,47 @@ def _attach_events_wait(
     clock,
     sleep,
     events_stat,
+    mailbox_watcher: Optional[_MailboxWatcher] = None,
+    heartbeat=_emit_heartbeat,
 ) -> None:
     """Wait between attach-mode full ``asl status`` probes, watching events.jsonl.
 
     Sleeps ``poll_interval`` slices while ``os.stat``-ing the events file and
     returns — signalling the caller to run a fresh full probe — once the
     ``heartbeat_interval`` elapses or the file grows (new activity or a terminal
-    event). With no events file to watch (no path, or an unreadable one) it
-    degrades to a single ``poll_interval`` sleep so callers without a live event
-    stream keep the legacy full-probe-every-poll cadence.
+    event). When a mailbox watcher is active, each sleep slice also honors its
+    poll/lease deadline and emits newly observed questions through the supplied
+    heartbeat sink. With no events file to watch (no path, or an unreadable one)
+    it degrades to a single bounded sleep so callers without a live event stream
+    keep the legacy full-probe-every-poll cadence.
     """
+    def poll_mailbox(now: float) -> None:
+        if mailbox_watcher is None:
+            return
+        _poll_mailbox_watcher(
+            mailbox_watcher,
+            now=now,
+            heartbeat=heartbeat,
+        )
+
+    def sleep_slice() -> float:
+        duration = poll_interval
+        if mailbox_watcher is not None:
+            deadline = mailbox_watcher.next_deadline()
+            if deadline is not None:
+                duration = min(duration, max(0.0, deadline - clock()))
+        sleep(duration)
+        if mailbox_watcher is not None:
+            poll_mailbox(clock())
+        return duration
+
     baseline = events_stat(events_path)
     if baseline is None:
-        sleep(poll_interval)
+        sleep_slice()
         return
     start = clock()
     while True:
-        sleep(poll_interval)
+        sleep_slice()
         current = events_stat(events_path)
         if current is None or current != baseline:
             return
@@ -1471,6 +2056,7 @@ def supervise_run(
     stall_threshold: float = DEFAULT_STALL_IDLE_THRESHOLD,
     max_chunks: int = DEFAULT_MAX_CHUNKS,
     max_retries: int = DEFAULT_MAX_RETRIES,
+    mailbox_watcher_factory=_MailboxWatcher.from_status,
 ) -> dict:
     """Drive an ``asl run`` to completion within a global session budget.
 
@@ -1483,7 +2069,10 @@ def supervise_run(
       transient status snapshot reports zero pending sessions. The attached
       run's ``run_id`` and the pending count at attach are recorded so that,
       once its lock clears, the sessions it finished are attributed to
-      ``completed`` and its persisted terminal reason is read back;
+      ``completed`` and its persisted terminal reason is read back. Mailbox
+      supervision uses the same status-derived durable cursor as a self-launched
+      child, renewing its lease and delivering each newly observed question once
+      until supervision returns;
     - ``--max-sessions`` is a global budget: the drop in pending across chunks
       accumulates the implementation sessions completed this run, and once that
       count reaches the cap with impl sessions still pending the run stops
@@ -1536,16 +2125,27 @@ def supervise_run(
     ``max_chunks`` bounds both self-launched relaunches and attach polls so a
     wedged plan can never loop forever.
 
-    Both heartbeat sites carry live progress. Self-launched chunks derive each
-    tick from the plan's ``events.jsonl`` (see :func:`_invoke_run`), and the
-    attach-wait heartbeat reuses the ``status`` payload already fetched this
-    iteration to surface the same session/idle detail and a ``WARN possibly
-    stalled`` line once ``idle_seconds`` crosses ``stall_threshold``. Between
-    attach heartbeats the loop only ``os.stat``s ``events.jsonl`` (via the
-    ``events_stat`` seam) rather than re-running ``asl status`` every poll; a
-    fresh full probe — which keeps lock/pending classification authoritative —
-    runs once the heartbeat interval elapses or the events file grows.
+    Both heartbeat sites carry live progress and pending outbox counts.
+    Self-launched chunks derive each tick from the plan's ``events.jsonl`` (see
+    :func:`_invoke_run`), and the attach-wait heartbeat reuses the ``status``
+    payload already fetched this iteration to surface the same session/idle
+    detail and a ``WARN possibly stalled`` line once ``idle_seconds`` crosses
+    ``stall_threshold``. A bounded ``waiting_for_reply`` state suppresses
+    event-silence warnings only until its hard deadline; an overdue or malformed
+    deadline is reported as possibly stalled. Between attach heartbeats the loop
+    only ``os.stat``s ``events.jsonl`` (via the ``events_stat`` seam) and services
+    watcher deadlines rather than re-running ``asl status`` every poll; a fresh
+    full probe — which keeps lock/pending classification authoritative — runs
+    once the heartbeat interval elapses or the events file grows.
     """
+    mailbox_watcher: Optional[_MailboxWatcher] = None
+
+    def run_result(*args, **kwargs) -> dict:
+        if mailbox_watcher is not None:
+            kwargs.setdefault("outbox", mailbox_watcher.outbox_payload())
+            mailbox_watcher.stop()
+        return _run_result(*args, **kwargs)
+
     if run_invoker is None:
 
         def run_invoker(target: dict, chunk_index: int) -> dict:
@@ -1560,6 +2160,7 @@ def supervise_run(
                 heartbeat=heartbeat,
                 heartbeat_interval=heartbeat_interval,
                 status_probe=lambda: status_invoker(parsed),
+                mailbox_watcher=mailbox_watcher,
                 stall_threshold=stall_threshold,
             )
 
@@ -1605,7 +2206,7 @@ def supervise_run(
                 if isinstance(status, dict)
                 else "status probe returned no payload"
             )
-            return _run_result(
+            return run_result(
                 False, "status-error", status=status if isinstance(status, dict) else None,
                 chunks=chunks, error=error,
             )
@@ -1613,7 +2214,7 @@ def supervise_run(
         events_path = status.get("events_path")
         disposition = _classify_lock(parsed, status)
         if disposition == "mismatch":
-            return _run_result(
+            return run_result(
                 False,
                 "user_required",
                 status=status,
@@ -1655,7 +2256,7 @@ def supervise_run(
             ):
                 attached_run_id = observed_run_id
             if attach_polls > max_chunks:
-                return _run_result(
+                return run_result(
                     False,
                     "capped",
                     status=status,
@@ -1666,6 +2267,20 @@ def supervise_run(
                     ),
                 )
             now = clock()
+            if not parsed.get("no_mailbox") and mailbox_watcher is None:
+                candidate = mailbox_watcher_factory(
+                    status,
+                    clock=clock,
+                    include_unanswered_backlog=True,
+                )
+                if candidate is not None and candidate.establish(now=now):
+                    mailbox_watcher = candidate
+            if mailbox_watcher is not None:
+                _poll_mailbox_watcher(
+                    mailbox_watcher,
+                    now=now,
+                    heartbeat=heartbeat,
+                )
             if attach_start is None:
                 attach_start = now
             if last_attach_beat is None or now - last_attach_beat >= heartbeat_interval:
@@ -1697,6 +2312,8 @@ def supervise_run(
                 clock=clock,
                 sleep=sleep,
                 events_stat=events_stat,
+                mailbox_watcher=mailbox_watcher,
+                heartbeat=heartbeat,
             )
             continue
 
@@ -1733,7 +2350,7 @@ def supervise_run(
         # exactly as pending reaches 0, `pending > 0` is false so we fall through
         # to the normal complete/review path instead of pre-empting it.
         if budget is not None and completed_total >= budget and pending > 0:
-            return _run_result(
+            return run_result(
                 True,
                 "max-sessions",
                 status=status,
@@ -1750,7 +2367,7 @@ def supervise_run(
         # that lands exactly as pending reaches 0 from pre-empting the normal
         # complete/review path.
         if stop_requested and pending > 0:
-            return _run_result(
+            return run_result(
                 True,
                 "stopped",
                 status=status,
@@ -1760,11 +2377,11 @@ def supervise_run(
             )
 
         if not _should_launch_for_status(parsed, status, pending):
-            return _run_result(True, "complete", status=status, chunks=chunks)
+            return run_result(True, "complete", status=status, chunks=chunks)
 
         # disposition in ("clear", "stale") -> start one chunk ourselves.
         if chunks >= max_chunks:
-            return _run_result(
+            return run_result(
                 False,
                 "capped",
                 status=status,
@@ -1791,9 +2408,17 @@ def supervise_run(
             }
         else:
             launch_parsed = parsed
+        if not parsed.get("no_mailbox"):
+            launch_now = clock()
+            if mailbox_watcher is None:
+                candidate = mailbox_watcher_factory(status, clock=clock)
+                if candidate is not None and candidate.establish(now=launch_now):
+                    mailbox_watcher = candidate
+            else:
+                mailbox_watcher.renew_before_launch(now=launch_now)
         run_payload = run_invoker(launch_parsed, chunks)
         if not isinstance(run_payload, dict) or run_payload.get("_invoke_error"):
-            return _run_result(
+            return run_result(
                 False,
                 "run-error",
                 status=status,
@@ -1821,7 +2446,7 @@ def supervise_run(
             # surface immediately as `user_required` with any reset info, never
             # retry, and let run_autopilot skip `asl questions` for them.
             if policy.get("requires_user"):
-                return _run_result(
+                return run_result(
                     False,
                     "user_required",
                     status=status,
@@ -1875,7 +2500,7 @@ def supervise_run(
                     sleep(delay)
                 # Relaunch the same session on the next iteration (a new chunk).
                 continue
-            return _run_result(
+            return run_result(
                 False,
                 "paused",
                 status=status,
@@ -1892,7 +2517,7 @@ def supervise_run(
                 },
             )
         if run_payload.get("ok") is False:
-            return _run_result(
+            return run_result(
                 False,
                 "blocked",
                 status=status,

@@ -31,8 +31,14 @@ MAILBOX_LEASE_FILE_NAME = "mailbox-lease.json"
 MAILBOX_SCHEMA_VERSION = 1
 MAILBOX_LEASE_VERSION = 1
 MAILBOX_MAX_BYTES = 4 * 1024 * 1024
+# The smallest compact record produced with normal generated metadata is an
+# acknowledgement with a one-digit ``upto`` value, a canonical UUID, and a
+# generated UTC timestamp with six fractional-second digits. Once less than this
+# remains, no ordinary mailbox append can succeed.
+MAILBOX_MIN_APPEND_BYTES = 128
 MAILBOX_LEASE_BYTES = 512
 MAILBOX_LEASE_FRESH_SECONDS = 90.0
+MAILBOX_CHANGE_TOKEN_UNAVAILABLE = object()
 
 MessageKind = Literal["guidance", "question", "reply", "ack"]
 KIND_GUIDANCE: MessageKind = "guidance"
@@ -245,7 +251,7 @@ class MailboxView:
 
     @property
     def full(self) -> bool:
-        return self.size_bytes >= MAILBOX_MAX_BYTES
+        return self.size_bytes + MAILBOX_MIN_APPEND_BYTES > MAILBOX_MAX_BYTES
 
     def messages_since(
         self,
@@ -356,7 +362,7 @@ def _utc_now() -> datetime:
 
 
 def _utc_now_iso() -> str:
-    return _utc_now().isoformat()
+    return _utc_now().isoformat(timespec="microseconds")
 
 
 def _is_uuid(value: object) -> bool:
@@ -611,6 +617,24 @@ def _read_locked(fd: int) -> bytes:
             break
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+def mailbox_change_token(mailbox_path: str | Path) -> object:
+    """Return cheap append-log metadata used to avoid unchanged full reads."""
+    try:
+        stat_result = Path(mailbox_path).stat()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        # The metadata probe is only an optimization. Callers must perform a
+        # full read so the mailbox API preserves its established error behavior.
+        return MAILBOX_CHANGE_TOKEN_UNAVAILABLE
+    return (
+        stat_result.st_dev,
+        stat_result.st_ino,
+        stat_result.st_size,
+        stat_result.st_mtime_ns,
+    )
 
 
 def read_mailbox(

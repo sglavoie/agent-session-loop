@@ -7,7 +7,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import dataclasses
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import errno
 import hashlib
 import importlib.util
@@ -28,6 +28,7 @@ import threading
 import time
 import unittest
 import urllib.parse
+import uuid
 from unittest import mock
 
 from agent_session_loop import (
@@ -43,6 +44,7 @@ from agent_session_loop import (
     events,
     harnesses,
     install_verify,
+    mailbox,
     pause_policy,
     plans,
     preflight,
@@ -157,6 +159,313 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         self.assertTrue(policy["requires_user"])
         self.assertEqual(0, policy["max_retries"])
 
+    def test_waiting_state_helpers_have_no_pause_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            state_path = tmp_dir / events.STATE_FILE_NAME
+            event_path = tmp_dir / events.EVENTS_FILE_NAME
+            payload = {
+                "run_id": "run-1",
+                "ok": True,
+                "paused": False,
+                "reason": "",
+                "state_path": str(state_path),
+            }
+            started_at = datetime(2026, 7, 24, 12, tzinfo=timezone.utc)
+            waiting = runner._waiting_for_reply_payload(
+                question_id="question-1",
+                session_id="9",
+                turn_index=3,
+                started_at=started_at,
+                base_deadline=started_at + timedelta(minutes=5),
+                hard_deadline=started_at + timedelta(minutes=15),
+                last_lease_activity_at=started_at + timedelta(minutes=1),
+            )
+            persistence = runner._RunPersistence()
+
+            with mock.patch.object(
+                runner, "_notify_agent_mux_loop_paused"
+            ) as notify_paused:
+                runner._set_waiting_for_reply(
+                    event_path,
+                    payload,
+                    waiting,
+                    pending_outbox=2,
+                    persistence=persistence,
+                )
+
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+            records = read_jsonl(event_path)
+            self.assertEqual(waiting, payload["waiting_for_reply"])
+            self.assertEqual(waiting, persisted["waiting_for_reply"])
+            self.assertTrue(payload["ok"])
+            self.assertFalse(payload["paused"])
+            self.assertEqual("", payload["reason"])
+            self.assertNotIn("pause_reason", payload)
+            self.assertNotIn("pause_message", payload)
+            self.assertEqual(1, len(records))
+            self.assertEqual(events.MAILBOX_EVENT, records[0]["name"])
+            self.assertEqual(
+                events.MAILBOX_ACTION_WAIT_STARTED,
+                records[0]["payload"]["action"],
+            )
+            self.assertEqual(2, records[0]["payload"]["pending_outbox"])
+            self.assertNotIn(
+                events.RUN_PAUSED_EVENT,
+                [record["name"] for record in records],
+            )
+            notify_paused.assert_not_called()
+
+            runner._clear_waiting_for_reply(
+                event_path,
+                payload,
+                reason="reply",
+                pending_outbox=1,
+                persistence=persistence,
+            )
+
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertNotIn("waiting_for_reply", payload)
+            self.assertNotIn("waiting_for_reply", persisted)
+            self.assertTrue(payload["ok"])
+            self.assertFalse(payload["paused"])
+            records = read_jsonl(event_path)
+            self.assertEqual(2, len(records))
+            self.assertEqual(
+                events.MAILBOX_ACTION_WAIT_CLEARED,
+                records[1]["payload"]["action"],
+            )
+            self.assertEqual("reply", records[1]["payload"]["reason"])
+            self.assertEqual(1, records[1]["payload"]["pending_outbox"])
+            self.assertEqual("question-1", records[1]["payload"]["question_id"])
+
+    def test_mailbox_reply_wait_settings_fail_safe_on_bad_overrides(self) -> None:
+        settings = runner._mailbox_reply_wait_settings(
+            {
+                runner.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "nan",
+                runner.MAILBOX_REPLY_WAIT_LEASE_EXTENSION_ENV_VAR: "-1",
+                runner.MAILBOX_REPLY_WAIT_HARD_ENV_VAR: "0",
+                runner.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "not-a-number",
+                runner.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "inf",
+            }
+        )
+        self.assertEqual(
+            runner.MAILBOX_REPLY_WAIT_BASE_SECONDS,
+            settings.base_seconds,
+        )
+        self.assertEqual(
+            runner.MAILBOX_REPLY_WAIT_LEASE_EXTENSION_SECONDS,
+            settings.lease_extension_seconds,
+        )
+        self.assertEqual(
+            runner.MAILBOX_REPLY_WAIT_HARD_SECONDS,
+            settings.hard_seconds,
+        )
+        self.assertEqual(
+            runner.MAILBOX_REPLY_WAIT_POLL_SECONDS,
+            settings.poll_seconds,
+        )
+        self.assertEqual(
+            runner.MAILBOX_REPLY_WAIT_IO_GRACE_SECONDS,
+            settings.io_grace_seconds,
+        )
+
+        clamped = runner._mailbox_reply_wait_settings(
+            {
+                runner.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "20",
+                runner.MAILBOX_REPLY_WAIT_HARD_ENV_VAR: "10",
+            }
+        )
+        self.assertEqual(10.0, clamped.base_seconds)
+        self.assertEqual(10.0, clamped.hard_seconds)
+
+    def test_mailbox_question_identity_is_stable_uuid5_per_turn(self) -> None:
+        first = runner._mailbox_question_id(
+            plan_dir=Path("/tmp/plan"),
+            run_id="run-1",
+            session_id="10",
+            turn_index=3,
+        )
+        repeated = runner._mailbox_question_id(
+            plan_dir=Path("/tmp/plan"),
+            run_id="run-1",
+            session_id="10",
+            turn_index=3,
+        )
+        next_turn = runner._mailbox_question_id(
+            plan_dir=Path("/tmp/plan"),
+            run_id="run-1",
+            session_id="10",
+            turn_index=4,
+        )
+        self.assertEqual(first, repeated)
+        self.assertNotEqual(first, next_turn)
+        self.assertEqual(5, uuid.UUID(first).version)
+
+    def test_mailbox_reply_wait_uses_lease_extensions_until_hard_bound(
+        self,
+    ) -> None:
+        question_id = "00000000-0000-0000-0000-000000000010"
+        question = mailbox.MailboxMessage(
+            seq=1,
+            id=question_id,
+            kind=mailbox.KIND_QUESTION,
+            created_at="2026-07-24T12:00:00+00:00",
+            text="Which option?",
+        )
+        view = mailbox.MailboxView(
+            mailbox_path=Path("/tmp/mailbox.jsonl"),
+            messages=(question,),
+            last_seq=1,
+        )
+        lease_record = mailbox.MailboxLease(
+            supervisor_id="00000000-0000-0000-0000-000000000011",
+            updated_at="2026-07-24T12:00:00+00:00",
+        )
+        lease = mailbox.MailboxLeaseView(
+            lease_path=Path("/tmp/mailbox-lease.json"),
+            lease=lease_record,
+            fresh=True,
+        )
+        settings = runner._MailboxReplyWaitSettings(
+            base_seconds=2.0,
+            lease_extension_seconds=1.0,
+            hard_seconds=5.0,
+            poll_seconds=0.5,
+            io_grace_seconds=1.0,
+        )
+        now = [0.0]
+
+        def monotonic() -> float:
+            return now[0]
+
+        def sleep(seconds: float) -> None:
+            now[0] += seconds
+
+        payload = {
+            "waiting_for_reply": {
+                "question_id": question_id,
+                "last_lease_activity_at": None,
+            }
+        }
+        persistence = runner._RunPersistence(
+            write_state=False,
+            append_events=False,
+        )
+        with (
+            mock.patch.object(
+                runner.mailbox, "read_mailbox", return_value=view
+            ),
+            mock.patch.object(
+                runner.mailbox, "read_lease", return_value=lease
+            ),
+        ):
+            result = runner._wait_for_mailbox_reply(
+                plan_dir=Path("/tmp/plan"),
+                state_dir_arg=None,
+                payload=payload,
+                question_id=question_id,
+                settings=settings,
+                persistence=persistence,
+                monotonic=monotonic,
+                sleep=sleep,
+            )
+
+        self.assertIsNone(result.reply)
+        self.assertEqual("timeout", result.reason)
+        self.assertEqual(5.0, now[0])
+        self.assertEqual(
+            lease_record.updated_at,
+            payload["waiting_for_reply"]["last_lease_activity_at"],
+        )
+
+    def test_mailbox_reply_wait_degrades_after_sustained_io_failure(
+        self,
+    ) -> None:
+        settings = runner._MailboxReplyWaitSettings(
+            base_seconds=10.0,
+            lease_extension_seconds=1.0,
+            hard_seconds=20.0,
+            poll_seconds=1.0,
+            io_grace_seconds=3.0,
+        )
+        now = [0.0]
+
+        def monotonic() -> float:
+            return now[0]
+
+        def sleep(seconds: float) -> None:
+            now[0] += seconds
+
+        with mock.patch.object(
+            runner.mailbox,
+            "read_mailbox",
+            side_effect=mailbox.MailboxError(mailbox.ERROR_MAILBOX_READ),
+        ):
+            result = runner._wait_for_mailbox_reply(
+                plan_dir=Path("/tmp/plan"),
+                state_dir_arg=None,
+                payload={},
+                question_id="00000000-0000-0000-0000-000000000012",
+                settings=settings,
+                persistence=runner._RunPersistence(
+                    write_state=False,
+                    append_events=False,
+                ),
+                monotonic=monotonic,
+                sleep=sleep,
+            )
+
+        self.assertIsNone(result.reply)
+        self.assertEqual(mailbox.ERROR_MAILBOX_READ, result.reason)
+        self.assertEqual(3.0, now[0])
+
+    def test_mailbox_reply_wait_gate_excludes_recoverable_and_failed_turns(
+        self,
+    ) -> None:
+        success = harnesses.HarnessResult(
+            name="codex",
+            argv=["codex"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+        failure = harnesses.HarnessResult(
+            name="codex",
+            argv=["codex"],
+            returncode=1,
+            stdout="",
+            stderr="quota exhausted",
+        )
+        self.assertTrue(
+            runner._runner_pause_can_wait_for_mailbox_reply(
+                mailbox_enabled=True,
+                pause_reason="blocked",
+                result=success,
+            )
+        )
+        self.assertFalse(
+            runner._runner_pause_can_wait_for_mailbox_reply(
+                mailbox_enabled=True,
+                pause_reason="verify-failed",
+                result=success,
+            )
+        )
+        self.assertFalse(
+            runner._runner_pause_can_wait_for_mailbox_reply(
+                mailbox_enabled=True,
+                pause_reason="blocked",
+                result=failure,
+            )
+        )
+        self.assertFalse(
+            runner._runner_pause_can_wait_for_mailbox_reply(
+                mailbox_enabled=False,
+                pause_reason="blocked",
+                result=success,
+            )
+        )
+
     def test_questions_payload_carries_pause_policy_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir, state_dir, _ = self._seed_paused_plan(Path(tmp))
@@ -179,7 +488,10 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             )
             plan_state = state.plan_state_dir(plan_dir, state_dir)
             state_path = plan_state / events.STATE_FILE_NAME
-            runner_state = state._runner_state_payload(state_path)
+            runner_state = state._runner_state_payload(
+                state_path,
+                lock_info=None,
+            )
             self.assertEqual(
                 pause_policy.classify_pause("runner-pause"),
                 runner_state["pause_policy"],
@@ -204,7 +516,10 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             }
             raw["pause_policy"] = persisted
             state_path.write_text(json.dumps(raw), encoding="utf-8")
-            runner_state = state._runner_state_payload(state_path)
+            runner_state = state._runner_state_payload(
+                state_path,
+                lock_info=None,
+            )
             self.assertEqual(persisted, runner_state["pause_policy"])
 
     def test_runner_state_payload_omits_pause_policy_when_not_paused(
@@ -219,7 +534,10 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 json.dumps({"ok": True, "paused": False, "reason": None}),
                 encoding="utf-8",
             )
-            runner_state = state._runner_state_payload(state_path)
+            runner_state = state._runner_state_payload(
+                state_path,
+                lock_info=None,
+            )
             self.assertIsNone(runner_state["pause_policy"])
 
     def test_questions_command_text_includes_state_dir_when_provided(self) -> None:

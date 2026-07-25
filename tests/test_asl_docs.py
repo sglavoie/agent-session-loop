@@ -5,6 +5,7 @@ Split from tests/test_agent_session_loop.py."""
 from __future__ import annotations
 
 import argparse
+import ast
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import dataclasses
 from datetime import datetime, timezone
@@ -40,10 +41,13 @@ from agent_session_loop import (
     compact_state,
     config,
     contracts,
+    control_cli,
     control_queue,
     events,
     harnesses,
     install_verify,
+    mailbox,
+    mailbox_cli,
     metrics,
     plans,
     preflight,
@@ -502,6 +506,454 @@ class HarnessDocsRegressionTests(unittest.TestCase):
             "--review-harness-model claude-opus-4 --dry-run",
             docs,
         )
+
+
+class LiveMailboxDocsRegressionTests(unittest.TestCase):
+    """Lock the final mailbox/model-control public contract."""
+
+    def _read(self, relative: str) -> str:
+        return (REPO_ROOT / relative).read_text(encoding="utf-8")
+
+    def test_command_synopsis_exposes_final_mailbox_surface(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        commands = docs.split("## Commands", 1)[1].split("\n## ", 1)[0]
+
+        self.assertIn("[--no-mailbox]", commands)
+        for command in (
+            "asl inbox guidance",
+            "asl inbox reply",
+            "asl inbox read",
+            "asl ask",
+            "asl outbox wait",
+        ):
+            self.assertIn(command, commands)
+        self.assertIn("asl control set-model", commands)
+        self.assertIn("--clear-harness-model", commands)
+        self.assertIn("--clear-effort", commands)
+
+    def test_docs_describe_activation_precedence_waits_and_fallback(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        mailbox_docs = docs.split(
+            "## Live Mailbox and Future-Turn Model Control", 1
+        )[1].split("\n## ", 1)[0]
+
+        for marker in (
+            "`mailbox.jsonl`",
+            "`mailbox-lease.json`",
+            "fixed-size 512-byte supervisor",
+            "fresh for 90 seconds",
+            "mode `0600`",
+            "existing `mailbox.jsonl` or a fresh supervisor lease",
+            "`asl run --no-mailbox` always wins",
+            "cannot override the",
+            "runner-owned mutation rules",
+            "90 seconds by default",
+            "polls mailbox\n  metadata every two seconds",
+            "default timeout is 300 seconds",
+            "polls mailbox metadata every five seconds",
+            "`acknowledged: false` plus an `acknowledgement_error`",
+            "waits five minutes initially",
+            "Lease freshness is checked only at an\nactive deadline",
+            "extends the wait by 60 seconds",
+            "15-minute limit",
+            "ordinary\nterminal pause",
+            "next\nimplementation invocation",
+            "never affect generated review turns",
+        ):
+            self.assertIn(
+                marker,
+                mailbox_docs,
+                msg=f"missing mailbox contract marker: {marker!r}",
+            )
+
+    def test_docs_describe_exhausted_mailbox_reply_precedence(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        mailbox_docs = docs.split(
+            "### Live reply wait and fallback", 1
+        )[1].split("\n### ", 1)[0]
+        normalized = " ".join(mailbox_docs.split())
+
+        self.assertIn(
+            "An already-committed reply takes precedence over mailbox "
+            "exhaustion and is delivered even when the mailbox is full.",
+            normalized,
+        )
+        self.assertIn(
+            "If no reply is available, timeout, a stale lease at an active "
+            "deadline, a full/unavailable mailbox",
+            normalized,
+        )
+        self.assertIn("such as `mailbox-full`", normalized)
+
+    def test_docs_describe_guidance_rendering_bounds(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        mailbox_docs = docs.split(
+            "## Live Mailbox and Future-Turn Model Control", 1
+        )[1].split("\n## ", 1)[0]
+        normalized = " ".join(mailbox_docs.split())
+
+        self.assertIn(
+            f"newest {runner.MAX_RENDERED_GUIDANCE} pending guidance records",
+            normalized,
+        )
+        self.assertIn(
+            f"{runner.MAX_RENDERED_GUIDANCE_BYTES:,}-byte UTF-8 rendering budget",
+            normalized,
+        )
+        self.assertIn(
+            "records remain pending and unacknowledged",
+            normalized,
+        )
+        self.assertIn(
+            "repeats the shell-safe `asl inbox read` command",
+            normalized,
+        )
+        self.assertIn(
+            "identifies each omitted record by physical sequence and message ID",
+            normalized,
+        )
+        self.assertIn(
+            "cannot fit within the complete subsection on its own is omitted first",
+            normalized,
+        )
+        self.assertIn(
+            "evicts the oldest remaining record until the subsection fits",
+            normalized,
+        )
+        self.assertIn(
+            "labels the delimited block as intentionally empty",
+            normalized,
+        )
+        self.assertIn(
+            "text form of `asl inbox read` applies the same "
+            "newest-20-record and 65,536-byte complete-section limits",
+            normalized,
+        )
+        self.assertIn(
+            "acknowledgement covers that full snapshot through the highest "
+            "pending sequence",
+            normalized,
+        )
+        self.assertIn(
+            "The `--json` payload is not rendering-truncated",
+            normalized,
+        )
+
+    def test_docs_describe_mailbox_and_reply_text_framing(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        mailbox_docs = docs.split(
+            "## Live Mailbox and Future-Turn Model Control", 1
+        )[1].split("\n## ", 1)[0]
+        normalized = " ".join(mailbox_docs.split())
+
+        self.assertIn(
+            "In text mode, `asl inbox read`, `asl ask`, and "
+            "`asl outbox wait`",
+            normalized,
+        )
+        self.assertIn("`BEGIN ASL MAILBOX MESSAGE JSONL`", normalized)
+        self.assertIn(
+            "Every continuation source—mailbox, `--reply`, or "
+            "`--reply-stdin`—uses the same safe prompt representation",
+            normalized,
+        )
+        self.assertIn("`BEGIN ASL OPERATOR REPLY JSONL`", normalized)
+        self.assertIn("worker consumes only its `text` value", normalized)
+
+    def test_docs_lock_wait_timeout_and_bare_label_resolution(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        mailbox_docs = docs.split(
+            "## Live Mailbox and Future-Turn Model Control", 1
+        )[1].split("\n## ", 1)[0]
+        status_docs = docs.split("`status` reads durable plan files", 1)[1].split(
+            "\n\n`tail` prints", 1
+        )[0]
+
+        self.assertIn(
+            "`--wait-timeout` accepts 0 through 900 seconds and requires `--wait`.",
+            mailbox_docs,
+        )
+        self.assertIn(
+            "Supplying `--wait-timeout` alone fails with `reason: invalid-timeout`.",
+            mailbox_docs,
+        )
+        self.assertIn(
+            "Bare-label resolution is available to `status`, `asl control`,",
+            status_docs,
+        )
+        for command in (
+            "`status`",
+            "`asl control`",
+            "`asl inbox guidance`",
+            "`asl inbox reply`",
+            "`asl inbox read`",
+            "`asl ask`",
+            "`asl outbox wait`",
+        ):
+            self.assertIn(command, status_docs)
+        self.assertRegex(
+            status_docs,
+            r"other plan-taking\s+commands remain path-only",
+        )
+        self.assertNotIn(
+            "Resolution is limited to `status` and `asl control`",
+            status_docs,
+        )
+
+    def test_docs_enumerate_mailbox_command_error_reasons(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        mailbox_docs = docs.split(
+            "### Mailbox commands", 1
+        )[1].split("\n### ", 1)[0]
+        mailbox_cli_source = self._read("agent_session_loop/mailbox_cli.py")
+
+        def resolve_reason(node: ast.expr) -> str | None:
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                return node.value
+            if isinstance(node, ast.Name):
+                value = getattr(mailbox_cli, node.id, None)
+                return value if isinstance(value, str) else None
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "mailbox"
+            ):
+                value = getattr(mailbox, node.attr, None)
+                return value if isinstance(value, str) else None
+            return None
+
+        cli_reasons = {
+            reason
+            for call in ast.walk(ast.parse(mailbox_cli_source))
+            if isinstance(call, ast.Call)
+            for keyword in call.keywords
+            if keyword.arg == "reason"
+            if (reason := resolve_reason(keyword.value)) is not None
+        }
+        operation_reasons = {
+            value
+            for name, value in vars(mailbox).items()
+            if name.startswith("ERROR_") and isinstance(value, str)
+        }
+        expected_reasons = cli_reasons | operation_reasons | {
+            "ambiguous-plan",
+            "invalid-target",
+            "malformed-plan",
+            "os-error",
+            "question-already-answered",
+            "question-not-found",
+            "state-error",
+        }
+
+        # Keep the most important repaired distinctions visible in this
+        # regression even though their production constants are also derived.
+        self.assertIn("missing-text", expected_reasons)
+        self.assertIn("invalid-text-source", expected_reasons)
+        self.assertIn("stdin-read-error", expected_reasons)
+        for reason in sorted(expected_reasons):
+            self.assertIn(
+                f"`{reason}`",
+                mailbox_docs,
+                msg=f"mailbox command reason {reason!r} is undocumented",
+            )
+        self.assertRegex(
+            mailbox_docs,
+            r"`missing-text` when a required message body is\s+absent or blank",
+        )
+        self.assertRegex(
+            mailbox_docs,
+            r"`invalid-text-source` when both `--text` and\s+`--text-stdin` are supplied",
+        )
+
+    def test_docs_enumerate_control_command_error_reasons(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        control_docs = docs.split(
+            "`asl control` is the programmatic equivalent", 1
+        )[1].split("\n`status` reads durable plan files", 1)[0]
+        control_cli_source = self._read("agent_session_loop/control_cli.py")
+
+        def resolve_reason(node: ast.expr) -> str | None:
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                return node.value
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "control_queue"
+            ):
+                value = getattr(control_queue, node.attr, None)
+                return value if isinstance(value, str) else None
+            return None
+
+        expected_reasons = {
+            reason
+            for call in ast.walk(ast.parse(control_cli_source))
+            if isinstance(call, ast.Call)
+            for keyword in call.keywords
+            if keyword.arg == "reason"
+            if (reason := resolve_reason(keyword.value)) is not None
+        }
+
+        self.assertIn(
+            control_queue.REJECT_MISSING_MODEL_CONTROL_OPERATION,
+            expected_reasons,
+        )
+        for reason in sorted(expected_reasons):
+            self.assertIn(
+                f"`{reason}`",
+                control_docs,
+                msg=f"control command reason {reason!r} is undocumented",
+            )
+
+    def test_docs_enumerate_waiting_for_reply_statuses(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        status_docs = docs.split("## JSON Output", 1)[1].split(
+            "\n## Pause Semantics", 1
+        )[0]
+        pause_docs = docs.split("## Pause Semantics", 1)[1].split(
+            "\n## Autopilot Skill", 1
+        )[0]
+
+        self.assertIn("`waiting_for_reply_status`", status_docs)
+        for waiting_status in state.WAITING_FOR_REPLY_STATUSES:
+            self.assertIn(
+                f"`{waiting_status}`",
+                status_docs,
+                msg=(
+                    "waiting_for_reply_status value "
+                    f"{waiting_status!r} is undocumented"
+                ),
+            )
+        self.assertIn(f"`{qna.EXPIRED_WAIT_PAUSE_REASON}`", pause_docs)
+        self.assertRegex(
+            pause_docs,
+            r"`wait-expired` pause reason without rewriting\s+`state\.json`",
+        )
+        self.assertRegex(
+            pause_docs,
+            r"This recovery reason is\s+never written into `state\.json`",
+        )
+
+    def test_docs_enumerate_mailbox_lease_reasons(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        status_docs = docs.split("## JSON Output", 1)[1].split(
+            "\n## Pause Semantics", 1
+        )[0]
+        expected_reasons = {
+            value
+            for name, value in vars(mailbox).items()
+            if name.startswith("LEASE_") and isinstance(value, str)
+        }
+
+        for key in (
+            "lease_reason",
+            "lease_error",
+            "lease_present",
+            "lease_fresh",
+        ):
+            self.assertIn(
+                f"`{key}`",
+                status_docs,
+                msg=f"status mailbox projection key {key!r} is undocumented",
+            )
+        for reason in sorted(expected_reasons):
+            self.assertIn(
+                f"`{reason}`",
+                status_docs,
+                msg=f"mailbox lease reason {reason!r} is undocumented",
+            )
+
+    def test_docs_lock_net_surface_privacy_and_exclusions(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        mailbox_docs = docs.split(
+            "## Live Mailbox and Future-Turn Model Control", 1
+        )[1].split("\n## ", 1)[0]
+        surface_docs = mailbox_docs.split(
+            "### Surface and observability accounting", 1
+        )[1].split("\n\nWorkbench", 1)[0]
+        event_reference_docs = docs.split("`events.jsonl` records", 1)[1].split(
+            "Verification heartbeats", 1
+        )[0]
+
+        for marker in (
+            "two mailbox state files",
+            "five mailbox commands",
+            "one\nmodel-control command",
+            "one `mailbox` event name",
+            "adds no runner or\nsupervisor threads",
+            "no terminal statuses",
+            "`guidance-observed` carries",
+            "`reply_provided` carries",
+            "do not increment pause metrics",
+            "no mailbox-authoring, mailbox-reply, or live\nmodel-control endpoint",
+        ):
+            self.assertIn(
+                marker,
+                mailbox_docs,
+                msg=f"missing surface/privacy marker: {marker!r}",
+            )
+        for section_name, section in (
+            ("surface accounting", surface_docs),
+            ("events.jsonl reference", event_reference_docs),
+        ):
+            for action in events.MAILBOX_ACTIONS:
+                self.assertIn(
+                    f"`{action}`",
+                    section,
+                    msg=f"{section_name} omits mailbox action {action!r}",
+                )
+        normalized_surface_docs = " ".join(surface_docs.split())
+        self.assertIn(
+            "`wait-cleared` carries the wait identity and deadlines, "
+            "the exit `reason`, and `pending_outbox`, the measured "
+            "unanswered-question count",
+            normalized_surface_docs,
+        )
+        live_wait_docs = mailbox_docs.split(
+            "### Live reply wait and fallback", 1
+        )[1].split("\n### ", 1)[0]
+        for reason in runner.MAILBOX_REPLY_WAIT_PREPARATION_REASONS:
+            self.assertIn(
+                f"`{reason}`",
+                live_wait_docs,
+                msg=f"live-wait docs omit preparation reason {reason!r}",
+            )
+        for stale_draft in (
+            "set-max-sessions",
+            "--mailbox-interactive",
+            "append-only keepalive",
+            "transient real pause",
+            "model changes affect the active turn",
+        ):
+            self.assertNotIn(stale_draft, docs)
+
+    def test_readme_and_autopilot_skill_match_live_contract(self) -> None:
+        readme = self._read("README.md")
+        skill = self._read("skills/asl/SKILL.md")
+
+        for marker in (
+            "### Live ASL supervision",
+            "`asl run --no-mailbox`",
+            "The five mailbox commands",
+            "Lease freshness is checked only at an active\ndeadline",
+            "15-minute\nabsolute maximum",
+            "`asl control set-model",
+            "no runner/supervisor thread",
+            "no Workbench",
+        ):
+            self.assertIn(marker, readme)
+        for marker in (
+            "`--no-mailbox` is accepted",
+            "polls questions every five seconds",
+            "renews the\nlease every 30 seconds",
+            "`QUESTION id=... preview=...`",
+            "asl inbox reply <plan-dir> --to <question-id>",
+            "continue the same\nsession",
+            "Lease freshness is checked only at an active deadline",
+            "never waits beyond 15 minutes",
+            "already-committed reply takes precedence over\nmailbox exhaustion",
+            "affect only the next implementation invocation",
+        ):
+            self.assertIn(marker, skill)
 
 
 class WorkbenchDocsRegressionTests(unittest.TestCase):

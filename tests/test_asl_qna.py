@@ -161,6 +161,106 @@ class QnAContextLoaderTests(unittest.TestCase):
             self.assertEqual(state_path, context.state_path)
             self.assertEqual(plans.canonicalize_path(plan_dir), context.plan_dir)
 
+    def test_load_qna_context_accepts_live_waiting_question(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path = self._seed_plan(tmp_dir)
+            last_message_path = str(tmp_dir / "last-message.txt")
+            waiting = {
+                "question_id": "question-1",
+                "session": 1,
+                "session_id": "1",
+                "session_number": 1,
+                "turn_index": 1,
+                "started_at": "2999-07-24T12:00:00+00:00",
+                "base_deadline": "2999-07-24T12:05:00+00:00",
+                "hard_deadline": "2999-07-24T12:15:00+00:00",
+                "last_lease_activity_at": "2999-07-24T12:01:00+00:00",
+            }
+            self._write_state(
+                state_path,
+                paused=False,
+                last_message_path=last_message_path,
+                payload_overrides={
+                    "waiting_for_reply": waiting,
+                    "run_config": {"state_dir_override": str(state_dir)},
+                },
+            )
+            self._write_last_message(last_message_path, "Choose blue or green?\n")
+            state.acquire_lock(plan_dir, state_dir)
+
+            try:
+                context = qna.load_qna_context(plan_dir, state_dir=state_dir)
+                payload = qna.questions_payload(context)
+            finally:
+                state.release_lock(plan_dir, state_dir)
+
+            self.assertEqual("waiting", context.context_kind)
+            self.assertEqual("question-1", context.question_id)
+            self.assertEqual(waiting, context.waiting_for_reply)
+            self.assertIsNone(context.pause_reason)
+            self.assertIsNone(context.pause_message)
+            self.assertEqual({}, context.pause_details)
+            self.assertEqual("waiting", payload["context_kind"])
+            self.assertEqual("question-1", payload["question_id"])
+            self.assertEqual(waiting, payload["waiting_for_reply"])
+            self.assertNotIn("resume_command", payload)
+            self.assertNotIn("pause_reason", payload)
+            plan = str(plans.canonicalize_path(plan_dir))
+            self.assertEqual(
+                f"asl inbox reply {plan} --to question-1 "
+                f"--state-dir {state_dir} --text TEXT",
+                payload["reply_command"],
+            )
+            self.assertEqual(
+                f"asl inbox reply {plan} --to question-1 "
+                f"--state-dir {state_dir} --text-stdin",
+                payload["reply_stdin_command"],
+            )
+            self.assertIn(
+                "# Live Agent Session - Resolver Prompt",
+                payload["rendered_prompt"],
+            )
+            self.assertIn("Choose blue or green?", payload["rendered_prompt"])
+
+    def test_live_waiting_identity_must_match_latest_completed_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path = self._seed_plan(tmp_dir)
+            last_message_path = str(tmp_dir / "last-message.txt")
+            self._write_last_message(last_message_path)
+            self._write_state(
+                state_path,
+                paused=False,
+                last_message_path=last_message_path,
+                payload_overrides={
+                    "waiting_for_reply": {
+                        "question_id": "question-1",
+                        "session": 1,
+                        "session_id": "1",
+                        "turn_index": 2,
+                        "started_at": "2999-07-24T12:00:00+00:00",
+                        "base_deadline": "2999-07-24T12:05:00+00:00",
+                        "hard_deadline": "2999-07-24T12:15:00+00:00",
+                        "last_lease_activity_at": None,
+                    }
+                },
+            )
+            state.acquire_lock(plan_dir, state_dir)
+
+            try:
+                with self.assertRaises(qna.QnAError) as ctx:
+                    qna.load_qna_context(plan_dir, state_dir=state_dir)
+            finally:
+                state.release_lock(plan_dir, state_dir)
+
+            self.assertEqual(
+                qna.REASON_REPLY_CONTEXT_MISMATCH,
+                ctx.exception.reason,
+            )
+            self.assertEqual(2, ctx.exception.details["waiting_turn_index"])
+            self.assertEqual(1, ctx.exception.details["turn_index"])
+
     def test_qna_context_payload_is_json_serializable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -197,6 +297,9 @@ class QnAContextLoaderTests(unittest.TestCase):
             payload = qna.questions_payload(context)
 
             plan = str(plans.canonicalize_path(plan_dir))
+            self.assertNotIn("context_kind", payload)
+            self.assertNotIn("waiting_for_reply", payload)
+            self.assertNotIn("question_id", payload)
             self.assertEqual(
                 f"asl run {plan} --resume --state-dir {state_dir} --reply TEXT",
                 payload["resume_command"],
@@ -538,6 +641,131 @@ class QnAQuestionsCliTests(unittest.TestCase):
             )
             self.assertIn(
                 "Pick 1a, 2b, or 3c?", payload["rendered_prompt"]
+            )
+
+    def test_json_output_recovers_from_expired_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir, _last_message_path = self._seed_paused_plan(
+                Path(tmp),
+                last_message_text="Use the strict or lenient parser?\n",
+                paused=False,
+            )
+            state_path = (
+                state.plan_state_dir(plan_dir, state_dir)
+                / events.STATE_FILE_NAME
+            )
+            raw = json.loads(state_path.read_text(encoding="utf-8"))
+            raw["waiting_for_reply"] = {
+                "question_id": "question-2",
+                "session": 1,
+                "session_id": "1",
+                "session_number": 1,
+                "turn_index": 2,
+                "started_at": "2026-07-24T12:00:00+00:00",
+                "base_deadline": "2026-07-24T12:05:00+00:00",
+                "hard_deadline": "2026-07-24T12:15:00+00:00",
+                "last_lease_activity_at": None,
+            }
+            raw["run_config"] = {"state_dir_override": str(state_dir)}
+            state_path.write_text(json.dumps(raw), encoding="utf-8")
+
+            code, out, err = self._run_questions(
+                plan_dir,
+                state_dir,
+                json_output=True,
+            )
+
+            self.assertEqual(0, code, err)
+            self.assertEqual("", err)
+            payload = json.loads(out)
+            self.assertTrue(payload["ok"])
+            self.assertNotIn("context_kind", payload)
+            self.assertNotIn("question_id", payload)
+            self.assertNotIn("reply_command", payload)
+            self.assertEqual(
+                qna.EXPIRED_WAIT_PAUSE_REASON,
+                payload["pause_reason"],
+            )
+            self.assertIn("asl run", payload["resume_command"])
+            self.assertIn("--resume", payload["resume_command"])
+            self.assertIn("--reply TEXT", payload["resume_command"])
+            self.assertIn(
+                "# Paused Agent Session - Resolver Prompt",
+                payload["rendered_prompt"],
+            )
+
+            status_payload = state.status_payload(
+                plans.inspect_plan(plan_dir),
+                state_dir,
+            )
+            self.assertEqual(
+                state.WAITING_FOR_REPLY_STATUS_EXPIRED,
+                status_payload["waiting_for_reply_status"],
+            )
+            self.assertEqual(
+                state.WAITING_FOR_REPLY_STATUS_EXPIRED,
+                status_payload["runner_state"][
+                    "waiting_for_reply_status"
+                ],
+            )
+            status_output = io.StringIO()
+            with redirect_stdout(status_output):
+                state._print_text_status(status_payload)
+            self.assertIn("Status: expired", status_output.getvalue())
+
+    def test_json_output_recovers_from_orphaned_future_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir, _last_message_path = self._seed_paused_plan(
+                Path(tmp),
+                last_message_text="Use the strict or lenient parser?\n",
+                paused=False,
+            )
+            state_path = (
+                state.plan_state_dir(plan_dir, state_dir)
+                / events.STATE_FILE_NAME
+            )
+            raw = json.loads(state_path.read_text(encoding="utf-8"))
+            raw["waiting_for_reply"] = {
+                "question_id": "question-2",
+                "session": 1,
+                "session_id": "1",
+                "session_number": 1,
+                "turn_index": 2,
+                "started_at": "2999-07-24T12:00:00+00:00",
+                "base_deadline": "2999-07-24T12:05:00+00:00",
+                "hard_deadline": "2999-07-24T12:15:00+00:00",
+                "last_lease_activity_at": None,
+            }
+            raw["run_config"] = {"state_dir_override": str(state_dir)}
+            state_path.write_text(json.dumps(raw), encoding="utf-8")
+
+            code, out, err = self._run_questions(
+                plan_dir,
+                state_dir,
+                json_output=True,
+            )
+
+            self.assertEqual(0, code, err)
+            self.assertEqual("", err)
+            payload = json.loads(out)
+            self.assertNotIn("context_kind", payload)
+            self.assertNotIn("question_id", payload)
+            self.assertNotIn("reply_command", payload)
+            self.assertEqual(
+                qna.EXPIRED_WAIT_PAUSE_REASON,
+                payload["pause_reason"],
+            )
+            self.assertIn("--resume", payload["resume_command"])
+            self.assertIn("--reply TEXT", payload["resume_command"])
+
+            status_payload = state.status_payload(
+                plans.inspect_plan(plan_dir),
+                state_dir,
+            )
+            self.assertFalse(status_payload["lock"]["present"])
+            self.assertEqual(
+                state.WAITING_FOR_REPLY_STATUS_EXPIRED,
+                status_payload["waiting_for_reply_status"],
             )
 
     def test_text_error_prints_to_stderr_when_no_paused_run(self) -> None:
