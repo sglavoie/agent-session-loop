@@ -165,7 +165,7 @@ class ParseCommandTest(unittest.TestCase):
             "--harness-model opus --review-harness-model gpt-5 "
             "--effort high --timeout 600 --max-sessions 3 "
             "--max-pending-sessions 30 --commit-at-end --no-unsafe-bypass "
-            "--allow-not-loop-ready"
+            "--no-mailbox --allow-not-loop-ready"
         )
         self.assertTrue(result["ok"])
         args = result["run_args"]
@@ -176,6 +176,8 @@ class ParseCommandTest(unittest.TestCase):
         self.assertEqual(args[args.index("--review-harness-model") + 1], "gpt-5")
         self.assertIn("--commit-at-end", args)
         self.assertIn("--no-unsafe-bypass", args)
+        self.assertIn("--no-mailbox", args)
+        self.assertTrue(result["no_mailbox"])
         self.assertIn("--allow-not-loop-ready", args)
         self.assertEqual(args[args.index("--timeout") + 1], "600")
 

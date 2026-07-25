@@ -43,6 +43,7 @@ from agent_session_loop import (
     events,
     harnesses,
     install_verify,
+    mailbox,
     plans,
     preflight,
     prepare,
@@ -2339,6 +2340,215 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertEqual(
                 "review-harness-required",
                 payload["review_resume"]["blocker"],
+            )
+
+    def test_status_payload_projects_absent_mailbox_without_creating_state(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+
+            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+
+            status = payload["mailbox"]
+            self.assertFalse(status["present"])
+            self.assertFalse(status["active"])
+            self.assertFalse(status["lease_present"])
+            self.assertEqual(0, status["size_bytes"])
+            self.assertEqual(mailbox.MAILBOX_MAX_BYTES, status["max_bytes"])
+            self.assertFalse(status["full"])
+            self.assertEqual(0, status["last_seq"])
+            self.assertEqual(0, status["pending_guidance"])
+            self.assertEqual(0, status["unanswered_questions"])
+            self.assertEqual(0, status["rejected_records"])
+            self.assertIsNone(status["error"])
+            self.assertIsNone(status["lease_updated_at"])
+            self.assertFalse(status["lease_fresh"])
+            self.assertIsNone(status["lease_reason"])
+            self.assertIsNone(status["lease_error"])
+            self.assertFalse(plan_state.exists())
+
+    def test_status_payload_projects_active_mailbox_and_fresh_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            mailbox.append_guidance(plan_dir, "keep the API small", state_dir=state_dir)
+            mailbox.append_question(plan_dir, "Which mode?", state_dir=state_dir)
+            mailbox.write_lease(
+                plan_dir,
+                "00000000-0000-4000-8000-000000000001",
+                state_dir=state_dir,
+            )
+            mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
+            lease_path = mailbox.lease_path_for_plan(plan_dir, state_dir)
+            mailbox_before = mailbox_path.read_bytes()
+            lease_before = lease_path.read_bytes()
+
+            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+
+            status = payload["mailbox"]
+            self.assertTrue(status["present"])
+            self.assertTrue(status["active"])
+            self.assertEqual(str(mailbox_path), status["path"])
+            self.assertTrue(status["lease_present"])
+            self.assertEqual(str(lease_path), status["lease_path"])
+            self.assertGreater(status["size_bytes"], 0)
+            self.assertFalse(status["full"])
+            self.assertEqual(2, status["last_seq"])
+            self.assertEqual(1, status["pending_guidance"])
+            self.assertEqual(1, status["unanswered_questions"])
+            self.assertEqual(0, status["rejected_records"])
+            self.assertIsNone(status["error"])
+            self.assertIsNotNone(status["lease_updated_at"])
+            self.assertTrue(status["lease_fresh"])
+            self.assertIsNone(status["lease_reason"])
+            self.assertIsNone(status["lease_error"])
+            self.assertEqual(mailbox_before, mailbox_path.read_bytes())
+            self.assertEqual(lease_before, lease_path.read_bytes())
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                state._print_text_status(payload)
+            output = buffer.getvalue()
+            self.assertIn("Mailbox: active", output)
+            self.assertIn("1 pending guidance", output)
+            self.assertIn("1 unanswered questions", output)
+            self.assertIn("Mailbox lease: fresh", output)
+
+    def test_status_payload_surfaces_full_and_malformed_mailboxes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            mailbox.append_guidance(plan_dir, "x", state_dir=state_dir)
+
+            with mock.patch.object(mailbox, "MAILBOX_MAX_BYTES", 1):
+                full_payload = state.status_payload(
+                    plans.inspect_plan(plan_dir), state_dir
+                )
+
+            full_status = full_payload["mailbox"]
+            self.assertTrue(full_status["full"])
+            self.assertEqual(1, full_status["max_bytes"])
+
+            mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
+            mailbox_path.write_text("not-json\n", encoding="utf-8")
+            lease_path = mailbox.lease_path_for_plan(plan_dir, state_dir)
+            lease_path.write_text("not-json\n", encoding="utf-8")
+
+            malformed_payload = state.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
+
+            malformed = malformed_payload["mailbox"]
+            self.assertTrue(malformed["present"])
+            self.assertEqual(1, malformed["last_seq"])
+            self.assertEqual(1, malformed["rejected_records"])
+            self.assertIn("rejected mailbox record", malformed["error"])
+            self.assertTrue(malformed["lease_present"])
+            self.assertFalse(malformed["lease_fresh"])
+            self.assertEqual(mailbox.LEASE_INVALID_SIZE, malformed["lease_reason"])
+            self.assertEqual(mailbox.LEASE_INVALID_SIZE, malformed["lease_error"])
+
+    def test_status_payload_surfaces_mailbox_read_error_and_stale_lease(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
+            mailbox_path.parent.mkdir(parents=True)
+            mailbox_path.touch()
+            mailbox.write_lease(
+                plan_dir,
+                "00000000-0000-4000-8000-000000000001",
+                state_dir=state_dir,
+                updated_at="2020-01-01T00:00:00+00:00",
+            )
+
+            read_error = mailbox.MailboxError(
+                mailbox.ERROR_MAILBOX_READ,
+                "permission denied",
+                path=mailbox_path,
+            )
+            with mock.patch.object(
+                mailbox, "read_mailbox", side_effect=read_error
+            ):
+                payload = state.status_payload(
+                    plans.inspect_plan(plan_dir), state_dir
+                )
+
+            status = payload["mailbox"]
+            self.assertTrue(status["present"])
+            self.assertIsNone(status["size_bytes"])
+            self.assertIsNone(status["full"])
+            self.assertIn(mailbox.ERROR_MAILBOX_READ, status["error"])
+            self.assertTrue(status["lease_present"])
+            self.assertFalse(status["lease_fresh"])
+            self.assertEqual("2020-01-01T00:00:00+00:00", status["lease_updated_at"])
+            self.assertEqual(mailbox.LEASE_EXPIRED, status["lease_reason"])
+            self.assertIsNone(status["lease_error"])
+
+    def test_status_projects_waiting_for_reply_without_hiding_pause_state(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            plan_state.mkdir(parents=True)
+            waiting = {
+                "question_id": "question-1",
+                "session": 1,
+                "session_id": "1",
+                "turn_index": 2,
+                "started_at": "2026-07-24T12:00:00+00:00",
+                "base_deadline": "2026-07-24T12:05:00+00:00",
+                "hard_deadline": "2026-07-24T12:15:00+00:00",
+                "last_lease_activity_at": "2026-07-24T12:01:00+00:00",
+            }
+            (plan_state / events.STATE_FILE_NAME).write_text(
+                json.dumps(
+                    {
+                        "run_id": "run-1",
+                        "paused": True,
+                        "reason": "blocked",
+                        "run_started_at": "2026-07-24T11:59:00+00:00",
+                        "run_finished_at": None,
+                        "waiting_for_reply": waiting,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+
+            self.assertEqual(waiting, payload["waiting_for_reply"])
+            self.assertEqual(
+                waiting, payload["runner_state"]["waiting_for_reply"]
+            )
+            self.assertTrue(payload["runner_state"]["paused"])
+            self.assertEqual(
+                "blocked", payload["runner_state"]["pause_policy"]["reason"]
+            )
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                state._print_text_status(payload)
+            output = buffer.getvalue()
+            self.assertIn("Mailbox: disabled", output)
+            self.assertIn(
+                "Waiting for reply: question question-1 session 1 turn 2",
+                output,
+            )
+            self.assertIn(
+                "Deadlines: base 2026-07-24T12:05:00+00:00, "
+                "hard 2026-07-24T12:15:00+00:00",
+                output,
             )
 
     def test_status_payload_progress_journal_absent(self) -> None:

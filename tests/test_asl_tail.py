@@ -112,6 +112,62 @@ class TailFollowerTests(unittest.TestCase):
         self.assertIn("attempts 3", message)
         self.assertIn("trace trace-3", message)
 
+    def test_model_control_events_include_target_changes_and_overrides(
+        self,
+    ) -> None:
+        message = tail._event_message(
+            events.RUN_CONTROL_EVENT,
+            {
+                "action": (
+                    events.RUN_CONTROL_ACTION_IMPLEMENTATION_MODEL_UPDATED
+                ),
+                "message": "implementation model controls updated",
+                "stop_after_current": False,
+                "target_harness": "claude",
+                "changed_fields": ["model", "effort"],
+                "implementation_overrides": {
+                    "claude": {
+                        "model": "claude-sonnet-4-5",
+                        "effort": "high",
+                    }
+                },
+                "session": "4",
+                "total_sessions": 13,
+                "turn_index": 1,
+            },
+        )
+
+        self.assertIn("target harness claude", message)
+        self.assertIn("changed model, effort", message)
+        self.assertIn(
+            'effective overrides {"claude": {"effort": "high", '
+            '"model": "claude-sonnet-4-5"}}',
+            message,
+        )
+        self.assertIn("session 4/13", message)
+        self.assertIn("turn 1", message)
+
+    def test_mailbox_guidance_event_renders_metadata_without_body(self) -> None:
+        message = tail._event_message(
+            events.MAILBOX_EVENT,
+            {
+                "action": events.MAILBOX_ACTION_GUIDANCE_OBSERVED,
+                "message_id": "guidance-1",
+                "seq": 4,
+                "length": 37,
+                "digest": "abc123",
+                "session_id": "7",
+                "turn_index": 2,
+            },
+        )
+
+        self.assertEqual(
+            "mailbox: guidance observed "
+            "(id guidance-1, sequence 4, length 37, digest abc123, "
+            "session 7, turn 2)",
+            message,
+        )
+
     def cleanup_follower(self, follower: tail.TailFollower) -> None:
         follower.stop()
         follower.join(1.0)

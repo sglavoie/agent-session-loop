@@ -5,6 +5,7 @@ Split from tests/test_agent_session_loop.py."""
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import dataclasses
 from datetime import datetime, timezone
@@ -174,6 +175,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         note: str | None = None,
         extra_env: dict[str, str] | None = None,
         harness_config_overrides: dict[str, str] | None = None,
+        before_run: Callable[[Path, Path], None] | None = None,
     ) -> tuple[int, dict[str, object], Path, Path, Path]:
         plan_dir, state_dir, config_home, fake_codex = self.setup_loop(
             statuses=statuses,
@@ -184,6 +186,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             listener.state_path = real_state_dir / events.STATE_FILE_NAME
         if listener.events_path is None:
             listener.events_path = real_state_dir / events.EVENTS_FILE_NAME
+        if before_run is not None:
+            before_run(plan_dir, state_dir)
         run_cwd = REPO_ROOT if cwd is None else cwd
         args = argparse.Namespace(
             plan_dir=str(plan_dir),
@@ -308,6 +312,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         max_sessions: int | None = None,
         commit_mode: str | None = None,
         harness_model: str | None = None,
+        review_harness: str | None = None,
+        review_harness_model: str | None = None,
         effort: str | None = None,
         note: str | None = None,
         extra_env: dict[str, str] | None = None,
@@ -340,6 +346,10 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             raise ValueError(f"unsupported commit_mode: {commit_mode}")
         if harness_model is not None:
             command.extend(["--harness-model", harness_model])
+        if review_harness is not None:
+            command.extend(["--review-harness", review_harness])
+        if review_harness_model is not None:
+            command.extend(["--review-harness-model", review_harness_model])
         if effort is not None:
             command.extend(["--effort", effort])
         if note is not None:
@@ -1305,6 +1315,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stop_after_current": False,
                 "tail_enabled": False,
                 "next_harness": None,
+                "target_harness": None,
+                "changed_fields": [],
+                "implementation_overrides": {},
                 "consumed": True,
                 "last_action": "stop-after-current-consumed",
             },
@@ -1381,6 +1394,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stop_after_current": False,
                 "tail_enabled": False,
                 "next_harness": None,
+                "target_harness": None,
+                "changed_fields": [],
+                "implementation_overrides": {},
                 "consumed": False,
                 "last_action": "stop-after-current-canceled",
             },
@@ -1600,6 +1616,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stop_after_current": False,
                 "tail_enabled": False,
                 "next_harness": "copilot",
+                "target_harness": None,
+                "changed_fields": [],
+                "implementation_overrides": {},
                 "consumed": False,
                 "last_action": "harness-selected",
             },
@@ -1782,6 +1801,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stop_after_current": False,
                 "tail_enabled": False,
                 "next_harness": None,
+                "target_harness": None,
+                "changed_fields": [],
+                "implementation_overrides": {},
                 "consumed": False,
                 "last_action": "tail-disabled",
             },
@@ -1919,6 +1941,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stop_after_current": False,
                 "tail_enabled": False,
                 "next_harness": None,
+                "target_harness": None,
+                "changed_fields": [],
+                "implementation_overrides": {},
                 "consumed": True,
                 "last_action": "stop-after-current-consumed",
             },
@@ -2222,8 +2247,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         actions = [event["action"] for event in control_events]
         self.assertIn("harness-selected", actions)
 
-    def test_external_queue_does_not_interrupt_active_harness_subprocess(self) -> None:
-        """A queue command written mid-turn must not be applied until the turn ends."""
+    def test_external_queue_applies_while_harness_subprocess_is_active(self) -> None:
+        """A queue command written mid-turn is applied by periodic polling."""
 
         listener = FakeRunControlListener(current_harness="codex")
         calls: list[dict[str, object]] = []
@@ -2260,6 +2285,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 state_dir=state_dir_box[0],
                 command_id=f"midflight-{len(calls)}",
             )
+            wait_until(lambda: listener.state.stop_after_current)
             stop_state_during_call.append(listener.state.stop_after_current)
             complete_next_pending(plan_dir)
             return harnesses.HarnessResult(
@@ -2318,6 +2344,11 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     "for_run",
                     side_effect=fake_for_run,
                 ),
+                mock.patch.object(
+                    runner,
+                    "LIVE_CONTROL_POLL_INTERVAL_SECONDS",
+                    0.01,
+                ),
             ):
                 lock_info = state.acquire_lock(plan_dir, state_dir)
                 try:
@@ -2334,12 +2365,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     state.release_lock(plan_dir, state_dir)
 
         self.assertEqual(0, exit_code)
-        # While the first harness call ran, the stop flag had not yet been
-        # propagated from the queue to the in-memory control state. Drain
-        # only happens between checkpoints.
-        self.assertFalse(stop_state_during_call[0])
+        self.assertTrue(stop_state_during_call[0])
         # Exactly one harness call happened because the queued stop was
-        # applied at the post-session checkpoint and ended the run.
+        # consumed after the current session and ended the run.
         self.assertEqual(1, len(calls))
 
     def test_harness_selection_applies_to_next_session_and_recomputes_native_model(
@@ -2383,6 +2411,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stop_after_current": False,
                 "tail_enabled": False,
                 "next_harness": "claude",
+                "target_harness": None,
+                "changed_fields": [],
+                "implementation_overrides": {},
                 "consumed": False,
                 "last_action": "harness-selected",
             },
@@ -2430,6 +2461,226 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual(
             [config.EFFORT_SOURCE_FLAG, config.EFFORT_SOURCE_FLAG],
             [turn["effort_source"] for turn in turns],
+        )
+
+    def test_model_control_changes_next_invocation_and_clear_restores_defaults(
+        self,
+    ) -> None:
+        listener = FakeRunControlListener()
+        calls: list[dict[str, object]] = []
+        paths: dict[str, Path] = {}
+
+        def remember_paths(plan_dir: Path, state_dir: Path) -> None:
+            paths["plan_dir"] = plan_dir
+            paths["state_dir"] = state_dir
+
+        def complete_next_pending(plan_dir: Path) -> None:
+            for session_file in sorted(plan_dir.glob("session-*.md")):
+                text = session_file.read_text(encoding="utf-8")
+                if "- **Status**: pending" not in text:
+                    continue
+                session_file.write_text(
+                    text.replace(
+                        "- **Status**: pending",
+                        "- **Status**: complete",
+                        1,
+                    ),
+                    encoding="utf-8",
+                )
+                return
+
+        def fake_run_harness(name: str, **kwargs: object) -> harnesses.HarnessResult:
+            calls.append({"harness": name, **kwargs})
+            plan_dir = Path(kwargs["plan_dir"])
+            complete_next_pending(plan_dir)
+            if len(calls) == 1:
+                control_queue.append_command(
+                    plan_dir,
+                    control_queue.COMMAND_SELECT_FUTURE_HARNESS,
+                    state_dir=paths["state_dir"],
+                    harness="claude",
+                    command_id="select-claude",
+                )
+                control_queue.append_command(
+                    plan_dir,
+                    control_queue.COMMAND_SET_IMPLEMENTATION_MODEL,
+                    state_dir=paths["state_dir"],
+                    harness_model="claude-opus-control",
+                    effort="high",
+                    command_id="set-claude",
+                )
+            elif len(calls) == 2:
+                control_queue.append_command(
+                    plan_dir,
+                    control_queue.COMMAND_SET_IMPLEMENTATION_MODEL,
+                    state_dir=paths["state_dir"],
+                    clear_harness_model=True,
+                    clear_effort=True,
+                    command_id="clear-claude",
+                )
+            return harnesses.HarnessResult(
+                name=name,
+                argv=[name, str(kwargs["model"]), str(kwargs["effort"])],
+                returncode=0,
+                stdout=f"{name} completed\n",
+                stderr="",
+            )
+
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=fake_run_harness,
+        ):
+            exit_code, payload, _plan_dir, _state_dir, _fake_codex = (
+                self.run_locked_with_listener(
+                    mode="success",
+                    statuses=("pending", "pending", "pending"),
+                    listener=listener,
+                    harness_model="gpt-5-flag",
+                    effort="medium",
+                    harness_config_overrides={"claude": sys.executable},
+                    before_run=remember_paths,
+                )
+            )
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(
+            ["codex", "claude", "claude"],
+            [call["harness"] for call in calls],
+        )
+        self.assertEqual(
+            ["gpt-5-flag", "claude-opus-control", None],
+            [call["model"] for call in calls],
+        )
+        self.assertEqual(
+            ["medium", "high", "medium"],
+            [call["effort"] for call in calls],
+        )
+        turns = payload["turns"]
+        self.assertEqual(
+            [
+                config.MODEL_SOURCE_FLAG,
+                config.MODEL_SOURCE_CONTROL,
+                config.MODEL_SOURCE_UNRESOLVED,
+            ],
+            [turn["model_source"] for turn in turns],
+        )
+        self.assertEqual(
+            [
+                config.EFFORT_SOURCE_FLAG,
+                config.EFFORT_SOURCE_CONTROL,
+                config.EFFORT_SOURCE_FLAG,
+            ],
+            [turn["effort_source"] for turn in turns],
+        )
+        self.assertEqual({}, payload["control"]["implementation_overrides"])
+        control_events = [
+            record["payload"]
+            for record in read_jsonl(Path(payload["events_path"]))
+            if record["name"] == events.RUN_CONTROL_EVENT
+        ]
+        self.assertEqual(
+            [
+                events.RUN_CONTROL_ACTION_HARNESS_SELECTED,
+                events.RUN_CONTROL_ACTION_IMPLEMENTATION_MODEL_UPDATED,
+                events.RUN_CONTROL_ACTION_IMPLEMENTATION_MODEL_UPDATED,
+            ],
+            [event["action"] for event in control_events],
+        )
+        self.assertEqual(
+            "claude", control_events[1]["target_harness"]
+        )
+
+    def test_model_control_expires_when_a_new_runner_process_starts(self) -> None:
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+            statuses=("pending", "pending")
+        )
+        control_queue.append_command(
+            plan_dir,
+            control_queue.COMMAND_SET_IMPLEMENTATION_MODEL,
+            state_dir=state_dir,
+            harness="codex",
+            harness_model="gpt-5-control",
+            effort="high",
+        )
+
+        first_completed, first_payload = self.run_loop_command(
+            mode="success",
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            max_sessions=1,
+            harness_model="gpt-5-flag",
+            effort="medium",
+        )
+        second_completed, second_payload = self.run_loop_command(
+            mode="success",
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            max_sessions=1,
+            harness_model="gpt-5-flag",
+            effort="medium",
+        )
+
+        self.assertEqual(0, first_completed.returncode, first_completed.stderr)
+        self.assertEqual(0, second_completed.returncode, second_completed.stderr)
+        first_turn = first_payload["turns"][0]
+        second_turn = second_payload["turns"][0]
+        self.assertEqual("gpt-5-control", first_turn["model"])
+        self.assertEqual(config.MODEL_SOURCE_CONTROL, first_turn["model_source"])
+        self.assertEqual("high", first_turn["effort"])
+        self.assertEqual(config.EFFORT_SOURCE_CONTROL, first_turn["effort_source"])
+        self.assertEqual("gpt-5-flag", second_turn["model"])
+        self.assertEqual(config.MODEL_SOURCE_FLAG, second_turn["model_source"])
+        self.assertEqual("medium", second_turn["effort"])
+        self.assertEqual(config.EFFORT_SOURCE_FLAG, second_turn["effort_source"])
+
+    def test_model_control_does_not_change_generated_review_invocation(self) -> None:
+        plan_dir, state_dir, config_home, fake_codex = self.setup_loop(
+            statuses=("complete",)
+        )
+        config_path = (
+            config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        )
+        configured = json.loads(config_path.read_text(encoding="utf-8"))
+        configured["claude"] = {"executable": str(fake_codex)}
+        config_path.write_text(json.dumps(configured), encoding="utf-8")
+        runner.ensure_generated_review_session(
+            plan_dir, review_harness="claude"
+        )
+        control_queue.append_command(
+            plan_dir,
+            control_queue.COMMAND_SET_IMPLEMENTATION_MODEL,
+            state_dir=state_dir,
+            harness="claude",
+            harness_model="claude-control",
+            effort="high",
+        )
+
+        completed, payload = self.run_loop_command(
+            mode="success-with-review",
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            review_harness="claude",
+            review_harness_model="claude-review",
+            effort="medium",
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        turn = payload["turns"][0]
+        self.assertEqual(runner.SESSION_KIND_REVIEW, turn["session_kind"])
+        self.assertEqual("claude", turn["harness"])
+        self.assertEqual("claude-review", turn["model"])
+        self.assertEqual(config.MODEL_SOURCE_FLAG, turn["model_source"])
+        self.assertEqual("medium", turn["effort"])
+        self.assertEqual(config.EFFORT_SOURCE_FLAG, turn["effort_source"])
+        self.assertEqual(
+            "claude-review", turn["argv"][turn["argv"].index("--model") + 1]
+        )
+        self.assertEqual(
+            "medium", turn["argv"][turn["argv"].index("--effort") + 1]
         )
 
     def test_missing_switched_harness_pauses_before_next_turn(self) -> None:
@@ -2593,6 +2844,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stop_after_current": False,
                 "tail_enabled": False,
                 "next_harness": None,
+                "target_harness": None,
+                "changed_fields": [],
+                "implementation_overrides": {},
                 "consumed": False,
                 "last_action": None,
             },

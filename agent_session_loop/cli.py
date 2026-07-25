@@ -150,7 +150,7 @@ def _add_workbench_serve_args(
     )
 
 
-def _add_control_plan_args(parser: argparse.ArgumentParser) -> None:
+def _add_plan_reference_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "plan_dir",
         metavar="PLAN_DIR_OR_ID",
@@ -941,7 +941,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
             "(programmatic equivalent of the interactive 'p' key)."
         ),
     )
-    _add_control_plan_args(control_stop_parser)
+    _add_plan_reference_args(control_stop_parser)
     control_stop_parser.set_defaults(
         handler_ref="control_cli:control_stop_after_current_from_args",
     )
@@ -950,7 +950,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         "select-harness",
         help="Choose the harness future sessions of a run should use.",
     )
-    _add_control_plan_args(control_select_harness_parser)
+    _add_plan_reference_args(control_select_harness_parser)
     control_select_harness_parser.add_argument(
         "--harness",
         required=True,
@@ -959,6 +959,172 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     )
     control_select_harness_parser.set_defaults(
         handler_ref="control_cli:control_select_harness_from_args",
+    )
+
+    control_set_model_parser = control_sub.add_parser(
+        "set-model",
+        help=(
+            "Set or clear the model and effort used by the next "
+            "implementation turn."
+        ),
+    )
+    _add_plan_reference_args(control_set_model_parser)
+    control_set_model_parser.add_argument(
+        "--harness",
+        choices=harnesses.HARNESS_NAMES,
+        default=None,
+        help=(
+            "Implementation harness to update (default: the selected future "
+            "harness when the runner drains the command)"
+        ),
+    )
+    model_operation = control_set_model_parser.add_mutually_exclusive_group()
+    model_operation.add_argument(
+        "--harness-model",
+        dest="harness_model",
+        help="Model to request for the target implementation harness",
+    )
+    model_operation.add_argument(
+        "--clear-harness-model",
+        action="store_true",
+        help="Return the target harness to its run flag or native model default",
+    )
+    effort_operation = control_set_model_parser.add_mutually_exclusive_group()
+    effort_operation.add_argument(
+        "--effort",
+        help="Reasoning effort to request for the target implementation harness",
+    )
+    effort_operation.add_argument(
+        "--clear-effort",
+        action="store_true",
+        help="Return the target harness to the run's original effort setting",
+    )
+    control_set_model_parser.set_defaults(
+        handler_ref="control_cli:control_set_model_from_args",
+    )
+
+    inbox_parser = subparsers.add_parser(
+        "inbox",
+        help="Write supervisor messages or read pending worker guidance.",
+    )
+    inbox_sub = inbox_parser.add_subparsers(
+        dest="inbox_command",
+        required=True,
+    )
+
+    inbox_guidance_parser = inbox_sub.add_parser(
+        "guidance",
+        help="Append implementation guidance for the active worker.",
+    )
+    _add_plan_reference_args(inbox_guidance_parser)
+    guidance_text = inbox_guidance_parser.add_mutually_exclusive_group(
+        required=True
+    )
+    guidance_text.add_argument("--text", help="Guidance body")
+    guidance_text.add_argument(
+        "--text-stdin",
+        action="store_true",
+        help="Read the guidance body from standard input",
+    )
+    inbox_guidance_parser.set_defaults(
+        handler_ref="mailbox_cli:inbox_guidance_from_args",
+    )
+
+    inbox_reply_parser = inbox_sub.add_parser(
+        "reply",
+        help="Append the first reply to an existing worker question.",
+    )
+    _add_plan_reference_args(inbox_reply_parser)
+    inbox_reply_parser.add_argument(
+        "--to",
+        required=True,
+        metavar="QUESTION_ID",
+        help="Question UUID to answer",
+    )
+    reply_text = inbox_reply_parser.add_mutually_exclusive_group(required=True)
+    reply_text.add_argument("--text", help="Reply body")
+    reply_text.add_argument(
+        "--text-stdin",
+        action="store_true",
+        help="Read the reply body from standard input",
+    )
+    inbox_reply_parser.set_defaults(
+        handler_ref="mailbox_cli:inbox_reply_from_args",
+    )
+
+    inbox_read_parser = inbox_sub.add_parser(
+        "read",
+        help="Read pending guidance and acknowledge it unless peeking.",
+    )
+    _add_plan_reference_args(inbox_read_parser)
+    inbox_read_parser.add_argument(
+        "--peek",
+        action="store_true",
+        help="Read pending guidance without acknowledging it",
+    )
+    inbox_read_parser.set_defaults(
+        handler_ref="mailbox_cli:inbox_read_from_args",
+    )
+
+    ask_parser = subparsers.add_parser(
+        "ask",
+        help="Append or resume a worker question and optionally wait for a reply.",
+    )
+    _add_plan_reference_args(ask_parser)
+    question_source = ask_parser.add_mutually_exclusive_group(required=True)
+    question_source.add_argument(
+        "text",
+        nargs="?",
+        help="New question body",
+    )
+    question_source.add_argument(
+        "--question-id",
+        metavar="QUESTION_ID",
+        help="Resume an existing question without appending it again",
+    )
+    ask_parser.add_argument(
+        "--wait",
+        action="store_true",
+        help="Wait for the first reply",
+    )
+    ask_parser.add_argument(
+        "--wait-timeout",
+        type=float,
+        default=90.0,
+        metavar="SECONDS",
+        help="Reply wait timeout in seconds (default: 90; maximum: 900)",
+    )
+    ask_parser.set_defaults(handler_ref="mailbox_cli:ask_from_args")
+
+    outbox_parser = subparsers.add_parser(
+        "outbox",
+        help="Read worker questions from the supervisor side.",
+    )
+    outbox_sub = outbox_parser.add_subparsers(
+        dest="outbox_command",
+        required=True,
+    )
+    outbox_wait_parser = outbox_sub.add_parser(
+        "wait",
+        help="Wait for questions after a physical mailbox sequence.",
+    )
+    _add_plan_reference_args(outbox_wait_parser)
+    outbox_wait_parser.add_argument(
+        "--since",
+        type=int,
+        default=0,
+        metavar="SEQ",
+        help="Return questions after this physical sequence (default: 0)",
+    )
+    outbox_wait_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=300.0,
+        metavar="SECONDS",
+        help="Long-poll timeout in seconds (default: 300; maximum: 900)",
+    )
+    outbox_wait_parser.set_defaults(
+        handler_ref="mailbox_cli:outbox_wait_from_args",
     )
 
     return parser

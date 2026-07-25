@@ -355,6 +355,8 @@ def parse_command(command: str) -> dict:
         child_args.append("--unsafe-bypass")
     elif namespace.unsafe_bypass is False:
         child_args.append("--no-unsafe-bypass")
+    if namespace.no_mailbox:
+        child_args.append("--no-mailbox")
     if namespace.allow_not_loop_ready:
         child_args.append("--allow-not-loop-ready")
     if getattr(namespace, "resume", False):
@@ -377,6 +379,7 @@ def parse_command(command: str) -> dict:
         "state_dir": state_dir,
         "harness": namespace.harness,
         "review_harness": namespace.review_harness,
+        "no_mailbox": bool(namespace.no_mailbox),
         "max_review_fix_cycles": (
             namespace.max_review_fix_cycles
             if namespace.max_review_fix_cycles is not None

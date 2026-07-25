@@ -20,7 +20,7 @@ command here and let the runner own the state transition.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import fcntl
 import json
@@ -29,7 +29,7 @@ from pathlib import Path
 import uuid
 from typing import Any, Literal
 
-from . import harnesses, state
+from . import harnesses, run_control, state
 
 
 CONTROL_QUEUE_FILE_NAME = "control-queue.jsonl"
@@ -37,12 +37,15 @@ CONTROL_QUEUE_FILE_NAME = "control-queue.jsonl"
 CommandName = Literal[
     "request-stop-after-current",
     "select-future-harness",
+    "set-implementation-model",
 ]
 COMMAND_REQUEST_STOP_AFTER_CURRENT: CommandName = "request-stop-after-current"
 COMMAND_SELECT_FUTURE_HARNESS: CommandName = "select-future-harness"
+COMMAND_SET_IMPLEMENTATION_MODEL: CommandName = "set-implementation-model"
 COMMAND_NAMES: tuple[CommandName, ...] = (
     COMMAND_REQUEST_STOP_AFTER_CURRENT,
     COMMAND_SELECT_FUTURE_HARNESS,
+    COMMAND_SET_IMPLEMENTATION_MODEL,
 )
 
 # Reject reasons surfaced verbatim in the drain result so JSON consumers
@@ -54,6 +57,12 @@ REJECT_MISSING_ID = "missing-id"
 REJECT_DUPLICATE_ID = "duplicate-id"
 REJECT_INVALID_HARNESS = "invalid-harness"
 REJECT_MISSING_HARNESS = "missing-harness"
+REJECT_INVALID_MODEL = "invalid-model"
+REJECT_INVALID_EFFORT = "invalid-effort"
+REJECT_INVALID_CLEAR_OPERATION = "invalid-clear-operation"
+REJECT_CONFLICTING_MODEL_OPERATION = "conflicting-model-operation"
+REJECT_CONFLICTING_EFFORT_OPERATION = "conflicting-effort-operation"
+REJECT_MISSING_MODEL_CONTROL_OPERATION = "missing-model-control-operation"
 
 
 class ControlQueueError(Exception):
@@ -69,6 +78,12 @@ class ControlCommand:
     harness: str | None
     created_at: str
     line_number: int
+    model_operation: run_control.OverrideOperation = field(
+        default_factory=run_control.OverrideOperation.unchanged
+    )
+    effort_operation: run_control.OverrideOperation = field(
+        default_factory=run_control.OverrideOperation.unchanged
+    )
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -77,6 +92,8 @@ class ControlCommand:
             "harness": self.harness,
             "created_at": self.created_at,
             "line_number": self.line_number,
+            "model_operation": self.model_operation.to_payload(),
+            "effort_operation": self.effort_operation.to_payload(),
         }
 
 
@@ -134,12 +151,62 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _operation_from_fields(
+    *,
+    set_value: Any,
+    set_present: bool,
+    clear_value: Any,
+    clear_present: bool,
+    value_name: str,
+) -> run_control.OverrideOperation:
+    if set_present and (
+        not isinstance(set_value, str) or set_value == ""
+    ):
+        raise ValueError(f"invalid-{value_name}")
+    if clear_present and not isinstance(clear_value, bool):
+        raise ValueError(REJECT_INVALID_CLEAR_OPERATION)
+    clear_requested = clear_value is True
+    if set_present and clear_requested:
+        raise ValueError(f"conflicting-{value_name}-operation")
+    if set_present:
+        return run_control.OverrideOperation.set(set_value)
+    if clear_requested:
+        return run_control.OverrideOperation.clear()
+    return run_control.OverrideOperation.unchanged()
+
+
+def _model_control_operations(
+    payload: dict[str, Any],
+) -> tuple[run_control.OverrideOperation, run_control.OverrideOperation]:
+    model = _operation_from_fields(
+        set_value=payload.get("harness_model"),
+        set_present="harness_model" in payload,
+        clear_value=payload.get("clear_harness_model"),
+        clear_present="clear_harness_model" in payload,
+        value_name="model",
+    )
+    effort = _operation_from_fields(
+        set_value=payload.get("effort"),
+        set_present="effort" in payload,
+        clear_value=payload.get("clear_effort"),
+        clear_present="clear_effort" in payload,
+        value_name="effort",
+    )
+    if model.operation == "unchanged" and effort.operation == "unchanged":
+        raise ValueError(REJECT_MISSING_MODEL_CONTROL_OPERATION)
+    return model, effort
+
+
 def append_command(
     plan_dir: str | Path,
     command: CommandName,
     *,
     state_dir: str | Path | None = None,
     harness: str | None = None,
+    harness_model: str | None = None,
+    clear_harness_model: bool = False,
+    effort: str | None = None,
+    clear_effort: bool = False,
     command_id: str | None = None,
     created_at: str | None = None,
 ) -> ControlCommand:
@@ -155,6 +222,9 @@ def append_command(
         raise ControlQueueError("command_id must be a string when provided")
     if command_id == "":
         raise ControlQueueError("command_id must not be empty")
+    model_operation = run_control.OverrideOperation.unchanged()
+    effort_operation = run_control.OverrideOperation.unchanged()
+    model_control_record: dict[str, Any] = {}
     if command == COMMAND_SELECT_FUTURE_HARNESS:
         if harness is None or harness == "":
             raise ControlQueueError(
@@ -164,6 +234,29 @@ def append_command(
             raise ControlQueueError(
                 f"unsupported harness for select-future-harness: {harness!r}"
             )
+    elif command == COMMAND_SET_IMPLEMENTATION_MODEL:
+        if harness is not None and harness not in harnesses.HARNESS_NAMES:
+            raise ControlQueueError(
+                f"unsupported harness for set-implementation-model: {harness!r}"
+            )
+        if not isinstance(clear_harness_model, bool):
+            raise ControlQueueError(REJECT_INVALID_CLEAR_OPERATION)
+        if not isinstance(clear_effort, bool):
+            raise ControlQueueError(REJECT_INVALID_CLEAR_OPERATION)
+        if harness_model is not None:
+            model_control_record["harness_model"] = harness_model
+        if clear_harness_model:
+            model_control_record["clear_harness_model"] = True
+        if effort is not None:
+            model_control_record["effort"] = effort
+        if clear_effort:
+            model_control_record["clear_effort"] = True
+        try:
+            model_operation, effort_operation = _model_control_operations(
+                model_control_record
+            )
+        except ValueError as error:
+            raise ControlQueueError(str(error)) from error
     else:
         # Other commands ignore harness; normalize to None for parity.
         harness = None
@@ -173,6 +266,7 @@ def append_command(
         "command": command,
         "harness": harness,
         "created_at": created_at or _utc_now_iso(),
+        **model_control_record,
     }
     line = json.dumps(record, sort_keys=True) + "\n"
 
@@ -195,6 +289,8 @@ def append_command(
         harness=record["harness"],
         created_at=record["created_at"],
         line_number=0,
+        model_operation=model_operation,
+        effort_operation=effort_operation,
     )
 
 
@@ -307,6 +403,8 @@ def drain_queue(
             )
             continue
         harness_value = payload.get("harness")
+        model_operation = run_control.OverrideOperation.unchanged()
+        effort_operation = run_control.OverrideOperation.unchanged()
         if command_value == COMMAND_SELECT_FUTURE_HARNESS:
             if harness_value is None or harness_value == "":
                 rejected.append(
@@ -330,6 +428,37 @@ def drain_queue(
                     )
                 )
                 continue
+        elif command_value == COMMAND_SET_IMPLEMENTATION_MODEL:
+            if (
+                harness_value is not None
+                and (
+                    not isinstance(harness_value, str)
+                    or harness_value not in harnesses.HARNESS_NAMES
+                )
+            ):
+                rejected.append(
+                    RejectedCommand(
+                        line_number=line_number,
+                        reason=REJECT_INVALID_HARNESS,
+                        raw=raw_line,
+                        detail=str(harness_value),
+                    )
+                )
+                continue
+            try:
+                model_operation, effort_operation = (
+                    _model_control_operations(payload)
+                )
+            except ValueError as error:
+                reason = str(error)
+                rejected.append(
+                    RejectedCommand(
+                        line_number=line_number,
+                        reason=reason,
+                        raw=raw_line,
+                    )
+                )
+                continue
         else:
             harness_value = None
 
@@ -344,6 +473,8 @@ def drain_queue(
                 harness=harness_value,
                 created_at=created_at,
                 line_number=line_number,
+                model_operation=model_operation,
+                effort_operation=effort_operation,
             )
         )
         seen.add(cmd_id)

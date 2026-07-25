@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 import select
 import sys
 import termios
 import threading
+from types import MappingProxyType
 import tty
 from typing import Any, Literal, TextIO
 
 
 HarnessName = Literal["codex", "claude", "copilot"]
+OverrideOperationName = Literal["unchanged", "set", "clear"]
+ImplementationOverrideField = Literal["model", "effort"]
 RunControlActionName = Literal[
     "request",
     "cancel",
@@ -22,6 +25,7 @@ RunControlActionName = Literal[
     "tail-enabled",
     "tail-disabled",
     "harness-selected",
+    "implementation-model-updated",
 ]
 ActionCallback = Callable[["RunControlAction"], None]
 StatusCallback = Callable[["RunControlAction"], None]
@@ -39,6 +43,71 @@ _POLL_INTERVAL_SECONDS = 0.1
 
 
 @dataclass(frozen=True)
+class OverrideOperation:
+    """Explicit set-or-clear operation for one implementation override."""
+
+    operation: OverrideOperationName
+    value: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.operation not in ("unchanged", "set", "clear"):
+            raise ValueError(f"unknown override operation: {self.operation}")
+        if self.operation == "set":
+            if not isinstance(self.value, str) or self.value == "":
+                raise ValueError("set override operations require a non-empty value")
+            return
+        if self.value is not None:
+            raise ValueError(
+                f"{self.operation} override operations must not carry a value"
+            )
+
+    @classmethod
+    def unchanged(cls) -> "OverrideOperation":
+        return cls("unchanged")
+
+    @classmethod
+    def set(cls, value: str) -> "OverrideOperation":
+        return cls("set", value)
+
+    @classmethod
+    def clear(cls) -> "OverrideOperation":
+        return cls("clear")
+
+    def to_payload(self) -> dict[str, str | None]:
+        return {
+            "operation": self.operation,
+            "value": self.value,
+        }
+
+
+UNCHANGED_OVERRIDE_OPERATION = OverrideOperation.unchanged()
+
+
+def _copy_implementation_overrides(
+    overrides: Mapping[
+        HarnessName, Mapping[ImplementationOverrideField, str]
+    ],
+) -> dict[HarnessName, dict[ImplementationOverrideField, str]]:
+    return {
+        harness: dict(values)
+        for harness, values in overrides.items()
+    }
+
+
+def _freeze_implementation_overrides(
+    overrides: Mapping[
+        HarnessName, Mapping[ImplementationOverrideField, str]
+    ],
+) -> Mapping[HarnessName, Mapping[ImplementationOverrideField, str]]:
+    return MappingProxyType(
+        {
+            harness: MappingProxyType(dict(values))
+            for harness, values in overrides.items()
+        }
+    )
+
+
+@dataclass(frozen=True)
 class RunControlAction:
     """State transition caused by a run-control key or lifecycle checkpoint."""
 
@@ -46,6 +115,21 @@ class RunControlAction:
     stop_after_current: bool
     tail_enabled: bool = False
     next_harness: HarnessName | None = None
+    target_harness: HarnessName | None = None
+    changed_fields: tuple[ImplementationOverrideField, ...] = ()
+    implementation_overrides: Mapping[
+        HarnessName, Mapping[ImplementationOverrideField, str]
+    ] | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.implementation_overrides is not None:
+            object.__setattr__(
+                self,
+                "implementation_overrides",
+                _freeze_implementation_overrides(
+                    self.implementation_overrides
+                ),
+            )
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -53,6 +137,15 @@ class RunControlAction:
             "stop_after_current": self.stop_after_current,
             "tail_enabled": self.tail_enabled,
             "next_harness": self.next_harness,
+            "target_harness": self.target_harness,
+            "changed_fields": list(self.changed_fields),
+            "implementation_overrides": (
+                None
+                if self.implementation_overrides is None
+                else _copy_implementation_overrides(
+                    self.implementation_overrides
+                )
+            ),
         }
 
 
@@ -65,12 +158,18 @@ class RunControlState:
         current_harness: HarnessName | None = None,
         tail_enabled: bool = False,
         next_harness: HarnessName | None = None,
+        implementation_overrides: dict[
+            HarnessName, dict[ImplementationOverrideField, str]
+        ] | None = None,
     ) -> None:
         self._lock = threading.Lock()
         self._stop_after_current = False
         self._tail_enabled = tail_enabled
         self._current_harness = current_harness
         self._next_harness = next_harness
+        self._implementation_overrides = _copy_implementation_overrides(
+            implementation_overrides or {}
+        )
 
     @property
     def stop_after_current(self) -> bool:
@@ -87,22 +186,50 @@ class RunControlState:
         with self._lock:
             return self._next_harness
 
+    @property
+    def implementation_overrides(
+        self,
+    ) -> dict[HarnessName, dict[ImplementationOverrideField, str]]:
+        with self._lock:
+            return _copy_implementation_overrides(
+                self._implementation_overrides
+            )
+
+    def _action(
+        self,
+        action: RunControlActionName,
+        *,
+        target_harness: HarnessName | None = None,
+        changed_fields: tuple[ImplementationOverrideField, ...] = (),
+    ) -> RunControlAction:
+        return RunControlAction(
+            action=action,
+            stop_after_current=self._stop_after_current,
+            tail_enabled=self._tail_enabled,
+            next_harness=self._next_harness,
+            target_harness=target_harness,
+            changed_fields=changed_fields,
+            implementation_overrides=_copy_implementation_overrides(
+                self._implementation_overrides
+            ),
+        )
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return {
                 "stop_after_current": self._stop_after_current,
                 "tail_enabled": self._tail_enabled,
                 "next_harness": self._next_harness,
+                "implementation_overrides": _copy_implementation_overrides(
+                    self._implementation_overrides
+                ),
             }
 
     def toggle_stop_after_current(self) -> RunControlAction:
         with self._lock:
             self._stop_after_current = not self._stop_after_current
-            return RunControlAction(
-                action="request" if self._stop_after_current else "cancel",
-                stop_after_current=self._stop_after_current,
-                tail_enabled=self._tail_enabled,
-                next_harness=self._next_harness,
+            return self._action(
+                "request" if self._stop_after_current else "cancel"
             )
 
     def request_stop_after_current(self) -> RunControlAction | None:
@@ -117,42 +244,24 @@ class RunControlState:
             if self._stop_after_current:
                 return None
             self._stop_after_current = True
-            return RunControlAction(
-                action="request",
-                stop_after_current=True,
-                tail_enabled=self._tail_enabled,
-                next_harness=self._next_harness,
-            )
+            return self._action("request")
 
     def consume_stop_after_current(self) -> RunControlAction | None:
         with self._lock:
             if not self._stop_after_current:
                 return None
             self._stop_after_current = False
-            return RunControlAction(
-                action="consumed",
-                stop_after_current=False,
-                tail_enabled=self._tail_enabled,
-                next_harness=self._next_harness,
-            )
+            return self._action("consumed")
 
     def request_status_snapshot(self) -> RunControlAction:
         with self._lock:
-            return RunControlAction(
-                action="status",
-                stop_after_current=self._stop_after_current,
-                tail_enabled=self._tail_enabled,
-                next_harness=self._next_harness,
-            )
+            return self._action("status")
 
     def toggle_tail(self) -> RunControlAction:
         with self._lock:
             self._tail_enabled = not self._tail_enabled
-            return RunControlAction(
-                action="tail-enabled" if self._tail_enabled else "tail-disabled",
-                stop_after_current=self._stop_after_current,
-                tail_enabled=self._tail_enabled,
-                next_harness=self._next_harness,
+            return self._action(
+                "tail-enabled" if self._tail_enabled else "tail-disabled"
             )
 
     def select_harness(self, harness: HarnessName) -> RunControlAction | None:
@@ -161,11 +270,75 @@ class RunControlState:
             if harness == selected_harness:
                 return None
             self._next_harness = harness
-            return RunControlAction(
-                action="harness-selected",
-                stop_after_current=self._stop_after_current,
-                tail_enabled=self._tail_enabled,
-                next_harness=self._next_harness,
+            return self._action("harness-selected")
+
+    def set_implementation_model(
+        self,
+        *,
+        target_harness: HarnessName | None = None,
+        model: OverrideOperation = UNCHANGED_OVERRIDE_OPERATION,
+        effort: OverrideOperation = UNCHANGED_OVERRIDE_OPERATION,
+    ) -> RunControlAction | None:
+        """Apply model/effort override operations for one implementation harness.
+
+        An omitted target is resolved while holding the state lock, after any
+        earlier harness-selection transition. This preserves queue order when
+        a drain applies multiple commands in sequence.
+        """
+        if (
+            model.operation == "unchanged"
+            and effort.operation == "unchanged"
+        ):
+            raise ValueError(
+                "at least one model or effort override operation is required"
+            )
+
+        with self._lock:
+            resolved_harness = (
+                target_harness
+                or self._next_harness
+                or self._current_harness
+            )
+            if resolved_harness is None:
+                raise ValueError(
+                    "an implementation harness is required to apply overrides"
+                )
+            if resolved_harness not in HARNESS_SELECTION_KEYS.values():
+                raise ValueError(
+                    f"unknown implementation harness: {resolved_harness}"
+                )
+
+            current = dict(
+                self._implementation_overrides.get(resolved_harness, {})
+            )
+            updated = dict(current)
+            changed_fields: list[ImplementationOverrideField] = []
+            for field_name, operation in (
+                ("model", model),
+                ("effort", effort),
+            ):
+                if operation.operation == "unchanged":
+                    continue
+                if operation.operation == "clear":
+                    if field_name in updated:
+                        del updated[field_name]
+                        changed_fields.append(field_name)
+                    continue
+                assert operation.value is not None
+                if updated.get(field_name) != operation.value:
+                    updated[field_name] = operation.value
+                    changed_fields.append(field_name)
+
+            if not changed_fields:
+                return None
+            if updated:
+                self._implementation_overrides[resolved_harness] = updated
+            else:
+                self._implementation_overrides.pop(resolved_harness, None)
+            return self._action(
+                "implementation-model-updated",
+                target_harness=resolved_harness,
+                changed_fields=tuple(changed_fields),
             )
 
     def help_text(self) -> str:

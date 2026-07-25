@@ -16,16 +16,16 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
-import sys
 from typing import Any
 
-from . import control_queue, harnesses, plans, responses, state
+from . import cli_common, control_queue, harnesses, responses
 
 
 # Command names used in both success and error payloads, so a supervisor can
 # branch on `command` without inspecting argv.
 COMMAND_STOP_AFTER_CURRENT = "control-stop-after-current"
 COMMAND_SELECT_HARNESS = "control-select-harness"
+COMMAND_SET_MODEL = "control-set-model"
 
 # Shared note for both subcommands: enqueueing always succeeds, but nothing
 # consumes the queue until some runner drains it.
@@ -34,35 +34,7 @@ NO_ACTIVE_RUN_NOTE = (
 )
 STOP_WILL_APPLY_NOTE = "will stop after current session"
 STOP_NOOP_NOTE = "current session is the last; stop is a no-op"
-
-
-def _print_error(
-    args: argparse.Namespace,
-    *,
-    command_name: str,
-    text_label: str,
-    reason: str,
-    error: str,
-    details: dict[str, Any] | None = None,
-    hint: str | None = None,
-) -> None:
-    """Report a failure using the ``status_from_args`` conventions."""
-    if args.json:
-        responses.print_json(
-            responses.error_payload(
-                command_name,
-                reason=reason,
-                error=error,
-                paused=False,
-                details=details,
-                plan_dir=str(args.plan_dir),
-            )
-        )
-        return
-    message = f"agent-session-loop {text_label}: {error}"
-    if hint is not None:
-        message = f"{message}; {hint}"
-    print(message, file=sys.stderr)
+MODEL_APPLIES_TO = "next-implementation-turn"
 
 
 def _run_active(status: dict[str, Any]) -> bool:
@@ -92,6 +64,10 @@ def _enqueue_and_report(
     text_label: str,
     queue_command: control_queue.CommandName,
     harness: str | None = None,
+    harness_model: str | None = None,
+    clear_harness_model: bool = False,
+    effort: str | None = None,
+    clear_effort: bool = False,
     report: Callable[
         [dict[str, Any], control_queue.ControlCommand],
         tuple[dict[str, Any], str],
@@ -103,39 +79,15 @@ def _enqueue_and_report(
     command and returns the subcommand-specific payload fields plus the one-line
     human summary.
     """
-    try:
-        resolved_plan_dir = state.resolve_plan_reference(
-            args.plan_dir, state.state_root(args.state_dir)
-        )
-        snapshot = plans.inspect_plan(resolved_plan_dir)
-        status = state.status_payload(snapshot, args.state_dir)
-    except state.AmbiguousPlanError as error:
-        _print_error(
-            args,
-            command_name=command_name,
-            text_label=text_label,
-            reason="ambiguous-plan",
-            error=str(error),
-            details={
-                "state_root": str(error.state_root),
-                "candidates": [str(candidate) for candidate in error.candidates],
-            },
-            hint="pass a full plan directory path to disambiguate",
-        )
+    context = cli_common.resolve_plan_context(
+        args,
+        command_name=command_name,
+        text_label=text_label,
+    )
+    if context is None:
         return 1
-    except (plans.PlanError, state.StateError) as error:
-        _print_error(
-            args,
-            command_name=command_name,
-            text_label=text_label,
-            reason=(
-                "malformed-plan"
-                if isinstance(error, plans.PlanError)
-                else "state-error"
-            ),
-            error=str(error),
-        )
-        return 1
+    snapshot = context.snapshot
+    status = context.status
 
     # Resolved before the append so the failure path can name the file it could
     # not write. This is pure path math (`realpath` on a possibly-absent path),
@@ -148,9 +100,13 @@ def _enqueue_and_report(
             queue_command,
             state_dir=args.state_dir,
             harness=harness,
+            harness_model=harness_model,
+            clear_harness_model=clear_harness_model,
+            effort=effort,
+            clear_effort=clear_effort,
         )
     except control_queue.ControlQueueError as error:
-        _print_error(
+        cli_common.print_error(
             args,
             command_name=command_name,
             text_label=text_label,
@@ -163,7 +119,7 @@ def _enqueue_and_report(
         # an unwritable or structurally invalid state directory. `--json` is a
         # programmatic surface, so those failures have to land as one error
         # object with a stable reason rather than a traceback on stderr.
-        _print_error(
+        cli_common.print_error(
             args,
             command_name=command_name,
             text_label=text_label,
@@ -231,7 +187,7 @@ def control_select_harness_from_args(args: argparse.Namespace) -> int:
     # both reject unknown harnesses, but direct handler callers get the same
     # stable `invalid-harness` reason the Workbench API returns.
     if harness not in harnesses.HARNESS_NAMES:
-        _print_error(
+        cli_common.print_error(
             args,
             command_name=COMMAND_SELECT_HARNESS,
             text_label="control select-harness",
@@ -267,5 +223,83 @@ def control_select_harness_from_args(args: argparse.Namespace) -> int:
         text_label="control select-harness",
         queue_command=control_queue.COMMAND_SELECT_FUTURE_HARNESS,
         harness=harness,
+        report=report,
+    )
+
+
+def control_set_model_from_args(args: argparse.Namespace) -> int:
+    """Override or clear model/effort for a future implementation turn."""
+    harness = getattr(args, "harness", None)
+    harness_model = getattr(args, "harness_model", None)
+    clear_harness_model = bool(
+        getattr(args, "clear_harness_model", False)
+    )
+    effort = getattr(args, "effort", None)
+    clear_effort = bool(getattr(args, "clear_effort", False))
+
+    if harness is not None and harness not in harnesses.HARNESS_NAMES:
+        cli_common.print_error(
+            args,
+            command_name=COMMAND_SET_MODEL,
+            text_label="control set-model",
+            reason="invalid-harness",
+            error=f"unsupported harness {harness!r}",
+            details={"harness": harness},
+        )
+        return 1
+    if (
+        harness_model is None
+        and not clear_harness_model
+        and effort is None
+        and not clear_effort
+    ):
+        cli_common.print_error(
+            args,
+            command_name=COMMAND_SET_MODEL,
+            text_label="control set-model",
+            reason=control_queue.REJECT_MISSING_MODEL_CONTROL_OPERATION,
+            error=(
+                "set-model requires at least one model or effort "
+                "set/clear operation"
+            ),
+        )
+        return 1
+
+    def report(
+        status: dict[str, Any], queued: control_queue.ControlCommand
+    ) -> tuple[dict[str, Any], str]:
+        run_active = _run_active(status)
+        target = harness or "the selected implementation harness"
+        note = (
+            f"will apply to the next implementation turn for {target}"
+            if run_active
+            else NO_ACTIVE_RUN_NOTE
+        )
+        fields = {
+            "harness": harness,
+            "harness_model": harness_model,
+            "clear_harness_model": clear_harness_model,
+            "effort": effort,
+            "clear_effort": clear_effort,
+            "run_active": run_active,
+            "applies_to": MODEL_APPLIES_TO,
+            "note": note,
+        }
+        summary = (
+            f"Queued set-model for {status['plan_dir']} "
+            f"(command {queued.id}); {note}"
+        )
+        return fields, summary
+
+    return _enqueue_and_report(
+        args,
+        command_name=COMMAND_SET_MODEL,
+        text_label="control set-model",
+        queue_command=control_queue.COMMAND_SET_IMPLEMENTATION_MODEL,
+        harness=harness,
+        harness_model=harness_model,
+        clear_harness_model=clear_harness_model,
+        effort=effort,
+        clear_effort=clear_effort,
         report=report,
     )

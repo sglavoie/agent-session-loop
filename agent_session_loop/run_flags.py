@@ -187,6 +187,16 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
         help="Use the harness default sandbox and approval behavior",
     ),
     RunFlag(
+        dest="no_mailbox",
+        option_strings=("--no-mailbox",),
+        action="store_true",
+        cli_default=False,
+        help=(
+            "Disable live mailbox guidance and question/reply handling even "
+            "when a mailbox or fresh supervisor lease exists"
+        ),
+    ),
+    RunFlag(
         dest="json",
         option_strings=("--json",),
         action="store_true",

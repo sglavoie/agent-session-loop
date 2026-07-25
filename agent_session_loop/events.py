@@ -26,6 +26,7 @@ ACTION_REQUIRED_EVENT = "action_required"
 COMMIT_STARTED_EVENT = "commit_started"
 COMMIT_FINISHED_EVENT = "commit_finished"
 RUN_CONTROL_EVENT = "run_control"
+MAILBOX_EVENT = "mailbox"
 REVIEW_SESSION_CREATED_EVENT = "review_session_created"
 REVIEW_CYCLE_EVENT = "review_cycle"
 REVIEW_REPAIR_REOPENED_EVENT = "review_repair_reopened"
@@ -45,6 +46,7 @@ RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CONSUMED = "stop-after-current-consumed"
 RUN_CONTROL_ACTION_TAIL_ENABLED = "tail-enabled"
 RUN_CONTROL_ACTION_TAIL_DISABLED = "tail-disabled"
 RUN_CONTROL_ACTION_HARNESS_SELECTED = "harness-selected"
+RUN_CONTROL_ACTION_IMPLEMENTATION_MODEL_UPDATED = "implementation-model-updated"
 RUN_CONTROL_ACTIONS: tuple[str, ...] = (
     RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED,
     RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CANCELED,
@@ -52,6 +54,11 @@ RUN_CONTROL_ACTIONS: tuple[str, ...] = (
     RUN_CONTROL_ACTION_TAIL_ENABLED,
     RUN_CONTROL_ACTION_TAIL_DISABLED,
     RUN_CONTROL_ACTION_HARNESS_SELECTED,
+    RUN_CONTROL_ACTION_IMPLEMENTATION_MODEL_UPDATED,
+)
+MAILBOX_ACTION_GUIDANCE_OBSERVED = "guidance-observed"
+MAILBOX_ACTIONS: tuple[str, ...] = (
+    MAILBOX_ACTION_GUIDANCE_OBSERVED,
 )
 # Stable, evidence-based harness-failure categories produced by
 # ``agent_session_loop.runner.classify_harness_failure``. A nonzero harness

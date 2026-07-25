@@ -43,6 +43,7 @@ from agent_session_loop import (
     events,
     harnesses,
     install_verify,
+    mailbox,
     metrics,
     plans,
     preflight,
@@ -644,6 +645,73 @@ class CommandAndConfigTests(unittest.TestCase):
             ]
         )
         self.assertFalse(doctor_safe_args.unsafe_bypass)
+
+    def test_run_mailbox_defaults_active_capable_with_explicit_opt_out(self) -> None:
+        parser = cli.build_parser()
+
+        default_args = parser.parse_args(["run", "/tmp/plan"])
+        disabled_args = parser.parse_args(
+            ["run", "/tmp/plan", "--no-mailbox"]
+        )
+
+        self.assertFalse(default_args.no_mailbox)
+        self.assertTrue(disabled_args.no_mailbox)
+        self.assertIn("no_mailbox", runner._RESUME_OVERLAY_DESTS)
+
+    def test_mailbox_activation_accepts_fresh_lease_and_honors_opt_out(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            plan_dir.mkdir()
+            mailbox.write_lease(
+                plan_dir,
+                "11111111-1111-4111-8111-111111111111",
+                state_dir=state_dir,
+            )
+
+            enabled = runner._mailbox_activation_payload(
+                argparse.Namespace(state_dir=str(state_dir), no_mailbox=False),
+                plan_dir,
+            )
+            disabled = runner._mailbox_activation_payload(
+                argparse.Namespace(state_dir=str(state_dir), no_mailbox=True),
+                plan_dir,
+            )
+
+            self.assertTrue(enabled["enabled"])
+            self.assertEqual("fresh-lease", enabled["reason"])
+            self.assertTrue(enabled["lease_fresh"])
+            self.assertFalse(disabled["enabled"])
+            self.assertEqual("disabled-by-flag", disabled["reason"])
+            self.assertFalse(disabled["lease_fresh"])
+
+    def test_resume_overlay_rehydrates_no_mailbox(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            plan_dir.mkdir()
+            plan_state_dir = state.plan_state_dir(plan_dir, state_dir)
+            plan_state_dir.mkdir(parents=True)
+            (plan_state_dir / events.STATE_FILE_NAME).write_text(
+                json.dumps({"run_config": {"no_mailbox": True}}),
+                encoding="utf-8",
+            )
+            tokens = [
+                "run",
+                str(plan_dir),
+                "--resume",
+                "--state-dir",
+                str(state_dir),
+            ]
+            args = cli.build_parser().parse_args(tokens)
+
+            overlaid = runner._apply_resume_config(args, tokens)
+
+            self.assertTrue(overlaid.no_mailbox)
 
     def test_parser_uses_custom_program_name_in_help(self) -> None:
         parser = cli.build_parser(prog="asl")
@@ -1520,6 +1588,78 @@ class JsonCliTests(unittest.TestCase):
             )
             self.assertTrue(run_payload["state_path"].endswith("/state.json"))
             self.assertTrue(run_payload["events_path"].endswith("/events.jsonl"))
+
+    def test_dry_run_reports_mailbox_activation_and_opt_out(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan with spaces"
+            state_dir = tmp_dir / "state with spaces"
+            write_plan(plan_dir, ("pending",))
+            mailbox.append_guidance(
+                plan_dir,
+                "Prefer the smaller implementation.",
+                state_dir=state_dir,
+            )
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(tmp_dir / "config")
+            env["PYTHONPATH"] = (
+                str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+            )
+            base_argv = [
+                sys.executable,
+                "-m",
+                "agent_session_loop",
+                "run",
+                str(plan_dir),
+                "--cwd",
+                str(REPO_ROOT),
+                "--state-dir",
+                str(state_dir),
+                "--dry-run",
+                "--json",
+            ]
+
+            active_result = subprocess.run(
+                base_argv,
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            disabled_result = subprocess.run(
+                [*base_argv, "--no-mailbox"],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            active = json.loads(active_result.stdout)
+            disabled = json.loads(disabled_result.stdout)
+            self.assertTrue(active["planned"]["mailbox_enabled"])
+            self.assertEqual(
+                "mailbox-present",
+                active["planned"]["mailbox_activation"]["reason"],
+            )
+            self.assertFalse(active["run_config"]["no_mailbox"])
+            self.assertFalse(active["planned"]["no_mailbox"])
+            self.assertIn(
+                runner.MAILBOX_PROTOCOL_HEADING,
+                active["planned"]["prompt"],
+            )
+            self.assertFalse(disabled["planned"]["mailbox_enabled"])
+            self.assertEqual(
+                "disabled-by-flag",
+                disabled["planned"]["mailbox_activation"]["reason"],
+            )
+            self.assertTrue(disabled["run_config"]["no_mailbox"])
+            self.assertTrue(disabled["planned"]["no_mailbox"])
+            self.assertEqual(
+                runner.build_session_prompt("codex", plan_dir),
+                disabled["planned"]["prompt"],
+            )
 
     def test_compact_state_cli_dry_run_then_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

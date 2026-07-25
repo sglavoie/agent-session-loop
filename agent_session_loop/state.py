@@ -550,6 +550,7 @@ def _runner_state_payload(state_path: Path) -> dict[str, Any]:
             "error": None,
             "active_turn": None,
             "active_verification": None,
+            "waiting_for_reply": None,
         }
 
     try:
@@ -564,6 +565,7 @@ def _runner_state_payload(state_path: Path) -> dict[str, Any]:
             "error": None,
             "active_turn": None,
             "active_verification": None,
+            "waiting_for_reply": None,
         }
     except (OSError, json.JSONDecodeError) as error:
         return {
@@ -572,6 +574,7 @@ def _runner_state_payload(state_path: Path) -> dict[str, Any]:
             "error": str(error),
             "active_turn": None,
             "active_verification": None,
+            "waiting_for_reply": None,
         }
 
     if not isinstance(raw, dict):
@@ -581,6 +584,7 @@ def _runner_state_payload(state_path: Path) -> dict[str, Any]:
             "error": "state file did not contain a JSON object",
             "active_turn": None,
             "active_verification": None,
+            "waiting_for_reply": None,
         }
 
     active_turn = raw.get("active_turn")
@@ -590,6 +594,10 @@ def _runner_state_payload(state_path: Path) -> dict[str, Any]:
     active_verification = raw.get("active_verification")
     if not isinstance(active_verification, dict):
         active_verification = None
+
+    waiting_for_reply = raw.get("waiting_for_reply")
+    if not isinstance(waiting_for_reply, dict):
+        waiting_for_reply = None
 
     # Prefer the pause_policy block the runner persisted alongside the pause;
     # fall back to classifying the reason for older state files that predate it,
@@ -615,7 +623,104 @@ def _runner_state_payload(state_path: Path) -> dict[str, Any]:
         "duration_seconds": raw.get("duration_seconds"),
         "active_turn": active_turn,
         "active_verification": active_verification,
+        "waiting_for_reply": waiting_for_reply,
     }
+
+
+def _mailbox_status_payload(
+    plan_dir: Path,
+    state_dir: str | Path | None,
+) -> dict[str, Any]:
+    """Project the append-only mailbox and lease without mutating either file."""
+    # Local import avoids a module cycle: mailbox path resolution depends on
+    # this module's state-root helpers, while status only needs read-only views.
+    from . import mailbox
+
+    mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
+    lease_path = mailbox.lease_path_for_plan(plan_dir, state_dir)
+    mailbox_present = mailbox_path.exists()
+    lease_present = lease_path.exists()
+    payload: dict[str, Any] = {
+        "present": mailbox_present,
+        "active": False,
+        "path": str(mailbox_path),
+        "lease_present": lease_present,
+        "lease_path": str(lease_path),
+        "size_bytes": 0,
+        "max_bytes": mailbox.MAILBOX_MAX_BYTES,
+        "full": False,
+        "last_seq": 0,
+        "pending_guidance": 0,
+        "unanswered_questions": 0,
+        "rejected_records": 0,
+        "error": None,
+        "lease_updated_at": None,
+        "lease_fresh": False,
+        "lease_reason": None,
+        "lease_error": None,
+    }
+
+    try:
+        view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+    except mailbox.MailboxError as error:
+        # read_mailbox only returns an absent view for FileNotFoundError, so an
+        # exception means something exists at the path but could not be read.
+        payload["present"] = True
+        payload["size_bytes"] = None
+        payload["full"] = None
+        payload["last_seq"] = None
+        payload["pending_guidance"] = None
+        payload["unanswered_questions"] = None
+        payload["rejected_records"] = None
+        payload["error"] = str(error)
+    else:
+        counts = view.counts
+        payload.update(
+            {
+                "present": (
+                    mailbox_present
+                    or mailbox_path.exists()
+                    or view.size_bytes > 0
+                ),
+                "size_bytes": view.size_bytes,
+                "full": view.full,
+                "last_seq": view.last_seq,
+                "pending_guidance": counts.pending_guidance,
+                "unanswered_questions": counts.unanswered_questions,
+                "rejected_records": counts.rejected,
+            }
+        )
+        if view.rejected:
+            first = view.rejected[0]
+            noun = "record" if len(view.rejected) == 1 else "records"
+            payload["error"] = (
+                f"{len(view.rejected)} rejected mailbox {noun}; "
+                f"first at seq {first.seq}: {first.reason}"
+            )
+
+    try:
+        lease = mailbox.read_lease(plan_dir, state_dir=state_dir)
+    except mailbox.MailboxError as error:
+        payload["lease_present"] = True
+        payload["lease_reason"] = error.reason
+        payload["lease_error"] = str(error)
+    else:
+        lease_present = lease.reason != mailbox.LEASE_MISSING
+        payload["lease_present"] = lease_present
+        payload["lease_updated_at"] = lease.updated_at
+        payload["lease_fresh"] = lease.fresh
+        payload["lease_reason"] = (
+            None if lease.reason == mailbox.LEASE_MISSING else lease.reason
+        )
+        if lease.reason not in (
+            None,
+            mailbox.LEASE_MISSING,
+            mailbox.LEASE_EXPIRED,
+        ):
+            payload["lease_error"] = lease.reason
+
+    payload["active"] = bool(payload["present"] or payload["lease_fresh"])
+    return payload
 
 
 def _progress_journal_payload(plan_dir: Path) -> dict[str, Any]:
@@ -799,6 +904,7 @@ def status_payload(
     stale_unfinished, stale_reason = _stale_runner_state(runner_state, lock_info)
     runner_state["stale_unfinished"] = stale_unfinished
     runner_state["stale_reason"] = stale_reason
+    mailbox_status = _mailbox_status_payload(snapshot.plan_dir, state_dir)
     progress_journal = _progress_journal_payload(snapshot.plan_dir)
     review_resume = review_continuation.evaluate_review_continuation(
         snapshot, event_path
@@ -817,6 +923,8 @@ def status_payload(
         runner_state=runner_state,
         active_turn=runner_state.get("active_turn"),
         active_verification=runner_state.get("active_verification"),
+        waiting_for_reply=runner_state.get("waiting_for_reply"),
+        mailbox=mailbox_status,
         counts=_status_counts(snapshot),
         next_pending=(
             _session_compat_value(next_pending.id)
@@ -859,6 +967,44 @@ def _print_text_status(payload: dict[str, Any]) -> None:
         if runner_state.get("stale_unfinished"):
             stale_reason = runner_state.get("stale_reason") or "stale unfinished"
             print(f"Run state: stale/orphaned ({stale_reason})")
+
+    mailbox_status = payload.get("mailbox")
+    if isinstance(mailbox_status, dict):
+        mailbox_error = mailbox_status.get("error")
+        if mailbox_error:
+            print(f"Mailbox: unreadable/malformed ({mailbox_error})")
+        elif mailbox_status.get("active"):
+            full_suffix = ", full" if mailbox_status.get("full") else ""
+            print(
+                "Mailbox: active"
+                f"{full_suffix}, seq {mailbox_status.get('last_seq')}, "
+                f"{mailbox_status.get('pending_guidance')} pending guidance, "
+                f"{mailbox_status.get('unanswered_questions')} unanswered "
+                "questions, "
+                f"{mailbox_status.get('size_bytes')}/"
+                f"{mailbox_status.get('max_bytes')} bytes"
+            )
+        elif mailbox_status.get("lease_present"):
+            print("Mailbox: inactive (supervisor lease is not fresh)")
+        else:
+            print("Mailbox: disabled")
+
+        if mailbox_status.get("lease_error"):
+            print(
+                "Mailbox lease: malformed/unreadable "
+                f"({mailbox_status['lease_error']})"
+            )
+        elif mailbox_status.get("lease_fresh"):
+            print(
+                "Mailbox lease: fresh, updated "
+                f"{mailbox_status.get('lease_updated_at') or 'unknown'}"
+            )
+        elif mailbox_status.get("lease_present"):
+            reason = mailbox_status.get("lease_reason") or "stale"
+            updated_at = mailbox_status.get("lease_updated_at") or "unknown"
+            print(f"Mailbox lease: stale ({reason}), updated {updated_at}")
+        else:
+            print("Mailbox lease: absent")
 
     progress_journal = payload.get("progress_journal")
     if isinstance(progress_journal, dict):
@@ -929,6 +1075,25 @@ def _print_text_status(payload: dict[str, Any]) -> None:
         heartbeat_count = active_verification.get("heartbeat_count")
         if heartbeat_count is not None:
             print(f"  Heartbeats: {heartbeat_count}")
+
+    waiting_for_reply = payload.get("waiting_for_reply")
+    if isinstance(waiting_for_reply, dict):
+        question_id = waiting_for_reply.get("question_id") or "unknown"
+        print(
+            "Waiting for reply: "
+            f"question {question_id} "
+            f"session {_session_label_from_payload(waiting_for_reply)} "
+            f"turn {waiting_for_reply.get('turn_index')} "
+            f"since {waiting_for_reply.get('started_at') or 'unknown'}"
+        )
+        base_deadline = waiting_for_reply.get("base_deadline")
+        hard_deadline = waiting_for_reply.get("hard_deadline")
+        if base_deadline or hard_deadline:
+            print(
+                "  Deadlines: "
+                f"base {base_deadline or 'unknown'}, "
+                f"hard {hard_deadline or 'unknown'}"
+            )
 
     print("Sessions:")
     for session in payload["sessions"]:

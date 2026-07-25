@@ -22,7 +22,9 @@ MODEL_SOURCE_FLAG = "flag"
 MODEL_SOURCE_UNRESOLVED = "unresolved"
 MODEL_SOURCE_CODEX_CONFIG = "codex_config"
 MODEL_SOURCE_COPILOT_SETTINGS = "copilot_settings"
+MODEL_SOURCE_CONTROL = "control"
 EFFORT_SOURCE_FLAG = "flag"
+EFFORT_SOURCE_CONTROL = "control"
 
 
 class ConfigError(Exception):

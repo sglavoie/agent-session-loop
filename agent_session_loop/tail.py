@@ -180,6 +180,26 @@ def _run_control_message(payload: dict[str, Any]) -> str:
     message = payload.get("message") or payload.get("action") or "unknown action"
     status = "on" if payload.get("stop_after_current") else "off"
     details = [f"stop-after-current {status}"]
+    if (
+        payload.get("action")
+        == events.RUN_CONTROL_ACTION_IMPLEMENTATION_MODEL_UPDATED
+    ):
+        target_harness = payload.get("target_harness") or "unknown"
+        changed_fields = payload.get("changed_fields")
+        if isinstance(changed_fields, list) and changed_fields:
+            changed = ", ".join(str(field) for field in changed_fields)
+        else:
+            changed = "none"
+        overrides = payload.get("implementation_overrides")
+        if not isinstance(overrides, dict):
+            overrides = {}
+        details.extend(
+            (
+                f"target harness {target_harness}",
+                f"changed {changed}",
+                f"effective overrides {json.dumps(overrides, sort_keys=True)}",
+            )
+        )
     session = payload.get("session")
     if session is not None:
         details.append(f"session {_format_session_label(payload)}")
@@ -187,6 +207,25 @@ def _run_control_message(payload: dict[str, Any]) -> str:
     if turn_index is not None:
         details.append(f"turn {turn_index}")
     return f"run control: {message} ({', '.join(details)})"
+
+
+def _mailbox_message(payload: dict[str, Any]) -> str:
+    action = payload.get("action") or "unknown"
+    if action == events.MAILBOX_ACTION_GUIDANCE_OBSERVED:
+        details = [
+            f"id {payload.get('message_id', 'unknown')}",
+            f"sequence {payload.get('seq', 'unknown')}",
+            f"length {payload.get('length', 'unknown')}",
+            f"digest {payload.get('digest', 'unknown')}",
+        ]
+        session = payload.get("session_id") or payload.get("session")
+        if session is not None:
+            details.append(f"session {session}")
+        turn_index = payload.get("turn_index")
+        if turn_index is not None:
+            details.append(f"turn {turn_index}")
+        return f"mailbox: guidance observed ({', '.join(details)})"
+    return f"mailbox: {action}"
 
 
 def _event_message(name: str, payload: dict[str, Any]) -> str:
@@ -229,6 +268,8 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
         )
     if name == events.RUN_CONTROL_EVENT:
         return _run_control_message(payload)
+    if name == events.MAILBOX_EVENT:
+        return _mailbox_message(payload)
     if name == events.REVIEW_SESSION_CREATED_EVENT:
         session = payload.get("session_id") or payload.get("session", "unknown")
         harness = payload.get("review_harness", "unknown")
