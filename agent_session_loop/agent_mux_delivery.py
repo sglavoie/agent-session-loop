@@ -29,6 +29,8 @@ TURN_FINISH_EVENT = "AgentSessionLoopTurnFinished"
 VERIFICATION_START_EVENT = "AgentSessionLoopVerificationStarted"
 VERIFICATION_HEARTBEAT_EVENT = "AgentSessionLoopVerificationHeartbeat"
 VERIFICATION_FINISH_EVENT = "AgentSessionLoopVerificationFinished"
+WAIT_START_EVENT = "AgentSessionLoopWaitStarted"
+WAIT_END_EVENT = "AgentSessionLoopWaitEnded"
 PAUSE_EVENT = "AgentSessionLoopPaused"
 FINISH_EVENT = "AgentSessionLoopFinished"
 SOURCE = "agent_session_loop"
@@ -40,6 +42,8 @@ TURN_FINISH_REASON = "turn_finished"
 VERIFICATION_START_REASON = "verification_started"
 VERIFICATION_HEARTBEAT_REASON = "verification_heartbeat"
 VERIFICATION_FINISH_REASON = "verification_finished"
+WAIT_START_REASON = "wait_started"
+WAIT_END_REASON = "wait_ended"
 PAUSE_REASON = "run_paused"
 FINISH_REASON = "run_finished"
 
@@ -51,6 +55,8 @@ PHASE_BY_EVENT: dict[str, str] = {
     VERIFICATION_START_EVENT: "verification",
     VERIFICATION_HEARTBEAT_EVENT: "verification",
     VERIFICATION_FINISH_EVENT: "between",
+    WAIT_START_EVENT: "waiting",
+    WAIT_END_EVENT: "between",
     PAUSE_EVENT: "paused",
     FINISH_EVENT: "finished",
 }

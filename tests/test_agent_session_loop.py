@@ -3,9 +3,10 @@
 The former monolithic module now lives in the tests/test_asl_*.py subsystem
 modules (shared fixtures in tests/support.py). This shim keeps historical
 dotted names such as ``tests.test_agent_session_loop.VerificationExecutorTests``
-working. Under discovery (``python3 -m unittest discover``) it contributes no
-tests so the split modules are not run twice; loading it directly
-(``python3 -m unittest tests.test_agent_session_loop``) runs the full suite.
+working. Under broad discovery (``python3 -m unittest discover``) it contributes
+no tests so the split modules are not run twice; loading it directly
+(``python3 -m unittest tests.test_agent_session_loop``) runs the full suite, and
+a self-targeted discovery pattern runs the AgentMux delivery coverage.
 """
 
 from __future__ import annotations
@@ -177,8 +178,17 @@ _SPLIT_MODULES = (
 )
 
 
+_SELF_DISCOVERY_PATTERN = "test_agent_session_loop.py"
+
+
 def load_tests(loader, tests, pattern):
     if pattern is not None:
+        # Only a pattern naming this module asks for its own tests; the broad
+        # pattern must stay empty so the split modules are not run twice.
+        if pattern == _SELF_DISCOVERY_PATTERN:
+            return loader.loadTestsFromTestCase(
+                AgentMuxNotificationIntegrationTests
+            )
         return unittest.TestSuite()
     suite = unittest.TestSuite()
     for module_name in _SPLIT_MODULES:

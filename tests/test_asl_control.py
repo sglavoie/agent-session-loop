@@ -4122,6 +4122,40 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             with self.subTest(raw=raw), patched_env(KITTY_WINDOW_ID=raw):
                 self.assertIsNone(runner._kitty_window_id_from_env())
 
+    def test_wait_lifecycle_delivery_constants_and_phases(self) -> None:
+        self.assertEqual(
+            "AgentSessionLoopWaitStarted", agent_mux_delivery.WAIT_START_EVENT
+        )
+        self.assertEqual(
+            "AgentSessionLoopWaitEnded", agent_mux_delivery.WAIT_END_EVENT
+        )
+        self.assertEqual("wait_started", agent_mux_delivery.WAIT_START_REASON)
+        self.assertEqual("wait_ended", agent_mux_delivery.WAIT_END_REASON)
+        self.assertEqual(
+            "waiting",
+            agent_mux_delivery.PHASE_BY_EVENT[
+                agent_mux_delivery.WAIT_START_EVENT
+            ],
+        )
+        self.assertEqual(
+            "between",
+            agent_mux_delivery.PHASE_BY_EVENT[agent_mux_delivery.WAIT_END_EVENT],
+        )
+        self.assertEqual(
+            agent_mux_delivery.WAIT_START_EVENT,
+            runner.AGENT_MUX_WAIT_START_EVENT,
+        )
+        self.assertEqual(
+            agent_mux_delivery.WAIT_END_EVENT, runner.AGENT_MUX_WAIT_END_EVENT
+        )
+        self.assertEqual(
+            agent_mux_delivery.WAIT_START_REASON,
+            runner.AGENT_MUX_WAIT_START_REASON,
+        )
+        self.assertEqual(
+            agent_mux_delivery.WAIT_END_REASON, runner.AGENT_MUX_WAIT_END_REASON
+        )
+
     def test_agent_mux_notify_timeout_defaults_without_env_override(self) -> None:
         with patched_env(ASL_AGENT_MUX_NOTIFY_TIMEOUT_SECONDS=None):
             self.assertEqual(

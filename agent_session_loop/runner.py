@@ -128,6 +128,8 @@ AGENT_MUX_VERIFICATION_HEARTBEAT_EVENT = (
     agent_mux_delivery.VERIFICATION_HEARTBEAT_EVENT
 )
 AGENT_MUX_VERIFICATION_FINISH_EVENT = agent_mux_delivery.VERIFICATION_FINISH_EVENT
+AGENT_MUX_WAIT_START_EVENT = agent_mux_delivery.WAIT_START_EVENT
+AGENT_MUX_WAIT_END_EVENT = agent_mux_delivery.WAIT_END_EVENT
 AGENT_MUX_PAUSE_EVENT = agent_mux_delivery.PAUSE_EVENT
 AGENT_MUX_FINISH_EVENT = agent_mux_delivery.FINISH_EVENT
 AGENT_MUX_SOURCE = agent_mux_delivery.SOURCE
@@ -143,8 +145,11 @@ AGENT_MUX_VERIFICATION_HEARTBEAT_REASON = (
 AGENT_MUX_VERIFICATION_FINISH_REASON = (
     agent_mux_delivery.VERIFICATION_FINISH_REASON
 )
+AGENT_MUX_WAIT_START_REASON = agent_mux_delivery.WAIT_START_REASON
+AGENT_MUX_WAIT_END_REASON = agent_mux_delivery.WAIT_END_REASON
 AGENT_MUX_PAUSE_REASON = agent_mux_delivery.PAUSE_REASON
 AGENT_MUX_FINISH_REASON = agent_mux_delivery.FINISH_REASON
+AGENT_MUX_QUESTION_PREVIEW_CHARS = 160
 # Phase vocabulary must match the AgentMux daemon's event mapping
 # (internal/daemon/normalize.go::aslPhaseForEvent).
 AGENT_MUX_PHASE_BY_EVENT = agent_mux_delivery.PHASE_BY_EVENT
@@ -3139,6 +3144,51 @@ def _notify_agent_mux_loop_turn_finished(
         payload,
         reason=AGENT_MUX_TURN_FINISH_REASON,
         active_turn=finished_turn,
+        persistence=persistence,
+    )
+
+
+def _question_preview(text: str | None) -> str | None:
+    """Collapse question text into one bounded line for notification payloads."""
+    if text is None:
+        return None
+    collapsed = " ".join(text.split())
+    if not collapsed:
+        return None
+    return collapsed[:AGENT_MUX_QUESTION_PREVIEW_CHARS]
+
+
+def _notify_agent_mux_loop_wait_started(
+    payload: dict[str, Any],
+    *,
+    question_id: str,
+    question_text: str | None,
+    persistence: _RunPersistence | None = None,
+) -> None:
+    _notify_agent_mux_loop(
+        AGENT_MUX_WAIT_START_EVENT,
+        payload,
+        reason=AGENT_MUX_WAIT_START_REASON,
+        extra={
+            "question_id": question_id,
+            "question_preview": _question_preview(question_text),
+        },
+        persistence=persistence,
+    )
+
+
+def _notify_agent_mux_loop_wait_ended(
+    payload: dict[str, Any],
+    *,
+    question_id: str,
+    wait_reason: str,
+    persistence: _RunPersistence | None = None,
+) -> None:
+    _notify_agent_mux_loop(
+        AGENT_MUX_WAIT_END_EVENT,
+        payload,
+        reason=AGENT_MUX_WAIT_END_REASON,
+        extra={"question_id": question_id, "wait_reason": wait_reason},
         persistence=persistence,
     )
 
@@ -8542,6 +8592,12 @@ def _run_locked(
                             pending_outbox=prepared_wait.pending_outbox,
                             persistence=persistence,
                         )
+                        _notify_agent_mux_loop_wait_started(
+                            payload,
+                            question_id=prepared_wait.question.id,
+                            question_text=prepared_wait.question.text,
+                            persistence=persistence,
+                        )
                         wait_result: _MailboxReplyWaitResult | None = None
                         try:
                             wait_result = _wait_for_mailbox_reply(
@@ -8557,19 +8613,26 @@ def _run_locked(
                                 ),
                             )
                         finally:
+                            wait_reason = (
+                                wait_result.reason
+                                if wait_result is not None
+                                else "error"
+                            )
                             _clear_waiting_for_reply(
                                 event_path,
                                 payload,
-                                reason=(
-                                    wait_result.reason
-                                    if wait_result is not None
-                                    else "error"
-                                ),
+                                reason=wait_reason,
                                 pending_outbox=(
                                     wait_result.pending_outbox
                                     if wait_result is not None
                                     else None
                                 ),
+                                persistence=persistence,
+                            )
+                            _notify_agent_mux_loop_wait_ended(
+                                payload,
+                                question_id=prepared_wait.question.id,
+                                wait_reason=wait_reason,
                                 persistence=persistence,
                             )
 

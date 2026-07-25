@@ -32,6 +32,7 @@ import urllib.parse
 from unittest import mock
 
 from agent_session_loop import (
+    agent_mux_delivery,
     artifacts,
     authoring,
     baseline,
@@ -68,6 +69,7 @@ from agent_session_loop.formatting import (
 )
 from tests.support import (
     REPO_ROOT,
+    agent_mux_notify_enabled,
     write_plan,
     install_fake_codex,
     init_git_repo,
@@ -603,6 +605,156 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             self.assertNotIn(
                 events.RUN_PAUSED_EVENT,
                 [record.get("name") for record in records],
+            )
+
+    def test_answered_mailbox_wait_emits_wait_lifecycle_notifications(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("pending",))
+            mailbox.append_guidance(
+                plan_dir,
+                "Keep working after the answer.",
+                state_dir=state_dir,
+            )
+            mailbox.write_lease(
+                plan_dir,
+                "00000000-0000-0000-0000-000000000003",
+                state_dir=state_dir,
+            )
+            calls = 0
+
+            def fake_run_harness(name, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    last_message = (
+                        "Choose option 1a or 1b.\n"
+                        "RUNNER_PAUSE: blocked - need operator answer\n"
+                    )
+                    return harnesses.HarnessResult(
+                        name=name,
+                        argv=[name],
+                        returncode=0,
+                        stdout="waiting\n",
+                        stderr="",
+                        last_message=last_message,
+                    )
+                session_path = plan_dir / "session-1.md"
+                session_path.write_text(
+                    session_path.read_text(encoding="utf-8").replace(
+                        "- **Status**: pending",
+                        "- **Status**: complete",
+                        1,
+                    ),
+                    encoding="utf-8",
+                )
+                return harnesses.HarnessResult(
+                    name=name,
+                    argv=[name],
+                    returncode=0,
+                    stdout="complete\n",
+                    stderr="",
+                    last_message="Runner status: complete\n",
+                )
+
+            responder_error: list[BaseException] = []
+
+            def respond() -> None:
+                try:
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        view = mailbox.read_mailbox(
+                            plan_dir, state_dir=state_dir
+                        )
+                        if view.unanswered_questions:
+                            mailbox.append_reply(
+                                plan_dir,
+                                view.unanswered_questions[0].id,
+                                "Use 1a.",
+                                state_dir=state_dir,
+                            )
+                            return
+                        time.sleep(0.01)
+                    raise AssertionError("runner did not publish a question")
+                except BaseException as error:
+                    responder_error.append(error)
+
+            responder = threading.Thread(target=respond, daemon=True)
+            responder.start()
+            args = self._build_args(
+                plan_dir,
+                state_dir,
+                reply=None,
+                cwd=tmp_dir,
+            )
+            env = {
+                runner.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "1",
+                runner.MAILBOX_REPLY_WAIT_HARD_ENV_VAR: "2",
+                runner.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
+                runner.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
+            }
+            notified: list[tuple[str, dict[str, object] | None]] = []
+
+            def record_notification(event_name, _payload, **kwargs):
+                notified.append((event_name, kwargs.get("extra")))
+
+            with (
+                mock.patch.dict(os.environ, env),
+                mock.patch.object(
+                    runner.harnesses,
+                    "run_harness",
+                    side_effect=fake_run_harness,
+                ),
+                mock.patch.object(
+                    runner,
+                    "_notify_agent_mux_loop",
+                    side_effect=record_notification,
+                ),
+            ):
+                code, out, _err = self._run_capture(args)
+            responder.join(timeout=5)
+
+            self.assertEqual([], responder_error)
+            self.assertEqual(0, code, out)
+            emitted = [event_name for event_name, _extra in notified]
+            self.assertEqual(
+                1, emitted.count(runner.AGENT_MUX_WAIT_START_EVENT), emitted
+            )
+            self.assertEqual(
+                1, emitted.count(runner.AGENT_MUX_WAIT_END_EVENT), emitted
+            )
+            start_index = emitted.index(runner.AGENT_MUX_WAIT_START_EVENT)
+            end_index = emitted.index(runner.AGENT_MUX_WAIT_END_EVENT)
+            self.assertLess(start_index, end_index, emitted)
+            self.assertLess(
+                emitted.index(runner.AGENT_MUX_TURN_FINISH_EVENT),
+                start_index,
+                emitted,
+            )
+            self.assertNotIn(runner.AGENT_MUX_PAUSE_EVENT, emitted)
+
+            view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+            questions = [
+                message
+                for message in view.messages
+                if message.kind == mailbox.KIND_QUESTION
+            ]
+            self.assertEqual(1, len(questions))
+            question = questions[0]
+            self.assertEqual(
+                {
+                    "question_id": question.id,
+                    "question_preview": runner._question_preview(question.text),
+                },
+                notified[start_index][1],
+            )
+            self.assertEqual(
+                {"question_id": question.id, "wait_reason": "reply"},
+                notified[end_index][1],
             )
 
     def test_mailbox_with_stale_lease_records_wait_preparation_failure(
@@ -1454,6 +1606,194 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 mailbox.MAILBOX_MAX_BYTES,
                 mailbox_path.stat().st_size,
             )
+
+
+class AgentMuxWaitNotificationTests(unittest.TestCase):
+    """Wait lifecycle delivery payloads, preview bounds, and fail-open behavior."""
+
+    def setUp(self) -> None:
+        self.enterContext(agent_mux_notify_enabled())
+        agent_mux_delivery.reset_legacy_cache()
+        self.addCleanup(agent_mux_delivery.reset_legacy_cache)
+
+    @staticmethod
+    def _accepted_delivery() -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            ["/opt/amx"],
+            0,
+            stdout=json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "accepted",
+                    "retryable": False,
+                    "reason": "accepted",
+                    "trace_id": "trace-wait",
+                }
+            ),
+            stderr="",
+        )
+
+    @staticmethod
+    def _wait_payload(tmp_dir: Path) -> dict[str, object]:
+        return {
+            "run_id": "run-wait",
+            "plan_dir": str(tmp_dir / "plan"),
+            "cwd": str(tmp_dir / "repo"),
+            "harness": "codex",
+            "state_path": str(tmp_dir / "state.json"),
+            "events_path": str(tmp_dir / "events.jsonl"),
+        }
+
+    def test_question_preview_collapses_whitespace_and_caps_length(self) -> None:
+        self.assertEqual(
+            "Should we use 1a or 1b?",
+            runner._question_preview("  Should we use\n\t1a  or 1b?  \n"),
+        )
+        self.assertIsNone(runner._question_preview(None))
+        self.assertIsNone(runner._question_preview("  \n\t "))
+
+        capped = runner._question_preview("x" * 500)
+        self.assertEqual(runner.AGENT_MUX_QUESTION_PREVIEW_CHARS, len(capped))
+        self.assertEqual("x" * runner.AGENT_MUX_QUESTION_PREVIEW_CHARS, capped)
+
+        multiline = runner._question_preview("line\n" * 400)
+        self.assertLessEqual(
+            len(multiline), runner.AGENT_MUX_QUESTION_PREVIEW_CHARS
+        )
+        self.assertNotIn("\n", multiline)
+
+    def test_wait_started_delivers_bounded_question_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._wait_payload(Path(tmp))
+
+            with (
+                mock.patch.object(
+                    runner.shutil, "which", return_value="/opt/amx"
+                ),
+                mock.patch.object(
+                    runner.subprocess,
+                    "run",
+                    return_value=self._accepted_delivery(),
+                ) as run,
+            ):
+                runner._notify_agent_mux_loop_wait_started(
+                    payload,
+                    question_id="question-1",
+                    question_text="Should we use\n\n1a or 1b? " + "detail " * 100,
+                )
+
+            run.assert_called_once()
+            args, kwargs = run.call_args
+            self.assertEqual("AgentSessionLoopWaitStarted", args[0][-1])
+            hook_payload = json.loads(kwargs["input"])
+            self.assertEqual("wait_started", hook_payload["reason"])
+            self.assertEqual("waiting", hook_payload["phase"])
+            self.assertEqual("question-1", hook_payload["question_id"])
+            preview = hook_payload["question_preview"]
+            self.assertTrue(preview.startswith("Should we use 1a or 1b? detail"))
+            self.assertLessEqual(
+                len(preview), runner.AGENT_MUX_QUESTION_PREVIEW_CHARS
+            )
+            self.assertNotIn("wait_reason", hook_payload)
+
+    def test_wait_started_omits_preview_for_blank_question_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._wait_payload(Path(tmp))
+
+            with (
+                mock.patch.object(
+                    runner.shutil, "which", return_value="/opt/amx"
+                ),
+                mock.patch.object(
+                    runner.subprocess,
+                    "run",
+                    return_value=self._accepted_delivery(),
+                ) as run,
+            ):
+                runner._notify_agent_mux_loop_wait_started(
+                    payload,
+                    question_id="question-1",
+                    question_text=None,
+                )
+
+            hook_payload = json.loads(run.call_args.kwargs["input"])
+            self.assertEqual("question-1", hook_payload["question_id"])
+            self.assertNotIn("question_preview", hook_payload)
+
+    def test_wait_ended_passes_every_wait_reason_through(self) -> None:
+        for wait_reason in (
+            "reply",
+            "timeout",
+            runner.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            "error",
+        ):
+            with self.subTest(wait_reason=wait_reason):
+                with tempfile.TemporaryDirectory() as tmp:
+                    payload = self._wait_payload(Path(tmp))
+
+                    with (
+                        mock.patch.object(
+                            runner.shutil, "which", return_value="/opt/amx"
+                        ),
+                        mock.patch.object(
+                            runner.subprocess,
+                            "run",
+                            return_value=self._accepted_delivery(),
+                        ) as run,
+                    ):
+                        runner._notify_agent_mux_loop_wait_ended(
+                            payload,
+                            question_id="question-1",
+                            wait_reason=wait_reason,
+                        )
+
+                    args, kwargs = run.call_args
+                    self.assertEqual("AgentSessionLoopWaitEnded", args[0][-1])
+                    hook_payload = json.loads(kwargs["input"])
+                    self.assertEqual("wait_ended", hook_payload["reason"])
+                    self.assertEqual("between", hook_payload["phase"])
+                    self.assertEqual("question-1", hook_payload["question_id"])
+                    self.assertEqual(wait_reason, hook_payload["wait_reason"])
+                    self.assertNotIn("question_preview", hook_payload)
+
+    def test_wait_notifications_stay_fail_open_when_amx_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            payload = self._wait_payload(tmp_dir)
+            events_path = Path(str(payload["events_path"]))
+
+            with (
+                mock.patch.object(runner.shutil, "which", return_value=None),
+                mock.patch.object(runner.subprocess, "run") as run,
+            ):
+                runner._notify_agent_mux_loop_wait_started(
+                    payload,
+                    question_id="question-1",
+                    question_text="Should we use 1a or 1b?",
+                )
+                runner._notify_agent_mux_loop_wait_ended(
+                    payload,
+                    question_id="question-1",
+                    wait_reason="timeout",
+                )
+
+            run.assert_not_called()
+            outcomes = [
+                record["payload"]
+                for record in read_jsonl(events_path)
+                if record.get("name") == events.AGENT_MUX_DELIVERY_EVENT
+            ]
+            self.assertEqual(
+                [
+                    runner.AGENT_MUX_WAIT_START_EVENT,
+                    runner.AGENT_MUX_WAIT_END_EVENT,
+                ],
+                [outcome["agent_mux_event"] for outcome in outcomes],
+            )
+            for outcome in outcomes:
+                self.assertEqual("unavailable", outcome["final_status"])
+                self.assertEqual("agent_mux_missing", outcome["reason"])
+                self.assertFalse(outcome["acknowledged"])
 
 
 class RunResumeConfigTests(unittest.TestCase):
