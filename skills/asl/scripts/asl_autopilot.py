@@ -354,6 +354,10 @@ def parse_command(command: str) -> dict:
             "--max-review-fix-cycles",
             str(namespace.max_review_fix_plans),
         ]
+    for exclude in getattr(namespace, "review_guard_exclude", None) or ():
+        child_args += ["--review-guard-exclude", exclude]
+    if namespace.review_guard_include_ignored:
+        child_args.append("--review-guard-include-ignored")
     if namespace.commit_mode == "per-session":
         child_args.append("--commit-per-session")
     elif namespace.commit_mode == "end":

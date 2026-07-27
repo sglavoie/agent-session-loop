@@ -264,9 +264,15 @@ class StructuredReviewArtifactTests(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            2,
+            review.GENERATED_REVIEW_SESSION_VERSION,
             review.review_session_marker_version(
                 f"# Review\n{review.review_session_version_marker()}\n"
+            ),
+        )
+        self.assertEqual(
+            2,
+            review.review_session_marker_version(
+                f"# Review\n{review.review_session_version_marker(2)}\n"
             ),
         )
         self.assertTrue(
@@ -418,6 +424,125 @@ class StructuredReviewArtifactTests(unittest.TestCase):
             self.assertEqual(runner_verdict, autopilot_verdict)
             self.assertIs(
                 autopilot.parse_review_verdict, review.parse_review_verdict
+            )
+
+    def test_eventless_disposition_enforces_artifact_for_v2_review(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_completed_review_plan(plan_dir, [])
+            session_two = plan_dir / "session-2.md"
+            session_two.write_text(
+                session_two.read_text(encoding="utf-8").replace(
+                    review.review_session_version_marker(),
+                    review.review_session_version_marker(
+                        review.STRUCTURED_REVIEW_MIN_VERSION
+                    ),
+                ),
+                encoding="utf-8",
+            )
+            snapshot = plans.inspect_plan(plan_dir)
+            source = next(
+                session for session in snapshot.sessions if session.id == "2"
+            )
+
+            self.assertEqual(
+                review_continuation.REVIEW_CYCLE_DISPOSITION_ALL_CLEAR,
+                review_continuation._eventless_review_disposition(
+                    snapshot.plan_dir, source
+                ),
+            )
+
+            (plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).unlink()
+
+            self.assertIsNone(
+                review_continuation._eventless_review_disposition(
+                    snapshot.plan_dir, source
+                )
+            )
+
+    def test_generated_review_session_body_renders_delta_scope(self) -> None:
+        finding = {
+            "id": "F1",
+            "severity": "high",
+            "title": "Guard is bypassed",
+            "evidence": [
+                {"path": "agent_session_loop/runner.py", "symbol": "guard"},
+                {"path": "docs/agent-session-loop.md"},
+            ],
+            "done_criteria": ["The guard rejects the bypass."],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            session_id = plans.SessionId((7,))
+
+            full = runner.build_generated_review_session_body(
+                session_id, review_harness="claude", plan_dir=plan_dir
+            )
+            delta = runner.build_generated_review_session_body(
+                session_id,
+                review_harness="claude",
+                plan_dir=plan_dir,
+                delta={
+                    "mode": runner.REVIEW_SCOPE_DELTA,
+                    "base_sha": "f" * 40,
+                    "changed_files": ["agent_session_loop/runner.py"],
+                    "prior_findings": [finding],
+                },
+            )
+            degraded = runner.build_generated_review_session_body(
+                session_id,
+                review_harness="claude",
+                plan_dir=plan_dir,
+                delta={
+                    "mode": runner.REVIEW_SCOPE_FULL,
+                    "prior_findings": [finding],
+                },
+            )
+
+            # The first review of a run renders no scope section at all.
+            self.assertNotIn("## Delta Review Scope", full)
+
+            self.assertIn("## Delta Review Scope", delta)
+            flags = " ".join(runner._DELTA_DIFF_FLAGS)
+            self.assertIn(f"git diff {flags} {'f' * 40}", delta)
+            self.assertIn(f"git diff --cached {flags} {'f' * 40}", delta)
+            self.assertIn("`agent_session_loop/runner.py`", delta)
+            self.assertIn("`F1` (high): Guard is bypassed", delta)
+            self.assertIn("Done when: The guard rejects the bypass.", delta)
+
+            self.assertIn("## Delta Review Scope", degraded)
+            self.assertNotIn("git diff", degraded)
+            self.assertIn("this review stays full scope", degraded)
+            self.assertIn("this scope is not narrowed", degraded)
+            self.assertIn("`F1` (high): Guard is bypassed", degraded)
+
+            # Scope narrows reading only: grammar, artifacts, and the
+            # completion contract stay identical across all three bodies.
+            for body in (full, delta, degraded):
+                contract = contracts.parse_completion_contract(
+                    body, session_id=session_id
+                )
+                self.assertEqual(
+                    [
+                        "final-review-output-evidence-based",
+                        "final-review-artifact-consistent",
+                    ],
+                    [check.name for check in contract.verify.checks],
+                )
+                self.assertEqual(
+                    review.GENERATED_REVIEW_SESSION_VERSION,
+                    review.review_session_marker_version(body),
+                )
+                self.assertIn(runner.FINAL_REVIEW_ARTIFACT_FILENAME, body)
+            self.assertEqual(
+                contracts.parse_completion_contract(
+                    full, session_id=session_id
+                ).done_when,
+                contracts.parse_completion_contract(
+                    delta, session_id=session_id
+                ).done_when,
             )
 
     def test_generated_review_session_body_is_versioned_v2(self) -> None:
@@ -823,6 +948,41 @@ class ReviewVerdictCommandTests(unittest.TestCase):
             self.assertTrue(payload["ok"], payload)
             self.assertEqual("all-clear", payload["outcome"])
             self.assertEqual([], payload["next_steps"])
+
+    def test_pending_v2_review_still_requires_artifact_after_bump(
+        self,
+    ) -> None:
+        # Enforcement is pinned to STRUCTURED_REVIEW_MIN_VERSION, so a review
+        # session written before the generated-version bump keeps requiring
+        # final-review.json instead of silently degrading to Markdown-only.
+        self.assertLess(
+            review.STRUCTURED_REVIEW_MIN_VERSION,
+            review.GENERATED_REVIEW_SESSION_VERSION,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_completed_review_plan(plan_dir, [])
+            session_two = plan_dir / "session-2.md"
+            body = session_two.read_text(encoding="utf-8").replace(
+                review.review_session_version_marker(),
+                review.review_session_version_marker(
+                    review.STRUCTURED_REVIEW_MIN_VERSION
+                ),
+            )
+            session_two.write_text(body, encoding="utf-8")
+            self.assertEqual(
+                review.STRUCTURED_REVIEW_MIN_VERSION,
+                review.review_session_marker_version(body),
+            )
+            (plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).unlink()
+
+            code, payload = self._run_from_args(plan_dir, state_dir)
+
+            self.assertEqual(1, code)
+            self.assertEqual(
+                review.REVIEW_REASON_MISSING_ARTIFACT, payload["reason"]
+            )
 
 
 class ReviewRepairMaterializationTests(unittest.TestCase):
@@ -2388,6 +2548,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
                 }
             },
             max_review_fix_cycles=1,
+            plan_cache=plans.PlanSnapshotCache(),
         )
 
         self.assertEqual("complete", action)
@@ -2468,6 +2629,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             snapshot=snapshot,
             turn_payload=turn_payload,
             max_review_fix_cycles=2,
+            plan_cache=plans.PlanSnapshotCache(),
         )
 
         self.assertEqual("paused", action)

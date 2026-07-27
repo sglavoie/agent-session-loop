@@ -705,10 +705,12 @@ def render_completion_contract(contract: _contracts.CompletionContract) -> str:
         raise PlanError("completion contract requires at least one 'Done when' bullet")
     lines.extend(["", _contracts.VERIFY_HEADING, "", "```json"])
 
-    payload = {
+    payload: dict[str, Any] = {
         "session": contract.session_id.value,
         "checks": [_check_to_json(check) for check in contract.verify.checks],
     }
+    if contract.verify.parallel:
+        payload["parallel"] = True
     lines.extend(json.dumps(payload, indent=2).splitlines())
     lines.append("```")
     return "\n".join(lines) + "\n"

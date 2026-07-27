@@ -2208,6 +2208,79 @@ class ParserAndStateTests(unittest.TestCase):
         with self.assertRaisesRegex(plans.PlanError, "duplicated"):
             contracts.parse_completion_contract(text, session_id="1")
 
+    def _parallel_contract_text(self, parallel_literal: str | None) -> str:
+        parallel_line = (
+            []
+            if parallel_literal is None
+            else [f'  "parallel": {parallel_literal},']
+        )
+        return "\n".join(
+            [
+                "## Completion Contract",
+                "",
+                "### Done when",
+                "- something",
+                "",
+                "### Verify",
+                "",
+                "```json",
+                "{",
+                *parallel_line,
+                '  "checks": [{"type": "file_exists", "path": "a"}]',
+                "}",
+                "```",
+                "",
+                "## Handoff",
+                "- **Status**: pending",
+            ]
+        )
+
+    def test_parse_completion_contract_reads_parallel_flag(self) -> None:
+        for literal, expected in (("true", True), ("false", False), (None, False)):
+            with self.subTest(parallel=literal):
+                contract = contracts.parse_completion_contract(
+                    self._parallel_contract_text(literal), session_id="1"
+                )
+                self.assertIs(expected, contract.verify.parallel)
+
+    def test_parse_completion_contract_rejects_non_bool_parallel(self) -> None:
+        for literal in ('"true"', "1", "null", "[]"):
+            with self.subTest(parallel=literal):
+                with self.assertRaisesRegex(
+                    plans.PlanError, "'parallel' must be a boolean"
+                ):
+                    contracts.parse_completion_contract(
+                        self._parallel_contract_text(literal), session_id="1"
+                    )
+
+    def test_render_completion_contract_round_trips_parallel_flag(self) -> None:
+        contract = authoring.contract_from_payload(
+            "1",
+            ["something"],
+            {
+                "parallel": True,
+                "checks": [
+                    {"type": "command", "argv": ["python3", "-c", "pass"]},
+                    {"type": "command", "argv": ["python3", "-c", "pass"]},
+                ],
+            },
+        )
+
+        rendered = authoring.render_completion_contract(contract)
+        reparsed = contracts.parse_completion_contract(rendered, session_id="1")
+
+        self.assertIn('"parallel": true', rendered)
+        self.assertTrue(reparsed.verify.parallel)
+
+    def test_render_completion_contract_omits_default_parallel_flag(self) -> None:
+        contract = authoring.contract_from_payload(
+            "1", ["something"], {"checks": [{"type": "file_exists", "path": "a"}]}
+        )
+
+        self.assertNotIn(
+            "parallel", authoring.render_completion_contract(contract)
+        )
+
     def test_parse_completion_contract_reports_malformed_json(self) -> None:
         text = "\n".join(
             [
@@ -3709,6 +3782,186 @@ class NextStepsPayloadBuilderTests(unittest.TestCase):
         step = responses.invocation_step("d", source)
         source["codex"] = "mutated"
         self.assertEqual("$foo", step["invocations"]["codex"])
+
+
+class PlanSnapshotCacheTests(unittest.TestCase):
+    @contextmanager
+    def _counting_inspect(self):
+        calls: list[Path] = []
+        real_inspect_plan = plans.inspect_plan
+
+        def counting(plan_dir):
+            calls.append(plans.canonicalize_path(plan_dir))
+            return real_inspect_plan(plan_dir)
+
+        with mock.patch.object(plans, "inspect_plan", counting):
+            yield calls
+
+    @contextmanager
+    def _seeded_cache(self, statuses=("complete", "pending")):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, statuses)
+            cache = plans.PlanSnapshotCache()
+            cache.get(plan_dir)
+            yield plan_dir, cache
+
+    def test_get_reuses_snapshot_while_plan_files_are_untouched(self) -> None:
+        with self._seeded_cache() as (plan_dir, cache):
+            with self._counting_inspect() as calls:
+                first = cache.get(plan_dir)
+                second = cache.get(plan_dir)
+
+            self.assertEqual([], calls)
+            self.assertIs(first, second)
+
+    def test_get_rereads_after_mtime_change_with_identical_size(self) -> None:
+        with self._seeded_cache() as (plan_dir, cache):
+            session_path = plan_dir / "session-2.md"
+            before = session_path.stat()
+            os.utime(
+                session_path,
+                ns=(before.st_atime_ns + 10**9, before.st_mtime_ns + 10**9),
+            )
+
+            with self._counting_inspect() as calls:
+                cache.get(plan_dir)
+
+            self.assertEqual(before.st_size, session_path.stat().st_size)
+            self.assertEqual(1, len(calls))
+
+    def test_get_rereads_after_size_change_and_serves_new_content(self) -> None:
+        with self._seeded_cache() as (plan_dir, cache):
+            session_path = plan_dir / "session-2.md"
+            session_path.write_text(
+                session_path.read_text(encoding="utf-8").replace(
+                    "- **Status**: pending", "- **Status**: complete"
+                ),
+                encoding="utf-8",
+            )
+
+            with self._counting_inspect() as calls:
+                refreshed = cache.get(plan_dir)
+
+            self.assertEqual(1, len(calls))
+            self.assertEqual(
+                ["complete", "complete"],
+                [session.status for session in refreshed.sessions],
+            )
+
+    def test_get_rereads_when_a_session_file_is_added_or_removed(self) -> None:
+        with self._seeded_cache() as (plan_dir, cache):
+            write_plan(plan_dir, ("complete", "pending", "pending"))
+
+            with self._counting_inspect() as calls:
+                grown = cache.get(plan_dir)
+            self.assertEqual(1, len(calls))
+            self.assertEqual(3, len(grown.sessions))
+
+            (plan_dir / "session-3.md").unlink()
+            with self._counting_inspect() as calls:
+                shrunk = cache.get(plan_dir)
+            self.assertEqual(1, len(calls))
+            self.assertEqual(2, len(shrunk.sessions))
+
+    def test_get_rereads_when_an_expansion_file_is_added_or_removed(self) -> None:
+        with self._seeded_cache() as (plan_dir, cache):
+            expansion_path = plan_dir / "session-2.expand.md"
+            expansion_path.write_text("# Notes\n", encoding="utf-8")
+
+            with self._counting_inspect() as calls:
+                with_expansion = cache.get(plan_dir)
+            self.assertEqual(1, len(calls))
+
+            expansion_path.unlink()
+            with self._counting_inspect() as calls:
+                without_expansion = cache.get(plan_dir)
+            self.assertEqual(1, len(calls))
+            self.assertNotEqual(
+                with_expansion.content_sha256, without_expansion.content_sha256
+            )
+
+    def test_get_rereads_for_a_different_plan_directory(self) -> None:
+        with self._seeded_cache() as (plan_dir, cache):
+            other_dir = plan_dir.parent / "other-plan"
+            write_plan(other_dir, ("pending",))
+
+            with self._counting_inspect() as calls:
+                other = cache.get(other_dir)
+
+            self.assertEqual(1, len(calls))
+            self.assertEqual(plans.canonicalize_path(other_dir), other.plan_dir)
+
+    def test_get_fresh_always_rereads(self) -> None:
+        with self._seeded_cache() as (plan_dir, cache):
+            with self._counting_inspect() as calls:
+                cache.get_fresh(plan_dir)
+                cache.get_fresh(plan_dir)
+
+            self.assertEqual(2, len(calls))
+
+    def test_invalidate_forces_the_next_get_to_reread(self) -> None:
+        with self._seeded_cache() as (plan_dir, cache):
+            cache.invalidate()
+
+            with self._counting_inspect() as calls:
+                cache.get(plan_dir)
+                cache.get(plan_dir)
+
+            self.assertEqual(1, len(calls))
+
+    def test_unreadable_plan_raises_instead_of_serving_the_cached_snapshot(self) -> None:
+        with self._seeded_cache() as (plan_dir, cache):
+            (plan_dir / "manifest.md").unlink()
+
+            with self.assertRaises(plans.PlanError):
+                cache.get(plan_dir)
+
+            (plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
+            with self._counting_inspect() as calls:
+                recovered = cache.get(plan_dir)
+            self.assertEqual(1, len(calls))
+            self.assertEqual(2, len(recovered.sessions))
+
+    def test_concurrent_readers_never_observe_a_stale_snapshot(self) -> None:
+        with self._seeded_cache() as (plan_dir, cache):
+            session_path = plan_dir / "session-2.md"
+            template = session_path.read_text(encoding="utf-8")
+            stop = threading.Event()
+            errors: list[BaseException] = []
+
+            def hammer(fetch) -> None:
+                try:
+                    while not stop.is_set():
+                        snapshot = fetch(plan_dir)
+                        self.assertEqual(2, len(snapshot.sessions))
+                except BaseException as error:  # pragma: no cover - failure path
+                    errors.append(error)
+
+            readers = [
+                threading.Thread(target=hammer, args=(cache.get,)),
+                threading.Thread(target=hammer, args=(cache.get_fresh,)),
+            ]
+            for reader in readers:
+                reader.start()
+            try:
+                for index in range(40):
+                    marker = "complete" if index % 2 else "pending"
+                    session_path.write_text(
+                        template.replace("- **Status**: pending", f"- **Status**: {marker}"),
+                        encoding="utf-8",
+                    )
+            finally:
+                stop.set()
+                for reader in readers:
+                    reader.join(timeout=10)
+
+            self.assertEqual([], errors)
+            self.assertFalse(any(reader.is_alive() for reader in readers))
+            self.assertEqual(
+                plans.inspect_plan(plan_dir).content_sha256,
+                cache.get(plan_dir).content_sha256,
+            )
 
 
 if __name__ == "__main__":

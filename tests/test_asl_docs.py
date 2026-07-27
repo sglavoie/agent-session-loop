@@ -109,6 +109,18 @@ class SkillInstructionTests(unittest.TestCase):
         self.assertIn("missing-contract", text)
         self.assertNotIn("session-contract", text)
 
+    def test_session_split_documents_optional_parallel_verify_flag(self) -> None:
+        text = (REPO_ROOT / "skills/session-split/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("`verify.parallel` is optional and defaults to `false`", text)
+        self.assertIn(
+            "two or more `command` checks that cannot interfere with each other",
+            text,
+        )
+        self.assertIn("reporting results in declared order", text)
+
     def test_session_split_delegates_heading_grammar_to_parser(self) -> None:
         text = (REPO_ROOT / "skills/session-split/SKILL.md").read_text(
             encoding="utf-8"
@@ -481,6 +493,24 @@ class HarnessDocsRegressionTests(unittest.TestCase):
         self.assertIn(safe_copilot_argv, safe_block)
         self.assertNotIn("--allow-all-tools", safe_block)
         self.assertNotIn("--allow-all-paths", safe_block)
+
+    def test_docs_describe_optional_parallel_verify_recipes(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+
+        self.assertIn(
+            "`parallel` (optional, defaults to `false`)", docs
+        )
+        self.assertIn(
+            "a parallel run is byte-identical to the\n  sequential one", docs
+        )
+        self.assertIn(
+            "non-interference is the contract\n  author's responsibility", docs
+        )
+        self.assertIn(
+            'A `"parallel": true` recipe adds that same additive key to\n'
+            "`verification_started`",
+            docs,
+        )
 
     def test_docs_expose_only_role_specific_asl_model_flags(self) -> None:
         docs = self._read("docs/agent-session-loop.md")

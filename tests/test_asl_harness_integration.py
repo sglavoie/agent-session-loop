@@ -67,8 +67,10 @@ from agent_session_loop.formatting import (
 )
 from tests.support import (
     REPO_ROOT,
+    assert_marked_pids_exited,
     patched_env,
     write_plan,
+    write_process_tree_scripts,
     write_plan_with_ids,
     install_fake_codex,
     install_fake_harness,
@@ -4244,6 +4246,666 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             )
             self.assertIsNone(check_started["argv"])
             self.assertIsNone(check_started["cwd"])
+
+    def test_live_verification_background_finish_keeps_running_check_displayed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            event_path = tmp_dir / events.EVENTS_FILE_NAME
+            state_path = tmp_dir / events.STATE_FILE_NAME
+            payload = {
+                "state_path": str(state_path),
+                "active_turn": None,
+                "active_verification": None,
+            }
+            live_verification = runner._LiveVerification(
+                event_path=event_path,
+                payload=payload,
+                progress=runner._ProgressReporter(enabled=False),
+                persistence=runner._RunPersistence(),
+                run_id="run-3",
+                turn_index=1,
+                session_id="1",
+                session_label="1/1",
+                total_sessions=1,
+                check_count=2,
+                check_names=("fast", "slow"),
+                check_kinds=("command", "command"),
+                parallel=True,
+                heartbeat_interval=60,
+            )
+
+            live_verification.start()
+            started_event = next(
+                record["payload"]
+                for record in read_jsonl(event_path)
+                if record["name"] == events.VERIFICATION_STARTED_EVENT
+            )
+            self.assertTrue(started_event["parallel"])
+
+            for index, name in ((0, "fast"), (1, "slow")):
+                live_verification.check_started(
+                    check_index=index,
+                    name=name,
+                    kind="command",
+                    argv=("python3",),
+                    cwd=None,
+                )
+            live_verification.check_finished(
+                check_index=0,
+                name="fast",
+                kind="command",
+                status="pass",
+                duration_seconds=0.1,
+                failure_reason=None,
+                returncode=0,
+            )
+
+            active = json.loads(state_path.read_text(encoding="utf-8"))[
+                "active_verification"
+            ]
+            # `slow` is still running, so the background completion of `fast`
+            # must not steal the display slot or blank the check timer.
+            self.assertEqual(1, active["current_check_index"])
+            self.assertEqual("slow", active["current_check_name"])
+            self.assertIsNotNone(active["current_check_started_at"])
+            finished_event = next(
+                record["payload"]
+                for record in read_jsonl(event_path)
+                if record["name"] == events.VERIFICATION_CHECK_FINISHED_EVENT
+            )
+            self.assertEqual(0, finished_event["check_index"])
+            self.assertEqual("fast", finished_event["name"])
+
+            live_verification.check_finished(
+                check_index=1,
+                name="slow",
+                kind="command",
+                status="pass",
+                duration_seconds=0.5,
+                failure_reason=None,
+                returncode=0,
+            )
+            active = json.loads(state_path.read_text(encoding="utf-8"))[
+                "active_verification"
+            ]
+            self.assertIsNone(active["current_check_started_at"])
+
+            live_verification.finish(passed=True, passed_count=2, reason="ok")
+
+    def test_live_verification_displayed_finish_promotes_remaining_check(
+        self,
+    ) -> None:
+        """Reverse completion order must not stop parallel heartbeats.
+
+        The display slot goes to the most recently started check, so when that
+        one finishes first the earlier-started command is still running and has
+        to take over the slot; otherwise the check timer is blanked and
+        `_record_heartbeat` goes silent while verification is still working.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            event_path = tmp_dir / events.EVENTS_FILE_NAME
+            state_path = tmp_dir / events.STATE_FILE_NAME
+            payload = {
+                "state_path": str(state_path),
+                "active_turn": None,
+                "active_verification": None,
+            }
+            live_verification = runner._LiveVerification(
+                event_path=event_path,
+                payload=payload,
+                progress=runner._ProgressReporter(enabled=False),
+                persistence=runner._RunPersistence(),
+                run_id="run-5",
+                turn_index=1,
+                session_id="1",
+                session_label="1/1",
+                total_sessions=1,
+                check_count=3,
+                check_names=("slow", "medium", "fast"),
+                check_kinds=("command", "command", "command"),
+                parallel=True,
+                heartbeat_interval=60,
+            )
+
+            live_verification.start()
+            for index, name in ((0, "slow"), (1, "medium"), (2, "fast")):
+                live_verification.check_started(
+                    check_index=index,
+                    name=name,
+                    kind="command",
+                    argv=("python3",),
+                    cwd=None,
+                )
+
+            # `fast` holds the display slot and retires first, while `slow` and
+            # `medium` are still running.
+            live_verification.check_finished(
+                check_index=2,
+                name="fast",
+                kind="command",
+                status="pass",
+                duration_seconds=0.1,
+                failure_reason=None,
+                returncode=0,
+            )
+            active = json.loads(state_path.read_text(encoding="utf-8"))[
+                "active_verification"
+            ]
+            self.assertEqual(1, active["current_check_index"])
+            self.assertEqual("medium", active["current_check_name"])
+            self.assertIsNotNone(active["current_check_started_at"])
+            heartbeat = live_verification._record_heartbeat()
+            self.assertIsNotNone(heartbeat)
+            self.assertEqual(1, heartbeat["check_index"])
+            self.assertEqual("medium", heartbeat["name"])
+
+            live_verification.check_finished(
+                check_index=1,
+                name="medium",
+                kind="command",
+                status="pass",
+                duration_seconds=0.3,
+                failure_reason=None,
+                returncode=0,
+            )
+            active = json.loads(state_path.read_text(encoding="utf-8"))[
+                "active_verification"
+            ]
+            self.assertEqual(0, active["current_check_index"])
+            self.assertEqual("slow", active["current_check_name"])
+            self.assertIsNotNone(active["current_check_started_at"])
+            heartbeat = live_verification._record_heartbeat()
+            self.assertIsNotNone(heartbeat)
+            self.assertEqual(0, heartbeat["check_index"])
+            self.assertEqual("slow", heartbeat["name"])
+
+            # Only the last active check clears the timer and silences
+            # heartbeats.
+            live_verification.check_finished(
+                check_index=0,
+                name="slow",
+                kind="command",
+                status="pass",
+                duration_seconds=0.9,
+                failure_reason=None,
+                returncode=0,
+            )
+            active = json.loads(state_path.read_text(encoding="utf-8"))[
+                "active_verification"
+            ]
+            self.assertEqual(0, active["current_check_index"])
+            self.assertIsNone(active["current_check_started_at"])
+            self.assertIsNone(live_verification._record_heartbeat())
+
+            live_verification.finish(passed=True, passed_count=3, reason="ok")
+
+    def test_live_verification_finish_drops_late_check_callbacks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            event_path = tmp_dir / events.EVENTS_FILE_NAME
+            state_path = tmp_dir / events.STATE_FILE_NAME
+            payload = {
+                "state_path": str(state_path),
+                "active_turn": None,
+                "active_verification": None,
+            }
+            progress = runner._ProgressReporter(enabled=True)
+            stderr = io.StringIO()
+            live_verification = runner._LiveVerification(
+                event_path=event_path,
+                payload=payload,
+                progress=progress,
+                persistence=runner._RunPersistence(),
+                run_id="run-6",
+                turn_index=1,
+                session_id="1",
+                session_label="1/1",
+                total_sessions=1,
+                check_count=2,
+                check_names=("first", "second"),
+                check_kinds=("command", "command"),
+                parallel=True,
+                heartbeat_interval=60,
+            )
+
+            with redirect_stderr(stderr):
+                live_verification.start()
+                live_verification.check_started(
+                    check_index=0,
+                    name="first",
+                    kind="command",
+                    argv=("python3",),
+                    cwd=None,
+                )
+                live_verification.finish(
+                    passed=False, passed_count=0, reason="interrupted"
+                )
+                event_count_at_finish = len(read_jsonl(event_path))
+
+                # Late callbacks from checks the interrupt abandoned.
+                live_verification.check_finished(
+                    check_index=0,
+                    name="first",
+                    kind="command",
+                    status="pass",
+                    duration_seconds=1.0,
+                    failure_reason=None,
+                    returncode=0,
+                )
+                live_verification.check_started(
+                    check_index=1,
+                    name="second",
+                    kind="command",
+                    argv=("python3",),
+                    cwd=None,
+                )
+                self.assertIsNone(live_verification._record_heartbeat())
+
+            self.assertEqual(event_count_at_finish, len(read_jsonl(event_path)))
+            self.assertEqual(
+                events.VERIFICATION_FINISHED_EVENT,
+                read_jsonl(event_path)[-1]["name"],
+            )
+            self.assertIsNone(
+                json.loads(state_path.read_text(encoding="utf-8"))[
+                    "active_verification"
+                ]
+            )
+            stderr_text = stderr.getvalue()
+            self.assertNotIn("verification check 1/2 finished", stderr_text)
+            self.assertNotIn("verification check 2/2 started", stderr_text)
+
+    def test_live_verification_callback_during_heartbeat_shutdown_is_inert(
+        self,
+    ) -> None:
+        """A callback landing while `finish` joins the heartbeat thread is inert.
+
+        `finish` claims the terminal transition before the join, so a worker
+        callback that arrives during that wait can neither append a check event
+        nor resurrect `active_verification`. The heartbeat thread is parked
+        inside its own progress write, which holds `finish` in its shutdown for
+        as long as the test needs.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            event_path = tmp_dir / events.EVENTS_FILE_NAME
+            state_path = tmp_dir / events.STATE_FILE_NAME
+            progress = runner._ProgressReporter(enabled=True)
+            stderr = io.StringIO()
+            live_verification = runner._LiveVerification(
+                event_path=event_path,
+                payload={
+                    "state_path": str(state_path),
+                    "active_turn": None,
+                    "active_verification": None,
+                },
+                progress=progress,
+                persistence=runner._RunPersistence(),
+                run_id="run-8",
+                turn_index=1,
+                session_id="1",
+                session_label="1/1",
+                total_sessions=1,
+                check_count=2,
+                check_names=("first", "second"),
+                check_kinds=("command", "command"),
+                parallel=True,
+                heartbeat_interval=0.01,
+            )
+
+            parked = threading.Event()
+            release = threading.Event()
+            emit_heartbeat = progress.verification_heartbeat
+
+            def parked_heartbeat(heartbeat: dict[str, object]) -> None:
+                parked.set()
+                release.wait(timeout=30)
+                emit_heartbeat(heartbeat)
+
+            finisher = threading.Thread(
+                target=lambda: live_verification.finish(
+                    passed=False, passed_count=0, reason="interrupted"
+                )
+            )
+            with redirect_stderr(stderr), mock.patch.object(
+                progress, "verification_heartbeat", parked_heartbeat
+            ):
+                live_verification.start()
+                live_verification.check_started(
+                    check_index=0,
+                    name="first",
+                    kind="command",
+                    argv=("python3",),
+                    cwd=None,
+                )
+                wait_until(parked.is_set)
+                finisher.start()
+                try:
+                    # `finish` sets the stop flag on its way into the heartbeat
+                    # join, and the parked heartbeat holds the progress lock,
+                    # so it provably has not returned when this callback lands.
+                    wait_until(live_verification._stop.is_set)
+                    self.assertTrue(finisher.is_alive())
+                    live_verification.check_finished(
+                        check_index=0,
+                        name="first",
+                        kind="command",
+                        status="pass",
+                        duration_seconds=1.0,
+                        failure_reason=None,
+                        returncode=0,
+                    )
+                finally:
+                    release.set()
+                    finisher.join(timeout=30)
+            self.assertFalse(finisher.is_alive())
+
+            self.assertEqual(
+                [
+                    events.VERIFICATION_STARTED_EVENT,
+                    events.VERIFICATION_CHECK_STARTED_EVENT,
+                    events.VERIFICATION_HEARTBEAT_EVENT,
+                    events.VERIFICATION_FINISHED_EVENT,
+                ],
+                [record["name"] for record in read_jsonl(event_path)],
+            )
+            self.assertIsNone(
+                json.loads(state_path.read_text(encoding="utf-8"))[
+                    "active_verification"
+                ]
+            )
+            stderr_lines = [
+                line for line in stderr.getvalue().splitlines() if line.strip()
+            ]
+            self.assertNotIn("verification check 1/2 finished", stderr.getvalue())
+            self.assertIn("verification failed for session 1/1", stderr_lines[-1])
+
+    def test_live_verification_finish_waits_for_stalled_check_progress(
+        self,
+    ) -> None:
+        """A callback stalled mid-write cannot print behind the terminal line.
+
+        The callback passes its lifecycle check and stalls before its progress
+        line reaches stderr, then `finish` runs to completion in that window.
+        The terminal message has to queue behind the stalled write instead of
+        racing ahead of it.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            event_path = tmp_dir / events.EVENTS_FILE_NAME
+            state_path = tmp_dir / events.STATE_FILE_NAME
+            progress = runner._ProgressReporter(enabled=True)
+            stderr = io.StringIO()
+            live_verification = runner._LiveVerification(
+                event_path=event_path,
+                payload={
+                    "state_path": str(state_path),
+                    "active_turn": None,
+                    "active_verification": None,
+                },
+                progress=progress,
+                persistence=runner._RunPersistence(),
+                run_id="run-9",
+                turn_index=1,
+                session_id="1",
+                session_label="1/1",
+                total_sessions=1,
+                check_count=2,
+                check_names=("first", "second"),
+                check_kinds=("command", "command"),
+                parallel=True,
+                heartbeat_interval=60,
+            )
+
+            parked = threading.Event()
+            release = threading.Event()
+            emit_check_finished = progress.verification_check_finished
+
+            def parked_check_finished(check: dict[str, object]) -> None:
+                parked.set()
+                release.wait(timeout=30)
+                emit_check_finished(check)
+
+            worker = threading.Thread(
+                target=lambda: live_verification.check_finished(
+                    check_index=0,
+                    name="first",
+                    kind="command",
+                    status="pass",
+                    duration_seconds=1.0,
+                    failure_reason=None,
+                    returncode=0,
+                )
+            )
+            finisher = threading.Thread(
+                target=lambda: live_verification.finish(
+                    passed=False, passed_count=0, reason="interrupted"
+                )
+            )
+            with redirect_stderr(stderr), mock.patch.object(
+                progress, "verification_check_finished", parked_check_finished
+            ):
+                live_verification.start()
+                live_verification.check_started(
+                    check_index=0,
+                    name="first",
+                    kind="command",
+                    argv=("python3",),
+                    cwd=None,
+                )
+                worker.start()
+                try:
+                    wait_until(parked.is_set)
+                    finisher.start()
+                    # The terminal event is durable before the terminal
+                    # message is written, so `finish` is now past its
+                    # lifecycle block and can only be waiting for the stalled
+                    # write to release the output.
+                    wait_until(
+                        lambda: read_jsonl(event_path)[-1]["name"]
+                        == events.VERIFICATION_FINISHED_EVENT
+                    )
+                    self.assertTrue(finisher.is_alive())
+                finally:
+                    release.set()
+                    worker.join(timeout=30)
+                    finisher.join(timeout=30)
+            self.assertFalse(worker.is_alive())
+            self.assertFalse(finisher.is_alive())
+
+            self.assertEqual(
+                [
+                    events.VERIFICATION_STARTED_EVENT,
+                    events.VERIFICATION_CHECK_STARTED_EVENT,
+                    events.VERIFICATION_CHECK_FINISHED_EVENT,
+                    events.VERIFICATION_FINISHED_EVENT,
+                ],
+                [record["name"] for record in read_jsonl(event_path)],
+            )
+            stderr_lines = [
+                line for line in stderr.getvalue().splitlines() if line.strip()
+            ]
+            self.assertIn("verification check 1/2 finished", stderr_lines[-2])
+            self.assertIn("verification failed for session 1/1", stderr_lines[-1])
+
+    def test_parallel_interrupt_leaves_verification_finished_terminal(
+        self,
+    ) -> None:
+        """A main-thread interrupt mid-parallel-recipe ends the phase cleanly.
+
+        `as_completed` is where a real Ctrl-C surfaces: the main thread waits
+        there while worker threads run the command checks, so the
+        KeyboardInterrupt is raised in `run_verification`'s own frame with
+        several checks still live. Every process of every live check that is
+        still in the check's process group — the command itself and the
+        descendants it spawned — must be dead before the interrupt reaches the
+        runner, so nothing abandoned can resurrect `active_verification` or
+        append behind `verification_finished`.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            script, grandchild_script = write_process_tree_scripts(tmp_dir)
+            started_dir = tmp_dir / "started"
+            total = 6
+            running = 4  # `run_verification` caps the pool at four workers.
+            checks = tuple(
+                contracts.CommandCheck(
+                    name=f"cmd-{index}",
+                    argv=(
+                        "python3",
+                        str(script),
+                        f"cmd-{index}",
+                        str(tmp_dir),
+                        str(grandchild_script),
+                    ),
+                    timeout_seconds=120.0,
+                )
+                for index in range(total)
+            )
+            contract = contracts.CompletionContract(
+                session_id=plans.parse_session_id("1"),
+                done_when=("done",),
+                verify=contracts.VerifyRecipe(checks=checks, parallel=True),
+            )
+
+            event_path = tmp_dir / events.EVENTS_FILE_NAME
+            state_path = tmp_dir / events.STATE_FILE_NAME
+            payload = {
+                "state_path": str(state_path),
+                "active_turn": None,
+                "active_verification": None,
+            }
+            live_verification = runner._LiveVerification(
+                event_path=event_path,
+                payload=payload,
+                progress=runner._ProgressReporter(enabled=False),
+                persistence=runner._RunPersistence(),
+                run_id="run-7",
+                turn_index=1,
+                session_id="1",
+                session_label="1/1",
+                total_sessions=1,
+                check_count=total,
+                check_names=tuple(check.name for check in checks),
+                check_kinds=("command",) * total,
+                parallel=True,
+                heartbeat_interval=0.01,
+            )
+
+            finishes: list[int] = []
+
+            def on_check_started(event: verification.CheckStartedEvent) -> None:
+                live_verification.check_started(
+                    check_index=event.check_index,
+                    name=event.name,
+                    kind=event.kind,
+                    argv=event.argv,
+                    cwd=event.cwd,
+                )
+
+            def on_check_finished(event: verification.CheckFinishedEvent) -> None:
+                live_verification.check_finished(
+                    check_index=event.check_index,
+                    name=event.name,
+                    kind=event.kind,
+                    status=event.result.status,
+                    duration_seconds=event.result.duration_seconds,
+                    failure_reason=event.result.failure_reason,
+                    returncode=event.result.returncode,
+                )
+                finishes.append(event.check_index)
+
+            def interrupt_once_all_running(_futures: object) -> None:
+                wait_until(lambda: len(list(started_dir.iterdir())) == running)
+                raise KeyboardInterrupt
+
+            live_verification.start()
+            with mock.patch.object(
+                verification, "as_completed", interrupt_once_all_running
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    verification.run_verification(
+                        contract,
+                        repo_root=repo_root,
+                        observer=verification.VerificationObserver(
+                            on_check_started=on_check_started,
+                            on_check_finished=on_check_finished,
+                        ),
+                    )
+
+            # Every process the interrupt abandoned — command and grandchild
+            # alike — is already dead, so nothing can report back or touch the
+            # repository after control returned.
+            started_markers = sorted(started_dir.iterdir())
+            assert_marked_pids_exited(started_dir, label="command process")
+            assert_marked_pids_exited(
+                tmp_dir / "grandchildren", label="grandchild"
+            )
+            self.assertEqual([], list((tmp_dir / "late").iterdir()))
+            self.assertEqual([], finishes)
+
+            live_verification.finish(
+                passed=False, passed_count=0, reason="interrupted"
+            )
+            events_at_finish = read_jsonl(event_path)
+
+            # The two futures still queued behind the four workers were
+            # cancelled rather than executed.
+            self.assertEqual(running, len(started_markers))
+            self.assertEqual(
+                events.VERIFICATION_FINISHED_EVENT, events_at_finish[-1]["name"]
+            )
+            self.assertEqual(
+                "interrupted", events_at_finish[-1]["payload"]["reason"]
+            )
+            self.assertEqual(events_at_finish, read_jsonl(event_path))
+            self.assertIsNone(
+                json.loads(state_path.read_text(encoding="utf-8"))[
+                    "active_verification"
+                ]
+            )
+
+    def test_live_verification_started_event_omits_parallel_when_sequential(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            event_path = tmp_dir / events.EVENTS_FILE_NAME
+            state_path = tmp_dir / events.STATE_FILE_NAME
+            live_verification = runner._LiveVerification(
+                event_path=event_path,
+                payload={
+                    "state_path": str(state_path),
+                    "active_turn": None,
+                    "active_verification": None,
+                },
+                progress=runner._ProgressReporter(enabled=False),
+                persistence=runner._RunPersistence(),
+                run_id="run-4",
+                turn_index=1,
+                session_id="1",
+                session_label="1/1",
+                total_sessions=1,
+                check_count=1,
+                check_names=("only",),
+                check_kinds=("command",),
+                heartbeat_interval=60,
+            )
+
+            live_verification.start()
+            live_verification.finish(passed=True, passed_count=1, reason="ok")
+
+            started_event = next(
+                record["payload"]
+                for record in read_jsonl(event_path)
+                if record["name"] == events.VERIFICATION_STARTED_EVENT
+            )
+            self.assertNotIn("parallel", started_event)
 
     def test_live_turn_action_required_payload_includes_harness(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

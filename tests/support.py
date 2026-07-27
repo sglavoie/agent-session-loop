@@ -353,6 +353,117 @@ def wait_until(predicate, *, timeout: float = 5.0, interval: float = 0.05):
     raise AssertionError("condition was not met before timeout")
 
 
+#: A grandchild of a verification command check: it publishes its PID, waits to
+#: be orphaned, and only then records a late side effect. It inherits the
+#: check's captured pipes, so surviving it also keeps the reader threads that
+#: drain those pipes from ever seeing EOF.
+_TREE_GRANDCHILD_SOURCE = (
+    "import os, pathlib, sys, time\n"
+    "name, root = sys.argv[1], pathlib.Path(sys.argv[2])\n"
+    "pending = root / 'pending' / (name + '-grandchild')\n"
+    "pending.write_text(str(os.getpid()))\n"
+    "os.replace(pending, root / 'grandchildren' / name)\n"
+    "parent = os.getppid()\n"
+    "while os.getppid() == parent:\n"
+    "    time.sleep(0.01)\n"
+    "(root / 'late' / name).write_text('orphaned')\n"
+    "time.sleep(60)\n"
+)
+
+#: The command a check runs: spawn a grandchild, wait until it is live, publish
+#: this process's PID under `started/`, then outlive any termination window.
+#: A fourth argv entry of `detached` makes the grandchild call `setsid`, which
+#: takes it out of the check's process group and so out of reach of `killpg`.
+_TREE_PARENT_SOURCE = (
+    "import os, pathlib, subprocess, sys, time\n"
+    "name, root, child = sys.argv[1], pathlib.Path(sys.argv[2]), sys.argv[3]\n"
+    "detached = len(sys.argv) > 4 and sys.argv[4] == 'detached'\n"
+    "subprocess.Popen(\n"
+    "    [sys.executable, child, name, str(root)], start_new_session=detached\n"
+    ")\n"
+    "while not (root / 'grandchildren' / name).exists():\n"
+    "    time.sleep(0.01)\n"
+    "pending = root / 'pending' / name\n"
+    "pending.write_text(str(os.getpid()))\n"
+    "os.replace(pending, root / 'started' / name)\n"
+    "time.sleep(60)\n"
+)
+
+
+def write_process_tree_scripts(root: Path) -> tuple[Path, Path]:
+    """Lay out the marker directories and both tree scripts under ``root``.
+
+    A ``started/<name>`` marker is written only once that check's grandchild is
+    live, so waiting for it is enough to know the whole tree is running.
+    """
+    for name in ("pending", "started", "grandchildren", "late"):
+        (root / name).mkdir(parents=True, exist_ok=True)
+    parent = root / "spawn_tree.py"
+    parent.write_text(_TREE_PARENT_SOURCE, encoding="utf-8")
+    grandchild = root / "tree_grandchild.py"
+    grandchild.write_text(_TREE_GRANDCHILD_SOURCE, encoding="utf-8")
+    return parent, grandchild
+
+
+def assert_marked_pids_exited(
+    marker_dir: Path, *, label: str, timeout: float = 15.0
+) -> None:
+    """Assert every PID published under ``marker_dir`` is gone.
+
+    A killed process is reaped by its parent (or, once orphaned, by init)
+    shortly after the signal lands, so this polls rather than reading the PID
+    table once.
+    """
+    for marker in sorted(marker_dir.iterdir()):
+        pid = int(marker.read_text(encoding="utf-8"))
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            if time.monotonic() > deadline:
+                raise AssertionError(
+                    f"{label} for {marker.name} (pid {pid}) is still alive"
+                )
+            time.sleep(0.02)
+
+
+def assert_marked_pids_alive(marker_dir: Path, *, label: str) -> None:
+    """Assert every PID published under ``marker_dir`` is still running.
+
+    No polling: the tree scripts sleep well past any assertion window, so a
+    process that is gone here was terminated rather than merely slow.
+    """
+    for marker in sorted(marker_dir.iterdir()):
+        pid = int(marker.read_text(encoding="utf-8"))
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            raise AssertionError(
+                f"{label} for {marker.name} (pid {pid}) is gone"
+            ) from None
+
+
+def kill_marked_pids(marker_dir: Path) -> None:
+    """Kill every PID published under ``marker_dir``, ignoring the dead ones.
+
+    Cleanup for tests that deliberately let a detached descendant survive: it
+    outlives the test process otherwise.
+    """
+    if not marker_dir.exists():
+        return
+    for marker in sorted(marker_dir.iterdir()):
+        try:
+            pid = int(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
 def _baseline_contract_text(json_block: str) -> str:
     return "\n".join(
         [
@@ -447,7 +558,10 @@ class FakeRunControlListener:
         )
 
 
-def _contract_block(check_payload: str, *, session: str = "1") -> str:
+def _contract_block(
+    check_payload: str, *, session: str = "1", parallel: bool = False
+) -> str:
+    parallel_field = ', "parallel": true' if parallel else ""
     return "\n".join(
         [
             "## Completion Contract",
@@ -458,7 +572,8 @@ def _contract_block(check_payload: str, *, session: str = "1") -> str:
             "### Verify",
             "",
             "```json",
-            f'{{"session": "{session}", "checks": [{check_payload}]}}',
+            f'{{"session": "{session}"{parallel_field}, '
+            f"\"checks\": [{check_payload}]}}",
             "```",
         ]
     )
@@ -541,9 +656,15 @@ def _structured_review_finding(
 def write_completed_review_plan(
     plan_dir: Path,
     findings: list[dict[str, object]],
+    *,
+    contracts_by_id: dict[str, str] | None = None,
 ) -> Path:
     """Write a two-session plan ending in one completed generated review."""
-    write_plan_with_ids(plan_dir, (("1", "complete"), ("2", "complete")))
+    write_plan_with_ids(
+        plan_dir,
+        (("1", "complete"), ("2", "complete")),
+        contracts_by_id=contracts_by_id,
+    )
     review_body = runner.build_generated_review_session_body(
         plans.parse_session_id("2"),
         review_harness="codex",

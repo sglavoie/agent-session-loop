@@ -28,6 +28,7 @@ COMMIT_FINISHED_EVENT = "commit_finished"
 RUN_CONTROL_EVENT = "run_control"
 MAILBOX_EVENT = "mailbox"
 REVIEW_SESSION_CREATED_EVENT = "review_session_created"
+REVIEW_SCOPE_EVENT = "review_scope_selected"
 REVIEW_CYCLE_EVENT = "review_cycle"
 REVIEW_REPAIR_REOPENED_EVENT = "review_repair_reopened"
 REPLY_PROVIDED_EVENT = "reply_provided"
@@ -37,6 +38,7 @@ VERIFICATION_HEARTBEAT_EVENT = "verification_heartbeat"
 VERIFICATION_CHECK_FINISHED_EVENT = "verification_check_finished"
 VERIFICATION_FINISHED_EVENT = "verification_finished"
 PREFLIGHT_AUTO_REPAIRED_EVENT = "preflight_auto_repaired"
+PREFLIGHT_SKIPPED_EVENT = "preflight_skipped"
 AGENT_MUX_DELIVERY_EVENT = "agent_mux_delivery"
 STATE_FILE_NAME = "state.json"
 EVENTS_FILE_NAME = "events.jsonl"
@@ -82,6 +84,9 @@ PAUSE_REASON_INTERRUPTED = "interrupted"
 # Review repair-cycle materialization could not produce safe repair sessions
 # (see ``agent_session_loop.review_repair.REVIEW_REPAIR_REASON_MALFORMED``).
 PAUSE_REASON_MALFORMED_REVIEW_REPAIR = "malformed-review-repair"
+# A git probe the review mutation guard depends on failed, so the guard cannot
+# prove the review turn left the worktree alone.
+PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE = "review-guard-unavailable"
 
 # The subset of harness-failure categories that a supervisor may safely retry
 # by relaunching the same session. Quota, authentication, invalid-model, and
@@ -115,6 +120,7 @@ PAUSE_REASONS: tuple[str, ...] = (
     PAUSE_REASON_INTERRUPTED,
     "review-harness-required",
     "review-mutated-worktree",
+    PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,
     PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
     PAUSE_REASON_QUOTA_EXHAUSTED,
     PAUSE_REASON_AUTH_FAILED,

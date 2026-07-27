@@ -144,6 +144,26 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
         help="Deprecated compatibility alias for --max-review-fix-cycles",
     ),
     RunFlag(
+        dest="review_guard_exclude",
+        option_strings=("--review-guard-exclude",),
+        action="append",
+        help=(
+            "Repo-relative path the review mutation guard ignores; repeat for "
+            "several paths. Merged with the os.pathsep-separated "
+            "ASL_REVIEW_GUARD_EXCLUDE environment variable"
+        ),
+    ),
+    RunFlag(
+        dest="review_guard_include_ignored",
+        option_strings=("--review-guard-include-ignored",),
+        action="store_true",
+        help=(
+            "Include gitignored untracked files in the review mutation guard's "
+            "evidence; off by default so build caches and harness-rewritten "
+            "settings do not revert a review turn"
+        ),
+    ),
+    RunFlag(
         dest="commit_mode",
         option_strings=("--commit-per-session",),
         action="store_const",

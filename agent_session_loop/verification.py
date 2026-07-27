@@ -15,11 +15,13 @@ failures into structured ``CheckResult`` rows.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -27,7 +29,7 @@ import time
 from typing import Any, Callable, Literal
 
 from . import plans, responses
-from .artifacts import StreamCapture
+from .artifacts import ArtifactError, StreamCapture
 from .contracts import (
     CommandCheck,
     CompletionContract,
@@ -133,9 +135,11 @@ CheckFinishedCallback = Callable[[CheckFinishedEvent], None]
 class VerificationObserver:
     """Optional callbacks invoked around each check in :func:`run_verification`.
 
-    Each callback is fired synchronously, in declared check order, on the same
-    thread that runs the check. ``on_check_started`` is invoked before the
-    check executes; ``on_check_finished`` is invoked after the check completes
+    Each callback is fired synchronously on the thread that runs the check —
+    the calling thread for a sequential recipe, a worker thread for the
+    command checks of a ``parallel`` one, where callbacks may also interleave
+    out of declared order. ``on_check_started`` is invoked before the check
+    executes; ``on_check_finished`` is invoked after the check completes
     (including failures). Either field may be ``None`` to skip that event.
     Exceptions raised by a callback propagate to the caller.
     """
@@ -185,20 +189,130 @@ _STREAM_CHUNK_BYTES = 64 * 1024
 
 
 def _drain_stream(stream: Any, capture: StreamCapture) -> None:
-    """Feed a process pipe into ``capture`` chunk by chunk until EOF."""
+    """Feed a process pipe into ``capture`` chunk by chunk until EOF.
+
+    ``ArtifactError`` is tolerated because a check abandoned after
+    :data:`_ABANDONED_READER_JOIN_SECONDS` discards its capture while this
+    thread may still be blocked on a pipe some escaped descendant holds open.
+    """
     try:
         while True:
             chunk = stream.read1(_STREAM_CHUNK_BYTES)
             if not chunk:
                 break
             capture.feed(chunk)
-    except (OSError, ValueError):
+    except (OSError, ValueError, ArtifactError):
         pass
     finally:
         try:
             stream.close()
         except OSError:
             pass
+
+
+class _VerificationCancelled(BaseException):
+    """Raised inside a worker whose check an interrupt abandoned.
+
+    Derives from ``BaseException`` so no ``except Exception`` handler can
+    mistake it for a check failure. The future carrying it is never read: the
+    interrupt that triggered the cancellation is re-raised instead.
+    """
+
+
+# A killed process group closes the inherited pipes, so the reader threads see
+# EOF at once. This bound only exists for a descendant that escaped the group
+# (by calling `setsid` itself): such a process is never stopped, so this caps
+# what an abandoned check pays to walk away from it.
+_ABANDONED_READER_JOIN_SECONDS = 5.0
+
+
+def _kill_process_group(process: subprocess.Popen) -> None:
+    """Kill ``process`` and every descendant still in its process group.
+
+    Command checks are spawned with ``start_new_session=True``, so the child's
+    process group ID is its PID and every descendant inherits that group unless
+    it starts a session of its own. Killing the group is what stops a check
+    that fans out into helper processes; without it the direct child dies while
+    its children keep running, hold the captured pipes open, and can still
+    write to the repository.
+
+    The group is the whole guarantee. A descendant that calls ``setsid`` leaves
+    it and survives this call, so it can still write repository side effects
+    after verification returns — a documented limit, not an oversight. Closing
+    it would mean walking the process table, which stays racy regardless (a
+    descendant can detach or fork between the scan and the signal), so callers
+    bound the *cost* of an escapee instead: see
+    :data:`_ABANDONED_READER_JOIN_SECONDS`.
+    """
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
+        # The group is already empty, or the child left it for one of its own.
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def _kill_and_reap(process: subprocess.Popen) -> None:
+    """Kill ``process``'s group and wait for it, tolerating an already-dead child."""
+    _kill_process_group(process)
+    process.wait()
+
+
+def _join_readers(
+    readers: tuple[threading.Thread, ...], *, timeout: float | None
+) -> None:
+    """Join the pipe readers, optionally under a shared deadline."""
+    if timeout is None:
+        for reader in readers:
+            reader.join()
+        return
+    deadline = time.monotonic() + timeout
+    for reader in readers:
+        reader.join(timeout=max(0.0, deadline - time.monotonic()))
+
+
+class _ParallelCancellation:
+    """Kill switch shared by the command checks of one parallel dispatch.
+
+    :meth:`cancel` runs on the calling thread once the dispatch has raised: it
+    kills every command process still in flight so the workers unblock at once
+    and :func:`run_verification` can join them before the exception escapes.
+    Killing is what makes that join bounded — without it, waiting would stall
+    behind the longest check and not waiting would leave it running.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._processes: set[subprocess.Popen] = set()
+
+    @property
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    def register(self, process: subprocess.Popen) -> bool:
+        """Track a spawned process; ``False`` when the run is already cancelled."""
+        with self._lock:
+            if self._cancelled:
+                return False
+            self._processes.add(process)
+            return True
+
+    def unregister(self, process: subprocess.Popen) -> None:
+        with self._lock:
+            self._processes.discard(process)
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._cancelled = True
+            in_flight = tuple(self._processes)
+            self._processes.clear()
+        for process in in_flight:
+            # The owning worker is inside `process.wait()` and reaps it there.
+            _kill_process_group(process)
 
 
 def _command_stream_fields(
@@ -249,6 +363,7 @@ def _run_command_check(
     *,
     repo_root: Path,
     artifact_dir: Path | None = None,
+    cancellation: _ParallelCancellation | None = None,
 ) -> CheckResult:
     cwd = repo_root if check.cwd is None else _resolve_under_root(repo_root, check.cwd)
     scope_diagnostic = diagnose_command_scope(check)
@@ -261,6 +376,8 @@ def _run_command_check(
             detail=scope_diagnostic.detail,
         )
     start = time.monotonic()
+    if cancellation is not None and cancellation.cancelled:
+        raise _VerificationCancelled(check.name)
     try:
         process = subprocess.Popen(
             list(check.argv),
@@ -268,6 +385,11 @@ def _run_command_check(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             shell=False,
+            # Its own session, so every descendant that inherits the check's
+            # process group can be killed at once on timeout or cancellation.
+            # Descendants that start a session of their own are out of reach:
+            # see :func:`_kill_process_group`.
+            start_new_session=True,
         )
     except FileNotFoundError as error:
         return CheckResult(
@@ -287,6 +409,15 @@ def _run_command_check(
             detail=f"command could not be executed: {error}",
             duration_seconds=time.monotonic() - start,
         )
+
+    # Registration is what lets an interrupt reach this process: it closes the
+    # window where a cancellation fired while Popen was still spawning.
+    if cancellation is not None and not cancellation.register(process):
+        _kill_and_reap(process)
+        # No reader thread exists yet, so nothing else will close the pipes.
+        for pipe in (process.stdout, process.stderr):
+            pipe.close()
+        raise _VerificationCancelled(check.name)
 
     # Output is bounded as it arrives: each pipe feeds a StreamCapture that
     # keeps only the preview windows, running digest/counts, and — when an
@@ -315,16 +446,29 @@ def _run_command_check(
             process.wait(timeout=check.timeout_seconds)
         except subprocess.TimeoutExpired:
             timed_out = True
-            process.kill()
-            process.wait()
-        for reader in readers:
-            reader.join()
+            _kill_and_reap(process)
+        killed = timed_out or (
+            cancellation is not None and cancellation.cancelled
+        )
+        _join_readers(
+            readers,
+            timeout=_ABANDONED_READER_JOIN_SECONDS if killed else None,
+        )
     except BaseException:
-        process.kill()
-        process.wait()
+        _kill_and_reap(process)
         stdout_capture.discard()
         stderr_capture.discard()
         raise
+    finally:
+        if cancellation is not None:
+            cancellation.unregister(process)
+
+    # A cancelled check publishes nothing: its output is dropped rather than
+    # finalized, so no artifact is written for a process the interrupt killed.
+    if cancellation is not None and cancellation.cancelled:
+        stdout_capture.discard()
+        stderr_capture.discard()
+        raise _VerificationCancelled(check.name)
 
     duration = time.monotonic() - start
     if timed_out:
@@ -698,12 +842,17 @@ def run_check(
     *,
     repo_root: str | Path,
     artifact_dir: str | Path | None = None,
+    cancellation: _ParallelCancellation | None = None,
 ) -> CheckResult:
     """Execute a single verification check and return a structured result.
 
     ``artifact_dir`` — when set — is where failed command checks retain their
     full gzip-compressed stdout/stderr; command previews and metadata are
     always bounded regardless. File and regex checks ignore it.
+
+    ``cancellation`` is supplied by :func:`run_verification`'s parallel
+    dispatch so an interrupt can kill this check's command process; file and
+    regex checks ignore it.
     """
     canonical_root = canonicalize_path(repo_root)
     resolved_artifact_dir = (
@@ -714,6 +863,7 @@ def run_check(
             check,
             repo_root=canonical_root,
             artifact_dir=resolved_artifact_dir,
+            cancellation=cancellation,
         )
     if isinstance(check, FileExistsCheck):
         return _run_file_exists_check(check, repo_root=canonical_root)
@@ -733,12 +883,28 @@ def run_verification(
 
     When ``observer`` is provided, its ``on_check_started`` and
     ``on_check_finished`` callbacks are invoked synchronously around each
-    check in declared order. The CLI behavior and JSON payload of
+    check. Under a sequential recipe they arrive in declared order on the
+    calling thread; under ``contract.verify.parallel`` the command-check
+    callbacks arrive from worker threads in completion order, so an observer
+    must be thread-safe. The CLI behavior and JSON payload of
     :func:`verify_from_args` are unchanged when no observer is passed.
 
     ``artifact_dir`` — when set — is forwarded to each command check so failed
     commands retain their full stdout/stderr as gzip artifacts there; without
     it, only bounded previews and metadata are recorded.
+
+    A ``parallel`` recipe with at least two command checks runs its file and
+    regex checks sequentially in declared order first, then dispatches the
+    command checks concurrently. Results are always assembled by declared
+    index, so the returned :class:`VerificationResult` is byte-identical to a
+    sequential run of the same recipe.
+
+    Interrupting a parallel dispatch (``KeyboardInterrupt`` on the calling
+    thread, or any exception surfacing from a worker) kills every command
+    process still in flight, cancels every queued check, and joins the worker
+    threads before re-raising. Abandoned checks therefore publish nothing: no
+    result, no artifact, and no ``on_check_finished`` callback can arrive after
+    the exception reaches the caller.
     """
     canonical_root = canonicalize_path(repo_root)
     resolved_artifact_dir = (
@@ -748,8 +914,18 @@ def run_verification(
     on_finished = observer.on_check_finished if observer is not None else None
     checks = contract.verify.checks
     check_count = len(checks)
-    results: list[CheckResult] = []
-    for index, check in enumerate(checks):
+    command_indexes = [
+        index
+        for index, check in enumerate(checks)
+        if isinstance(check, CommandCheck)
+    ]
+    dispatch_parallel = contract.verify.parallel and len(command_indexes) >= 2
+    cancellation = _ParallelCancellation() if dispatch_parallel else None
+
+    def execute(index: int) -> CheckResult:
+        check = checks[index]
+        if cancellation is not None and cancellation.cancelled:
+            raise _VerificationCancelled(check.name)
         if on_started is not None:
             on_started(
                 _make_check_started_event(
@@ -764,8 +940,10 @@ def run_verification(
             check,
             repo_root=canonical_root,
             artifact_dir=resolved_artifact_dir,
+            cancellation=cancellation,
         )
-        results.append(check_result)
+        if cancellation is not None and cancellation.cancelled:
+            raise _VerificationCancelled(check.name)
         if on_finished is not None:
             on_finished(
                 CheckFinishedEvent(
@@ -777,6 +955,34 @@ def run_verification(
                     result=check_result,
                 )
             )
+        return check_result
+
+    if dispatch_parallel:
+        deferred = set(command_indexes)
+        results_by_index = {
+            index: execute(index)
+            for index in range(check_count)
+            if index not in deferred
+        }
+        executor = ThreadPoolExecutor(max_workers=min(4, len(command_indexes)))
+        try:
+            futures = {
+                executor.submit(execute, index): index
+                for index in command_indexes
+            }
+            for future in as_completed(futures):
+                results_by_index[futures[future]] = future.result()
+        except BaseException:
+            # Kill first, then wait: killing makes the in-flight checks return
+            # at once, and the wait is what guarantees no abandoned worker
+            # outlives this raise to emit a callback or write an artifact.
+            cancellation.cancel()
+            executor.shutdown(wait=True, cancel_futures=True)
+            raise
+        executor.shutdown(wait=True)
+        results = [results_by_index[index] for index in range(check_count)]
+    else:
+        results = [execute(index) for index in range(check_count)]
     return VerificationResult(
         session_id=contract.session_id,
         checks=tuple(results),

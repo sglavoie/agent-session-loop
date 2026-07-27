@@ -269,6 +269,39 @@ class ParseCommandTest(unittest.TestCase):
         self.assertEqual(result["reason"], "invalid-argument")
         self.assertEqual(result["reason"], "invalid-argument")
 
+    def test_review_guard_exclude_round_trips_repeated_values(self) -> None:
+        result = autopilot.parse_command(
+            "asl run /tmp/plan --review-guard-exclude claude/.claude-personal "
+            "--review-guard-exclude notes"
+        )
+        self.assertTrue(result["ok"], result)
+        args = result["run_args"]
+        self.assertEqual(
+            ["claude/.claude-personal", "notes"],
+            [
+                args[index + 1]
+                for index, token in enumerate(args)
+                if token == "--review-guard-exclude"
+            ],
+        )
+
+    def test_review_guard_exclude_absent_by_default(self) -> None:
+        result = autopilot.parse_command("asl run /tmp/plan")
+        self.assertTrue(result["ok"])
+        self.assertNotIn("--review-guard-exclude", result["run_args"])
+
+    def test_review_guard_include_ignored_round_trips(self) -> None:
+        result = autopilot.parse_command(
+            "asl run /tmp/plan --review-guard-include-ignored"
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertIn("--review-guard-include-ignored", result["run_args"])
+
+    def test_review_guard_include_ignored_absent_by_default(self) -> None:
+        result = autopilot.parse_command("asl run /tmp/plan")
+        self.assertTrue(result["ok"])
+        self.assertNotIn("--review-guard-include-ignored", result["run_args"])
+
     def test_rejects_shell_pipe(self) -> None:
         result = autopilot.parse_command("asl run /tmp/plan | tee log")
         self.assertFalse(result["ok"])

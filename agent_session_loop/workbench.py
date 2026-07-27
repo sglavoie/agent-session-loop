@@ -2173,6 +2173,9 @@ GENERIC_RECOVERY_PAUSE_REASONS: tuple[str, ...] = (
     "interrupted",
     "review-harness-required",
     "review-mutated-worktree",
+    # The guard's git probes failed, so the review needs a working repository
+    # before it can be relaunched — inspect, do not reply.
+    "review-guard-unavailable",
     # Review repair-cycle materialization failed closed (Session 18); the
     # review artifacts or plan structure need inspection, not a reply.
     "malformed-review-repair",

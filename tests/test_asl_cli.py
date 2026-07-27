@@ -688,6 +688,128 @@ class CommandAndConfigTests(unittest.TestCase):
             self.assertEqual("disabled-by-flag", disabled["reason"])
             self.assertFalse(disabled["lease_fresh"])
 
+    def test_review_guard_exclude_is_repeatable_and_defaults_unset(self) -> None:
+        parser = cli.build_parser()
+
+        default_args = parser.parse_args(["run", "/tmp/plan"])
+        repeated_args = parser.parse_args(
+            [
+                "run",
+                "/tmp/plan",
+                "--review-guard-exclude",
+                "claude/.claude-personal",
+                "--review-guard-exclude",
+                "notes",
+            ]
+        )
+
+        self.assertIsNone(default_args.review_guard_exclude)
+        self.assertEqual(
+            ["claude/.claude-personal", "notes"],
+            repeated_args.review_guard_exclude,
+        )
+        self.assertIn("review_guard_exclude", runner._RESUME_OVERLAY_DESTS)
+
+    def test_review_guard_include_ignored_defaults_off_and_round_trips(
+        self,
+    ) -> None:
+        parser = cli.build_parser()
+
+        default_args = parser.parse_args(["run", "/tmp/plan"])
+        enabled_args = parser.parse_args(
+            ["run", "/tmp/plan", "--review-guard-include-ignored"]
+        )
+
+        self.assertFalse(default_args.review_guard_include_ignored)
+        self.assertFalse(runner._review_guard_include_ignored(default_args))
+        self.assertTrue(enabled_args.review_guard_include_ignored)
+        self.assertTrue(runner._review_guard_include_ignored(enabled_args))
+        self.assertIn(
+            "review_guard_include_ignored", runner._RESUME_OVERLAY_DESTS
+        )
+
+    def test_review_guard_exclude_merges_env_and_flags(self) -> None:
+        args = cli.build_parser().parse_args(
+            [
+                "run",
+                "/tmp/plan",
+                "--review-guard-exclude",
+                "claude/",
+                "--review-guard-exclude",
+                "./nested/dir",
+            ]
+        )
+
+        with mock.patch.dict(
+            os.environ,
+            {runner.REVIEW_GUARD_EXCLUDE_ENV_VAR: os.pathsep.join(["notes", "claude"])},
+        ):
+            resolved = runner._review_guard_excludes(args)
+
+        self.assertEqual(("claude", "nested/dir", "notes"), resolved)
+
+    def test_review_guard_exclude_rejects_absolute_and_parent_paths(self) -> None:
+        parser = cli.build_parser()
+
+        for value in ("/etc", "../outside", "a/../../b"):
+            with self.subTest(value=value):
+                args = parser.parse_args(
+                    ["run", "/tmp/plan", "--review-guard-exclude", value]
+                )
+                with self.assertRaises(runner.RunError):
+                    runner._review_guard_excludes(args)
+
+    def test_review_guard_exclude_invalid_value_is_input_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_session_loop",
+                    "run",
+                    str(Path(tmp) / "plan"),
+                    "--cwd",
+                    tmp,
+                    "--review-guard-exclude",
+                    "../escape",
+                    "--json",
+                ],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(1, completed.returncode, completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertEqual("input-error", payload["reason"])
+            self.assertIn("--review-guard-exclude", payload["error"])
+
+    def test_resume_overlay_rehydrates_review_guard_exclude(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            plan_dir.mkdir()
+            plan_state_dir = state.plan_state_dir(plan_dir, state_dir)
+            plan_state_dir.mkdir(parents=True)
+            (plan_state_dir / events.STATE_FILE_NAME).write_text(
+                json.dumps({"run_config": {"review_guard_exclude": ["claude"]}}),
+                encoding="utf-8",
+            )
+            tokens = [
+                "run",
+                str(plan_dir),
+                "--resume",
+                "--state-dir",
+                str(state_dir),
+            ]
+            args = cli.build_parser().parse_args(tokens)
+
+            overlaid = runner._apply_resume_config(args, tokens)
+
+            self.assertEqual(["claude"], overlaid.review_guard_exclude)
+
     def test_resume_overlay_rehydrates_no_mailbox(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -1069,6 +1191,13 @@ class CommandAndConfigTests(unittest.TestCase):
     def test_review_pause_reasons_are_registered(self) -> None:
         self.assertIn("review-harness-required", events.PAUSE_REASONS)
         self.assertIn("review-mutated-worktree", events.PAUSE_REASONS)
+        self.assertEqual(
+            "review-guard-unavailable",
+            events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,
+        )
+        self.assertIn(
+            events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE, events.PAUSE_REASONS
+        )
 
     def test_contains_review_session_marker_detects_marker(self) -> None:
         body_with_marker = "\n".join(

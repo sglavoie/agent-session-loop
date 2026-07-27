@@ -220,6 +220,36 @@ shapes. Required and optional fields:
 - `session` (optional): when present, must match the canonical session ID of
   the host file.
 - `checks` (required): non-empty array of check objects.
+- `parallel` (optional, defaults to `false`): when `true` and the recipe has at
+  least two `command` checks, `file_exists` and `regex_in_file` checks run
+  first sequentially in declared order and the command checks then run
+  concurrently (at most four at a time). Results, `result.json`, and failure
+  details stay in declared order, so a parallel run is byte-identical to the
+  sequential one; per-check timeouts, output capture, and artifacts are
+  unchanged. Commands sharing mutable state (the same output directory, port,
+  database, or lock) must not opt in — non-interference is the contract
+  author's responsibility. `asl baseline` always runs checks sequentially.
+  Interrupting a parallel recipe (Ctrl-C, or any error surfacing from a
+  concurrent check) kills every command process still running, cancels the
+  checks still queued, and waits for the workers before it re-raises, so an
+  abandoned check publishes no result, no failure artifact, and no progress
+  event after the interrupt. Every command check runs in a session of its own
+  (`start_new_session=True`), and both cancellation and the per-check timeout
+  signal the whole process group, so a check that fans out into helper
+  processes leaves no descendant *in that group* behind to write output or
+  repository side effects — nor to hold the captured pipes open and stall the
+  cancellation. The guarantee stops at the process group, and that boundary is
+  deliberate: a descendant that starts a session of its own (`setsid`,
+  `start_new_session=True`) leaves the group, is **not** stopped by either
+  path, and can still write repository side effects after verification has
+  published its terminal state. Reaching it would mean walking the process
+  table, which cannot close the hole either — a descendant can detach or fork
+  between the scan and the signal — so the runner does not try. What stays
+  bounded is the cost: the pipe readers of a killed check are joined under a
+  five-second limit, so an escapee holding those pipes open delays cancellation
+  by at most that long rather than indefinitely, and the abandoned check still
+  publishes no result, artifact, or event. A check that backgrounds work which
+  must not outlive it therefore must not detach that work into a new session.
 - Each check object has `name` (string), `type` (one of `command`,
   `file_exists`, `regex_in_file`), and type-specific fields.
 - `command`: `argv` (non-empty array of strings, no shell), optional
@@ -245,7 +275,8 @@ After writing a `- **Status**: complete` handoff, the runner and the
 asl verify ~/.local/share/agent-plans/example-plan/ --session 2 --json
 ```
 
-`asl verify` runs the recipe in order. Exit 0 means every check passed;
+`asl verify` runs the recipe in order (or with concurrent command checks under
+`"parallel": true`, reporting in declared order). Exit 0 means every check passed;
 non-zero exit is a hard pause. The JSON body carries a stable `reason` field
 (`ok`, `verify-failed`, `no-contract`, `malformed-contract`, `cwd-error`, or
 `invalid-session`) plus per-check rows with `failure_reason` enums
@@ -322,7 +353,7 @@ stop-after-current request before all sessions complete exits successfully
 ## Commands
 
 ```text
-asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--review-harness codex|claude|copilot] [--review-harness-model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--max-pending-sessions N] [--max-review-fix-cycles N] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--no-mailbox] [--allow-not-loop-ready] [--reply TEXT|--reply-stdin] [--json] [--dry-run]
+asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--review-harness codex|claude|copilot] [--review-harness-model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--max-pending-sessions N] [--max-review-fix-cycles N] [--review-guard-exclude PATH] [--review-guard-include-ignored] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--no-mailbox] [--allow-not-loop-ready] [--reply TEXT|--reply-stdin] [--json] [--dry-run]
 asl preflight PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--max-pending-sessions N] [--mark-loop-ready] [--json]
 asl verify PLAN_DIR --session ID [--cwd REPO_ROOT] [--artifact-dir DIR] [--json]
 asl contract-check PLAN_DIR [--session ID] [--cwd REPO_ROOT] [--json]
@@ -637,7 +668,7 @@ The final non-empty line must be exactly `Status: All clear, no findings` or
 `Status: N Findings (H high, M med, L low)` with severity counts adding up to
 `N`; missing or malformed status lines fail review verification. Generated
 review sessions carry a versioned marker (`asl:generated-review-session
-version=2`) and additionally require the structured artifact
+version=3`) and additionally require the structured artifact
 `PLAN_DIR/final-review.json`: a JSON object with `version: 2`, an `outcome`
 (`all-clear` or `findings`), and a `findings` list where every finding carries
 a unique `id`, `severity` (`high`/`med`/`low`), `title`, `evidence` (objects
@@ -645,7 +676,11 @@ with a `path` and optional `symbol`), `explanation`, `repair_group`,
 `done_criteria`, and `verification_checks` (completion-contract check
 objects). The artifact must agree with the `final-review.md` status line on
 outcome and per-severity totals; a malformed, contradictory, or incomplete
-artifact fails review verification. Pre-existing v1 review sessions (base
+artifact fails review verification. Artifact enforcement is pinned to a fixed
+minimum marker version (`review.STRUCTURED_REVIEW_MIN_VERSION`, currently 2)
+rather than to the generated version, so raising the generated version never
+exempts review sessions already pending on disk at an older version.
+Pre-existing v1 review sessions (base
 marker only) remain Markdown-only compatible — no `final-review.json` is
 required for them. The grammar, artifact schema, and shared verdict payload
 live in `agent_session_loop.review`; the runner and the `asl` skill's
@@ -654,7 +689,108 @@ failures (nonzero exit, timeout, verification failure on missing or empty
 `final-review.md`) or repo mutations outside the plan directory also fail
 the run. A git mutation guard fingerprints dirty, staged, and untracked content
 outside `PLAN_DIR` before and after the review turn and pauses the run with
-`reason: review-mutated-worktree` if the fingerprint changes. Review turns are
+`reason: review-mutated-worktree` if the fingerprint changes. The post-turn
+comparison runs ahead of every other result branch, so a review turn that also
+timed out, exited nonzero, was interrupted, emitted `RUNNER_PAUSE`, or left the
+plan unreadable still pauses on the guard rather than on its own outcome — those
+pauses are retryable or reply-driven, and a relaunch would adopt the mutated
+worktree as its new baseline. The suppressed outcome stays visible on the turn
+record (`timed_out`, `returncode`, `interrupted`, `runner_pause`). Before the
+first commit `HEAD` does not resolve, so the guard diffs against the
+repository's empty tree and staged content is still fingerprinted. Every probe
+is anchored at the repository root and reports repo-root-relative paths, so a
+nested `--cwd` still fingerprints the whole repository rather than that one
+subtree. Both diffs are taken with text conversion and external diff drivers
+disabled, so the evidence is the file's raw content rather than whatever a
+`.gitattributes` rule or git config renders it as: a driver whose output is
+identical for two different contents makes git report no diff at all for a path
+whose bytes moved, and a review turn can write both the attributes file and the
+config. Gitignored files are left out of the untracked evidence by default: the
+repository's ignore rules are the operator's existing declaration of what is not
+the code under review, and the paths they name churn on their own during a
+review turn — byte-compiled output, test and lint caches, and the harness's own
+stowed settings, which commit `bf421f9` gitignored for exactly that reason.
+`--review-guard-include-ignored` below restores the strict scan for a repository
+whose ignored tree is expected to stay still. Deferring to those rules would
+otherwise let a turn write the rule that blinds the guard, so every untracked
+`.gitignore` git can apply is fingerprinted under either mode, including one
+hidden by its own rules — git reads a new ignore file before answering the scan,
+so a turn could otherwise create `generated/.gitignore` holding `*` beside the
+file it wrote and leave both invisible. The ordinary ignored content beside such
+a file stays out of the default evidence, and so does a `.gitignore` inside an
+ignored directory, whose rules git never applies because it never descends
+there, and a `.gitignore` that is a symlink, which git refuses to follow when it
+loads ignore rules — retargeting one changes no rule git applied. That last
+omission is from the ignore-source evidence only: the link is still an ordinary
+untracked node, so the default scan above fingerprints an unignored one from
+its link text, and `--review-guard-include-ignored` fingerprints an ignored one
+there the same way — retargeting either still moves the fingerprint and pauses
+the review. An ignored symlinked `.gitignore` under the default mode is the one
+retarget the guard does not report. The exclusion sources that live
+outside the worktree are fingerprinted under either mode — `.git/info/exclude`,
+the effective `core.excludesFile` setting, and the file that setting selects —
+because none of the scans above can see them: without them a review turn could
+hide a mutation by ignoring the path it wrote, either by editing an exclusion
+file directly or by repointing `core.excludesFile` at rules it writes itself.
+Git follows a symlinked exclusion source, so a linked one is fingerprinted
+twice: the link node itself, which makes retargeting or replacing the link
+visible, and the fully resolved file git reads through it, named under a
+`target:` prefix, without which rewriting only the target's rules would move
+nothing. A symlink cycle, an unreadable target, or a target that is neither a
+regular file nor a symlink makes the guard unusable rather than blind; a
+dangling link records its target as absent, so creating that file later still
+moves the fingerprint.
+Untracked
+paths are fingerprinted as repository nodes and symlinks are never followed: a
+regular file contributes its bytes and a symlink contributes its node kind and
+link text, so a retargeted or dangling link is visible and a link swapped for a
+file holding the target's bytes cannot compare equal. Tracked entries marked
+`assume-unchanged` or `skip-worktree` are fingerprinted the same way, from their
+raw worktree content: git honours those flags by never comparing the entry
+against the working tree, so no diff — including the guard's — can see a
+mutation to one. A flagged entry with no worktree file is recorded as absent
+(the ordinary sparse-checkout state) rather than failing the guard closed, so
+deleting or restoring one still moves the fingerprint. Any other
+failing git probe — or any untracked path git reported that cannot be
+`lstat`ed, read, or resolved as a link — makes the guard unusable rather than
+empty: the run pauses
+with `reason: review-guard-unavailable` (before the turn starts when the
+pre-turn capture fails, otherwise after it, reverting the review session to
+pending).
+`--review-guard-exclude PATH` (repeatable, merged with the
+`os.pathsep`-separated `ASL_REVIEW_GUARD_EXCLUDE` environment variable) adds
+repo-relative files or directories the guard ignores — use it for a *tracked*
+path a harness rewrites on its own, or an untracked one git does not already
+ignore. Values must be
+repo-relative and free of `..` segments; anything else is an `input-error`
+before the first turn. Each value is matched literally against the repository
+root — `*`, `?`, and `[]` are ordinary filename characters, not wildcards — and
+drops exactly that path and its subtree from the tracked diff, the untracked
+evidence, the worktree ignore sources, and the diff-suppressed index entries
+alike — excluding a subtree therefore also stops a `.gitignore` inside it from
+being evidence, which is the same declaration that the subtree is not the code
+under review. It is how a path git
+does not ignore leaves the evidence; for ignored untracked paths the default
+already defers to git's own rules. It does not apply to the exclusion sources
+outside the worktree — `.git/info/exclude`, the `core.excludesFile` setting, and
+the file it selects — which these repo-relative values cannot describe. The
+resolved allowlist is persisted in
+`run_config`, so `--resume` keeps it, and it is reported as `excluded` on every
+guard record.
+`--review-guard-include-ignored` puts gitignored untracked files back into the
+guard's evidence, restoring the strict scan for a repository whose ignored tree
+is expected to stay still. It is off by default because the ignored tree here
+churns on its own every review turn — the full suite rewrites `__pycache__`
+trees and the test and lint tooling caches beside them, and the Claude harness
+rewrites its own
+stowed `settings.json` — so a strict default discards a 5–17 minute review turn
+on evidence that names no code. The flag takes no value and is persisted in
+`run_config`, so `--resume` keeps it, and it is reported as `include_ignored` on
+every guard record, so a `review-mutated-worktree` pause says which mode
+produced its evidence. It governs the guard's evidence only: the delta rereview
+scope — which code a rereview must reread — defers to git's ignore rules under
+either mode, because a genuine code repair never lands in a gitignored path.
+Review turns are
 never auto-committed even under `--commit-per-session`. Review is skipped (with
 the reason recorded in `review_skipped_reason`) on `--max-sessions` reached,
 stop-after-current (`reason: stopped`), verification failure, harness failure,
@@ -680,6 +816,78 @@ counts once when it produced repair children, including legacy
 and reopen evidence never double-count it. The minimum cap needed for another
 materialization is therefore `historical_materializations + 1`, not the prior
 run's cap plus one.
+
+Rereviews are delta-scoped when the runner can prove a narrower scope is safe.
+Each review turn records the reviewed tree on its `review_cycle` record
+(`repo_head`, `worktree_dirty`, and `dirty_paths` — every path whose reviewed
+content differed from that commit, plus every `assume-unchanged` or
+`skip-worktree` entry, whose relationship to that commit no diff can establish
+either way), derived from the mutation guard's existing fingerprint at no extra
+cost. Before appending the next review session the
+runner picks a scope and appends a `review_scope_selected` event carrying
+`scope`, `base_sha`, and `fallback_reason`; the same `review_scope` and
+`review_base_sha` also ride on `review_session_created`. `scope: delta` (a
+`## Delta Review Scope` section listing the prior findings to verify plus the
+patch commands and changed files described below) requires *all* of: a prior
+`repairs-materialized` cycle carrying a `repo_head`, loadable prior findings,
+a base that resolves, is still an ancestor of `HEAD` (so a rebase or reset
+cannot silently narrow the scope), and diffs cleanly, and either a clean
+recorded worktree or the exact `dirty_paths` the reviewer saw. The changed-file
+list is Git-derived only — `git diff --name-only --no-renames --no-relative
+--no-textconv --no-ext-diff <base_sha>` unioned with its `--cached` counterpart
+(`--no-relative` pins both
+probes repository-wide and root-relative, which a `diff.relative=true` config
+plus a nested `cwd` would otherwise narrow to that subtree), the untracked files
+(scanned from the repository root and filtered by git's ignore rules, which are
+the operator's declaration of what is not code under review — a genuine repair
+never lands in a gitignored path; this deference is independent of
+`--review-guard-include-ignored`, which governs the guard's evidence rather than
+this scope), every tracked entry marked `assume-unchanged`
+or `skip-worktree` (added wholesale, because the same blindness that hides a
+repair to one makes it impossible to tell which of them moved), and those
+recorded `dirty_paths` — so it
+covers committed and uncommitted repairs alike, cannot omit a path the repair
+sessions forgot to declare, and stays a superset even when a repair restored a
+dirty file to its committed content, deleted an untracked one, staged an
+edit and then restored the working file, or edited a flagged entry, none of
+which the base-to-worktree diff still shows. The rendered section names two
+commands rather than one — `git diff --no-renames --no-relative --no-textconv
+--no-ext-diff <base_sha>` and
+its `--cached` counterpart — so the reviewer sees the base-to-index patch too,
+under the same scope and rename behavior the file list was derived with; a
+staged-only repair is otherwise a path in the list whose bytes no command in
+the section would print. Both rendered commands carry `--no-textconv` and
+`--no-ext-diff` so they print git's own diff of the raw bytes rather than
+whatever a configured textconv or external diff driver renders: a driver with
+constant output (configured in `.gitattributes` and git config, both of which a
+repair turn could itself write) leaves the name probes selecting the repaired
+path while the patch commands print nothing at all. Nothing else can narrow a
+rereview: a
+missing, unresolvable, non-ancestor, or undiffable base (including an
+undiffable index, `fallback_reason: index-diff-failed`, or an unlistable one,
+`fallback_reason: index-flags-scan-failed`), or a dirty recorded
+baseline with no path evidence (`fallback_reason:
+dirty-base-evidence-missing`, which is what a pre-`dirty_paths` cycle record
+yields), falls back to `scope: full` with the prior findings carried as extra
+checks on top of a from-scratch reading, and a missing prior repair cycle or
+unloadable findings yields a plain `scope: full`. The first review of a run is
+therefore always full-scope. Delta scoping narrows only what the reviewer must
+read: the output grammar, required artifacts, and verdict enforcement are
+scope-agnostic.
+
+A pending review session's scope is a static list, but the repository keeps
+moving — a crash and resume, or an in-run reuse, can leave a delta scope that
+predates files the reviewer must now inspect, and untracked additions never
+show up in `git diff <base_sha>` at all. So immediately before a pending
+generated review session executes, the runner re-derives its scope from current
+Git evidence and rewrites the `## Delta Review Scope` section in place,
+widening to full scope whenever a narrower one can no longer be proven. Only
+that section changes: the session keeps its id, its generated-review version
+marker, its completion contract, its pending handoff, and the prior findings
+recorded by the earlier review. A session with no scope section is already
+full-scope and is left untouched, so first reviews cost no extra Git probes. A
+scope section the runner cannot parse fails closed with a `malformed-plan`
+pause rather than executing against stale bounds.
 
 An all-complete plan is not necessarily inert. A later run with a higher
 absolute cap automatically reopens `cycles-disabled` or
@@ -1284,7 +1492,8 @@ last observed lease activity. `events.jsonl` records
 `turn_started`, `turn_heartbeat`, `action_required`, `turn_finished`,
 `verification_started`, `verification_check_started`, `verification_heartbeat`,
 `verification_check_finished`, `verification_finished`, `commit_started`,
-`commit_finished`, `run_control`, `review_session_created`, `review_cycle`,
+`commit_finished`, `run_control`, `review_scope_selected`,
+`review_session_created`, `review_cycle`,
 `review_repair_reopened`, `mailbox`, `reply_provided`, `run_paused`, and
 `run_finished` events as they happen. The `mailbox` name uses
 `guidance-observed`, `wait-preparation-failed`, `wait-started`, and
@@ -1295,14 +1504,36 @@ checks remain observable in `tail` and the live status snapshot. Verification
 check argv is captured in the `verification_check_started` payload and not
 streamed to a log file; command stdout and stderr remain captured in the
 underlying `asl verify` invocation and in the turn `result.json` under the
-`verification` key. `review_session_created`
+`verification` key. A `"parallel": true` recipe adds that same additive key to
+`verification_started`; its `verification_check_started` /
+`verification_check_finished` records interleave by real completion order while
+`result.json` stays in declared order, and heartbeats track whichever check
+currently holds the display slot. Every check that has started and not yet
+finished is tracked, so when the displayed check finishes the slot moves to
+another still-active check and heartbeats continue until the last command
+retires. An interrupt kills every abandoned check before `run_verification`
+re-raises, so no callback outlives it; `finish` independently drops any check
+callback from the moment it begins — before it waits for the heartbeat thread —
+so `verification_finished` stays the last verification lifecycle event,
+`active_verification` stays `null`, and no check progress line can appear after
+the terminal verification message.
+`review_session_created`
 fires once per run, when the runner appends a fresh generated review session;
 resuming an existing pending review session does not re-emit it. Its payload
 carries `run_id`, the review `session_id`, `review_harness`,
-`review_session_path`, and `review_output_path`. `review_cycle` fires once per
+`review_session_path`, `review_output_path`, and the additive `review_scope` /
+`review_base_sha` keys. `review_scope_selected` fires immediately before it with
+`run_id`, `session_id`, `scope`, `base_sha`, `fallback_reason`, and the additive
+`refreshed` key — the auditable record of why a rereview was or was not
+narrowed. It fires a second time, with `refreshed: true`, whenever a pending
+review session's scope is re-derived and rewritten before that session executes,
+so a resumed review's effective bounds are recorded rather than inferred from
+the creation-time event. `review_cycle` fires
+once per
 completed review session and carries the repair/rereview cycle record (cycle
 number, review session id, outcome, finding fingerprints with
-introduced/closed/repeated classification, repair session ids, and
+introduced/closed/repeated classification, repair session ids, the reviewed
+`repo_head` / `worktree_dirty` / `dirty_paths`, and
 disposition). `review_repair_reopened` records each later attempt to consume
 an existing findings artifact. Successful records include the source
 cycle/session/disposition, previous and current artifact evidence, repair child
@@ -1650,9 +1881,46 @@ Common pause reasons:
   `--review-harness codex|claude|copilot`.
 - `review-mutated-worktree`: the review harness changed repo content outside
   the plan directory. The pre/post fingerprint covers the working tree's
-  `HEAD`, tracked diff (with the plan directory excluded), and untracked files
-  outside the plan directory; any change trips the guard. The implementation
-  turns that ran before the review are preserved.
+  `HEAD`, tracked diff, the separate `--cached` (index) diff — so staging a
+  mutation and then restoring the working file to its `HEAD` bytes still trips
+  the guard — (with the plan directory and any
+  `--review-guard-exclude` paths excluded from both diffs), and untracked nodes
+  outside those
+  paths (file bytes, or a symlink's kind and link text — never the link
+  target's bytes), gitignored ones excluded unless
+  `--review-guard-include-ignored` is passed — except for the untracked
+  `.gitignore` files git can apply, which are fingerprinted under either mode
+  even when their own rules hide them. `.git/info/exclude`, the
+  `core.excludesFile` setting, and the file it selects are fingerprinted the
+  same way under either mode, and neither the plan directory nor
+  `--review-guard-exclude` removes them. Any change trips the guard. Every
+  probe is rooted at the repository root, so a nested `--cwd` narrows nothing. The pause message names up to three
+  changed paths, and the pause details carry `changed_paths` (`tracked`,
+  `untracked_added`, `untracked_removed`, `untracked_changed`,
+  `worktree_ignore`, `ignore_config`, `head_changed`)
+  plus the `excluded` allowlist and the `include_ignored` mode beside the raw
+  fingerprints. The implementation
+  turns that ran before the review are preserved. This pause outranks the
+  review turn's own failure: a mutating review that also timed out, exited
+  nonzero, was interrupted, emitted `RUNNER_PAUSE`, or corrupted the plan
+  reports `review-mutated-worktree` (never retryable) instead of the reason it
+  would otherwise have paused with.
+- `review-guard-unavailable`: a git probe the mutation guard depends on failed
+  (git itself unrunnable, or a nonzero `git diff`, `git diff --name-only`,
+  either of their `--cached` counterparts, `git ls-files --others`, or
+  `git ls-files -v`), or a path git reported could not be
+  fingerprinted (`untracked-path-unreadable`, `untracked-link-unreadable`,
+  `untracked-node-unsupported`, and the `index-flagged-` counterparts of all
+  three for an `assume-unchanged` or `skip-worktree` entry), or a path git named
+  as changed but rendered no patch for (`tracked-patch-missing`,
+  `index-patch-missing`), so the guard cannot
+  prove the review turn left the worktree alone. Failing probes and unreadable paths are never turned into
+  empty evidence — dropping a path would hide every later change to it. The
+  pause details carry a `review_mutation_guard` block with `phase` (`before` or
+  `after` the turn) and `unavailable` (`reason`, `argv`, the offending `path`
+  for a per-path failure, and the git `returncode`/`stderr` when there is one). A failure on the post-turn capture
+  reverts the review session to pending so a resume re-runs it under a working
+  guard.
 - `interrupted`: the run was interrupted by Ctrl+C.
 
 ## Autopilot Skill (`$asl`)

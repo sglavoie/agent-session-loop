@@ -104,8 +104,9 @@ class RunReadinessGateTests(unittest.TestCase):
         *,
         readiness: str | None = "loop-ready",
         sha_override: str | None = None,
+        contracts_by_id: dict[str, str] | None = None,
     ) -> plans.ReadinessMetadata | None:
-        contracts = {
+        contracts = contracts_by_id or {
             str(index): _contract_block(
                 '{"type": "file_exists", "path": "README.md", '
                 f'"name": "readme-{index}"}}',
@@ -293,6 +294,141 @@ class RunReadinessGateTests(unittest.TestCase):
             metadata.readiness_sha256,
         )
 
+    def _preflight_skipped_events(self) -> list[dict[str, object]]:
+        event_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir)
+            / events.EVENTS_FILE_NAME
+        )
+        return [
+            record
+            for record in read_jsonl(event_path)
+            if record["name"] == events.PREFLIGHT_SKIPPED_EVENT
+        ]
+
+    def test_loop_ready_start_skips_core_preflight(self) -> None:
+        self._write_plan(("pending",), readiness="loop-ready")
+        expected_sha = plans.stable_readiness_sha256(self.plan_dir)
+
+        completed, payload = self._run()
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["readiness_gate"]["core_skipped"])
+        self.assertNotIn("readiness_gate_repair", payload)
+        skipped = self._preflight_skipped_events()
+        self.assertEqual(1, len(skipped))
+        self.assertEqual(
+            {"readiness_state": "loop-ready", "readiness_sha256": expected_sha},
+            skipped[0]["payload"],
+        )
+        # Command runnability probes only run on the full preflight path.
+        self.assertEqual(
+            [],
+            [
+                finding
+                for finding in payload["readiness_gate"]["findings"]
+                if finding["category"] == "command-not-runnable"
+            ],
+        )
+
+    _UNRUNNABLE_EXECUTABLE = "asl-missing-executable-for-probe-regression"
+
+    def _write_plan_with_unrunnable_probe(
+        self, *, readiness: str, sha_override: str | None = None
+    ) -> None:
+        """Write a 2-session plan whose second contract fails command probes.
+
+        Only the full preflight probes command runnability, and the run never
+        reaches session 2, so the finding appears if and only if the core
+        preflight ran.
+        """
+        self._write_plan(
+            ("pending", "pending"),
+            readiness=readiness,
+            sha_override=sha_override,
+            contracts_by_id={
+                "1": _contract_block(
+                    '{"type": "file_exists", "path": "README.md", '
+                    '"name": "readme-1"}',
+                    session="1",
+                ),
+                "2": _contract_block(
+                    '{"type": "command", "argv": '
+                    f'["{self._UNRUNNABLE_EXECUTABLE}"], "name": "probe-2"}}',
+                    session="2",
+                ),
+            },
+        )
+
+    def _command_runnability_findings(
+        self, payload: dict[str, object]
+    ) -> list[dict[str, object]]:
+        return [
+            finding
+            for finding in payload["readiness_gate"]["findings"]
+            if finding["category"] == "command-not-runnable"
+        ]
+
+    def test_running_readiness_start_skips_core_preflight(self) -> None:
+        self._write_plan_with_unrunnable_probe(readiness="running")
+        expected_sha = plans.stable_readiness_sha256(self.plan_dir)
+
+        completed, payload = self._run(max_sessions=1)
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("running", payload["readiness_state_initial"])
+        skipped = self._preflight_skipped_events()
+        self.assertEqual(1, len(skipped))
+        self.assertEqual(
+            {"readiness_state": "running", "readiness_sha256": expected_sha},
+            skipped[0]["payload"],
+        )
+        # `running` still fails the strict gate, so the readiness metadata is
+        # normalized -- but the repair rerun stays on the reduced path.
+        repair_payload = payload["readiness_gate_repair"]
+        self.assertEqual(["manifest-readiness"], repair_payload["attempted"])
+        self.assertTrue(repair_payload["ok"])
+        self.assertTrue(repair_payload["core_skipped"])
+        self.assertTrue(payload["readiness_gate"]["core_skipped"])
+        self.assertEqual([], self._command_runnability_findings(payload))
+
+    def test_running_readiness_with_stale_sha_probes_commands(self) -> None:
+        self._write_plan_with_unrunnable_probe(
+            readiness="running", sha_override="0" * 64
+        )
+
+        completed, payload = self._run(max_sessions=1)
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertEqual([], self._preflight_skipped_events())
+        self.assertNotIn("core_skipped", payload["readiness_gate"])
+        self.assertEqual("not-loop-ready", payload["reason"])
+        findings = self._command_runnability_findings(payload)
+        self.assertEqual(1, len(findings))
+        self.assertEqual("red", findings[0]["severity"])
+        self.assertEqual("2", findings[0]["session_id"])
+
+    def test_session_edited_after_loop_ready_runs_full_preflight(self) -> None:
+        self._write_plan(("pending",), readiness="loop-ready")
+        session_path = self.plan_dir / "session-1.md"
+        session_path.write_text(
+            session_path.read_text(encoding="utf-8").replace(
+                "Instructions.", "Instructions. Edited while paused."
+            ),
+            encoding="utf-8",
+        )
+
+        completed, payload = self._run()
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual([], self._preflight_skipped_events())
+        self.assertNotIn("core_skipped", payload["readiness_gate"])
+        self.assertEqual(
+            ["manifest-readiness"],
+            payload["readiness_gate_repair"]["attempted"],
+        )
+
     def test_allow_not_loop_ready_lets_run_proceed_and_reports_findings(
         self,
     ) -> None:
@@ -444,6 +580,11 @@ class RunReadinessGateTests(unittest.TestCase):
         self.assertFalse(payload["paused"])
         self.assertEqual("all-complete", payload["reason"])
 
+        # The readiness SHA matches, so only the unhashed-state check keeps the
+        # loop-ready start from skipping the core preflight past this finding.
+        self.assertEqual([], self._preflight_skipped_events())
+        self.assertNotIn("core_skipped", payload["readiness_gate"])
+
         repair_payload = payload["readiness_gate_repair"]
         self.assertEqual(["progress-journal-missing"], repair_payload["attempted"])
         self.assertEqual([], repair_payload["errors"])
@@ -588,6 +729,10 @@ class RunReadinessGateTests(unittest.TestCase):
             for finding in payload["readiness_gate"]["findings"]
         }
         self.assertIn("baseline-missing", categories)
+        # Baseline evidence is outside the readiness SHA, so the loop-ready
+        # start must not skip the core preflight past this finding.
+        self.assertEqual([], self._preflight_skipped_events())
+        self.assertNotIn("core_skipped", payload["readiness_gate"])
 
     def test_run_proceeds_when_baseline_evidence_present(self) -> None:
         self._write_baseline_gated_plan()
@@ -605,6 +750,60 @@ class RunReadinessGateTests(unittest.TestCase):
             for finding in payload["readiness_gate"]["findings"]
         }
         self.assertNotIn("baseline-missing", categories)
+
+
+class ResumeGateTests(unittest.TestCase):
+    def _report(
+        self,
+        *,
+        state: str | None,
+        findings: tuple[preflight.PreflightFinding, ...] = (),
+    ) -> preflight.PreflightReport:
+        readiness = None
+        if state is not None:
+            readiness = plans.ReadinessMetadata(
+                state=state,
+                readiness_sha256="0" * 64,
+                checked_at="2026-06-19T00:00:00Z",
+            )
+        return preflight.PreflightReport(
+            plan_dir=Path("/plan"),
+            findings=findings,
+            readiness=readiness,
+            expected_readiness_sha256="0" * 64,
+        )
+
+    def test_resume_gate_accepts_every_resumable_readiness_state(self) -> None:
+        for state in preflight.RESUME_READINESS_STATES:
+            with self.subTest(state=state):
+                self.assertTrue(runner._resume_gate_passed(self._report(state=state)))
+
+    def test_resume_gate_rejects_other_states_and_findings(self) -> None:
+        for state in ("draft", "reviewed", "complete"):
+            with self.subTest(state=state):
+                self.assertFalse(runner._resume_gate_passed(self._report(state=state)))
+        self.assertFalse(runner._resume_gate_passed(self._report(state=None)))
+        for severity in ("red", "yellow"):
+            with self.subTest(severity=severity):
+                report = self._report(
+                    state="running",
+                    findings=(
+                        preflight.PreflightFinding(
+                            severity=severity,
+                            category="env-harness",
+                            message="broken",
+                        ),
+                    ),
+                )
+                self.assertFalse(runner._resume_gate_passed(report))
+
+    def test_readiness_gate_still_requires_loop_ready(self) -> None:
+        self.assertTrue(
+            runner._readiness_gate_passed(self._report(state="loop-ready"))
+        )
+        self.assertFalse(
+            runner._readiness_gate_passed(self._report(state="running"))
+        )
 
 
 class RunVerificationEnforcementTests(unittest.TestCase):
@@ -837,6 +1036,88 @@ class RunVerificationEnforcementTests(unittest.TestCase):
         self.assertIsNone(payload["active_verification"])
         self.assertIsInstance(payload["run_finished_at"], str)
         self.assertNotEqual("", payload["run_finished_at"])
+
+    def test_verify_parallel_contract_completes_and_marks_event(self) -> None:
+        contracts_by_id = {
+            "1": _contract_block(
+                '{"type": "command", "name": "quick", '
+                '"argv": ["python3", "-c", "pass"], "timeout_seconds": 60},'
+                '{"type": "command", "name": "slow", '
+                '"argv": ["python3", "-c", "import time; time.sleep(0.2)"], '
+                '"timeout_seconds": 60},'
+                '{"type": "file_exists", "path": "README.md", '
+                '"name": "readme"}',
+                session="1",
+                parallel=True,
+            )
+        }
+        self._write_plan(("pending",), contracts_by_id=contracts_by_id)
+
+        completed, payload = self._run()
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("all-complete", payload["reason"])
+        verify_payload = payload["turns"][0]["verification"]
+        self.assertEqual("ok", verify_payload["reason"])
+        self.assertTrue(verify_payload["passed"])
+        event_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir)
+            / events.EVENTS_FILE_NAME
+        )
+        event_records = read_jsonl(event_path)
+        started = next(
+            record["payload"]
+            for record in event_records
+            if record["name"] == events.VERIFICATION_STARTED_EVENT
+        )
+        self.assertTrue(started["parallel"])
+        self.assertEqual(["quick", "slow", "readme"], started["check_names"])
+        finished = next(
+            record["payload"]
+            for record in event_records
+            if record["name"] == events.VERIFICATION_FINISHED_EVENT
+        )
+        self.assertTrue(finished["passed"])
+        self.assertEqual(3, finished["passed_count"])
+
+    def test_verify_parallel_contract_pauses_with_declared_order_details(
+        self,
+    ) -> None:
+        contracts_by_id = {
+            "1": _contract_block(
+                '{"type": "command", "name": "alpha", '
+                '"argv": ["python3", "-c", "import sys; sys.exit(3)"], '
+                '"timeout_seconds": 60},'
+                '{"type": "command", "name": "beta", '
+                '"argv": ["python3", "-c", '
+                '"import sys, time; time.sleep(0.2); sys.exit(4)"], '
+                '"timeout_seconds": 60}',
+                session="1",
+                parallel=True,
+            )
+        }
+        self._write_plan(("pending",), contracts_by_id=contracts_by_id)
+
+        completed, payload = self._run()
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("verify-failed", payload["pause_reason"])
+        pause_details = payload["pause_details"]
+        self.assertFalse(pause_details["passed"])
+        self.assertEqual(["alpha", "beta"], pause_details["recipe"]["names"])
+        # `alpha` fails first in wall-clock order but must still be reported
+        # in its declared position, ahead of the slower `beta`.
+        self.assertEqual(
+            ["alpha", "beta"],
+            [failure["name"] for failure in pause_details["failures"]],
+        )
+        self.assertEqual(
+            [3, 4], [failure["returncode"] for failure in pause_details["failures"]]
+        )
+        text = (self.plan_dir / "session-1.md").read_text(encoding="utf-8")
+        self.assertIn("- **Status**: pending", text)
 
     def test_verify_missing_contract_pauses_when_gate_enforced(self) -> None:
         self._write_plan(("pending",), contracts_by_id=None)

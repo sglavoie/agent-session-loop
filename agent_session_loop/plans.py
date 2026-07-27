@@ -22,6 +22,7 @@ import json
 import os
 from pathlib import Path
 import re
+import threading
 from typing import Literal, Mapping, NoReturn
 
 
@@ -1230,6 +1231,91 @@ def inspect_plan(plan_dir: str | Path) -> PlanSnapshot:
         path_hash=path_sha256(canonical_dir),
         fingerprint=plan_fingerprint(canonical_dir, content_hash),
     )
+
+
+def _plan_file_stamps(canonical_dir: Path) -> dict[str, tuple[int, int, int]] | None:
+    """Stamp every file `plan_content_sha256` hashes, or `None` if unreadable.
+
+    Mirrors `plan_content_sha256`'s file-set enumeration so an added or removed
+    session file *or* expansion note changes the stamp keys, not just the values.
+    """
+    try:
+        sessions = discover_session_files(canonical_dir)
+    except (PlanError, OSError):
+        return None
+
+    relative_names = ["context.md", "manifest.md"]
+    for session in sorted(sessions, key=lambda session: session.session_id.sort_key):
+        relative_names.append(session.filename)
+        expansion_name = session.expansion_filename
+        try:
+            if (canonical_dir / expansion_name).is_file():
+                relative_names.append(expansion_name)
+        except OSError:
+            return None
+
+    stamps: dict[str, tuple[int, int, int]] = {}
+    for relative_name in relative_names:
+        try:
+            info = (canonical_dir / relative_name).stat()
+        except OSError:
+            return None
+        stamps[relative_name] = (info.st_mtime_ns, info.st_size, info.st_ctime_ns)
+    return stamps
+
+
+class PlanSnapshotCache:
+    """Reuse an `inspect_plan()` result while every hashed plan file is untouched.
+
+    Instances are owned by their caller, so a one-shot CLI invocation keeps the
+    uncached behaviour. `get()` is fail-closed: anything it cannot positively
+    prove unchanged -- a different plan directory, a different file set, a
+    changed `(mtime_ns, size, ctime_ns)`, or an `OSError` -- forces a full
+    re-read.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._plan_dir: Path | None = None
+        self._snapshot: PlanSnapshot | None = None
+        self._stamps: dict[str, tuple[int, int, int]] | None = None
+
+    def get(self, plan_dir: str | Path) -> PlanSnapshot:
+        """Return a validated cached snapshot, re-reading the plan on any doubt."""
+        canonical_dir = canonicalize_path(plan_dir)
+        with self._lock:
+            if (
+                self._snapshot is not None
+                and self._plan_dir == canonical_dir
+                and self._stamps is not None
+                and self._stamps == _plan_file_stamps(canonical_dir)
+            ):
+                return self._snapshot
+            return self._reread(canonical_dir)
+
+    def get_fresh(self, plan_dir: str | Path) -> PlanSnapshot:
+        """Re-read the plan unconditionally and re-record it as the cached state."""
+        canonical_dir = canonicalize_path(plan_dir)
+        with self._lock:
+            return self._reread(canonical_dir)
+
+    def invalidate(self) -> None:
+        """Drop the cached snapshot so the next `get()` re-reads."""
+        with self._lock:
+            self._plan_dir = None
+            self._snapshot = None
+            self._stamps = None
+
+    def _reread(self, canonical_dir: Path) -> PlanSnapshot:
+        # Stamp before reading: a write racing the read then leaves a stamp that
+        # no longer matches the file, which costs a re-read instead of serving a
+        # snapshot that never existed on disk.
+        stamps = _plan_file_stamps(canonical_dir)
+        snapshot = inspect_plan(canonical_dir)
+        self._plan_dir = canonical_dir
+        self._snapshot = snapshot
+        self._stamps = stamps
+        return snapshot
 
 
 _PROGRESS_VERSION_RE = re.compile(

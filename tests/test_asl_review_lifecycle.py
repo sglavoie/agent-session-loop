@@ -5,7 +5,12 @@ Split from tests/test_agent_session_loop.py."""
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from contextlib import (
+    ExitStack,
+    contextmanager,
+    redirect_stderr,
+    redirect_stdout,
+)
 import dataclasses
 from datetime import datetime, timezone
 import errno
@@ -28,6 +33,7 @@ import threading
 import time
 import unittest
 import urllib.parse
+import uuid
 from unittest import mock
 
 from agent_session_loop import (
@@ -43,6 +49,8 @@ from agent_session_loop import (
     events,
     harnesses,
     install_verify,
+    mailbox,
+    pause_policy,
     plans,
     preflight,
     prepare,
@@ -71,8 +79,11 @@ from tests.support import (
     install_fake_codex,
     install_fake_harness,
     install_fake_spec,
+    git_stdout,
     init_git_repo,
+    patched_env,
     read_jsonl,
+    write_completed_review_plan,
     _contract_block,
     _structured_review_finding,
 )
@@ -203,6 +214,8 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         json_mode: bool = True,
         fake_codex_sleep: str = "5",
         commit_per_session: bool = False,
+        review_guard_exclude: tuple[str, ...] = (),
+        review_guard_include_ignored: bool = False,
         extra_env: dict[str, str] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, object] | None]:
         argv = [
@@ -236,6 +249,10 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             argv.extend(["--timeout", str(timeout)])
         if commit_per_session:
             argv.append("--commit-per-session")
+        for exclude in review_guard_exclude:
+            argv.extend(["--review-guard-exclude", exclude])
+        if review_guard_include_ignored:
+            argv.append("--review-guard-include-ignored")
         env = os.environ.copy()
         env.update(
             {
@@ -261,13 +278,16 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         payload = json.loads(completed.stdout) if json_mode else None
         return completed, payload
 
-    def _install_mutating_fake_claude(self) -> Path:
+    def _install_mutating_fake_claude(
+        self, mutate_paths: tuple[str, ...] = ("README.md",)
+    ) -> Path:
         """Replace the claude fake harness with one that mutates the cwd repo.
 
         The replacement marks the first pending session complete, pre-stamps
         ``final-review.md`` so the generated contract passes, and writes
-        ``mutated by review\\n`` to ``README.md`` in the cwd. The mutation
-        guard should detect the README change and pause the run.
+        ``mutated by review\\n`` to every path in ``mutate_paths`` (relative to
+        the cwd). The mutation guard should detect those changes and pause the
+        run unless every path is excluded.
         """
         script = self.fake_claude
         script.write_text(
@@ -289,10 +309,11 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                     "    print('missing --add-dir', file=sys.stderr)",
                     "    sys.exit(2)",
                     "",
-                    "# Mutate a tracked file inside cwd to trigger the guard.",
-                    "(Path.cwd() / 'README.md').write_text(",
-                    "    'mutated by review\\n', encoding='utf-8',",
-                    ")",
+                    "# Mutate files inside cwd to trigger the guard.",
+                    f"for rel in {tuple(mutate_paths)!r}:",
+                    "    mutated = Path.cwd() / rel",
+                    "    mutated.parent.mkdir(parents=True, exist_ok=True)",
+                    "    mutated.write_text('mutated by review\\n', encoding='utf-8')",
                     "",
                     "session_re = re.compile(",
                     "    r'^session-([1-9][0-9]*(?:\\.[1-9][0-9]*)*)\\.md$'",
@@ -699,6 +720,41 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             created_payload["review_output_path"],
         )
 
+    def test_review_scope_event_records_the_full_scope_fallback(self) -> None:
+        self._write_plan(("pending",), readiness="loop-ready")
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        self._precreate_final_review()
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        events_log = self._read_events()
+        scope_events = [
+            entry
+            for entry in events_log
+            if entry.get("name") == events.REVIEW_SCOPE_EVENT
+        ]
+        self.assertEqual(1, len(scope_events))
+        scope_payload = scope_events[0]["payload"]
+        self.assertEqual(runner.REVIEW_SCOPE_FULL, scope_payload["scope"])
+        self.assertIsNone(scope_payload["base_sha"])
+        self.assertEqual(
+            "no-prior-repair-cycle", scope_payload["fallback_reason"]
+        )
+        created_payload = next(
+            entry["payload"]
+            for entry in events_log
+            if entry.get("name") == events.REVIEW_SESSION_CREATED_EVENT
+        )
+        self.assertEqual(
+            runner.REVIEW_SCOPE_FULL, created_payload["review_scope"]
+        )
+        self.assertIsNone(created_payload["review_base_sha"])
+        review_body = (
+            self.plan_dir / f"session-{payload['review_session_id']}.md"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("## Delta Review Scope", review_body)
+
     def test_review_session_created_event_not_emitted_when_reused(self) -> None:
         self._write_plan(("complete",), readiness=None)
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
@@ -725,6 +781,91 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             if entry.get("name") == events.REVIEW_SESSION_CREATED_EVENT
         ]
         self.assertEqual([], created_events)
+
+    def test_resumed_delta_review_is_rescoped_for_a_late_untracked_file(
+        self,
+    ) -> None:
+        """A crash-resumed delta review must inspect files added since."""
+        finding = _structured_review_finding()
+        write_completed_review_plan(
+            self.plan_dir,
+            [finding],
+            contracts_by_id={
+                "1": _contract_block(
+                    '{"type": "file_exists", "path": "README.md", '
+                    '"name": "readme-1"}'
+                )
+            },
+        )
+        base = git_stdout(self.repo_root, "rev-parse", "HEAD")
+        events.append_event(
+            self._events_path(),
+            events.Event(
+                events.REVIEW_CYCLE_EVENT,
+                {
+                    "cycle": 1,
+                    "disposition": runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+                    "review_session_id": "2",
+                    "repair_session_ids": ["2.1"],
+                    "fingerprints": [f"finding:{finding['id']}"],
+                    "repo_head": base,
+                    "worktree_dirty": False,
+                    "dirty_paths": [],
+                },
+            ),
+        )
+        delta, fallback_reason = runner._compute_review_delta_context(
+            event_path=self._events_path(),
+            plan_dir=self.plan_dir,
+            cwd=self.repo_root,
+        )
+        self.assertIsNone(fallback_reason)
+        # The prior run wrote its delta review against a clean tree, then died
+        # before executing it.
+        review_session, created = runner.ensure_generated_review_session(
+            self.plan_dir, review_harness="claude", delta=delta
+        )
+        self.assertTrue(created)
+        self.assertIn(
+            f"No files changed since `{base}`",
+            review_session.path.read_text(encoding="utf-8"),
+        )
+        late = self.repo_root / "src" / "late.py"
+        late.parent.mkdir(parents=True, exist_ok=True)
+        late.write_text("late\n", encoding="utf-8")
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+
+        completed, payload = self._run(
+            mode="success-with-review", review_harness="claude"
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["review_completed"])
+        self.assertEqual(
+            review_session.session_id.value, payload["review_session_id"]
+        )
+        self.assertEqual(1, len(payload["turns"]))
+        resumed_body = review_session.path.read_text(encoding="utf-8")
+        self.assertIn("  - `src/late.py`", resumed_body)
+        flags = " ".join(runner._DELTA_DIFF_FLAGS)
+        self.assertIn(f"git diff {flags} {base}", resumed_body)
+        scope_events = [
+            entry["payload"]
+            for entry in self._read_events()
+            if entry["name"] == events.REVIEW_SCOPE_EVENT
+        ]
+        self.assertEqual(1, len(scope_events))
+        self.assertEqual(runner.REVIEW_SCOPE_DELTA, scope_events[0]["scope"])
+        self.assertEqual(base, scope_events[0]["base_sha"])
+        self.assertIsNone(scope_events[0]["fallback_reason"])
+        self.assertIs(True, scope_events[0]["refreshed"])
 
     def test_review_mutated_worktree_pauses_run(self) -> None:
         self._write_plan(("complete",), readiness=None)
@@ -761,6 +902,171 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertFalse(guard["passed"])
         self.assertEqual("review-mutated-worktree", guard["reason"])
         self.assertTrue(guard["reverted_to_pending"])
+        self.assertEqual([], guard["excluded"])
+        self.assertEqual(["README.md"], guard["changed_paths"]["tracked"])
+        self.assertFalse(guard["changed_paths"]["head_changed"])
+        self.assertEqual(
+            guard["changed_paths"], payload["pause_details"]["changed_paths"]
+        )
+        self.assertEqual([], payload["pause_details"]["excluded"])
+        self.assertIn("README.md", payload["pause_message"])
+
+    def test_review_guard_exclude_flag_allows_excluded_mutation(self) -> None:
+        self._write_plan(("complete",), readiness=None)
+        review_session = self._write_pending_review_session()
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        self._install_mutating_fake_claude()
+
+        completed, payload = self._run(
+            review_harness="claude", review_guard_exclude=("README.md",)
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["review_completed"])
+        self.assertEqual(
+            "complete", plans.read_session_status(review_session).status
+        )
+        guard = payload["turns"][0]["review_mutation_guard"]
+        self.assertTrue(guard["passed"])
+        self.assertEqual(["README.md"], guard["excluded"])
+
+    def test_review_guard_exclude_env_var_allows_excluded_mutation(self) -> None:
+        self._write_plan(("complete",), readiness=None)
+        self._write_pending_review_session()
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        self._install_mutating_fake_claude()
+
+        completed, payload = self._run(
+            review_harness="claude",
+            extra_env={runner.REVIEW_GUARD_EXCLUDE_ENV_VAR: "README.md"},
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["review_completed"])
+        self.assertEqual(
+            ["README.md"], payload["turns"][0]["review_mutation_guard"]["excluded"]
+        )
+
+    def test_review_guard_exclude_merges_env_var_and_flag(self) -> None:
+        self._write_plan(("complete",), readiness=None)
+        self._write_pending_review_session()
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        # The tracked README is excluded by the flag; the untracked file under
+        # notes/ only by the env var, so the run completes only if both merge.
+        self._install_mutating_fake_claude(("README.md", "notes/scratch.md"))
+
+        completed, payload = self._run(
+            review_harness="claude",
+            review_guard_exclude=("README.md",),
+            extra_env={runner.REVIEW_GUARD_EXCLUDE_ENV_VAR: "notes"},
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["review_completed"])
+        self.assertEqual(
+            ["README.md", "notes"],
+            payload["turns"][0]["review_mutation_guard"]["excluded"],
+        )
+
+    def test_review_guard_exclude_still_trips_on_other_paths(self) -> None:
+        self._write_plan(("complete",), readiness=None)
+        self._write_pending_review_session()
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        self._install_mutating_fake_claude()
+
+        completed, payload = self._run(
+            review_harness="claude", review_guard_exclude=("notes",)
+        )
+
+        self.assertEqual(1, completed.returncode)
+        self.assertEqual("review-mutated-worktree", payload["pause_reason"])
+        guard = payload["turns"][0]["review_mutation_guard"]
+        self.assertEqual(["notes"], guard["excluded"])
+        self.assertEqual(["README.md"], guard["changed_paths"]["tracked"])
+
+    def _commit_gitignore(self, text: str) -> None:
+        (self.repo_root / ".gitignore").write_text(text, encoding="utf-8")
+        for argv in (
+            ["git", "add", ".gitignore"],
+            ["git", "commit", "-m", "ignore build caches"],
+        ):
+            subprocess.run(
+                argv, cwd=self.repo_root, capture_output=True, check=True
+            )
+
+    def _write_pycache_review_plan(self) -> None:
+        self._write_plan(("complete",), readiness=None)
+        self._commit_gitignore("__pycache__/\n")
+        self._write_pending_review_session()
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        self._install_mutating_fake_claude(
+            ("agent_session_loop/__pycache__/x.pyc",)
+        )
+
+    def test_review_turn_writing_a_gitignored_cache_still_passes(self) -> None:
+        self._write_pycache_review_plan()
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["review_completed"])
+        self.assertTrue(
+            (self.repo_root / "agent_session_loop/__pycache__/x.pyc").exists()
+        )
+        guard = payload["turns"][0]["review_mutation_guard"]
+        self.assertTrue(guard["passed"])
+        self.assertFalse(guard["include_ignored"])
+
+    def test_include_ignored_flag_trips_the_guard_on_a_cache_write(self) -> None:
+        self._write_pycache_review_plan()
+
+        completed, payload = self._run(
+            review_harness="claude", review_guard_include_ignored=True
+        )
+
+        self.assertEqual(1, completed.returncode)
+        self.assertEqual("review-mutated-worktree", payload["pause_reason"])
+        guard = payload["turns"][0]["review_mutation_guard"]
+        self.assertTrue(guard["include_ignored"])
+        self.assertEqual(
+            ["agent_session_loop/__pycache__/x.pyc"],
+            guard["changed_paths"]["untracked_added"],
+        )
 
     def test_review_nonzero_exit_pauses_run(self) -> None:
         self._write_plan(("complete",), readiness=None)
@@ -1598,6 +1904,2592 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             if entry.get("name") == events.REVIEW_SESSION_CREATED_EVENT
         ]
         self.assertEqual([], review_events)
+
+
+class RevertSnapshotCacheIntegrationTests(unittest.TestCase):
+    """A status revert must leave the run-owned snapshot cache usable.
+
+    The revert rewrites the session file, so a re-read that bypasses the cache
+    strands it on stale stamps and forces the review-continuation projection at
+    loop exit to inspect the whole plan a second time.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+        self.repo_root = self.tmp_path / "repo"
+        self.config_home = self.tmp_path / "config"
+        init_git_repo(self.repo_root)
+        fake_codex = install_fake_codex(self.tmp_path)
+        fake_claude = install_fake_harness(self.tmp_path, "claude")
+        config_path = (
+            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        )
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps(
+                {
+                    "codex": {"executable": str(fake_codex)},
+                    "claude": {"executable": str(fake_claude)},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _run_locked_counting_inspections(
+        self,
+    ) -> tuple[dict[str, object], list[Path], list[int]]:
+        """Drive one `_run_locked` turn, counting every `inspect_plan` call.
+
+        Returns the run payload, the plan directories inspected in order, and
+        the running count observed right after each post-revert re-inspection.
+        """
+
+        def complete_first_pending(plan_dir: Path) -> None:
+            path = plan_dir / "session-1.md"
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "- **Status**: pending", "- **Status**: complete", 1
+                ),
+                encoding="utf-8",
+            )
+
+        def fake_run_harness(
+            name: str, **kwargs: object
+        ) -> harnesses.HarnessResult:
+            complete_first_pending(Path(str(kwargs["plan_dir"])))
+            return harnesses.HarnessResult(
+                name=name,
+                argv=[name],
+                returncode=0,
+                stdout="",
+                stderr="",
+            )
+
+        inspected: list[Path] = []
+        real_inspect_plan = plans.inspect_plan
+
+        def counting_inspect_plan(plan_dir):
+            inspected.append(plans.canonicalize_path(plan_dir))
+            return real_inspect_plan(plan_dir)
+
+        counts_after_revert: list[int] = []
+        real_reinspect = runner._reinspect_after_revert
+
+        def recording_reinspect(*args, **kwargs):
+            snapshot = real_reinspect(*args, **kwargs)
+            counts_after_revert.append(len(inspected))
+            return snapshot
+
+        args = argparse.Namespace(
+            plan_dir=str(self.plan_dir),
+            cwd=str(self.repo_root),
+            harness="codex",
+            review_harness="claude",
+            review_harness_model=None,
+            state_dir=str(self.state_dir),
+            json=False,
+            dry_run=False,
+            unsafe_bypass=True,
+            timeout=None,
+            max_sessions=None,
+            commit_mode=None,
+            model=None,
+            effort=None,
+            note=None,
+            allow_not_loop_ready=True,
+        )
+        with (
+            patched_env(
+                XDG_CONFIG_HOME=str(self.config_home),
+                PYTHONPATH=str(REPO_ROOT)
+                + os.pathsep
+                + os.environ.get("PYTHONPATH", ""),
+            ),
+            mock.patch.object(plans, "inspect_plan", counting_inspect_plan),
+            mock.patch.object(
+                runner.harnesses, "run_harness", side_effect=fake_run_harness
+            ),
+            mock.patch.object(
+                runner, "_reinspect_after_revert", recording_reinspect
+            ),
+        ):
+            lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+            try:
+                _exit_code, payload = runner._run_locked(
+                    args=args,
+                    cwd=self.repo_root,
+                    timeout=None,
+                    max_sessions=None,
+                    commit_mode=None,
+                    lock_info=lock_info,
+                    run_id="test-run-revert-cache",
+                )
+            finally:
+                state.release_lock(self.plan_dir, self.state_dir)
+        return payload, inspected, counts_after_revert
+
+    def test_verification_revert_leaves_final_review_projection_cached(
+        self,
+    ) -> None:
+        write_plan(
+            self.plan_dir,
+            ("pending",),
+            contracts_by_id={
+                "1": _contract_block(
+                    '{"type": "file_exists", "path": "MISSING.md", '
+                    '"name": "missing-file"}',
+                    session="1",
+                )
+            },
+        )
+
+        payload, inspected, counts_after_revert = (
+            self._run_locked_counting_inspections()
+        )
+
+        self.assertEqual("verify-failed", payload["pause_reason"])
+        session_text = (self.plan_dir / "session-1.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("- **Status**: pending", session_text)
+        # The final continuation projection ran at loop exit.
+        self.assertIsNotNone(payload["review_resume"])
+        # Exactly one revert re-inspection, and nothing inspected the plan
+        # again afterwards: the projection's `plan_cache.get()` was a hit.
+        self.assertEqual(1, len(counts_after_revert))
+        self.assertEqual(counts_after_revert[0], len(inspected))
+
+
+class ReviewGuardUnavailableRunTests(unittest.TestCase):
+    """A guard that cannot see the worktree must stop the run, not wave it on."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+        self.repo_root = self.tmp_path / "repo"
+        self.config_home = self.tmp_path / "config"
+        init_git_repo(self.repo_root)
+        fake_codex = install_fake_codex(self.tmp_path)
+        fake_claude = install_fake_harness(self.tmp_path, "claude")
+        config_path = (
+            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        )
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps(
+                {
+                    "codex": {"executable": str(fake_codex)},
+                    "claude": {"executable": str(fake_claude)},
+                }
+            ),
+            encoding="utf-8",
+        )
+        write_plan(
+            self.plan_dir,
+            ("complete",),
+            contracts_by_id={
+                "1": _contract_block(
+                    '{"type": "file_exists", "path": "README.md", '
+                    '"name": "readme-1"}',
+                    session="1",
+                )
+            },
+        )
+        self.review_session = runner.ensure_generated_review_session(
+            self.plan_dir, review_harness="claude"
+        )[0]
+
+    _UNAVAILABLE = {
+        "git": True,
+        "unavailable": {
+            "reason": "git-command-failed",
+            "argv": ["ls-files", "--others", "--exclude-standard"],
+            "returncode": 128,
+            "stderr": "fatal: broken index",
+        },
+    }
+    _CLEAN = {
+        "git": True,
+        "head": "0" * 40,
+        "diff_sha256": hashlib.sha256(b"").hexdigest(),
+        "tracked_changed": [],
+        "tracked_patches": [],
+        "untracked": [],
+    }
+
+    def _run_locked(
+        self, fingerprints: list[dict[str, object]]
+    ) -> tuple[dict[str, object], list[str]]:
+        """Drive one run with `fingerprints` returned by successive captures."""
+        harness_calls: list[str] = []
+
+        def fake_run_harness(name: str, **kwargs: object) -> harnesses.HarnessResult:
+            harness_calls.append(name)
+            path = Path(str(kwargs["plan_dir"])) / self.review_session.path.name
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "- **Status**: pending", "- **Status**: complete", 1
+                ),
+                encoding="utf-8",
+            )
+            return harnesses.HarnessResult(
+                name=name, argv=[name], returncode=0, stdout="", stderr=""
+            )
+
+        args = cli.build_parser().parse_args(
+            [
+                "run",
+                str(self.plan_dir),
+                "--cwd",
+                str(self.repo_root),
+                "--harness",
+                "codex",
+                "--review-harness",
+                "claude",
+                "--state-dir",
+                str(self.state_dir),
+                "--allow-not-loop-ready",
+            ]
+        )
+        with (
+            patched_env(
+                XDG_CONFIG_HOME=str(self.config_home),
+                PYTHONPATH=str(REPO_ROOT)
+                + os.pathsep
+                + os.environ.get("PYTHONPATH", ""),
+            ),
+            mock.patch.object(
+                runner.harnesses, "run_harness", side_effect=fake_run_harness
+            ),
+            mock.patch.object(
+                runner,
+                "_capture_review_repo_fingerprint",
+                side_effect=fingerprints,
+            ),
+        ):
+            lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+            try:
+                _exit_code, payload = runner._run_locked(
+                    args=args,
+                    cwd=self.repo_root,
+                    timeout=None,
+                    max_sessions=None,
+                    commit_mode=None,
+                    lock_info=lock_info,
+                    run_id="test-run-guard-unavailable",
+                )
+            finally:
+                state.release_lock(self.plan_dir, self.state_dir)
+        return payload, harness_calls
+
+    def test_unavailable_before_capture_pauses_without_spending_the_turn(
+        self,
+    ) -> None:
+        payload, harness_calls = self._run_locked([self._UNAVAILABLE])
+
+        self.assertTrue(payload["paused"])
+        self.assertEqual(
+            events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE, payload["pause_reason"]
+        )
+        self.assertEqual([], harness_calls)
+        self.assertEqual([], payload["turns"])
+        self.assertEqual(
+            "pending",
+            plans.read_session_status(self.review_session).status,
+        )
+        guard = payload["pause_details"]["review_mutation_guard"]
+        self.assertFalse(guard["passed"])
+        self.assertEqual("before", guard["phase"])
+        self.assertEqual("git-command-failed", guard["unavailable"]["reason"])
+
+    def test_unavailable_after_capture_reverts_the_review_to_pending(
+        self,
+    ) -> None:
+        payload, harness_calls = self._run_locked(
+            [self._CLEAN, self._UNAVAILABLE]
+        )
+
+        self.assertTrue(payload["paused"])
+        self.assertEqual(
+            events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE, payload["pause_reason"]
+        )
+        self.assertEqual(["claude"], harness_calls)
+        self.assertFalse(payload["review_completed"])
+        self.assertEqual(
+            "pending",
+            plans.read_session_status(self.review_session).status,
+        )
+        guard = payload["turns"][0]["review_mutation_guard"]
+        self.assertFalse(guard["passed"])
+        self.assertEqual("after", guard["phase"])
+        self.assertTrue(guard["reverted_to_pending"])
+        self.assertEqual(
+            guard, payload["pause_details"]["review_mutation_guard"]
+        )
+        self.assertIn("git-command-failed", payload["pause_message"])
+
+    def test_clean_captures_still_complete_the_review(self) -> None:
+        (self.plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
+            "## Findings\n"
+            "- Reviewed agent_session_loop/runner.py for guard behavior.\n"
+            "- Checked tests/test_asl_review_lifecycle.py for coverage.\n"
+            "- Compared docs/agent-session-loop.md for operator impact.\n"
+            "Status: All clear, no findings\n",
+            encoding="utf-8",
+        )
+        (self.plan_dir / runner.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+            json.dumps({"version": 2, "outcome": "all-clear", "findings": []}),
+            encoding="utf-8",
+        )
+
+        payload, harness_calls = self._run_locked([self._CLEAN, self._CLEAN])
+
+        self.assertFalse(payload["paused"])
+        self.assertTrue(payload["review_completed"])
+        self.assertEqual(["claude"], harness_calls)
+        self.assertTrue(payload["turns"][0]["review_mutation_guard"]["passed"])
+
+
+class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
+    """A failed review turn still has to answer for what it did to the worktree.
+
+    Every unsuccessful outcome used to pause before the post-turn fingerprint
+    was captured, so a review that mutated the repository and then timed out
+    was relaunched by the supervisor against its own mutation.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+        self.repo_root = self.tmp_path / "repo"
+        self.config_home = self.tmp_path / "config"
+        init_git_repo(self.repo_root)
+        fake_codex = install_fake_codex(self.tmp_path)
+        fake_claude = install_fake_harness(self.tmp_path, "claude")
+        config_path = (
+            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        )
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps(
+                {
+                    "codex": {"executable": str(fake_codex)},
+                    "claude": {"executable": str(fake_claude)},
+                }
+            ),
+            encoding="utf-8",
+        )
+        write_plan(
+            self.plan_dir,
+            ("complete",),
+            contracts_by_id={
+                "1": _contract_block(
+                    '{"type": "file_exists", "path": "README.md", '
+                    '"name": "readme-1"}',
+                    session="1",
+                )
+            },
+        )
+        self.review_session = runner.ensure_generated_review_session(
+            self.plan_dir, review_harness="claude"
+        )[0]
+
+    def _run_locked(
+        self,
+        *,
+        returncode: int = 0,
+        timed_out: bool = False,
+        interrupted: bool = False,
+        last_message: str = "Runner status: complete\n",
+        mutate: bool = True,
+        unreadable_plan: bool = False,
+        forbid_mailbox_wait: bool = False,
+    ) -> dict[str, object]:
+        """Drive one review turn whose harness fails the way `kwargs` describe."""
+
+        def fake_run_harness(name: str, **kwargs: object) -> harnesses.HarnessResult:
+            if mutate:
+                (self.repo_root / "README.md").write_text(
+                    "mutated by review\n", encoding="utf-8"
+                )
+            plan_dir = Path(str(kwargs["plan_dir"]))
+            path = plan_dir / self.review_session.path.name
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "- **Status**: pending", "- **Status**: complete", 1
+                ),
+                encoding="utf-8",
+            )
+            if unreadable_plan:
+                (plan_dir / "context.md").unlink()
+            return harnesses.HarnessResult(
+                name=name,
+                argv=[name],
+                returncode=returncode,
+                stdout="",
+                stderr="",
+                last_message=last_message,
+                timed_out=timed_out,
+                interrupted=interrupted,
+            )
+
+        args = cli.build_parser().parse_args(
+            [
+                "run",
+                str(self.plan_dir),
+                "--cwd",
+                str(self.repo_root),
+                "--harness",
+                "codex",
+                "--review-harness",
+                "claude",
+                "--state-dir",
+                str(self.state_dir),
+                "--allow-not-loop-ready",
+            ]
+        )
+        with ExitStack() as stack:
+            stack.enter_context(
+                patched_env(
+                    XDG_CONFIG_HOME=str(self.config_home),
+                    PYTHONPATH=str(REPO_ROOT)
+                    + os.pathsep
+                    + os.environ.get("PYTHONPATH", ""),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    runner.harnesses, "run_harness", side_effect=fake_run_harness
+                )
+            )
+            if forbid_mailbox_wait:
+                mailbox.write_lease(
+                    self.plan_dir,
+                    str(uuid.uuid4()),
+                    state_dir=str(self.state_dir),
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        runner,
+                        "_prepare_mailbox_reply_wait",
+                        side_effect=AssertionError(
+                            "the mailbox reply wait must not be reachable "
+                            "after the review mutation guard trips"
+                        ),
+                    )
+                )
+            lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+            try:
+                _exit_code, payload = runner._run_locked(
+                    args=args,
+                    cwd=self.repo_root,
+                    timeout=None,
+                    max_sessions=None,
+                    commit_mode=None,
+                    lock_info=lock_info,
+                    run_id="test-run-guard-turn-outcome",
+                )
+            finally:
+                state.release_lock(self.plan_dir, self.state_dir)
+        return payload
+
+    def _assert_guard_pause(self, payload: dict[str, object]) -> dict[str, object]:
+        """Assert the run stopped on the guard and returned the durable record."""
+        self.assertTrue(payload["paused"])
+        self.assertEqual("review-mutated-worktree", payload["pause_reason"])
+        self.assertFalse(payload["review_completed"])
+        self.assertEqual(
+            "pending", plans.read_session_status(self.review_session).status
+        )
+        turn = payload["turns"][0]
+        guard = turn["review_mutation_guard"]
+        self.assertFalse(guard["passed"])
+        self.assertEqual("review-mutated-worktree", guard["reason"])
+        self.assertTrue(guard["reverted_to_pending"])
+        self.assertEqual(["README.md"], guard["changed_paths"]["tracked"])
+        # The evidence has to survive the process, not just the payload.
+        persisted = json.loads(
+            Path(str(turn["result_path"])).read_text(encoding="utf-8")
+        )
+        self.assertEqual(guard, persisted["review_mutation_guard"])
+        return turn
+
+    def _assert_supervisor_will_not_relaunch(
+        self, payload: dict[str, object], *, suppressed_reason: str
+    ) -> None:
+        """Assert the pause the supervisor sees is not the retryable one."""
+        policy = payload["pause_policy"]
+        self.assertFalse(policy["recoverable"])
+        self.assertEqual(0, policy["max_retries"])
+        self.assertNotIn(
+            "review-mutated-worktree", pause_policy.RECOVERABLE_PAUSE_REASONS
+        )
+        # Without the guard the run would have surfaced this reason instead,
+        # and the supervisor would have relaunched onto the mutated tree.
+        self.assertIn(suppressed_reason, pause_policy.RECOVERABLE_PAUSE_REASONS)
+
+    def test_timed_out_review_turn_trips_the_guard_instead_of_retrying(
+        self,
+    ) -> None:
+        payload = self._run_locked(returncode=124, timed_out=True)
+
+        turn = self._assert_guard_pause(payload)
+        self.assertTrue(turn["timed_out"])
+        self._assert_supervisor_will_not_relaunch(
+            payload, suppressed_reason="timeout"
+        )
+
+    def test_nonzero_exit_review_turn_trips_the_guard(self) -> None:
+        payload = self._run_locked(returncode=3)
+
+        turn = self._assert_guard_pause(payload)
+        self.assertEqual(3, turn["returncode"])
+
+    def test_runner_pause_review_turn_trips_the_guard_before_any_reply_wait(
+        self,
+    ) -> None:
+        payload = self._run_locked(
+            last_message="Runner status: paused\nRUNNER_PAUSE: blocked - needs a decision\n",
+            forbid_mailbox_wait=True,
+        )
+
+        self._assert_guard_pause(payload)
+        self.assertIsNone(payload.get("waiting_for_reply"))
+
+    def test_interrupted_review_turn_trips_the_guard(self) -> None:
+        payload = self._run_locked(
+            returncode=runner.INTERRUPTED_EXIT, interrupted=True
+        )
+
+        self._assert_guard_pause(payload)
+
+    def test_unreadable_plan_after_a_mutating_review_turn_trips_the_guard(
+        self,
+    ) -> None:
+        payload = self._run_locked(unreadable_plan=True)
+
+        turn = self._assert_guard_pause(payload)
+        self.assertFalse(turn["timed_out"])
+
+    def test_a_clean_failed_review_turn_keeps_its_own_pause_reason(self) -> None:
+        payload = self._run_locked(returncode=124, timed_out=True, mutate=False)
+
+        self.assertTrue(payload["paused"])
+        self.assertEqual("timeout", payload["pause_reason"])
+        self.assertTrue(payload["turns"][0]["review_mutation_guard"]["passed"])
+
+
+class ReviewMutationGuardFingerprintTests(unittest.TestCase):
+    """Direct coverage for the guard's allowlist and per-path evidence."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.repo_root = self.tmp_path / "repo"
+        self.plan_dir = self.tmp_path / "plan"
+        self.plan_dir.mkdir()
+        init_git_repo(self.repo_root)
+
+    def _fingerprint(
+        self, *exclude: str, include_ignored: bool = False
+    ) -> dict[str, object]:
+        return runner._capture_review_repo_fingerprint(
+            self.repo_root,
+            self.plan_dir,
+            exclude=exclude,
+            include_ignored=include_ignored,
+        )
+
+    def _write(self, rel: str, text: str) -> None:
+        path = self.repo_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def _commit_all(self, message: str) -> None:
+        for argv in (["git", "add", "-A"], ["git", "commit", "-m", message]):
+            subprocess.run(
+                argv, cwd=self.repo_root, capture_output=True, check=True
+            )
+
+    def _stage(self, rel: str) -> None:
+        subprocess.run(
+            ["git", "add", rel],
+            cwd=self.repo_root,
+            capture_output=True,
+            check=True,
+        )
+
+    def test_excluded_tracked_change_leaves_fingerprint_unchanged(self) -> None:
+        before_excluded = self._fingerprint("README.md")
+        before_plain = self._fingerprint()
+
+        self._write("README.md", "mutated\n")
+
+        self.assertEqual(before_excluded, self._fingerprint("README.md"))
+        self.assertNotEqual(before_plain, self._fingerprint())
+
+    def test_excluded_untracked_file_is_not_fingerprinted(self) -> None:
+        before = self._fingerprint("scratch.txt")
+
+        self._write("scratch.txt", "ignored\n")
+
+        after = self._fingerprint("scratch.txt")
+        self.assertEqual(before, after)
+        self.assertEqual([], after["untracked"])
+        self.assertIn(
+            "scratch.txt",
+            [entry[0] for entry in self._fingerprint()["untracked"]],
+        )
+
+    def test_directory_prefix_excludes_tracked_and_untracked_children(self) -> None:
+        self._write("claude/settings.json", "{}\n")
+        subprocess.run(
+            ["git", "add", "claude/settings.json"],
+            cwd=self.repo_root,
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "add settings"],
+            cwd=self.repo_root,
+            capture_output=True,
+            check=True,
+        )
+        before = self._fingerprint("claude")
+
+        self._write("claude/settings.json", '{"mutated": true}\n')
+        self._write("claude/cache/session.json", "{}\n")
+
+        self.assertEqual(before, self._fingerprint("claude"))
+        # A sibling directory sharing the prefix is still guarded.
+        self._write("claude-extra/other.json", "{}\n")
+        self.assertNotEqual(before, self._fingerprint("claude"))
+
+    def test_glob_metacharacters_in_an_exclusion_are_matched_literally(
+        self,
+    ) -> None:
+        cases = (
+            ("dir[12]", ("dir1", "dir2")),
+            ("q?mark.txt", ("qxmark.txt",)),
+            ("star*name.txt", ("starANYname.txt",)),
+        )
+        for literal, siblings in cases:
+            for rel in (literal, *siblings):
+                self._write(rel, "one\n")
+        self._commit_all("add wildcard-named files")
+        for literal, siblings in cases:
+            for rel in (literal, *siblings):
+                self._write(rel, "two\n")
+
+        for literal, siblings in cases:
+            with self.subTest(exclusion=literal):
+                tracked = self._fingerprint(literal)["tracked_changed"]
+                self.assertNotIn(literal, tracked)
+                # As a git pattern the exclusion would swallow these too.
+                for sibling in siblings:
+                    self.assertIn(sibling, tracked)
+
+    def test_star_exclusion_does_not_erase_the_tracked_diff(self) -> None:
+        before = self._fingerprint("*")
+
+        self._write("README.md", "mutated\n")
+        after = self._fingerprint("*")
+
+        self.assertNotEqual(before, after)
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual(["README.md"], changed["tracked"])
+
+    def test_one_exclusion_selects_the_same_tracked_and_untracked_subtree(
+        self,
+    ) -> None:
+        self._write("logs[1]/kept.txt", "one\n")
+        self._write("logs1/kept.txt", "one\n")
+        self._commit_all("add bracket-named directories")
+        before = self._fingerprint("logs[1]")
+
+        self._write("logs[1]/kept.txt", "two\n")
+        self._write("logs[1]/scratch.txt", "new\n")
+
+        self.assertEqual(before, self._fingerprint("logs[1]"))
+
+        self._write("logs1/kept.txt", "two\n")
+        self._write("logs1/scratch.txt", "new\n")
+        after = self._fingerprint("logs[1]")
+
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual(["logs1/kept.txt"], changed["tracked"])
+        self.assertEqual(["logs1/scratch.txt"], changed["untracked_added"])
+
+    def test_untracked_paths_stay_repo_root_relative_from_a_subdirectory(
+        self,
+    ) -> None:
+        self._write("nested/kept.txt", "one\n")
+        self._commit_all("add nested tree")
+        self._write("nested/scratch.txt", "new\n")
+        nested = self.repo_root / "nested"
+
+        fingerprint = runner._capture_review_repo_fingerprint(nested, self.plan_dir)
+
+        self.assertIsNone(runner._review_guard_unavailable_detail(fingerprint))
+        self.assertEqual(
+            ["nested/scratch.txt"],
+            [entry[0] for entry in fingerprint["untracked"]],
+        )
+        excluded = runner._capture_review_repo_fingerprint(
+            nested, self.plan_dir, exclude=("nested",)
+        )
+        self.assertEqual([], excluded["untracked"])
+        self.assertEqual([], excluded["tracked_changed"])
+
+    def test_nested_cwd_still_fingerprints_the_whole_repository(self) -> None:
+        self._write("inside/tracked.txt", "one\n")
+        self._write("outside/tracked.txt", "one\n")
+        self._commit_all("add both subtrees")
+        # ``diff.relative`` narrows a diff to cwd *and* makes its paths
+        # cwd-relative, so it is the sharpest test of the repo-root anchoring.
+        subprocess.run(
+            ["git", "config", "diff.relative", "true"],
+            cwd=self.repo_root,
+            capture_output=True,
+            check=True,
+        )
+        nested = self.repo_root / "inside"
+        before = runner._capture_review_repo_fingerprint(nested, self.plan_dir)
+
+        self._write("inside/tracked.txt", "two\n")
+        self._write("outside/tracked.txt", "two\n")
+        self._write("inside/scratch.txt", "new\n")
+        self._write("outside/scratch.txt", "new\n")
+        after = runner._capture_review_repo_fingerprint(nested, self.plan_dir)
+
+        self.assertIsNone(runner._review_guard_unavailable_detail(after))
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual(
+            ["inside/tracked.txt", "outside/tracked.txt"], changed["tracked"]
+        )
+        self.assertEqual(
+            ["inside/scratch.txt", "outside/scratch.txt"],
+            changed["untracked_added"],
+        )
+
+    def test_ignored_file_change_is_invisible_until_include_ignored(self) -> None:
+        self._write(".gitignore", "ignored/\n")
+        self._write("ignored/cache.txt", "one\n")
+        self._commit_all("ignore a directory")
+        before = self._fingerprint()
+        strict_before = self._fingerprint(include_ignored=True)
+
+        self._write("ignored/cache.txt", "two\n")
+
+        self.assertEqual(before, self._fingerprint())
+        strict_after = self._fingerprint(include_ignored=True)
+        self.assertEqual(
+            ["ignored/cache.txt"],
+            runner._review_guard_changed_paths(strict_before, strict_after)[
+                "untracked_changed"
+            ],
+        )
+
+    def test_ignored_symlink_retarget_is_invisible_until_include_ignored(
+        self,
+    ) -> None:
+        self._write(".gitignore", "*.link\n")
+        self._commit_all("ignore link files")
+        self._write("target-a.txt", "a\n")
+        self._write("target-b.txt", "b\n")
+        link = self.repo_root / "cache.link"
+        link.symlink_to("target-a.txt")
+        before = self._fingerprint()
+        strict_before = self._fingerprint(include_ignored=True)
+
+        link.unlink()
+        link.symlink_to("target-b.txt")
+
+        self.assertEqual(before, self._fingerprint())
+        strict_after = self._fingerprint(include_ignored=True)
+        self.assertIn(
+            ["cache.link", "symlink"],
+            [entry[:2] for entry in strict_after["untracked"]],
+        )
+        self.assertEqual(
+            ["cache.link"],
+            runner._review_guard_changed_paths(strict_before, strict_after)[
+                "untracked_changed"
+            ],
+        )
+
+    def test_self_ignoring_untracked_gitignore_cannot_hide_review_mutation(
+        self,
+    ) -> None:
+        # Git applies a new untracked `.gitignore` before answering the guard's
+        # scans, and this one matches itself as well as the file written beside
+        # it: deferring to git's ignore rules would let a review turn write the
+        # very rule that blinds the guard.
+        before = self._fingerprint()
+
+        self._write("generated/.gitignore", "*\n")
+        self._write("generated/payload.py", "LEAKED = True\n")
+        after = self._fingerprint()
+
+        self.assertEqual(
+            "", git_stdout(self.repo_root, "status", "--short")
+        )
+        self.assertEqual(
+            "",
+            git_stdout(
+                self.repo_root, "ls-files", "--others", "--exclude-standard"
+            ),
+        )
+        self.assertEqual(before["untracked"], after["untracked"])
+        self.assertNotEqual(before, after)
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual(["generated/.gitignore"], changed["worktree_ignore"])
+        self.assertEqual(
+            ": generated/.gitignore",
+            runner._review_guard_changed_summary(changed),
+        )
+        # The rule the turn wrote is evidence; the payload it hides is the
+        # ordinary ignored content the default scan still defers to git about.
+        self.assertEqual(
+            ["generated/.gitignore"],
+            [entry[0] for entry in after["worktree_ignore"]],
+        )
+
+    def test_untracked_worktree_ignore_edit_and_deletion_move_the_evidence(
+        self,
+    ) -> None:
+        self._write("generated/.gitignore", "*\n")
+        before = self._fingerprint()
+        self.assertEqual(
+            ["generated/.gitignore"],
+            [entry[0] for entry in before["worktree_ignore"]],
+        )
+
+        strict_before = self._fingerprint(include_ignored=True)
+
+        self._write("generated/.gitignore", "*\n!keep.txt\n")
+        edited = self._fingerprint()
+
+        self.assertEqual(
+            ["generated/.gitignore"],
+            runner._review_guard_changed_paths(before, edited)[
+                "worktree_ignore"
+            ],
+        )
+        # The strict scan lists the same file under `untracked`, so the summary
+        # would otherwise name it twice.
+        self.assertEqual(
+            ": generated/.gitignore",
+            runner._review_guard_changed_summary(
+                runner._review_guard_changed_paths(
+                    strict_before, self._fingerprint(include_ignored=True)
+                )
+            ),
+        )
+
+        (self.repo_root / "generated" / ".gitignore").unlink()
+        deleted = self._fingerprint()
+
+        self.assertEqual([], deleted["worktree_ignore"])
+        self.assertEqual(
+            ["generated/.gitignore"],
+            runner._review_guard_changed_paths(edited, deleted)[
+                "worktree_ignore"
+            ],
+        )
+
+    def test_ignored_gitignore_symlink_stays_out_of_worktree_ignore_evidence(
+        self,
+    ) -> None:
+        # Git opens an ignore file with `O_NOFOLLOW`, so a symlinked
+        # `.gitignore` contributes no rules however it is retargeted — but the
+        # negative command-line pattern re-lists it anyway, and fingerprinting
+        # the link text would discard a review turn over a mutation git never
+        # acted on.
+        self._write(".gitignore", "generated/.gitignore\ngenerated/rules-*\n")
+        self._commit_all("ignore the generated ignore source and its targets")
+        self._write("generated/rules-a", "hidden-a.txt\n")
+        self._write("generated/rules-b", "hidden-b.txt\n")
+        link = self.repo_root / "generated" / ".gitignore"
+        link.symlink_to("rules-a")
+        before = self._fingerprint()
+
+        link.unlink()
+        link.symlink_to("rules-b")
+        after = self._fingerprint()
+
+        self.assertEqual("", git_stdout(self.repo_root, "status", "--short"))
+        self.assertEqual(
+            "",
+            git_stdout(
+                self.repo_root, "ls-files", "--others", "--exclude-standard"
+            ),
+        )
+        self.assertEqual([], after["untracked"])
+        self.assertEqual([], after["worktree_ignore"])
+        self.assertEqual(before, after)
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual([], changed["worktree_ignore"])
+        self.assertEqual("", runner._review_guard_changed_summary(changed))
+
+    def test_gitignore_git_cannot_apply_stays_out_of_the_evidence(self) -> None:
+        # Git never descends into an ignored directory, so a `.gitignore`
+        # inside one is a file whose rules git never applies — and the tool
+        # caches that churn every review turn write exactly that. Fingerprinting
+        # it would revive the false positives the default scan exists to avoid.
+        self._write(".gitignore", "cache/\n")
+        self._commit_all("ignore a cache directory")
+        before = self._fingerprint()
+
+        self._write("cache/.gitignore", "*\n")
+        self._write("cache/blob.bin", "one\n")
+
+        self.assertEqual([], before["worktree_ignore"])
+        self.assertEqual(before, self._fingerprint())
+
+    def _info_exclude(self) -> Path:
+        return self.repo_root / ".git" / "info" / "exclude"
+
+    def _write_info_exclude(self, text: str) -> None:
+        path = self._info_exclude()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def _ignore_config(
+        self, fingerprint: dict[str, object]
+    ) -> dict[str, list[str]]:
+        entries = fingerprint["ignore_config"]
+        assert isinstance(entries, list)
+        return {
+            str(rel): [str(kind), str(sha)] for _role, rel, kind, sha in entries
+        }
+
+    def test_git_info_exclude_mutation_trips_the_guard(self) -> None:
+        self._write_info_exclude("*.tmp\n")
+        before = self._fingerprint()
+
+        self._write_info_exclude("*.tmp\nsecret.txt\n")
+        after = self._fingerprint()
+
+        # No diff and no untracked scan reaches inside the git directory, so a
+        # turn could rewrite this to hide the path it wrote (as it could the
+        # excludes file `core.excludesFile` names).
+        self.assertEqual(before["untracked"], after["untracked"])
+        self.assertNotEqual(before, after)
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual([".git/info/exclude"], changed["ignore_config"])
+        self.assertEqual(
+            ": .git/info/exclude",
+            runner._review_guard_changed_summary(changed),
+        )
+
+    def test_absent_git_info_exclude_still_trips_on_creation(self) -> None:
+        self._info_exclude().unlink(missing_ok=True)
+        before = self._fingerprint()
+
+        self.assertEqual(
+            ["absent", hashlib.sha256(b"").hexdigest()],
+            self._ignore_config(before)[".git/info/exclude"],
+        )
+
+        self._write_info_exclude("secret.txt\n")
+        after = self._fingerprint()
+
+        self.assertNotEqual(before, after)
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual([".git/info/exclude"], changed["ignore_config"])
+
+    def test_git_info_exclude_resolves_from_a_nested_cwd(self) -> None:
+        # ``rev-parse --git-path`` answers relative to the directory git ran in,
+        # so a nested cwd reports ``../.git/info/exclude`` and joining that
+        # against the repository root would fingerprint a path that never
+        # exists — always absent, never moving.
+        self._write_info_exclude("*.tmp\n")
+        nested = self.repo_root / "nested"
+        nested.mkdir()
+
+        fingerprint = runner._capture_review_repo_fingerprint(
+            nested, self.plan_dir
+        )
+
+        self.assertEqual(
+            "file", self._ignore_config(fingerprint)[".git/info/exclude"][0]
+        )
+        self.assertEqual(
+            self._fingerprint()["ignore_config"], fingerprint["ignore_config"]
+        )
+
+    def _symlink_info_exclude(self, target: str) -> Path:
+        link = self._info_exclude()
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.unlink(missing_ok=True)
+        link.symlink_to(target)
+        return link.parent / target
+
+    def test_git_info_exclude_symlink_target_edit_trips_the_guard(self) -> None:
+        # Git follows a symlinked exclusion source, so evidence that stops at
+        # the link text goes quiet when only the target's rules change.
+        target = self._symlink_info_exclude("rules")
+        target.write_text("*.tmp\n", encoding="utf-8")
+        before = self._fingerprint()
+        self.assertEqual(
+            "symlink", self._ignore_config(before)[".git/info/exclude"][0]
+        )
+
+        target.write_text("*.tmp\nsecret.txt\n", encoding="utf-8")
+        self._write("secret.txt", "leak\n")
+        after = self._fingerprint()
+
+        # The link itself never moved and git hides the file its new rule names.
+        self.assertEqual(before["untracked"], after["untracked"])
+        self.assertEqual(
+            "", git_stdout(self.repo_root, "status", "--short").strip()
+        )
+        self.assertNotEqual(before, after)
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual(["target:.git/info/rules"], changed["ignore_config"])
+        self.assertEqual(
+            ": target:.git/info/rules",
+            runner._review_guard_changed_summary(changed),
+        )
+
+    def test_dangling_symlinked_source_moves_when_its_target_appears(
+        self,
+    ) -> None:
+        target = self._symlink_info_exclude("rules")
+        before = self._fingerprint()
+
+        self.assertEqual(
+            ["absent", hashlib.sha256(b"").hexdigest()],
+            self._ignore_config(before)["target:.git/info/rules"],
+        )
+
+        target.write_text("secret.txt\n", encoding="utf-8")
+        after = self._fingerprint()
+
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual(["target:.git/info/rules"], changed["ignore_config"])
+
+    def test_replacing_a_symlinked_source_with_its_target_trips_the_guard(
+        self,
+    ) -> None:
+        target = self._symlink_info_exclude("rules")
+        target.write_text("*.tmp\n", encoding="utf-8")
+        before = self._fingerprint()
+
+        link = self._info_exclude()
+        link.unlink()
+        link.write_text("*.tmp\n", encoding="utf-8")
+        after = self._fingerprint()
+
+        self.assertNotEqual(before, after)
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual(
+            [".git/info/exclude", "target:.git/info/rules"],
+            changed["ignore_config"],
+        )
+
+    def test_symlink_cycle_in_an_ignore_source_fails_the_guard_closed(
+        self,
+    ) -> None:
+        self._symlink_info_exclude("exclude")
+
+        fingerprint = self._fingerprint()
+
+        detail = runner._review_guard_unavailable_detail(fingerprint)
+        assert detail is not None
+        self.assertEqual("ignore-config-target-unresolved", detail["reason"])
+        self.assertNotIn("ignore_config", fingerprint)
+
+    def test_unreadable_symlinked_ignore_target_fails_the_guard_closed(
+        self,
+    ) -> None:
+        target = self._symlink_info_exclude("rules")
+        target.write_text("*.tmp\n", encoding="utf-8")
+        real_read_bytes = Path.read_bytes
+
+        def fake_read_bytes(self_path: Path) -> bytes:
+            if self_path.name == "rules":
+                raise OSError(errno.EIO, "input/output error")
+            return real_read_bytes(self_path)
+
+        with mock.patch.object(Path, "read_bytes", fake_read_bytes):
+            fingerprint = self._fingerprint()
+
+        detail = runner._review_guard_unavailable_detail(fingerprint)
+        assert detail is not None
+        self.assertEqual(
+            "ignore-config-target-path-unreadable", detail["reason"]
+        )
+        self.assertEqual("target:.git/info/rules", detail["path"])
+
+    def _set_excludes_file(self, value: str) -> None:
+        subprocess.run(
+            ["git", "config", "core.excludesFile", value],
+            cwd=self.repo_root,
+            capture_output=True,
+            check=True,
+        )
+
+    def test_core_excludes_file_cannot_hide_a_review_mutation(self) -> None:
+        # `--exclude-standard` honours `core.excludesFile` too, so a turn can
+        # repoint it at a file it writes under `.git` and every worktree scan
+        # goes quiet about the path the new rule hides.
+        before = self._fingerprint()
+
+        selected = self.repo_root / ".git" / "review-excludes"
+        selected.write_text("secret.txt\n", encoding="utf-8")
+        self._set_excludes_file(".git/review-excludes")
+        self._write("secret.txt", "leak\n")
+        after = self._fingerprint()
+
+        self.assertEqual(before["untracked"], after["untracked"])
+        self.assertEqual(
+            "", git_stdout(self.repo_root, "status", "--short").strip()
+        )
+        self.assertNotEqual(before, after)
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertIn("config:core.excludesFile", changed["ignore_config"])
+        self.assertIn(".git/review-excludes", changed["ignore_config"])
+        self.assertIn(
+            "config:core.excludesFile",
+            runner._review_guard_changed_summary(changed),
+        )
+
+    def test_core_excludes_file_trailing_newline_cannot_hide_a_review_mutation(
+        self,
+    ) -> None:
+        # A newline terminates git's own output record but is also a legal
+        # pathname byte, so trimming it collapses two different settings — and
+        # the two different files they select — onto one fingerprint.
+        selected = self.repo_root / ".git" / "review-excludes"
+        selected.write_text("*.tmp\n", encoding="utf-8")
+        self._set_excludes_file(".git/review-excludes")
+        before = self._fingerprint()
+
+        (self.repo_root / ".git" / "review-excludes\n").write_text(
+            "secret.txt\n", encoding="utf-8"
+        )
+        self._set_excludes_file(".git/review-excludes\n")
+        self._write("secret.txt", "leak\n")
+        after = self._fingerprint()
+
+        # Git honours the newline-terminated pathname, so every worktree scan
+        # goes quiet about the file its rule hides.
+        self.assertEqual(before["untracked"], after["untracked"])
+        self.assertEqual(
+            "", git_stdout(self.repo_root, "status", "--short").strip()
+        )
+        self.assertNotEqual(before, after)
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertIn("config:core.excludesFile", changed["ignore_config"])
+        self.assertIn(".git/review-excludes\n", changed["ignore_config"])
+        self.assertIn(
+            "config:core.excludesFile",
+            runner._review_guard_changed_summary(changed),
+        )
+
+    def test_effective_excludes_file_preserves_every_pathname_byte(self) -> None:
+        # Reading git's answer as text would rewrite `\r` and `\r\n` to `\n`,
+        # mapping three distinct settings — and three distinct files — onto one
+        # marker, which is the newline evasion one byte over.
+        markers = set()
+        for value in (".git/x\rex", ".git/x\r\nex", ".git/x\nex"):
+            self._set_excludes_file(value)
+            marker, selected = runner._effective_excludes_file(
+                self.repo_root, self.repo_root
+            )
+            markers.add(marker)
+            self.assertEqual(self.repo_root / value, selected)
+        self.assertEqual(3, len(markers))
+
+    def test_selected_excludes_file_edit_trips_the_guard(self) -> None:
+        # Leaving the setting alone and editing the file it already selects is
+        # the same evasion one step later.
+        selected = self.repo_root / ".git" / "review-excludes"
+        selected.write_text("*.tmp\n", encoding="utf-8")
+        self._set_excludes_file(".git/review-excludes")
+        before = self._fingerprint()
+
+        selected.write_text("*.tmp\nsecret.txt\n", encoding="utf-8")
+        self._write("secret.txt", "leak\n")
+        after = self._fingerprint()
+
+        self.assertEqual(before["untracked"], after["untracked"])
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual([".git/review-excludes"], changed["ignore_config"])
+
+    def _symlink_selected_excludes_file(self, target: str) -> Path:
+        link = self.repo_root / ".git" / "review-excludes"
+        link.symlink_to(target)
+        self._set_excludes_file(".git/review-excludes")
+        return link.parent / target
+
+    def test_selected_excludes_file_symlink_target_edit_trips_the_guard(
+        self,
+    ) -> None:
+        # The same evasion through the other source: git reads the target of
+        # the link `core.excludesFile` selects, so the link text alone is not
+        # evidence of the rules in force.
+        target = self._symlink_selected_excludes_file("review-rules")
+        target.write_text("*.tmp\n", encoding="utf-8")
+        before = self._fingerprint()
+        self.assertEqual(
+            "symlink", self._ignore_config(before)[".git/review-excludes"][0]
+        )
+
+        target.write_text("*.tmp\nsecret.txt\n", encoding="utf-8")
+        self._write("secret.txt", "leak\n")
+        after = self._fingerprint()
+
+        self.assertEqual(before["untracked"], after["untracked"])
+        self.assertEqual(
+            "", git_stdout(self.repo_root, "status", "--short").strip()
+        )
+        self.assertNotEqual(before, after)
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual(["target:.git/review-rules"], changed["ignore_config"])
+        self.assertIn(
+            "target:.git/review-rules",
+            runner._review_guard_changed_summary(changed),
+        )
+
+    def test_stable_symlinked_ignore_sources_leave_the_fingerprint_still(
+        self,
+    ) -> None:
+        # Following the link must not make an untouched configuration look like
+        # movement, which would pause every review turn on a linked source.
+        info_target = self._symlink_info_exclude("rules")
+        info_target.write_text("*.tmp\n", encoding="utf-8")
+        selected_target = self._symlink_selected_excludes_file("review-rules")
+        selected_target.write_text("*.log\n", encoding="utf-8")
+
+        before = self._fingerprint()
+
+        self.assertEqual(before, self._fingerprint())
+        entries = self._ignore_config(before)
+        self.assertEqual("file", entries["target:.git/info/rules"][0])
+        self.assertEqual("file", entries["target:.git/review-rules"][0])
+
+    def test_ignore_target_label_cannot_collide_with_source_path(self) -> None:
+        # `target:` is a legal repo-relative pathname prefix, so an excludes
+        # file at `target:.git/info/rules` spells exactly the label a symlinked
+        # `.git/info/exclude` resolving to `.git/info/rules` produces. Keyed by
+        # name alone the source entry displaced the target entry, and a
+        # target-only mutation moved the fingerprint while naming nothing.
+        collide = "target:.git/info/rules"
+        self._write(collide, "*.log\n")
+        self._set_excludes_file(collide)
+        target = self._symlink_info_exclude("rules")
+        target.write_text("*.tmp\n", encoding="utf-8")
+
+        before = self._fingerprint()
+        colliding = [
+            list(entry)
+            for entry in before["ignore_config"]
+            if entry[1] == collide
+        ]
+        self.assertEqual(
+            ["source", "target"], sorted(str(entry[0]) for entry in colliding)
+        )
+        # Two different files under one label: whichever the name-keyed map kept
+        # made the other's content unobservable.
+        self.assertNotEqual(colliding[0][2:], colliding[1][2:])
+
+        target.write_text("*.tmp\nsecret.txt\n", encoding="utf-8")
+        self._write("secret.txt", "leak\n")
+        after = self._fingerprint()
+
+        # The link text, the setting, and the file the setting selects are all
+        # untouched, and git hides the file the new rule names.
+        self.assertEqual(before["untracked"], after["untracked"])
+        self.assertNotEqual(before, after)
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual([collide], changed["ignore_config"])
+        self.assertIn(collide, runner._review_guard_changed_summary(changed))
+
+    def test_dev_null_excludes_file_leaves_the_fingerprint_still(self) -> None:
+        self._set_excludes_file("/dev/null")
+
+        before = self._fingerprint()
+
+        self.assertEqual(
+            ["unsupported", hashlib.sha256(b"").hexdigest()],
+            self._ignore_config(before)["/dev/null"],
+        )
+        self.assertEqual(before, self._fingerprint())
+
+    def test_symlinked_dev_null_excludes_file_fails_the_guard_closed(
+        self,
+    ) -> None:
+        # A link is never how `core.excludesFile=/dev/null` switches the global
+        # excludes off, so an unsupported target is a state the evidence cannot
+        # describe rather than a configuration to tolerate.
+        self._symlink_selected_excludes_file("/dev/null")
+
+        fingerprint = self._fingerprint()
+
+        detail = runner._review_guard_unavailable_detail(fingerprint)
+        assert detail is not None
+        self.assertEqual(
+            "excludes-file-target-node-unsupported", detail["reason"]
+        )
+        self.assertEqual("target:/dev/null", detail["path"])
+
+    def test_absent_excludes_file_is_fingerprinted_by_its_own_kind(
+        self,
+    ) -> None:
+        self._set_excludes_file(".git/review-excludes")
+        before = self._fingerprint()
+
+        self.assertEqual(
+            ["absent", hashlib.sha256(b"").hexdigest()],
+            self._ignore_config(before)[".git/review-excludes"],
+        )
+
+        (self.repo_root / ".git" / "review-excludes").write_text(
+            "secret.txt\n", encoding="utf-8"
+        )
+        after = self._fingerprint()
+
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual([".git/review-excludes"], changed["ignore_config"])
+
+    def test_unset_excludes_file_falls_back_to_the_xdg_default(self) -> None:
+        xdg = self.tmp_path / "xdg"
+        with mock.patch.dict(
+            os.environ, {"XDG_CONFIG_HOME": str(xdg)}, clear=False
+        ):
+            self.assertEqual(
+                xdg / "git" / "ignore", runner._default_excludes_file()
+            )
+            os.environ["XDG_CONFIG_HOME"] = ""
+            os.environ["HOME"] = str(self.tmp_path / "home")
+            self.assertEqual(
+                self.tmp_path / "home" / ".config" / "git" / "ignore",
+                runner._default_excludes_file(),
+            )
+
+    def test_non_excluded_change_still_trips_the_guard(self) -> None:
+        before = self._fingerprint("claude")
+
+        self._write("README.md", "mutated\n")
+        after = self._fingerprint("claude")
+
+        self.assertNotEqual(before, after)
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual(["README.md"], changed["tracked"])
+
+    def test_changed_paths_reports_tracked_and_untracked_movement(self) -> None:
+        self._write("kept.txt", "kept\n")
+        self._write("removed.txt", "removed\n")
+        before = self._fingerprint()
+
+        self._write("README.md", "mutated\n")
+        self._write("kept.txt", "changed\n")
+        (self.repo_root / "removed.txt").unlink()
+        self._write("added.txt", "added\n")
+        after = self._fingerprint()
+
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual(
+            {
+                "tracked": ["README.md"],
+                "untracked_added": ["added.txt"],
+                "untracked_removed": ["removed.txt"],
+                "untracked_changed": ["kept.txt"],
+                "worktree_ignore": [],
+                "ignore_config": [],
+                "head_changed": False,
+            },
+            changed,
+        )
+        self.assertEqual(
+            ": README.md, added.txt, kept.txt (+1 more)",
+            runner._review_guard_changed_summary(changed),
+        )
+
+    def test_untracked_symlink_is_fingerprinted_as_a_node(self) -> None:
+        self._write("payload.txt", "hi\n")
+        (self.repo_root / "link").symlink_to("payload.txt")
+        before = self._fingerprint()
+
+        self.assertIn(
+            ["link", "symlink", hashlib.sha256(b"payload.txt").hexdigest()],
+            before["untracked"],
+        )
+
+        # Following the link would have hashed the target's bytes, so replacing
+        # the link with a regular file holding those bytes compared equal.
+        (self.repo_root / "link").unlink()
+        self._write("link", "hi\n")
+        after = self._fingerprint()
+
+        self.assertNotEqual(before, after)
+        self.assertEqual(
+            ["link"],
+            runner._review_guard_changed_paths(before, after)["untracked_changed"],
+        )
+
+    def test_retargeted_dangling_symlink_trips_the_guard(self) -> None:
+        (self.repo_root / "link").symlink_to("missing-a")
+        before = self._fingerprint()
+
+        (self.repo_root / "link").unlink()
+        (self.repo_root / "link").symlink_to("missing-b")
+        after = self._fingerprint()
+
+        # Reading through the link fails for both targets, so omitting the path
+        # left the mutation invisible in both fingerprints.
+        self.assertNotEqual(before, after)
+        self.assertEqual(
+            ["link"],
+            runner._review_guard_changed_paths(before, after)["untracked_changed"],
+        )
+
+    def test_renamed_tracked_file_names_both_sides(self) -> None:
+        subprocess.run(
+            ["git", "mv", "README.md", "DOCS.md"],
+            cwd=self.repo_root,
+            capture_output=True,
+            check=True,
+        )
+
+        fingerprint = self._fingerprint()
+
+        # Rename detection would report the destination only, hiding the source
+        # from the dirty-path evidence a later rereview scopes against.
+        self.assertEqual(["DOCS.md", "README.md"], fingerprint["tracked_changed"])
+        self.assertEqual(
+            ["DOCS.md", "README.md"],
+            sorted(entry[0] for entry in fingerprint["tracked_patches"]),
+        )
+
+    def test_unborn_head_fingerprints_staged_content_against_empty_tree(
+        self,
+    ) -> None:
+        unborn = self.tmp_path / "unborn"
+        unborn.mkdir()
+        subprocess.run(
+            ["git", "init"], cwd=unborn, capture_output=True, check=True
+        )
+        (unborn / "tracked.txt").write_text("one\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "tracked.txt"],
+            cwd=unborn,
+            capture_output=True,
+            check=True,
+        )
+
+        before = runner._capture_review_repo_fingerprint(unborn, self.plan_dir)
+        self.assertIsNone(runner._review_guard_unavailable_detail(before))
+        self.assertEqual("", before["head"])
+        self.assertEqual(["tracked.txt"], before["tracked_changed"])
+
+        (unborn / "tracked.txt").write_text("two\n", encoding="utf-8")
+        after = runner._capture_review_repo_fingerprint(unborn, self.plan_dir)
+
+        self.assertNotEqual(before, after)
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual(["tracked.txt"], changed["tracked"])
+        # No commit exists, so no base ref can be recorded for delta scoping.
+        self.assertIsNone(runner._review_repo_state(after))
+
+    def test_staged_change_masked_by_a_restored_file_trips_the_guard(
+        self,
+    ) -> None:
+        before = self._fingerprint()
+
+        self._write("README.md", "staged\n")
+        self._stage("README.md")
+        self._write("README.md", "test repo\n")
+        after = self._fingerprint()
+
+        # The working file is byte-identical to HEAD again, so every piece of
+        # evidence but the index diff compares equal across the turn.
+        self.assertEqual([], after["tracked_changed"])
+        self.assertEqual(before["diff_sha256"], after["diff_sha256"])
+        self.assertEqual(before["untracked"], after["untracked"])
+        self.assertEqual(["README.md"], after["index_changed"])
+        self.assertNotEqual(before, after)
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual(["README.md"], changed["tracked"])
+        self.assertEqual(
+            ": README.md", runner._review_guard_changed_summary(changed)
+        )
+
+    def test_an_excluded_path_is_dropped_from_the_index_evidence_too(
+        self,
+    ) -> None:
+        before = self._fingerprint("README.md")
+
+        self._write("README.md", "staged\n")
+        self._stage("README.md")
+        self._write("README.md", "test repo\n")
+
+        self.assertEqual(before, self._fingerprint("README.md"))
+
+    def _git_config(self, key: str, value: str) -> None:
+        subprocess.run(
+            ["git", "config", key, value],
+            cwd=self.repo_root,
+            capture_output=True,
+            check=True,
+        )
+
+    def _commit_constant_textconv_driver(self) -> None:
+        """Commit a diff driver that renders every content identically."""
+        self._write(".gitattributes", "*.txt diff=const\n")
+        self._write("masked.txt", "one\n")
+        self._commit_all("add a constant text converter")
+        self._git_config("diff.const.textconv", "printf CONST")
+
+    def test_a_textconv_driver_cannot_mask_a_worktree_mutation(self) -> None:
+        self._commit_constant_textconv_driver()
+
+        self._write("masked.txt", "two\n")
+        before = self._fingerprint()
+        self._write("masked.txt", "three\n")
+        after = self._fingerprint()
+
+        # Git renders no patch at all for a path whose converted text did not
+        # move, and the path is already dirty in both captures, so the name
+        # lists cannot tell the two contents apart either.
+        self.assertEqual("", self._git("diff", "HEAD", "--", "masked.txt"))
+        self.assertEqual(["masked.txt"], before["tracked_changed"])
+        self.assertEqual(before["tracked_changed"], after["tracked_changed"])
+
+        self.assertNotEqual(before["diff_sha256"], after["diff_sha256"])
+        self.assertNotEqual(before["tracked_patches"], after["tracked_patches"])
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual(["masked.txt"], changed["tracked"])
+
+    def test_a_textconv_driver_cannot_mask_a_staged_mutation(self) -> None:
+        self._commit_constant_textconv_driver()
+
+        self._write("masked.txt", "two\n")
+        self._stage("masked.txt")
+        before = self._fingerprint()
+        self._write("masked.txt", "three\n")
+        self._stage("masked.txt")
+        after = self._fingerprint()
+
+        self.assertEqual(
+            "", self._git("diff", "--cached", "HEAD", "--", "masked.txt")
+        )
+        self.assertEqual(["masked.txt"], before["index_changed"])
+        self.assertEqual(before["index_changed"], after["index_changed"])
+
+        self.assertNotEqual(
+            before["index_diff_sha256"], after["index_diff_sha256"]
+        )
+        self.assertNotEqual(before["index_patches"], after["index_patches"])
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual(["masked.txt"], changed["tracked"])
+
+    def test_an_external_diff_driver_cannot_mask_a_mutation(self) -> None:
+        # Lives outside the repository so the driver itself is not evidence.
+        driver = self.tmp_path / "constant-diff.sh"
+        driver.write_text("#!/bin/sh\necho CONSTANT\n", encoding="utf-8")
+        driver.chmod(0o755)
+        self._git_config("diff.external", str(driver))
+
+        self._write("README.md", "two\n")
+        before = self._fingerprint()
+        self._write("README.md", "three\n")
+        after = self._fingerprint()
+
+        self.assertEqual("CONSTANT\n", self._git("diff", "HEAD", "--", "README.md"))
+        self.assertNotEqual(before["diff_sha256"], after["diff_sha256"])
+        self.assertNotEqual(before["tracked_patches"], after["tracked_patches"])
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual(["README.md"], changed["tracked"])
+
+    def test_a_named_path_git_renders_no_patch_for_fails_closed(self) -> None:
+        self._write("README.md", "mutated\n")
+        real_run_git = runner._run_git
+
+        def fake_run_git(cwd, args):
+            result = real_run_git(cwd, args)
+            if tuple(args[:3]) == ("diff", "HEAD", "--no-renames"):
+                return subprocess.CompletedProcess(
+                    args=result.args, returncode=0, stdout="", stderr=""
+                )
+            return result
+
+        with mock.patch.object(runner, "_run_git", fake_run_git):
+            fingerprint = self._fingerprint()
+
+        # A named path with no patch carries no content, so pairing short would
+        # make any two of its contents compare equal.
+        detail = runner._review_guard_unavailable_detail(fingerprint)
+        self.assertIsNotNone(detail)
+        self.assertEqual("tracked-patch-missing", detail["reason"])
+        self.assertNotIn("tracked_patches", fingerprint)
+
+    def _flag_index_entry(self, rel: str, flag: str) -> None:
+        subprocess.run(
+            ["git", "update-index", flag, rel],
+            cwd=self.repo_root,
+            capture_output=True,
+            check=True,
+        )
+
+    def test_index_flagged_file_mutation_trips_the_guard(self) -> None:
+        for flag, rel in (
+            ("--assume-unchanged", "assumed.txt"),
+            ("--skip-worktree", "skipped.txt"),
+        ):
+            with self.subTest(flag=flag):
+                self._write(rel, "one\n")
+                self._commit_all(f"add {rel}")
+                self._flag_index_entry(rel, flag)
+                before = self._fingerprint()
+
+                self._write(rel, "two\n")
+                after = self._fingerprint()
+
+                # Git honours the flag by never comparing the entry against the
+                # working tree, so every diff-derived key compares equal across
+                # a mutation git itself refuses to look at.
+                self.assertEqual([], after["tracked_changed"])
+                self.assertEqual([], after["index_changed"])
+                self.assertEqual(before["diff_sha256"], after["diff_sha256"])
+                self.assertEqual(
+                    before["index_diff_sha256"], after["index_diff_sha256"]
+                )
+                self.assertEqual(before["untracked"], after["untracked"])
+
+                self.assertNotEqual(before, after)
+                changed = runner._review_guard_changed_paths(before, after)
+                self.assertEqual([rel], changed["tracked"])
+                self.assertEqual(
+                    f": {rel}", runner._review_guard_changed_summary(changed)
+                )
+
+    def test_deleted_skip_worktree_file_trips_the_guard(self) -> None:
+        self._write("sparse.txt", "one\n")
+        self._commit_all("add sparse.txt")
+        self._flag_index_entry("sparse.txt", "--skip-worktree")
+        before = self._fingerprint()
+
+        # Removing the file is the ordinary skip-worktree state, so it is
+        # recorded rather than failing the capture closed — but it is still a
+        # repository mutation the reviewer's tree did not have.
+        (self.repo_root / "sparse.txt").unlink()
+        after = self._fingerprint()
+
+        self.assertEqual("", self._git_status_porcelain())
+        self.assertEqual(
+            ["sparse.txt", "absent"], after["index_flagged"][0][:2]
+        )
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertEqual(["sparse.txt"], changed["tracked"])
+
+    def test_an_excluded_index_flagged_path_is_not_fingerprinted(self) -> None:
+        self._write("vendor/pinned.txt", "one\n")
+        self._commit_all("add vendor tree")
+        self._flag_index_entry("vendor/pinned.txt", "--skip-worktree")
+        before = self._fingerprint("vendor")
+
+        self._write("vendor/pinned.txt", "two\n")
+
+        self.assertEqual([], before["index_flagged"])
+        self.assertEqual(before, self._fingerprint("vendor"))
+        self.assertEqual(
+            ["vendor/pinned.txt"],
+            [entry[0] for entry in self._fingerprint()["index_flagged"]],
+        )
+
+    def _git(self, *args: str) -> str:
+        return subprocess.run(
+            ["git", *args],
+            cwd=self.repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+
+    def _git_status_porcelain(self) -> str:
+        return self._git("status", "--porcelain").strip()
+
+    def test_failed_git_probe_yields_an_unavailable_fingerprint(self) -> None:
+        failing = {
+            "diff": ("diff", "HEAD"),
+            "name-only": ("diff", "HEAD", "--name-only"),
+            "index-diff": ("diff", "--cached", "HEAD", "--no-renames"),
+            "index-name-only": ("diff", "--cached", "HEAD", "--name-only"),
+            "untracked": ("ls-files", "--others"),
+        }
+        real_run_git = runner._run_git
+        for label, prefix in failing.items():
+            with self.subTest(probe=label):
+
+                def fake_run_git(cwd, args, _prefix=prefix):
+                    if tuple(args[: len(_prefix)]) == _prefix:
+                        return subprocess.CompletedProcess(
+                            args=["git", *args],
+                            returncode=128,
+                            stdout="",
+                            stderr="fatal: broken index\n",
+                        )
+                    return real_run_git(cwd, args)
+
+                with mock.patch.object(runner, "_run_git", fake_run_git):
+                    fingerprint = self._fingerprint()
+
+                detail = runner._review_guard_unavailable_detail(fingerprint)
+                self.assertIsNotNone(detail)
+                self.assertEqual("git-command-failed", detail["reason"])
+                self.assertEqual(128, detail["returncode"])
+                self.assertEqual("fatal: broken index", detail["stderr"])
+                self.assertEqual(list(prefix), detail["argv"][: len(prefix)])
+                # The failure must not masquerade as clean evidence.
+                self.assertNotIn("diff_sha256", fingerprint)
+                self.assertNotIn("tracked_changed", fingerprint)
+                self.assertNotIn("untracked", fingerprint)
+
+    def test_untracked_read_error_yields_an_unavailable_fingerprint(self) -> None:
+        self._write("scratch.txt", "readable\n")
+        real_read_bytes = Path.read_bytes
+
+        def fake_read_bytes(self_path: Path) -> bytes:
+            if self_path.name == "scratch.txt":
+                raise OSError(errno.EIO, "input/output error")
+            return real_read_bytes(self_path)
+
+        with mock.patch.object(Path, "read_bytes", fake_read_bytes):
+            fingerprint = self._fingerprint()
+
+        detail = runner._review_guard_unavailable_detail(fingerprint)
+        self.assertIsNotNone(detail)
+        self.assertEqual("untracked-path-unreadable", detail["reason"])
+        self.assertEqual("scratch.txt", detail["path"])
+        self.assertIn("input/output error", detail["error"])
+        # A dropped path must not leave the rest of the capture usable.
+        self.assertNotIn("untracked", fingerprint)
+        self.assertNotIn("diff_sha256", fingerprint)
+
+    def test_untracked_path_git_reports_but_that_vanished_fails_closed(
+        self,
+    ) -> None:
+        real_run_git = runner._run_git
+
+        def fake_run_git(cwd, args):
+            if tuple(args[:2]) == ("ls-files", "--others"):
+                return subprocess.CompletedProcess(
+                    args=["git", *args],
+                    returncode=0,
+                    stdout="vanished.txt\n",
+                    stderr="",
+                )
+            return real_run_git(cwd, args)
+
+        with mock.patch.object(runner, "_run_git", fake_run_git):
+            fingerprint = self._fingerprint()
+
+        detail = runner._review_guard_unavailable_detail(fingerprint)
+        self.assertIsNotNone(detail)
+        self.assertEqual("untracked-path-unreadable", detail["reason"])
+        self.assertEqual("vanished.txt", detail["path"])
+
+    def test_unrunnable_git_yields_an_unavailable_fingerprint(self) -> None:
+        def fake_run_git(cwd, args):
+            raise runner.RunError("git executable not found on PATH")
+
+        with mock.patch.object(runner, "_run_git", fake_run_git):
+            fingerprint = self._fingerprint()
+
+        detail = runner._review_guard_unavailable_detail(fingerprint)
+        self.assertIsNotNone(detail)
+        self.assertEqual("git-unrunnable", detail["reason"])
+        self.assertIn("git executable not found", detail["error"])
+
+    def test_non_repository_is_not_treated_as_unavailable(self) -> None:
+        outside = self.tmp_path / "outside"
+        outside.mkdir()
+
+        # The ceiling keeps the answer independent of whatever encloses the
+        # temporary directory on the machine running the suite.
+        with patched_env(GIT_CEILING_DIRECTORIES=str(self.tmp_path)):
+            fingerprint = runner._capture_review_repo_fingerprint(
+                outside, self.plan_dir
+            )
+
+        self.assertEqual({"git": False}, fingerprint)
+        self.assertIsNone(runner._review_guard_unavailable_detail(fingerprint))
+
+    def test_changed_paths_reports_a_moved_head(self) -> None:
+        before = self._fingerprint()
+        self._write("README.md", "committed\n")
+        subprocess.run(
+            ["git", "commit", "-am", "second"],
+            cwd=self.repo_root,
+            capture_output=True,
+            check=True,
+        )
+        after = self._fingerprint()
+
+        changed = runner._review_guard_changed_paths(before, after)
+        self.assertTrue(changed["head_changed"])
+        self.assertEqual("", runner._review_guard_changed_summary(changed))
+
+
+class ReviewDeltaScopeTests(unittest.TestCase):
+    """Scope selection for a re-review that follows a repair cycle."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.repo_root = self.tmp_path / "repo"
+        self.plan_dir = self.tmp_path / "plan"
+        init_git_repo(self.repo_root)
+        self.event_path = self.tmp_path / "events.jsonl"
+        self.finding = _structured_review_finding()
+        write_completed_review_plan(self.plan_dir, [self.finding])
+
+    def _git(self, *args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=self.repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+
+    def _commit(self, rel: str, text: str) -> str:
+        path = self.repo_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        self._git("add", rel)
+        self._git("commit", "-m", f"write {rel}")
+        return self._git("rev-parse", "HEAD")
+
+    def _record_repair_cycle(self, **overrides: object) -> None:
+        record: dict[str, object] = {
+            "cycle": 1,
+            "disposition": runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+            "review_session_id": "2",
+            "repair_session_ids": ["2.1"],
+            "fingerprints": ["finding:F1"],
+            "worktree_dirty": False,
+            "dirty_paths": [],
+        }
+        record.update(overrides)
+        events.append_event(
+            self.event_path, events.Event(events.REVIEW_CYCLE_EVENT, record)
+        )
+
+    def _record_repair_progress(self, *files: str) -> None:
+        plans.append_progress_entry(
+            self.plan_dir,
+            plans.ProgressEntry(
+                session_id=plans.parse_session_id("2.1"),
+                status="complete",
+                completed_at="2026-01-01T00:00:00Z",
+                files_modified=files,
+            ),
+        )
+
+    def _compute(
+        self, cwd: Path | None = None
+    ) -> tuple[dict[str, object] | None, str | None]:
+        return runner._compute_review_delta_context(
+            event_path=self.event_path,
+            plan_dir=self.plan_dir,
+            cwd=self.repo_root if cwd is None else cwd,
+        )
+
+    def _scope_diff_commands(self, scope: str) -> list[str]:
+        """Return the `git` commands the rendered scope tells a reviewer to run."""
+        return [
+            span
+            for span in scope.split("`")[1::2]
+            if span.startswith("git ")
+        ]
+
+    def _scope_section(self, delta: dict[str, object]) -> str:
+        """Return the `### Scope` text the reviewer is actually told to read."""
+        body = runner.build_generated_review_session_body(
+            plans.parse_session_id("3"),
+            review_harness="codex",
+            plan_dir=self.plan_dir,
+            delta=delta,
+        )
+        self.assertIn("## Delta Review Scope", body)
+        return body.split("### Scope", 1)[1]
+
+    def test_first_review_without_repair_history_is_full_scope(self) -> None:
+        self.assertEqual((None, "no-prior-repair-cycle"), self._compute())
+
+    def test_unloadable_prior_findings_fall_back_to_full_scope(self) -> None:
+        self._record_repair_cycle(repo_head=self._git("rev-parse", "HEAD"))
+        (self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).unlink()
+
+        self.assertEqual((None, "prior-findings-unavailable"), self._compute())
+
+    def test_committed_repairs_scope_review_to_the_recorded_base(
+        self,
+    ) -> None:
+        base = self._commit("src/base.py", "base\n")
+        self._record_repair_cycle(repo_head=base, worktree_dirty=False)
+        self._commit("src/repair.py", "repaired\n")
+
+        delta, fallback_reason = self._compute()
+
+        self.assertIsNone(fallback_reason)
+        assert delta is not None
+        self.assertEqual(runner.REVIEW_SCOPE_DELTA, delta["mode"])
+        self.assertEqual(base, delta["base_sha"])
+        self.assertEqual(["src/repair.py"], delta["changed_files"])
+        self.assertEqual([self.finding], delta["prior_findings"])
+
+        scope = self._scope_section(delta)
+        flags = " ".join(runner._DELTA_DIFF_FLAGS)
+        self.assertEqual(
+            [
+                f"git diff {flags} {base}",
+                f"git diff --cached {flags} {base}",
+            ],
+            self._scope_diff_commands(scope),
+        )
+        self.assertIn("src/repair.py", scope)
+
+    def test_scope_covers_repairs_the_handoff_never_declared(self) -> None:
+        base = self._commit("src/base.py", "base\n")
+        self._record_repair_cycle(repo_head=base)
+        # Uncommitted repair work: one edit to a tracked file and one brand new
+        # file, of which the handoff declared only the first.
+        (self.repo_root / "src" / "base.py").write_text(
+            "repaired\n", encoding="utf-8"
+        )
+        (self.repo_root / "src" / "collateral.py").write_text(
+            "collateral\n", encoding="utf-8"
+        )
+        self._record_repair_progress("src/base.py")
+
+        delta, fallback_reason = self._compute()
+
+        self.assertIsNone(fallback_reason)
+        assert delta is not None
+        self.assertEqual(runner.REVIEW_SCOPE_DELTA, delta["mode"])
+        self.assertEqual(
+            ["src/base.py", "src/collateral.py"], delta["changed_files"]
+        )
+        self.assertIn("src/collateral.py", self._scope_section(delta))
+
+    def test_ignored_repair_file_stays_out_of_scope(self) -> None:
+        base = self._commit(".gitignore", "generated/\n")
+        self._record_repair_cycle(repo_head=base)
+        generated = self.repo_root / "generated"
+        generated.mkdir()
+        (generated / "artifact.txt").write_text("repaired\n", encoding="utf-8")
+        src = self.repo_root / "src"
+        src.mkdir()
+        (src / "repair.py").write_text("repaired\n", encoding="utf-8")
+
+        delta, fallback_reason = self._compute()
+
+        self.assertIsNone(fallback_reason)
+        assert delta is not None
+        self.assertEqual(runner.REVIEW_SCOPE_DELTA, delta["mode"])
+        self.assertEqual(["src/repair.py"], delta["changed_files"])
+        self.assertNotIn("generated/artifact.txt", self._scope_section(delta))
+
+    def test_renamed_files_keep_both_paths_in_scope(self) -> None:
+        base = self._commit("src/before.py", "moved\n")
+        self._record_repair_cycle(repo_head=base)
+        self._git("mv", "src/before.py", "src/after.py")
+        self._git("commit", "-m", "rename")
+
+        delta, fallback_reason = self._compute()
+
+        self.assertIsNone(fallback_reason)
+        assert delta is not None
+        self.assertEqual(
+            ["src/after.py", "src/before.py"], delta["changed_files"]
+        )
+
+    def test_dirty_baseline_keeps_a_restored_tracked_file_in_scope(
+        self,
+    ) -> None:
+        base = self._commit("src/base.py", "base\n")
+        # The reviewer read an uncommitted edit to src/base.py.
+        (self.repo_root / "src" / "base.py").write_text(
+            "reviewed wip\n", encoding="utf-8"
+        )
+        self._record_repair_cycle(
+            repo_head=base,
+            worktree_dirty=True,
+            dirty_paths=["src/base.py"],
+        )
+        # The repair restored it to the committed content, so the current
+        # base-to-worktree diff no longer mentions it at all.
+        (self.repo_root / "src" / "base.py").write_text(
+            "base\n", encoding="utf-8"
+        )
+        self._commit("src/repair.py", "repaired\n")
+        self.assertEqual(
+            "src/repair.py",
+            self._git("diff", "--name-only", "--no-renames", base),
+        )
+
+        delta, fallback_reason = self._compute()
+
+        self.assertIsNone(fallback_reason)
+        assert delta is not None
+        self.assertEqual(runner.REVIEW_SCOPE_DELTA, delta["mode"])
+        self.assertEqual(
+            ["src/base.py", "src/repair.py"], delta["changed_files"]
+        )
+        self.assertIs(True, delta["baseline_dirty"])
+        scope = self._scope_section(delta)
+        self.assertIn("src/base.py", scope)
+        self.assertIn("carried uncommitted changes", scope)
+
+    def test_dirty_baseline_keeps_a_deleted_untracked_file_in_scope(
+        self,
+    ) -> None:
+        base = self._commit("src/base.py", "base\n")
+        scratch = self.repo_root / "src" / "scratch.py"
+        scratch.write_text("reviewed scratch\n", encoding="utf-8")
+        self._record_repair_cycle(
+            repo_head=base,
+            worktree_dirty=True,
+            dirty_paths=["src/scratch.py"],
+        )
+        # The repair deleted the untracked file the reviewer saw, so neither
+        # the diff nor the untracked scan reports it any more.
+        scratch.unlink()
+
+        delta, fallback_reason = self._compute()
+
+        self.assertIsNone(fallback_reason)
+        assert delta is not None
+        self.assertEqual(runner.REVIEW_SCOPE_DELTA, delta["mode"])
+        self.assertEqual(["src/scratch.py"], delta["changed_files"])
+        self.assertIn("src/scratch.py", self._scope_section(delta))
+
+    def test_staged_repair_masked_by_a_restored_file_stays_in_scope(
+        self,
+    ) -> None:
+        base = self._commit("src/base.py", "base\n")
+        self._record_repair_cycle(repo_head=base)
+        # The repair staged an edit and then restored the working file to its
+        # committed bytes, so only the index still carries the change.
+        target = self.repo_root / "src" / "base.py"
+        target.write_text("repaired\n", encoding="utf-8")
+        self._git("add", "src/base.py")
+        target.write_text("base\n", encoding="utf-8")
+        self.assertEqual(
+            "", self._git("diff", "--name-only", "--no-renames", base)
+        )
+
+        delta, fallback_reason = self._compute()
+
+        self.assertIsNone(fallback_reason)
+        assert delta is not None
+        self.assertEqual(runner.REVIEW_SCOPE_DELTA, delta["mode"])
+        self.assertEqual(["src/base.py"], delta["changed_files"])
+        self.assertIn("src/base.py", self._scope_section(delta))
+
+    def test_rendered_scope_exposes_the_staged_patch_not_just_its_path(
+        self,
+    ) -> None:
+        base = self._commit("src/base.py", "base\n")
+        self._record_repair_cycle(repo_head=base)
+        target = self.repo_root / "src" / "base.py"
+        target.write_text("repaired\n", encoding="utf-8")
+        self._git("add", "src/base.py")
+        target.write_text("base\n", encoding="utf-8")
+
+        delta, fallback_reason = self._compute()
+
+        self.assertIsNone(fallback_reason)
+        assert delta is not None
+        commands = self._scope_diff_commands(self._scope_section(delta))
+        self.assertEqual(2, len(commands))
+        patches = [self._git(*command.split()[1:]) for command in commands]
+        # The repair restored the working file, so the base-to-worktree patch
+        # is empty: only the second command carries the staged bytes.
+        self.assertEqual("", patches[0])
+        self.assertIn("src/base.py", patches[1])
+        self.assertIn("+repaired", patches[1])
+
+    def test_a_constant_textconv_cannot_empty_the_rendered_patches(
+        self,
+    ) -> None:
+        (self.repo_root / ".gitattributes").write_text(
+            "*.txt diff=const\n", encoding="utf-8"
+        )
+        (self.repo_root / "masked.txt").write_text("one\n", encoding="utf-8")
+        self._git("add", ".gitattributes", "masked.txt")
+        base = self._commit("staged.txt", "one\n")
+        self._git("config", "diff.const.textconv", "printf CONST")
+        self._record_repair_cycle(repo_head=base)
+        (self.repo_root / "masked.txt").write_text(
+            "worktree-repair\n", encoding="utf-8"
+        )
+        staged = self.repo_root / "staged.txt"
+        staged.write_text("cached-repair\n", encoding="utf-8")
+        self._git("add", "staged.txt")
+        staged.write_text("one\n", encoding="utf-8")
+        # The converter renders every content as the same constant text, so
+        # git prints no patch at all without the presentation flags and this
+        # regression cannot pass vacuously.
+        self.assertEqual(
+            "", self._git("diff", "--no-renames", "--no-relative", base)
+        )
+        self.assertEqual(
+            "",
+            self._git("diff", "--cached", "--no-renames", "--no-relative", base),
+        )
+        # Both name selectors still see past the converter, so the repairs are
+        # in the file list either way.
+        flags = list(runner._DELTA_DIFF_FLAGS)
+        self.assertEqual(
+            "masked.txt", self._git("diff", "--name-only", *flags, base)
+        )
+        self.assertEqual(
+            "staged.txt",
+            self._git("diff", "--cached", "--name-only", *flags, base),
+        )
+
+        delta, fallback_reason = self._compute()
+
+        self.assertIsNone(fallback_reason)
+        assert delta is not None
+        self.assertEqual(["masked.txt", "staged.txt"], delta["changed_files"])
+
+        commands = self._scope_diff_commands(self._scope_section(delta))
+        self.assertEqual(2, len(commands))
+        patches = [self._git(*command.split()[1:]) for command in commands]
+        self.assertIn("+worktree-repair", patches[0])
+        self.assertIn("+cached-repair", patches[1])
+
+    def test_nested_cwd_keeps_repository_root_repairs_in_scope(self) -> None:
+        self._commit("nested/base.py", "base\n")
+        self._commit("root_staged.py", "base\n")
+        base = self._commit("root.py", "base\n")
+        self._record_repair_cycle(repo_head=base)
+        self._git("config", "diff.relative", "true")
+        (self.repo_root / "nested" / "base.py").write_text(
+            "repaired\n", encoding="utf-8"
+        )
+        (self.repo_root / "root.py").write_text("repaired\n", encoding="utf-8")
+        staged = self.repo_root / "root_staged.py"
+        staged.write_text("repaired\n", encoding="utf-8")
+        self._git("add", "root_staged.py")
+        staged.write_text("base\n", encoding="utf-8")
+        # Unpinned, both probes report only the nested subtree from that
+        # directory, so this regression cannot pass vacuously.
+        self.assertEqual(
+            "base.py",
+            self._git(
+                "-C", "nested", "diff", "--name-only", "--no-renames", base
+            ),
+        )
+        self.assertEqual(
+            "",
+            self._git(
+                "-C",
+                "nested",
+                "diff",
+                "--cached",
+                "--name-only",
+                "--no-renames",
+                base,
+            ),
+        )
+
+        delta, fallback_reason = self._compute(cwd=self.repo_root / "nested")
+
+        self.assertIsNone(fallback_reason)
+        assert delta is not None
+        self.assertEqual(
+            ["nested/base.py", "root.py", "root_staged.py"],
+            delta["changed_files"],
+        )
+        # The rendered commands must reach as far as that list does, run the
+        # way a reviewer in the same nested directory would run them.
+        commands = self._scope_diff_commands(self._scope_section(delta))
+        self.assertEqual(2, len(commands))
+        patches = [
+            self._git("-C", "nested", *command.split()[1:])
+            for command in commands
+        ]
+        self.assertIn("root.py", patches[0])
+        self.assertIn("root_staged.py", patches[1])
+
+    def test_repair_to_an_index_flagged_file_stays_in_scope(self) -> None:
+        for flag, rel in (
+            ("--assume-unchanged", "src/assumed.py"),
+            ("--skip-worktree", "src/skipped.py"),
+        ):
+            with self.subTest(flag=flag):
+                base = self._commit(rel, "base\n")
+                self._git("update-index", flag, rel)
+                self._record_repair_cycle(repo_head=base)
+                # The repair edits the flagged file, which git reports in no
+                # diff at all.
+                (self.repo_root / rel).write_text("repaired\n", encoding="utf-8")
+                self.assertEqual(
+                    "", self._git("diff", "--name-only", "--no-renames", base)
+                )
+                self.assertEqual(
+                    "", self._git("diff", "--cached", "--name-only", base)
+                )
+
+                delta, fallback_reason = self._compute()
+
+                self.assertIsNone(fallback_reason)
+                assert delta is not None
+                self.assertEqual(runner.REVIEW_SCOPE_DELTA, delta["mode"])
+                self.assertIn(rel, delta["changed_files"])
+                self.assertIn(rel, self._scope_section(delta))
+
+    def test_repo_state_carries_an_index_flagged_path_into_the_next_scope(
+        self,
+    ) -> None:
+        head = self._git("rev-parse", "HEAD")
+        self._git("update-index", "--skip-worktree", "README.md")
+
+        state = self._repo_state()
+
+        # No diff can prove the flagged entry matches HEAD, so the reviewed
+        # tree is recorded as dirty at that path and the next rereview keeps it.
+        self.assertEqual(
+            {
+                "head": head,
+                "worktree_dirty": True,
+                "dirty_paths": ["README.md"],
+            },
+            state,
+        )
+
+    def test_dirty_baseline_without_path_evidence_is_full_scope(self) -> None:
+        base = self._commit("src/base.py", "base\n")
+        self._record_repair_cycle(
+            repo_head=base, worktree_dirty=True, dirty_paths=None
+        )
+        self._commit("src/repair.py", "repaired\n")
+
+        delta, fallback_reason = self._compute()
+
+        self.assertEqual("dirty-base-evidence-missing", fallback_reason)
+        assert delta is not None
+        self.assertEqual(runner.REVIEW_SCOPE_FULL, delta["mode"])
+        self.assertNotIn("src/", self._scope_section(delta))
+
+    def test_cycle_with_unknown_dirtiness_is_full_scope(self) -> None:
+        base = self._commit("src/base.py", "base\n")
+        # A cycle recorded before dirty-path evidence existed.
+        self._record_repair_cycle(
+            repo_head=base, worktree_dirty=None, dirty_paths=None
+        )
+        self._commit("src/repair.py", "repaired\n")
+
+        delta, fallback_reason = self._compute()
+
+        self.assertEqual("dirty-base-evidence-missing", fallback_reason)
+        assert delta is not None
+        self.assertEqual(runner.REVIEW_SCOPE_FULL, delta["mode"])
+
+    def test_cycle_without_recorded_base_falls_back_to_full_scope(
+        self,
+    ) -> None:
+        self._record_repair_cycle()
+        self._record_repair_progress("src/repair.py")
+
+        delta, fallback_reason = self._compute()
+
+        self.assertEqual("no-recorded-base", fallback_reason)
+        assert delta is not None
+        self.assertEqual(runner.REVIEW_SCOPE_FULL, delta["mode"])
+        self.assertNotIn("base_sha", delta)
+        self.assertEqual([self.finding], delta["prior_findings"])
+        self.assertNotIn("src/", self._scope_section(delta))
+
+    def test_unknown_base_commit_falls_back_to_full_scope(self) -> None:
+        self._record_repair_cycle(repo_head="0" * 40)
+        self._record_repair_progress("src/repair.py")
+
+        delta, fallback_reason = self._compute()
+
+        self.assertEqual("base-unresolvable", fallback_reason)
+        assert delta is not None
+        self.assertEqual(runner.REVIEW_SCOPE_FULL, delta["mode"])
+        self.assertNotIn("src/", self._scope_section(delta))
+
+    def test_rewritten_history_falls_back_to_full_scope(self) -> None:
+        keep = self._git("rev-parse", "HEAD")
+        dropped = self._commit("src/dropped.py", "dropped\n")
+        self._record_repair_cycle(repo_head=dropped)
+        # A rebase/reset moves the recorded base off the current history while
+        # the commit object itself still resolves.
+        self._git("reset", "--hard", keep)
+        self._commit("src/repair.py", "repaired\n")
+        self._record_repair_progress("src/dropped.py")
+
+        delta, fallback_reason = self._compute()
+
+        self.assertEqual("base-not-ancestor", fallback_reason)
+        assert delta is not None
+        self.assertEqual(runner.REVIEW_SCOPE_FULL, delta["mode"])
+        # The reviewer is given no file list at all, so neither the handoff's
+        # stale path nor the file the repair really changed can be excluded.
+        scope = self._scope_section(delta)
+        self.assertIn("this scope is not narrowed", scope)
+        self.assertNotIn("src/", scope)
+
+    def test_failed_git_probes_fall_back_to_full_scope(self) -> None:
+        base = self._commit("src/base.py", "base\n")
+        self._record_repair_cycle(repo_head=base)
+        self._commit("src/repair.py", "repaired\n")
+        real_run_git = runner._run_git
+
+        for prefix, reason in (
+            (("diff", "--name-only"), "base-diff-failed"),
+            (("diff", "--cached"), "index-diff-failed"),
+            (("ls-files", "--others"), "untracked-scan-failed"),
+            (("ls-files", "-v"), "index-flags-scan-failed"),
+        ):
+            with self.subTest(command=prefix):
+
+                def fail_one(cwd, args, _prefix=prefix):
+                    if tuple(args[: len(_prefix)]) == _prefix:
+                        return subprocess.CompletedProcess(args, 128, "", "boom")
+                    return real_run_git(cwd, args)
+
+                with mock.patch.object(runner, "_run_git", fail_one):
+                    delta, fallback_reason = self._compute()
+
+                self.assertEqual(reason, fallback_reason)
+                assert delta is not None
+                self.assertEqual(runner.REVIEW_SCOPE_FULL, delta["mode"])
+                self.assertNotIn("src/", self._scope_section(delta))
+
+    def _repo_state(self) -> dict[str, object] | None:
+        return runner._review_repo_state(
+            runner._capture_review_repo_fingerprint(
+                self.repo_root, self.plan_dir, exclude=()
+            )
+        )
+
+    def _advance_cycle(
+        self, repo_state: object
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        """Run one all-clear cycle and return its state and event records."""
+        write_completed_review_plan(self.plan_dir, [])
+        snapshot = plans.inspect_plan(self.plan_dir)
+        payload: dict[str, object] = {
+            "run_id": "run-1",
+            "run_dir": str(self.tmp_path / "run"),
+            "review_cycles": [],
+        }
+
+        action, _ = runner._advance_review_cycle(
+            event_path=self.event_path,
+            payload=payload,
+            persistence=runner._RunPersistence(),
+            args=argparse.Namespace(
+                state_dir=str(self.tmp_path / "state"),
+                allow_not_loop_ready=False,
+            ),
+            cwd=self.repo_root,
+            session_id="2",
+            session_label="session 2",
+            session_details={"session": "2"},
+            snapshot=snapshot,
+            turn_payload={
+                "review_verdict": {
+                    "passed": True,
+                    "outcome": "all-clear",
+                    "total_findings": 0,
+                    "findings": [],
+                },
+                "review_repo_state": repo_state,
+            },
+            max_review_fix_cycles=1,
+            plan_cache=plans.PlanSnapshotCache(),
+        )
+
+        self.assertEqual("complete", action)
+        recorded = [
+            entry["payload"]
+            for entry in read_jsonl(self.event_path)
+            if entry["name"] == events.REVIEW_CYCLE_EVENT
+        ]
+        return payload["review_cycles"][0], recorded[-1]
+
+    def _pending_delta_body(self) -> str:
+        """Render the session file a crashed run would have left pending."""
+        delta, fallback_reason = self._compute()
+        self.assertIsNone(fallback_reason)
+        return runner.build_generated_review_session_body(
+            plans.parse_session_id("3"),
+            review_harness="codex",
+            plan_dir=self.plan_dir,
+            delta=delta,
+        )
+
+    def test_rescoping_lists_an_untracked_file_added_after_the_session(
+        self,
+    ) -> None:
+        base = self._commit("src/base.py", "base\n")
+        self._record_repair_cycle(repo_head=base)
+        original = self._pending_delta_body()
+        self.assertNotIn("src/late.py", original)
+        # Untracked files are absent from `git diff <base>`, so the static list
+        # is the only thing that can tell the reviewer to read this one.
+        (self.repo_root / "src" / "late.py").write_text(
+            "late\n", encoding="utf-8"
+        )
+
+        refreshed = runner.rescoped_review_session_body(
+            original, self._compute()[0]
+        )
+
+        assert refreshed is not None
+        self.assertIn("  - `src/late.py`", refreshed)
+        # Identity, version marker, and the pending handoff survive intact.
+        session_path = self.plan_dir / "session-3.md"
+        session_path.write_text(refreshed, encoding="utf-8")
+        self.assertTrue(runner.is_generated_review_session_file(session_path))
+        self.assertEqual(
+            runner.generated_review_session_version(session_path),
+            runner.generated_review_session_version(
+                self.plan_dir / "session-2.md"
+            ),
+        )
+        session = plans.SessionFile(
+            session_id=plans.parse_session_id("3"), path=session_path
+        )
+        self.assertEqual("pending", plans.read_session_status(session).status)
+        self.assertEqual(
+            original.split("## Completion Contract", 1)[1],
+            refreshed.split("## Completion Contract", 1)[1],
+        )
+        self.assertIn(f"- `{self.finding['id']}`", refreshed)
+
+    def test_rescoping_widens_to_full_when_the_evidence_is_gone(self) -> None:
+        base = self._commit("src/base.py", "base\n")
+        self._record_repair_cycle(repo_head=base)
+        self._commit("src/repair.py", "repaired\n")
+        original = self._pending_delta_body()
+        self.assertIn("  - `src/repair.py`", original)
+        # Without the findings artifact the narrowed list can no longer be
+        # shown to cover the repair work.
+        (self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).unlink()
+        delta, fallback_reason = self._compute()
+        self.assertEqual((None, "prior-findings-unavailable"), (delta, fallback_reason))
+
+        refreshed = runner.rescoped_review_session_body(original, delta)
+
+        assert refreshed is not None
+        self.assertIn("this scope is not narrowed", refreshed)
+        self.assertNotIn(base, refreshed)
+        self.assertNotIn("src/repair.py", refreshed)
+        # The prior findings still have to be re-verified.
+        self.assertIn(f"- `{self.finding['id']}`", refreshed)
+
+    def test_a_full_scope_session_is_never_narrowed_by_a_refresh(self) -> None:
+        self._record_repair_cycle(repo_head=self._commit("src/base.py", "b\n"))
+        full_body = runner.build_generated_review_session_body(
+            plans.parse_session_id("3"),
+            review_harness="codex",
+            plan_dir=self.plan_dir,
+        )
+
+        self.assertIsNone(
+            runner.rescoped_review_session_body(full_body, self._compute()[0])
+        )
+
+    def test_an_unparseable_scope_section_cannot_be_re_scoped(self) -> None:
+        self._record_repair_cycle(repo_head=self._commit("src/base.py", "b\n"))
+        mangled = self._pending_delta_body().replace(
+            f"{runner.REVIEW_SCOPE_DETAIL_HEADING}\n", "", 1
+        )
+
+        with self.assertRaises(plans.PlanError):
+            runner.rescoped_review_session_body(mangled, self._compute()[0])
+
+    def test_repo_state_is_derived_from_the_guard_fingerprint(self) -> None:
+        head = self._git("rev-parse", "HEAD")
+
+        self.assertEqual(
+            {"head": head, "worktree_dirty": False, "dirty_paths": []},
+            self._repo_state(),
+        )
+
+        (self.repo_root / "scratch.txt").write_text("wip\n", encoding="utf-8")
+        (self.repo_root / "README.md").write_text("edited\n", encoding="utf-8")
+        dirty = self._repo_state()
+        assert dirty is not None
+        self.assertEqual(
+            {
+                "head": head,
+                "worktree_dirty": True,
+                "dirty_paths": ["README.md", "scratch.txt"],
+            },
+            dirty,
+        )
+        self.assertIsNone(runner._review_repo_state({"git": False}))
+
+    def test_repo_state_records_an_index_only_dirty_path(self) -> None:
+        head = self._git("rev-parse", "HEAD")
+        readme = self.repo_root / "README.md"
+        readme.write_text("staged\n", encoding="utf-8")
+        self._git("add", "README.md")
+        readme.write_text("test repo\n", encoding="utf-8")
+
+        # Nothing the base-to-worktree diff can see, but a commit would still
+        # publish the staged bytes, so the next rereview must cover the path.
+        self.assertEqual("", self._git("diff", "--name-only", head))
+        self.assertEqual(
+            {
+                "head": head,
+                "worktree_dirty": True,
+                "dirty_paths": ["README.md"],
+            },
+            self._repo_state(),
+        )
+
+    def test_cycle_record_carries_the_reviewed_repo_head(self) -> None:
+        head = self._git("rev-parse", "HEAD")
+
+        cycle, recorded = self._advance_cycle(self._repo_state())
+
+        self.assertEqual(head, cycle["repo_head"])
+        self.assertIs(False, cycle["worktree_dirty"])
+        self.assertEqual([], cycle["dirty_paths"])
+        self.assertEqual(head, recorded["repo_head"])
+
+    def test_cycle_record_carries_the_reviewed_dirty_paths(self) -> None:
+        (self.repo_root / "scratch.txt").write_text("wip\n", encoding="utf-8")
+
+        cycle, recorded = self._advance_cycle(self._repo_state())
+
+        self.assertIs(True, cycle["worktree_dirty"])
+        self.assertEqual(["scratch.txt"], cycle["dirty_paths"])
+        self.assertEqual(["scratch.txt"], recorded["dirty_paths"])
+        # The reader of that record agrees on the key it was written under.
+        self.assertEqual(
+            ["scratch.txt"], runner._reviewed_baseline_dirty_paths(cycle)
+        )
 
 
 if __name__ == "__main__":

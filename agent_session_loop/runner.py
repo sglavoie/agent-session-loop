@@ -22,11 +22,12 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, TextIO
 import uuid
 
@@ -82,6 +83,7 @@ REVIEW_STATUS_ALL_CLEAR = review.REVIEW_STATUS_ALL_CLEAR
 _REVIEW_STATUS_FINDINGS_RE = review._REVIEW_STATUS_FINDINGS_RE
 REVIEW_SESSION_MARKER = review.REVIEW_SESSION_MARKER
 GENERATED_REVIEW_SESSION_VERSION = review.GENERATED_REVIEW_SESSION_VERSION
+STRUCTURED_REVIEW_MIN_VERSION = review.STRUCTURED_REVIEW_MIN_VERSION
 REVIEW_ARTIFACT_VERSION = review.REVIEW_ARTIFACT_VERSION
 SESSION_KIND_IMPLEMENTATION = "implementation"
 SESSION_KIND_REVIEW = "review"
@@ -185,6 +187,12 @@ WORKER_MODE_ENV_VAR = "ASL_WORKER_MODE"
 WORKER_MODE_PACKET = "packet"
 WORKER_MODE_SKILL = "skill"
 
+# Repo-relative paths the review mutation guard ignores, on top of any
+# ``--review-guard-exclude`` values. Stow packages whose files the harness
+# rewrites mid-turn (its own settings, caches) would otherwise revert a
+# complete review turn.
+REVIEW_GUARD_EXCLUDE_ENV_VAR = "ASL_REVIEW_GUARD_EXCLUDE"
+
 # A runner that receives a reply-capable pause remains live for five minutes.
 # An active supervisor lease may extend that deadline one minute at a time,
 # but never beyond fifteen minutes from the start of the wait. Environment
@@ -272,6 +280,37 @@ REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY = (
     review_continuation.REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY
 )
 REVIEW_CYCLE_DISPOSITIONS = review_continuation.REVIEW_CYCLE_DISPOSITIONS
+
+# Scope of a generated review session. ``full`` is the fail-open default: any
+# re-review that cannot prove a narrower scope reads everything again.
+REVIEW_SCOPE_FULL = "full"
+REVIEW_SCOPE_DELTA = "delta"
+
+# Headings that delimit the re-review scope the runner owns and re-derives.
+REVIEW_SCOPE_HEADING = "## Delta Review Scope"
+REVIEW_PRIOR_FINDINGS_HEADING = "### Prior findings to verify"
+REVIEW_SCOPE_DETAIL_HEADING = "### Scope"
+
+# Carried both by the delta selector's name probes and by the diff commands the
+# rendered scope tells the reviewer to run, so the patch a reviewer reads covers
+# exactly the changes the file list was derived from. ``--no-renames`` keeps
+# both sides of a rename: with detection on, ``--name-only`` prints only the
+# destination, so the source path would drop out of the scope. ``--no-relative``
+# keeps a `diff.relative=true` config from narrowing the diff to `cwd` and
+# printing `cwd`-relative paths, which erases every repository-root change from
+# a run — or a reviewer — working in a nested directory. ``--no-textconv`` and
+# ``--no-ext-diff`` pin the rendered patches to git's built-in diff over raw
+# bytes: a textconv or external diff driver — configured in `.gitattributes` and
+# git config, both of which a repair turn could itself write — whose rendering is
+# constant makes git print no patch at all for a path the name probes still
+# select, leaving the reviewer a file list whose bytes no command in the section
+# would show.
+_DELTA_DIFF_FLAGS: tuple[str, ...] = (
+    "--no-renames",
+    "--no-relative",
+    "--no-textconv",
+    "--no-ext-diff",
+)
 
 
 def _worker_mode() -> str:
@@ -480,17 +519,175 @@ def _generated_review_contract_payload(
     }
 
 
+def _review_scope_preamble_lines(*, narrowed: bool) -> list[str]:
+    if narrowed:
+        intro = (
+            "- This is a re-review following a repair cycle. Prior findings "
+            "and the scope below replace a from-scratch reading of the plan."
+        )
+    else:
+        intro = (
+            "- This is a re-review following a repair cycle, but no Git-"
+            "verified diff bounds the repair work, so this review stays full "
+            "scope: read the plan and the repository as if reviewing from "
+            "scratch. The prior findings below are extra required checks, "
+            "not a narrower scope."
+        )
+    return [
+        REVIEW_SCOPE_HEADING,
+        "",
+        intro,
+        (
+            "- Verify each fix below actually closes its finding; report any "
+            "that is unresolved as a finding again."
+        ),
+        (
+            "- Report newly introduced problems inside this scope as new "
+            "findings."
+        ),
+        "",
+    ]
+
+
+def _review_scope_detail_lines(delta: Mapping[str, Any] | None) -> list[str]:
+    lines = [REVIEW_SCOPE_DETAIL_HEADING, ""]
+    if delta is None or delta.get("mode") != REVIEW_SCOPE_DELTA:
+        lines.append(
+            "- No Git-verified diff of the repair work is available, so this "
+            "scope is not narrowed: review the whole plan and every file it "
+            "touched, exactly as a first review would."
+        )
+        lines.append("")
+        return lines
+
+    base_sha = delta["base_sha"]
+    flags = " ".join(_DELTA_DIFF_FLAGS)
+    lines.append(
+        f"- Review the repair work since `{base_sha}`: run "
+        f"`git diff {flags} {base_sha}` for the base-to-worktree patch and "
+        f"`git diff --cached {flags} {base_sha}` for the base-to-index patch, "
+        "which is the only one that shows a repair that staged an edit and "
+        "then restored the working file. Both carry the flags the file list "
+        "below was derived with, so they cover the whole repository from any "
+        "directory, name both sides of a rename, and print git's own diff of "
+        "the raw bytes rather than whatever a configured textconv or external "
+        "diff driver would render."
+    )
+    changed_files = delta.get("changed_files") or ()
+    if changed_files:
+        lines.append(
+            f"- Files changed since `{base_sha}` (both patches above plus "
+            "untracked files, which neither patch shows):"
+        )
+        lines.extend(f"  - `{path}`" for path in changed_files)
+        if delta.get("baseline_dirty"):
+            lines.append(
+                "- The reviewed tree carried uncommitted changes on top of "
+                f"`{base_sha}`, so the list also names every path that was "
+                "uncommitted then; a repair may have restored one, in which "
+                "case neither patch above still shows it."
+            )
+    else:
+        lines.append(f"- No files changed since `{base_sha}`.")
+    lines.append("")
+    return lines
+
+
+def _delta_review_scope_lines(delta: Mapping[str, Any]) -> list[str]:
+    """Render the `## Delta Review Scope` section of a re-review session.
+
+    At most the section narrows what the reviewer must *read*, and only when
+    Git proved the narrower scope; it never relaxes the output grammar, the
+    required artifacts, or verdict enforcement, all of which stay
+    scope-agnostic.
+    """
+    narrowed = delta.get("mode") == REVIEW_SCOPE_DELTA
+    lines = _review_scope_preamble_lines(narrowed=narrowed)
+    lines.append(REVIEW_PRIOR_FINDINGS_HEADING)
+    lines.append("")
+    for finding in delta.get("prior_findings") or ():
+        lines.append(
+            f"- `{finding['id']}` ({finding['severity']}): {finding['title']}"
+        )
+        for evidence in finding.get("evidence") or ():
+            symbol = evidence.get("symbol")
+            if symbol:
+                lines.append(f"  - Evidence: `{evidence['path']}` — `{symbol}`")
+            else:
+                lines.append(f"  - Evidence: `{evidence['path']}`")
+        for bullet in finding.get("done_criteria") or ():
+            lines.append(f"  - Done when: {bullet}")
+    lines.append("")
+    lines.extend(_review_scope_detail_lines(delta))
+    return lines
+
+
+def rescoped_review_session_body(
+    text: str, delta: Mapping[str, Any] | None
+) -> str | None:
+    """Rebuild a generated review session's scope from current evidence.
+
+    Returns the new body, or ``None`` when the session declares no delta scope
+    at all — such a session already tells the reviewer to read everything, so
+    no refresh can widen it. The prior-findings block is carried over verbatim
+    because it records what the earlier review found, not what is in scope now.
+    """
+    lines = text.split("\n")
+    if REVIEW_SCOPE_HEADING not in lines:
+        return None
+    start = lines.index(REVIEW_SCOPE_HEADING)
+    end = next(
+        (
+            index
+            for index in range(start + 1, len(lines))
+            if lines[index].startswith("## ")
+        ),
+        len(lines),
+    )
+    section = lines[start:end]
+    if (
+        REVIEW_PRIOR_FINDINGS_HEADING not in section
+        or REVIEW_SCOPE_DETAIL_HEADING not in section
+    ):
+        raise plans.PlanError(
+            f"a `{REVIEW_SCOPE_HEADING}` section without both a "
+            f"`{REVIEW_PRIOR_FINDINGS_HEADING}` and a "
+            f"`{REVIEW_SCOPE_DETAIL_HEADING}` heading cannot be re-scoped"
+        )
+    findings_at = start + section.index(REVIEW_PRIOR_FINDINGS_HEADING)
+    detail_at = start + section.index(REVIEW_SCOPE_DETAIL_HEADING)
+    if findings_at > detail_at:
+        raise plans.PlanError(
+            f"`{REVIEW_PRIOR_FINDINGS_HEADING}` must precede "
+            f"`{REVIEW_SCOPE_DETAIL_HEADING}` in a re-scopable review session"
+        )
+    narrowed = delta is not None and delta.get("mode") == REVIEW_SCOPE_DELTA
+    return "\n".join(
+        [
+            *lines[:start],
+            *_review_scope_preamble_lines(narrowed=narrowed),
+            *lines[findings_at:detail_at],
+            *_review_scope_detail_lines(delta),
+            *lines[end:],
+        ]
+    )
+
+
 def build_generated_review_session_body(
     session_id: plans.SessionId,
     *,
     review_harness: str,
     plan_dir: str | Path,
+    delta: Mapping[str, Any] | None = None,
 ) -> str:
     """Render the markdown body of a generated review session file."""
     canonical_plan_dir = plans.canonicalize_path(plan_dir)
     contract_json = json.dumps(
         _generated_review_contract_payload(session_id, plan_dir=canonical_plan_dir),
         indent=2,
+    )
+    scope_lines = (
+        _delta_review_scope_lines(delta) if delta is not None else []
     )
     return "\n".join(
         [
@@ -557,6 +754,7 @@ def build_generated_review_session_body(
                 "other handoff status."
             ),
             "",
+            *scope_lines,
             "## Completion Contract",
             "",
             "### Done when",
@@ -614,12 +812,15 @@ def ensure_generated_review_session(
     plan_dir: str | Path,
     *,
     review_harness: str,
+    delta: Mapping[str, Any] | None = None,
 ) -> tuple[plans.SessionFile, bool]:
     """Reuse a pending generated review session, or append a new one.
 
     Returns the canonical ``SessionFile`` and ``True`` when a new session file
     was written. The next top-level session id is one greater than the max
-    first component across all existing session ids.
+    first component across all existing session ids. ``delta`` narrows the
+    scope of a newly written session only; a reused pending session keeps the
+    body it was written with.
     """
     canonical_dir = plans.canonicalize_path(plan_dir)
     pending = find_pending_generated_review_session(canonical_dir)
@@ -631,6 +832,7 @@ def ensure_generated_review_session(
         session_id,
         review_harness=review_harness,
         plan_dir=canonical_dir,
+        delta=delta,
     )
     target_path = canonical_dir / session_id.filename
     target_path.write_text(body, encoding="utf-8")
@@ -2032,6 +2234,8 @@ def _validate_run_inputs(
     if errors:
         raise RunError(errors[0].message)
 
+    _review_guard_excludes(args)
+
     timeout = getattr(args, "timeout", None)
     max_sessions = getattr(args, "max_sessions", None)
     return cwd, timeout, max_sessions, commit_mode
@@ -2053,6 +2257,47 @@ def _max_review_fix_cycles(args: argparse.Namespace) -> int:
     return DEFAULT_MAX_REVIEW_FIX_CYCLES
 
 
+def _review_guard_excludes(args: argparse.Namespace) -> tuple[str, ...]:
+    """Resolve the review mutation guard's allowlist as sorted POSIX paths.
+
+    Merges :data:`REVIEW_GUARD_EXCLUDE_ENV_VAR` (``os.pathsep``-separated) with
+    every ``--review-guard-exclude`` value. Absolute paths and ``..`` segments
+    raise :class:`RunError` so an allowlist can never reach outside the
+    repository, and so a typo fails the run instead of silently widening the
+    guard's blind spot.
+    """
+    raw: list[str] = []
+    env_value = os.environ.get(REVIEW_GUARD_EXCLUDE_ENV_VAR)
+    if env_value:
+        raw.extend(env_value.split(os.pathsep))
+    raw.extend(getattr(args, "review_guard_exclude", None) or ())
+
+    excludes: set[str] = set()
+    for entry in raw:
+        candidate = entry.strip()
+        if not candidate:
+            continue
+        pure = PurePosixPath(candidate)
+        if pure.is_absolute():
+            raise RunError(
+                "--review-guard-exclude must be repo-relative, got "
+                f"absolute path {candidate!r}"
+            )
+        if ".." in pure.parts:
+            raise RunError(
+                "--review-guard-exclude must not contain '..' segments, got "
+                f"{candidate!r}"
+            )
+        normalized = pure.as_posix().rstrip("/")
+        if normalized:
+            excludes.add(normalized)
+    return tuple(sorted(excludes))
+
+
+def _review_guard_include_ignored(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "review_guard_include_ignored", False))
+
+
 def _run_git(
     cwd: Path,
     args: list[str],
@@ -2061,6 +2306,28 @@ def _run_git(
         return subprocess.run(
             ["git", "-C", str(cwd), *args],
             text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        raise RunError("git executable not found on PATH") from error
+    except OSError as error:
+        raise RunError(f"could not run git {' '.join(args)}: {error}") from error
+
+
+def _run_git_bytes(
+    cwd: Path,
+    args: list[str],
+) -> subprocess.CompletedProcess[bytes]:
+    """Run git without decoding, for output whose bytes must survive intact.
+
+    Text mode translates ``\\r\\n`` and a lone ``\\r`` to ``\\n``, which collapses
+    values differing only in those bytes onto one another.
+    """
+    try:
+        return subprocess.run(
+            ["git", "-C", str(cwd), *args],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
@@ -2082,18 +2349,659 @@ def _read_git_head(cwd: Path) -> dict[str, Any]:
     }
 
 
+_DIFF_FILE_HEADER_RE = re.compile(r"^diff --git ", re.MULTILINE)
+
+# `git hash-object -t tree <devnull>` yields the repository's own empty tree id
+# (sha1 and sha256 repositories disagree on its value), which is the only diff
+# base that exists before the first commit.
+_EMPTY_TREE_ARGV: tuple[str, ...] = ("hash-object", "-t", "tree", os.devnull)
+
+# Carried by every guard diff probe so the evidence describes content rather
+# than presentation. `--no-renames` keeps both sides of a rename in the
+# evidence: with detection on, `--name-only` prints only the destination, so
+# the source path would vanish from the dirty-path list a later rereview scopes
+# against. `--no-relative` keeps the `:(top)` pathspec from being re-narrowed to
+# `cwd` by a `diff.relative=true` config. `--no-textconv` and `--no-ext-diff`
+# keep the patch derived from the file's raw bytes: a repository can configure
+# a textconv or external diff driver — in `.gitattributes` and git config, both
+# of which a review turn could itself write — whose rendering is identical for
+# two different contents, and git then reports no diff at all for a path whose
+# bytes moved.
+_GUARD_DIFF_FLAGS: tuple[str, ...] = (
+    "--no-renames",
+    "--no-relative",
+    "--no-textconv",
+    "--no-ext-diff",
+)
+
+# The exclusion file `--exclude-standard` reads on top of the worktree's
+# `.gitignore` files and `.git/info/exclude`. The setting is fingerprinted under
+# its own name, labelled so a pause reads as the setting rather than as a path.
+# `--null` terminates the reported value with the one byte a pathname may not
+# contain; a newline may not be trimmed off it, because git honours a pathname
+# that ends in one.
+_EXCLUDES_FILE_KEY = "core.excludesFile"
+_EXCLUDES_FILE_ARGV: tuple[str, ...] = (
+    "config",
+    "--null",
+    "--type=path",
+    "--get",
+    _EXCLUDES_FILE_KEY,
+)
+_EXCLUDES_CONFIG_REL = f"config:{_EXCLUDES_FILE_KEY}"
+
+# Every `ignore_config` entry is `[role, rel, kind, sha256]`. The role is its
+# own element rather than a prefix on `rel` because `config:` and `target:` are
+# legal repository pathnames: keyed by name alone, a directly named source and a
+# resolved link target claim one key in `_review_guard_changed_paths` and one of
+# them is dropped, so a target-only mutation moves the fingerprint but names
+# nothing. The prefixes stay on `rel`, which is what an operator reads.
+_IGNORE_ROLE_CONFIG = "config"
+_IGNORE_ROLE_SOURCE = "source"
+_IGNORE_ROLE_TARGET = "target"
+
+# The worktree exclusion source git reads from every directory it descends
+# into. `--exclude-standard` applies an untracked one before answering, so a
+# `.gitignore` whose own rules match itself is missing from the ordinary
+# untracked scan; the negative command-line pattern lists it anyway, because
+# git consults command-line patterns before every standard source and a
+# negative match there wins. The pathspec keeps the scan to the ignore files
+# themselves, so the ordinary ignored payload beside one stays out of the
+# default evidence. A directory git does not descend into is still pruned, and
+# a `.gitignore` inside one is a file git never applies. The negative pattern
+# re-lists symlinks too, and git opens an ignore file with `O_NOFOLLOW`, so a
+# linked one contributes no rules at all; the scan skips them rather than
+# reporting a retargeting git never acted on.
+_WORKTREE_IGNORE_FILE = ".gitignore"
+_WORKTREE_IGNORE_ARGV: tuple[str, ...] = (
+    "ls-files",
+    "--others",
+    "--full-name",
+    "--exclude-standard",
+    "-x",
+    f"!{_WORKTREE_IGNORE_FILE}",
+    "--",
+    f":(top,glob)**/{_WORKTREE_IGNORE_FILE}",
+)
+
+
+class _ReviewGuardUnavailable(Exception):
+    """A git probe the review mutation guard depends on could not be trusted.
+
+    Raised instead of returning partial evidence so no probe failure can be
+    laundered into an empty-but-valid fingerprint that compares equal across a
+    review turn.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        argv: Sequence[str],
+        *,
+        result: subprocess.CompletedProcess[str]
+        | subprocess.CompletedProcess[bytes]
+        | None = None,
+        error: Exception | None = None,
+        path: str | None = None,
+    ) -> None:
+        super().__init__(reason)
+        detail: dict[str, Any] = {"reason": reason, "argv": list(argv)}
+        if result is not None:
+            detail["returncode"] = result.returncode
+            stderr = result.stderr or ""
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", "replace")
+            detail["stderr"] = stderr.strip()
+        if error is not None:
+            detail["error"] = str(error)
+        if path is not None:
+            detail["path"] = path
+        self.fingerprint: dict[str, Any] = {"git": True, "unavailable": detail}
+
+
+def _review_guard_git(
+    cwd: Path, argv: list[str]
+) -> subprocess.CompletedProcess[str]:
+    """Run a git probe the guard's evidence depends on, failing closed."""
+    try:
+        result = _run_git(cwd, argv)
+    except RunError as error:
+        raise _ReviewGuardUnavailable(
+            "git-unrunnable", argv, error=error
+        ) from error
+    if result.returncode != 0:
+        raise _ReviewGuardUnavailable("git-command-failed", argv, result=result)
+    return result
+
+
+def _review_guard_diff_base(cwd: Path) -> tuple[str, str]:
+    """Resolve ``(head_sha, diff_base)`` for the guard's diff probes.
+
+    Before the first commit ``HEAD`` does not resolve, so the empty tree stands
+    in as the diff base and every staged or working-tree file fingerprints as an
+    addition rather than disappearing from the evidence.
+    """
+    head_argv = ["rev-parse", "--verify", "HEAD"]
+    try:
+        head_result = _run_git(cwd, head_argv)
+    except RunError as error:
+        raise _ReviewGuardUnavailable(
+            "git-unrunnable", head_argv, error=error
+        ) from error
+    head_sha = head_result.stdout.strip() if head_result.returncode == 0 else ""
+    if head_sha:
+        return head_sha, "HEAD"
+    empty_tree_argv = list(_EMPTY_TREE_ARGV)
+    empty_tree = _review_guard_git(cwd, empty_tree_argv).stdout.strip()
+    if not empty_tree:
+        raise _ReviewGuardUnavailable("empty-tree-unresolved", empty_tree_argv)
+    return "", empty_tree
+
+
+def _literal_exclude_pathspec(rel_posix: str) -> str:
+    """Build a pathspec excluding exactly ``rel_posix`` and everything under it.
+
+    ``top`` anchors the value at the repository root and ``literal`` stops git
+    from reading ``*``, ``?``, or ``[]`` as wildcards, so the tracked diff drops
+    the same file-or-directory subtree :func:`_fingerprint_untracked_nodes`
+    drops instead of an unrelated pattern match.
+    """
+    return f":(top,literal,exclude){rel_posix}"
+
+
+def _fingerprint_repo_node(
+    node: Path,
+    *,
+    rel: str,
+    argv: Sequence[str],
+    reason_prefix: str,
+    absent_kind: str | None = None,
+    unsupported_kind: str | None = None,
+) -> list[str]:
+    """Fingerprint one worktree path as ``[rel, kind, sha256]``.
+
+    Symlinks are never followed: a link contributes its kind and its link text,
+    so a retargeted or dangling link is visible and a link replaced by a regular
+    file holding the target's bytes cannot compare equal. A path that cannot be
+    fingerprinted (including a node that is neither a regular file nor a
+    symlink) raises, because silently dropping it from both captures would hide
+    every later change to it. ``absent_kind`` names the kind recorded for a path
+    that does not exist; without it a missing path raises too, and
+    ``unsupported_kind`` does the same for a node that is neither a regular file
+    nor a symlink.
+    """
+    try:
+        mode = node.lstat().st_mode
+    except FileNotFoundError as error:
+        if absent_kind is None:
+            raise _ReviewGuardUnavailable(
+                f"{reason_prefix}-path-unreadable", argv, error=error, path=rel
+            ) from error
+        return [rel, absent_kind, hashlib.sha256(b"").hexdigest()]
+    except OSError as error:
+        raise _ReviewGuardUnavailable(
+            f"{reason_prefix}-path-unreadable", argv, error=error, path=rel
+        ) from error
+    if stat.S_ISLNK(mode):
+        kind = "symlink"
+        try:
+            data = os.fsencode(os.readlink(node))
+        except OSError as error:
+            raise _ReviewGuardUnavailable(
+                f"{reason_prefix}-link-unreadable", argv, error=error, path=rel
+            ) from error
+    elif stat.S_ISREG(mode):
+        kind = "file"
+        try:
+            data = node.read_bytes()
+        except OSError as error:
+            raise _ReviewGuardUnavailable(
+                f"{reason_prefix}-path-unreadable", argv, error=error, path=rel
+            ) from error
+    else:
+        if unsupported_kind is None:
+            raise _ReviewGuardUnavailable(
+                f"{reason_prefix}-node-unsupported", argv, path=rel
+            )
+        return [rel, unsupported_kind, hashlib.sha256(b"").hexdigest()]
+    return [rel, kind, hashlib.sha256(data).hexdigest()]
+
+
+def _review_guard_skips_path(
+    rel: str,
+    *,
+    repo_root: Path,
+    plan_path: Path,
+    exclude: tuple[str, ...],
+) -> bool:
+    """Report whether the allowlist or the plan directory covers ``rel``."""
+    if any(rel == path or rel.startswith(f"{path}/") for path in exclude):
+        return True
+    try:
+        (repo_root / rel).relative_to(plan_path)
+    except ValueError:
+        return False
+    return True
+
+
+def _fingerprint_untracked_nodes(
+    untracked_text: str,
+    *,
+    repo_root: Path,
+    plan_path: Path,
+    exclude: tuple[str, ...],
+    argv: Sequence[str],
+    reason_prefix: str,
+    skip_symlinks: bool = False,
+) -> list[list[str]]:
+    """Fingerprint each git-reported untracked path as a repository node.
+
+    A path git reported that has since vanished fails the capture closed: git
+    just listed it, so its disappearance mid-scan is a race rather than a state
+    the evidence can describe. ``skip_symlinks`` drops a reported link instead,
+    for a scan whose subject is what git *reads* from the path rather than the
+    node itself; a link that cannot be `lstat`ed still reaches
+    :func:`_fingerprint_repo_node` and fails the capture closed there.
+    """
+    payload: list[list[str]] = []
+    for rel in sorted(untracked_text.splitlines()):
+        if not rel:
+            continue
+        if _review_guard_skips_path(
+            rel, repo_root=repo_root, plan_path=plan_path, exclude=exclude
+        ):
+            continue
+        if skip_symlinks and (repo_root / rel).is_symlink():
+            continue
+        payload.append(
+            _fingerprint_repo_node(
+                repo_root / rel, rel=rel, argv=argv, reason_prefix=reason_prefix
+            )
+        )
+    return payload
+
+
+def _index_flagged_paths(listing_text: str) -> list[str]:
+    """Return the tracked paths whose index entry hides worktree changes.
+
+    ``git ls-files -v`` tags a skip-worktree entry ``S`` and lowercases the tag
+    of an assume-unchanged entry. Git honours both flags by never comparing the
+    entry against the working tree, so a mutation to either is absent from every
+    diff — including the guard's.
+    """
+    flagged: list[str] = []
+    for line in listing_text.splitlines():
+        if len(line) < 3 or line[1] != " ":
+            continue
+        tag, rel = line[0], line[2:]
+        if tag == "S" or tag.islower():
+            flagged.append(rel)
+    return flagged
+
+
+def _fingerprint_index_flagged_nodes(
+    listing_text: str,
+    *,
+    repo_root: Path,
+    plan_path: Path,
+    exclude: tuple[str, ...],
+    argv: Sequence[str],
+) -> list[list[str]]:
+    """Fingerprint the worktree content of every diff-suppressed index entry.
+
+    A skip-worktree entry is routinely absent from the worktree (that is what
+    sparse checkouts use it for), so absence is recorded as its own kind rather
+    than failing the capture closed; a file reappearing at that path still moves
+    the fingerprint.
+    """
+    payload: list[list[str]] = []
+    for rel in sorted(set(_index_flagged_paths(listing_text))):
+        if _review_guard_skips_path(
+            rel, repo_root=repo_root, plan_path=plan_path, exclude=exclude
+        ):
+            continue
+        payload.append(
+            _fingerprint_repo_node(
+                repo_root / rel,
+                rel=rel,
+                argv=argv,
+                reason_prefix="index-flagged",
+                absent_kind="absent",
+            )
+        )
+    return payload
+
+
+def _ignore_source_rel(node: Path, repo_root: Path) -> str:
+    """Name an exclusion source repo-root-relatively, or absolutely if outside.
+
+    A linked worktree maps ``info/exclude`` to the common directory and
+    ``core.excludesFile`` usually names a file in the operator's home, so a
+    source outside the repository keeps its absolute path.
+    """
+    try:
+        return node.relative_to(repo_root).as_posix()
+    except ValueError:
+        return node.as_posix()
+
+
+def _fingerprint_ignore_target(
+    link: Path,
+    *,
+    repo_root: Path,
+    argv: Sequence[str],
+    reason_prefix: str,
+) -> list[str]:
+    """Fingerprint the file git actually reads through a symlinked source.
+
+    The link node alone carries only its link text, so a turn could rewrite the
+    target's rules through a link that never moved. The ``target:`` label says
+    which file the entry names; the identity that keeps it apart from a source
+    entry over the same pathname is the role element (see
+    :data:`_IGNORE_ROLE_TARGET`).
+
+    Resolution is strict: a symlink cycle (``ELOOP``) and every other resolution
+    failure fail the guard closed, because git may still read rules the evidence
+    then cannot describe. A dangling link is not a failure — its target
+    records ``absent``, so creating that file later still moves the
+    fingerprint — but a target that is neither a regular file nor a symlink
+    fails closed rather than recording its kind alone, since a link is never the
+    way ``core.excludesFile=/dev/null`` switches the global excludes off.
+    """
+    try:
+        resolved = Path(os.path.realpath(link, strict=True))
+    except FileNotFoundError:
+        resolved = Path(os.path.realpath(link))
+    except OSError as error:
+        raise _ReviewGuardUnavailable(
+            f"{reason_prefix}-target-unresolved",
+            argv,
+            error=error,
+            path=str(link),
+        ) from error
+    return [
+        _IGNORE_ROLE_TARGET,
+        *_fingerprint_repo_node(
+            resolved,
+            rel=f"target:{_ignore_source_rel(resolved, repo_root)}",
+            argv=argv,
+            reason_prefix=f"{reason_prefix}-target",
+            absent_kind="absent",
+        ),
+    ]
+
+
+def _fingerprint_ignore_source(
+    named: Path,
+    *,
+    repo_root: Path,
+    argv: Sequence[str],
+    reason_prefix: str,
+) -> list[list[str]]:
+    """Fingerprint one exclusion file that no worktree scan reaches.
+
+    Only the parent is resolved, never the final component, so a symlinked
+    exclusion file stays a ``symlink`` whose link text is its own evidence and a
+    retargeted or replaced link is visible. Git follows that link, though, so a
+    symlinked source contributes a second entry over the fully resolved file git
+    reads (see :func:`_fingerprint_ignore_target`) — without it a turn could
+    rewrite the target's rules through a link that never moved.
+
+    The file legitimately may not exist; ``absent`` is its own kind so creating
+    it later still moves the fingerprint. A node that is neither a regular file
+    nor a symlink records its kind alone rather than failing the guard closed:
+    ``core.excludesFile=/dev/null`` is a common way to switch the global
+    excludes off, and no rules can hide behind it.
+    """
+    try:
+        node = named.parent.resolve() / named.name
+    except OSError as error:
+        raise _ReviewGuardUnavailable(
+            f"{reason_prefix}-unresolved", argv, error=error, path=str(named)
+        ) from error
+    entry = [
+        _IGNORE_ROLE_SOURCE,
+        *_fingerprint_repo_node(
+            node,
+            rel=_ignore_source_rel(node, repo_root),
+            argv=argv,
+            reason_prefix=reason_prefix,
+            absent_kind="absent",
+            unsupported_kind="unsupported",
+        ),
+    ]
+    if entry[2] != "symlink":
+        return [entry]
+    return [
+        entry,
+        _fingerprint_ignore_target(
+            node, repo_root=repo_root, argv=argv, reason_prefix=reason_prefix
+        ),
+    ]
+
+
+def _default_excludes_file() -> Path | None:
+    """Return the excludes file git reads when ``core.excludesFile`` is unset.
+
+    Git falls back to ``$XDG_CONFIG_HOME/git/ignore``, or to
+    ``$HOME/.config/git/ignore`` when that variable is unset or empty, and reads
+    no global excludes when neither variable is set. No plumbing command reports
+    the resolved fallback, so the lookup is mirrored here against the same
+    environment the git subprocess inherits.
+    """
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config_home:
+        return Path(xdg_config_home) / "git" / "ignore"
+    home = os.environ.get("HOME")
+    if home:
+        return Path(home) / ".config" / "git" / "ignore"
+    return None
+
+
+def _effective_excludes_file(
+    cwd: Path, repo_root: Path
+) -> tuple[str, Path | None]:
+    """Resolve ``core.excludesFile`` into a marker and the file git reads.
+
+    The marker carries the configured value itself, so repointing the setting
+    moves the evidence under the setting's own name rather than only under the
+    two paths it moved between, and an explicitly empty value (which selects no
+    file at all) stays distinguishable from an unset one.
+
+    ``--get`` reports the merged value the way git resolves it — the last one
+    wins across the system, global, and repository files — and ``--type=path``
+    expands ``~`` as git does. The value is read as raw bytes up to the ``--null``
+    terminator rather than trimmed of a trailing newline: a newline is legal
+    inside a pathname and git honours such a value, so trimming it would let a
+    turn repoint the setting at a near-identical name — and at the different file
+    that name selects — while the evidence compared equal. A relative value is
+    joined against the repository root because git chdirs to the top level before
+    reading it, which also keeps the evidence identical from a nested ``cwd``.
+    """
+    argv = list(_EXCLUDES_FILE_ARGV)
+    try:
+        result = _run_git_bytes(cwd, argv)
+    except RunError as error:
+        raise _ReviewGuardUnavailable(
+            "git-unrunnable", argv, error=error
+        ) from error
+    if result.returncode == 1:
+        return "unset", _default_excludes_file()
+    if result.returncode != 0:
+        raise _ReviewGuardUnavailable("git-command-failed", argv, result=result)
+    terminator = result.stdout.find(b"\0")
+    if terminator < 0:
+        raise _ReviewGuardUnavailable(
+            "excludes-file-unterminated", argv, result=result
+        )
+    value = os.fsdecode(result.stdout[:terminator])
+    if not value:
+        return "set:", None
+    return f"set:{value}", repo_root / value
+
+
+def _fingerprint_ignore_config(cwd: Path, repo_root: Path) -> list[list[str]]:
+    """Fingerprint the ignore rules that no other guard probe covers.
+
+    ``--exclude-standard`` honours three exclusion sources. The worktree's
+    ``.gitignore`` files are covered already — tracked ones by the tracked diff,
+    untracked ones by the untracked scan — but ``.git/info/exclude`` and the
+    file ``core.excludesFile`` selects both live outside the worktree, so a turn
+    could otherwise hide a mutation by ignoring the path it wrote. The
+    ``core.excludesFile`` setting is fingerprinted beside the file it names,
+    because repointing it swaps the active rules without editing either file.
+    Either source may be a symlink, which git follows, so a symlinked one
+    contributes a second ``target:`` entry over the file git actually reads.
+    Each entry leads with its role (see :data:`_IGNORE_ROLE_SOURCE`), so the
+    marker, a named source, and a resolved target stay distinct even when one
+    repository pathname spells another's label.
+
+    ``--git-path`` follows the gitdir indirection a linked worktree or submodule
+    uses (where ``.git`` is a file, not a directory) and answers relative to the
+    directory git ran in, so the result is joined against that directory rather
+    than the repository root.
+    """
+    argv = ["rev-parse", "--git-path", "info/exclude"]
+    reported = _review_guard_git(cwd, argv).stdout.strip()
+    if not reported:
+        raise _ReviewGuardUnavailable("ignore-config-unresolved", argv)
+    payload = _fingerprint_ignore_source(
+        cwd / reported,
+        repo_root=repo_root,
+        argv=argv,
+        reason_prefix="ignore-config",
+    )
+    marker, excludes_file = _effective_excludes_file(cwd, repo_root)
+    payload.append(
+        [
+            _IGNORE_ROLE_CONFIG,
+            _EXCLUDES_CONFIG_REL,
+            "config",
+            # `os.fsencode`, not a plain utf-8 encode: a pathname git reported
+            # as undecodable bytes reaches here as surrogate escapes.
+            hashlib.sha256(os.fsencode(marker)).hexdigest(),
+        ]
+    )
+    if excludes_file is not None:
+        payload.extend(
+            _fingerprint_ignore_source(
+                excludes_file,
+                repo_root=repo_root,
+                argv=list(_EXCLUDES_FILE_ARGV),
+                reason_prefix="excludes-file",
+            )
+        )
+    return payload
+
+
+def _pair_diff_names_with_patches(
+    names_text: str, diff_text: str, *, argv: Sequence[str], reason: str
+) -> tuple[list[str], list[list[str]]]:
+    """Attribute each patch in ``diff_text`` to its path in ``names_text``.
+
+    ``--name-only`` and the full patch walk the same diff queue in the same
+    order, so pairing them positionally attributes each patch to its path
+    without re-parsing quoted ``diff --git`` headers.
+
+    A path git named but rendered no patch for fails the capture closed rather
+    than pairing short and dropping the tail of the queue: a path with no patch
+    evidence carries no content in the fingerprint, so any two of its contents
+    would compare equal.
+    """
+    changed = [rel for rel in names_text.splitlines() if rel]
+    patches = _DIFF_FILE_HEADER_RE.split(diff_text)[1:]
+    if len(patches) != len(changed):
+        raise _ReviewGuardUnavailable(reason, argv)
+    return changed, [
+        [rel, hashlib.sha256(patch.encode("utf-8")).hexdigest()]
+        for rel, patch in zip(changed, patches)
+    ]
+
+
 def _capture_review_repo_fingerprint(
     cwd: str | Path,
     plan_dir: str | Path,
+    *,
+    exclude: tuple[str, ...] = (),
+    include_ignored: bool = False,
 ) -> dict[str, Any]:
     """Snapshot repo content under `cwd` while excluding paths under `plan_dir`.
 
-    Returns ``{"git": False}`` when `cwd` is not inside a git repository — the
-    review mutation guard treats that case as "no guard applies". Otherwise
-    returns ``{"git": True, "head": <sha or "">, "diff_sha256": <sha>,
-    "untracked": [[rel, content_sha256], ...]}`` where ``diff_sha256`` covers
-    ``git diff HEAD`` (staged + unstaged tracked changes) and ``untracked``
-    enumerates every untracked path outside `plan_dir`.
+    Returns ``{"git": False}`` when git reports `cwd` is not inside a
+    repository — the review mutation guard treats that case as "no guard
+    applies". Returns ``{"git": True, "unavailable": {...}}`` when a probe the
+    evidence depends on failed; :func:`_review_guard_unavailable_detail`
+    recognizes that shape so the runner can fail closed instead of comparing
+    fingerprints that cannot see a mutation. Otherwise returns
+    ``{"git": True, "head": <sha or "">, "diff_sha256": <sha>,
+    "tracked_changed": [rel, ...], "tracked_patches": [[rel, patch_sha256], ...],
+    "index_diff_sha256": <sha>, "index_changed": [rel, ...],
+    "index_patches": [[rel, patch_sha256], ...],
+    "untracked": [[rel, kind, sha256], ...],
+    "index_flagged": [[rel, kind, sha256], ...],
+    "worktree_ignore": [[rel, kind, sha256], ...],
+    "ignore_config": [[role, rel, kind, sha256], ...]}``
+    where ``diff_sha256`` covers
+    ``git diff HEAD`` (the working tree against the base, against the empty tree
+    when HEAD is unborn, with rename detection off so both sides of a rename are
+    listed), ``index_diff_sha256`` covers the same diff ``--cached``, the tracked
+    and index keys carry the per-path evidence
+    :func:`_review_guard_changed_paths` reports on, and ``untracked`` enumerates
+    every untracked path outside `plan_dir` as a repository node (``kind`` is
+    ``file`` over its bytes or ``symlink`` over its link text; see
+    :func:`_fingerprint_untracked_nodes`).
+
+    The index is probed separately because ``git diff <base>`` reads the working
+    tree: staging a mutation and then restoring the file to its base content
+    leaves that diff empty while the index still holds the staged bytes a commit
+    would publish.
+
+    Both diffs render the raw file content (see :data:`_GUARD_DIFF_FLAGS`), so a
+    configured textconv or external diff driver cannot decide what the guard
+    sees; a path git names but renders no patch for makes the capture
+    unavailable rather than entering the evidence with no content at all.
+
+    Tracked entries marked assume-unchanged or skip-worktree are fingerprinted
+    from their raw worktree content under ``index_flagged``, because git honours
+    those flags by never comparing the entry against the working tree — so
+    neither diff above can see a mutation to one (``kind`` is ``absent`` for a
+    flagged entry with no worktree file, which is the ordinary skip-worktree
+    state).
+
+    Every probe is anchored at the repository root rather than at `cwd`, so a
+    run whose `cwd` is a nested directory still fingerprints the whole
+    repository and still reports repo-root-relative paths.
+
+    Gitignored files are left out of the untracked scan by default: the
+    repository's ignore rules are the operator's existing declaration of what is
+    not the code under review, and the caches they name (byte-compiled output,
+    test and lint caches, harness-rewritten settings) churn on their own during
+    a review turn (commit ``bf421f9`` gitignored the harness's own stowed
+    settings for exactly that reason). ``include_ignored`` — the run flag
+    ``--review-guard-include-ignored`` — restores the strict scan for a
+    repository whose ignored tree is expected to stay still, and is off by
+    default so the strict behavior is opt-in everywhere, direct calls included.
+
+    Deferring to those rules would otherwise let a turn write the rule that
+    blinds the guard, so ``worktree_ignore`` fingerprints every untracked
+    ``.gitignore`` git can apply — including one hidden by its own rules —
+    under either mode, without putting the ignored payload beside it back into
+    the evidence (see :data:`_WORKTREE_IGNORE_ARGV`).
+
+    ``ignore_config`` fingerprints the exclusion sources that live outside the
+    worktree under either mode — ``.git/info/exclude``, the ``core.excludesFile``
+    setting, and the file it selects — because no scan above can see them and a
+    turn could otherwise hide a mutation by ignoring the path it wrote (see
+    :func:`_fingerprint_ignore_config`). Its entries lead with a ``role``,
+    unlike the three keys above, because their names share one space with the
+    synthetic labels that describe them.
+
+    ``exclude`` holds repo-relative POSIX paths (files or directories) the guard
+    ignores entirely, on top of `plan_dir`. Each value drops exactly that path
+    and its subtree from both the tracked and the untracked evidence; ``*``,
+    ``?``, and ``[]`` are matched literally rather than as git wildcards. It is
+    how a *tracked* path, or an untracked one git does not ignore, leaves the
+    evidence.
     """
     cwd_path = Path(cwd)
     try:
@@ -2101,60 +3009,345 @@ def _capture_review_repo_fingerprint(
     except OSError:
         plan_path = Path(plan_dir)
 
+    root_argv = ["rev-parse", "--show-toplevel"]
     try:
-        repo_root_result = _run_git(cwd_path, ["rev-parse", "--show-toplevel"])
-    except RunError:
-        return {"git": False}
+        repo_root_result = _run_git(cwd_path, root_argv)
+    except RunError as error:
+        return _ReviewGuardUnavailable(
+            "git-unrunnable", root_argv, error=error
+        ).fingerprint
     if repo_root_result.returncode != 0:
         return {"git": False}
+
     try:
-        repo_root = Path(repo_root_result.stdout.strip()).resolve()
-    except OSError:
-        return {"git": False}
+        try:
+            repo_root = Path(repo_root_result.stdout.strip()).resolve()
+        except OSError as error:
+            raise _ReviewGuardUnavailable(
+                "repo-root-unresolved", root_argv, error=error
+            ) from error
 
-    head_result = _run_git(cwd_path, ["rev-parse", "--verify", "HEAD"])
-    head_sha = head_result.stdout.strip() if head_result.returncode == 0 else ""
+        head_sha, diff_base = _review_guard_diff_base(cwd_path)
 
-    diff_args = ["diff", "HEAD", "--", "."]
-    try:
-        rel_plan = plan_path.relative_to(repo_root)
-        diff_args.append(f":(exclude){rel_plan.as_posix()}")
-    except ValueError:
-        pass
-    diff_result = _run_git(cwd_path, diff_args)
-    diff_text = diff_result.stdout if diff_result.returncode == 0 else ""
+        # ``:(top)`` anchors the positive pathspec at the repository root, so a
+        # nested ``cwd`` still fingerprints the whole repository instead of one
+        # subtree, and the reported paths stay repo-root-relative so they line
+        # up with the untracked scan and the allowlist.
+        pathspecs = [":(top)"]
+        try:
+            rel_plan = plan_path.relative_to(repo_root)
+            pathspecs.append(_literal_exclude_pathspec(rel_plan.as_posix()))
+        except ValueError:
+            pass
+        pathspecs.extend(_literal_exclude_pathspec(path) for path in exclude)
 
-    untracked_result = _run_git(
-        cwd_path, ["ls-files", "--others", "--exclude-standard"]
-    )
-    untracked_payload: list[list[str]] = []
-    if untracked_result.returncode == 0:
-        for rel in sorted(untracked_result.stdout.splitlines()):
-            if not rel:
-                continue
-            try:
-                abs_path = (repo_root / rel).resolve()
-            except OSError:
-                continue
-            try:
-                abs_path.relative_to(plan_path)
-            except ValueError:
-                pass
-            else:
-                continue
-            try:
-                data = abs_path.read_bytes()
-            except OSError:
-                continue
-            sha = hashlib.sha256(data).hexdigest()
-            untracked_payload.append([rel, sha])
+        diff_argv = ["diff", diff_base, *_GUARD_DIFF_FLAGS, "--", *pathspecs]
+        diff_text = _review_guard_git(cwd_path, diff_argv).stdout
+        names_argv = [
+            "diff",
+            diff_base,
+            "--name-only",
+            *_GUARD_DIFF_FLAGS,
+            "--",
+            *pathspecs,
+        ]
+        names_text = _review_guard_git(cwd_path, names_argv).stdout
+        index_diff_argv = [
+            "diff",
+            "--cached",
+            diff_base,
+            *_GUARD_DIFF_FLAGS,
+            "--",
+            *pathspecs,
+        ]
+        index_diff_text = _review_guard_git(cwd_path, index_diff_argv).stdout
+        index_names_argv = [
+            "diff",
+            "--cached",
+            diff_base,
+            "--name-only",
+            *_GUARD_DIFF_FLAGS,
+            "--",
+            *pathspecs,
+        ]
+        index_names_text = _review_guard_git(cwd_path, index_names_argv).stdout
+        # ``--full-name`` keeps the reported paths repo-root-relative when
+        # ``cwd`` is a subdirectory, so they line up with the repo-root-relative
+        # allowlist and with the ``repo_root / rel`` lookup below; the
+        # ``:(top)`` pathspec is what widens the scan itself past that
+        # subdirectory. ``--exclude-standard`` defers to git's ignore rules,
+        # which are the operator's existing declaration of what is not the code
+        # under review: commit bf421f9 gitignored the harness's own stowed
+        # settings precisely because it rewrites them mid-turn, so a scan that
+        # ignored that declaration would revert essentially every review turn.
+        untracked_argv = [
+            "ls-files",
+            "--others",
+            "--full-name",
+            *(() if include_ignored else ("--exclude-standard",)),
+            "--",
+            ":(top)",
+        ]
+        untracked_text = _review_guard_git(cwd_path, untracked_argv).stdout
+        untracked_payload = _fingerprint_untracked_nodes(
+            untracked_text,
+            repo_root=repo_root,
+            plan_path=plan_path,
+            exclude=exclude,
+            argv=untracked_argv,
+            reason_prefix="untracked",
+        )
+        # The scan above defers to git's ignore rules, and git applies an
+        # untracked `.gitignore` before answering it — so a turn can write one
+        # that hides both itself and the file beside it. Every worktree ignore
+        # source git can apply is fingerprinted here instead, under either mode
+        # (see :data:`_WORKTREE_IGNORE_ARGV`); the strict scan merely lists the
+        # same files a second time.
+        worktree_ignore_argv = list(_WORKTREE_IGNORE_ARGV)
+        worktree_ignore_text = _review_guard_git(
+            cwd_path, worktree_ignore_argv
+        ).stdout
+        worktree_ignore_payload = _fingerprint_untracked_nodes(
+            worktree_ignore_text,
+            repo_root=repo_root,
+            plan_path=plan_path,
+            exclude=exclude,
+            argv=worktree_ignore_argv,
+            reason_prefix="worktree-ignore",
+            skip_symlinks=True,
+        )
+        # Git never compares an index entry marked assume-unchanged or
+        # skip-worktree against the working tree, so every diff above is blind
+        # to a mutation of one. Those entries are fingerprinted from their raw
+        # worktree content instead, which is the only evidence that moves.
+        index_flags_argv = [
+            "ls-files",
+            "-v",
+            "--full-name",
+            "--",
+            ":(top)",
+        ]
+        index_flags_text = _review_guard_git(cwd_path, index_flags_argv).stdout
+        index_flagged_payload = _fingerprint_index_flagged_nodes(
+            index_flags_text,
+            repo_root=repo_root,
+            plan_path=plan_path,
+            exclude=exclude,
+            argv=index_flags_argv,
+        )
+        ignore_config_payload = _fingerprint_ignore_config(cwd_path, repo_root)
+
+        tracked_changed, tracked_patches = _pair_diff_names_with_patches(
+            names_text,
+            diff_text,
+            argv=diff_argv,
+            reason="tracked-patch-missing",
+        )
+        index_changed, index_patches = _pair_diff_names_with_patches(
+            index_names_text,
+            index_diff_text,
+            argv=index_diff_argv,
+            reason="index-patch-missing",
+        )
+    except _ReviewGuardUnavailable as unavailable:
+        return unavailable.fingerprint
 
     return {
         "git": True,
         "head": head_sha,
         "diff_sha256": hashlib.sha256(diff_text.encode("utf-8")).hexdigest(),
+        "tracked_changed": sorted(tracked_changed),
+        "tracked_patches": tracked_patches,
+        "index_diff_sha256": hashlib.sha256(
+            index_diff_text.encode("utf-8")
+        ).hexdigest(),
+        "index_changed": sorted(index_changed),
+        "index_patches": index_patches,
         "untracked": untracked_payload,
+        "index_flagged": index_flagged_payload,
+        "worktree_ignore": worktree_ignore_payload,
+        "ignore_config": ignore_config_payload,
     }
+
+
+def _review_guard_unavailable_detail(
+    fingerprint: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Return why a fingerprint carries no usable evidence, or ``None``.
+
+    ``{"git": False}`` is not unavailable: git answered that `cwd` is outside a
+    repository, so the guard legitimately does not apply.
+    """
+    if not fingerprint.get("git"):
+        return None
+    detail = fingerprint.get("unavailable")
+    if isinstance(detail, Mapping):
+        return dict(detail)
+    return None
+
+
+def _review_repo_state(fingerprint: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Derive the reviewed repo state from an already-captured fingerprint.
+
+    Pure over the fingerprint dict, so recording the base ref of a review turn
+    costs no extra git calls. Returns ``None`` when the fingerprint carries no
+    usable commit (not a git repo, or an unborn HEAD), which downstream delta
+    scoping treats as "no base ref recorded".
+
+    ``dirty_paths`` names every path whose reviewed content differed from
+    ``head`` (working-tree and index changes plus untracked files), plus every
+    diff-suppressed index entry, whose relationship to ``head`` no diff can
+    establish either way. Delta scoping needs those exact paths, not just the
+    Boolean: a repair that restores one of them to its committed content, or
+    deletes one of the untracked ones, leaves no trace in a later
+    ``git diff <head>``.
+    """
+    if not fingerprint.get("git"):
+        return None
+    head = fingerprint.get("head")
+    if not isinstance(head, str) or not head:
+        return None
+    dirty_paths = sorted(
+        {str(rel) for rel in fingerprint.get("tracked_changed") or ()}
+        | {str(rel) for rel in fingerprint.get("index_changed") or ()}
+        | {str(entry[0]) for entry in fingerprint.get("untracked") or ()}
+        | {str(entry[0]) for entry in fingerprint.get("index_flagged") or ()}
+    )
+    return {
+        "head": head,
+        "worktree_dirty": bool(dirty_paths),
+        "dirty_paths": dirty_paths,
+    }
+
+
+def _review_guard_changed_paths(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Name what moved between two review fingerprints.
+
+    Pure over the two fingerprint dicts so the guard can report *which* paths
+    tripped it instead of only that some sha differed. A staged-only mutation
+    moves the index evidence while the working-tree diff stays put, and a
+    mutation to a diff-suppressed index entry moves only its raw content
+    fingerprint, so all three feed the reported ``tracked`` set.
+
+    The ignore sources get their own keys rather than being folded into the
+    untracked sets — ``worktree_ignore`` for the untracked ``.gitignore`` files
+    git applies, which the default untracked scan may not list at all, and
+    ``ignore_config`` for ``.git/info/exclude``, the ``core.excludesFile``
+    setting, and the file it selects, which live outside the worktree the other
+    keys describe. :func:`_review_guard_changed_summary` names both, so a pause
+    reads as the ignore source that moved rather than as an unexplained
+    mismatch.
+    """
+
+    def tracked_map(
+        fingerprint: Mapping[str, Any], changed_key: str, patches_key: str
+    ) -> dict[str, str]:
+        paths: dict[str, str] = {
+            str(rel): "" for rel in fingerprint.get(changed_key) or ()
+        }
+        for entry in fingerprint.get(patches_key) or ():
+            rel, sha = entry
+            paths[str(rel)] = str(sha)
+        return paths
+
+    def moved(
+        before_map: Mapping[str, str], after_map: Mapping[str, str]
+    ) -> set[str]:
+        return {
+            path
+            for path in set(before_map) | set(after_map)
+            if before_map.get(path) != after_map.get(path)
+        }
+
+    def node_map(fingerprint: Mapping[str, Any], key: str) -> dict[str, str]:
+        # Node kind is part of the identity: a symlink replaced by a regular
+        # file holding the target's bytes must not compare equal.
+        return {
+            str(rel): f"{kind}:{sha}"
+            for rel, kind, sha in (fingerprint.get(key) or ())
+        }
+
+    def ignore_map(
+        fingerprint: Mapping[str, Any],
+    ) -> dict[tuple[str, str], str]:
+        # Keyed by role *and* name, because `config:` and `target:` are legal
+        # repository pathnames: under a name-only key a directly named source
+        # overwrites the marker or the resolved target that spells the same
+        # string, and the entry it displaced leaves no evidence at all.
+        return {
+            (str(role), str(rel)): f"{kind}:{sha}"
+            for role, rel, kind, sha in (fingerprint.get("ignore_config") or ())
+        }
+
+    untracked_before = node_map(before, "untracked")
+    untracked_after = node_map(after, "untracked")
+    ignore_before = ignore_map(before)
+    ignore_after = ignore_map(after)
+
+    return {
+        "tracked": sorted(
+            moved(
+                tracked_map(before, "tracked_changed", "tracked_patches"),
+                tracked_map(after, "tracked_changed", "tracked_patches"),
+            )
+            | moved(
+                tracked_map(before, "index_changed", "index_patches"),
+                tracked_map(after, "index_changed", "index_patches"),
+            )
+            | moved(
+                node_map(before, "index_flagged"),
+                node_map(after, "index_flagged"),
+            )
+        ),
+        "untracked_added": sorted(set(untracked_after) - set(untracked_before)),
+        "untracked_removed": sorted(set(untracked_before) - set(untracked_after)),
+        "untracked_changed": sorted(
+            path
+            for path in set(untracked_before) & set(untracked_after)
+            if untracked_before[path] != untracked_after[path]
+        ),
+        "worktree_ignore": sorted(
+            moved(
+                node_map(before, "worktree_ignore"),
+                node_map(after, "worktree_ignore"),
+            )
+        ),
+        "ignore_config": sorted(
+            {
+                rel
+                for role, rel in set(ignore_before) | set(ignore_after)
+                if ignore_before.get((role, rel))
+                != ignore_after.get((role, rel))
+            }
+        ),
+        "head_changed": before.get("head") != after.get("head"),
+    }
+
+
+def _review_guard_changed_summary(changed_paths: Mapping[str, Any]) -> str:
+    """Render up to three changed paths as a suffix for the pause message."""
+    named: list[str] = []
+    for key in (
+        "tracked",
+        "untracked_added",
+        "untracked_changed",
+        "untracked_removed",
+        "worktree_ignore",
+        "ignore_config",
+    ):
+        named.extend(str(path) for path in changed_paths.get(key) or ())
+    # An untracked `.gitignore` is reported under both its own key and the
+    # untracked sets whenever the strict scan lists it too.
+    named = list(dict.fromkeys(named))
+    if not named:
+        return ""
+    suffix = f": {', '.join(named[:3])}"
+    if len(named) > 3:
+        suffix += f" (+{len(named) - 3} more)"
+    return suffix
 
 
 def _validate_git_worktree(cwd: Path) -> None:
@@ -4856,6 +6049,7 @@ class _LiveVerification:
         check_count: int,
         check_names: tuple[str, ...],
         check_kinds: tuple[str, ...],
+        parallel: bool = False,
         heartbeat_interval: float = VERIFICATION_HEARTBEAT_INTERVAL_SECONDS,
     ) -> None:
         self._event_path = event_path
@@ -4870,17 +6064,51 @@ class _LiveVerification:
         self._check_count = check_count
         self._check_names = check_names
         self._check_kinds = check_kinds
+        self._parallel = parallel
         self._heartbeat_interval = heartbeat_interval
         self._lock = threading.Lock()
+        # Ordering lock for progress output only. Kept distinct from ``_lock``
+        # so a slow stderr pipe can never stall a worker callback's state
+        # mutation and event append under a parallel recipe.
+        self._progress_lock = threading.Lock()
         self._stop = threading.Event()
+        self._finished = False
         self._thread: threading.Thread | None = None
         self._started_at: datetime | None = None
         self._check_started_at: datetime | None = None
         self._current_check_index: int | None = None
         self._current_check_name: str | None = None
         self._current_check_kind: str | None = None
+        # index -> (name, kind, started_at) for every check that has started
+        # and not yet finished; under a parallel recipe more than one is live
+        # at a time and the display slot is drawn from this set.
+        self._active_checks: dict[int, tuple[str, str, datetime]] = {}
         self._heartbeat_count = 0
         self._last_heartbeat_at: datetime | None = None
+
+    def _emit_progress_unless_finished(
+        self,
+        emit: Callable[[dict[str, Any]], None],
+        payload: dict[str, Any],
+    ) -> None:
+        """Write progress only while verification is still live.
+
+        ``finish`` claims ``_finished`` before it takes this same lock for the
+        terminal message, so a callback either writes ahead of that message or
+        is dropped; no check progress can land behind it.
+        """
+        with self._progress_lock:
+            if self._finished:
+                return
+            emit(payload)
+
+    def _display_most_recent_active_check(self) -> None:
+        index = next(reversed(self._active_checks))
+        name, kind, started_at = self._active_checks[index]
+        self._current_check_index = index
+        self._current_check_name = name
+        self._current_check_kind = kind
+        self._check_started_at = started_at
 
     def _identity_payload(self) -> dict[str, Any]:
         identity: dict[str, Any] = {
@@ -4963,6 +6191,8 @@ class _LiveVerification:
                 "started_at": _isoformat(started_at),
                 "session_label": self._session_label,
             }
+            if self._parallel:
+                event_payload["parallel"] = True
             with self._persistence.lock:
                 self._payload["active_verification"] = state_payload
                 self._persistence.append_event(
@@ -4996,10 +6226,10 @@ class _LiveVerification:
     ) -> None:
         moment = _utc_now()
         with self._lock:
-            self._check_started_at = moment
-            self._current_check_index = check_index
-            self._current_check_name = name
-            self._current_check_kind = kind
+            if self._finished:
+                return
+            self._active_checks[check_index] = (name, kind, moment)
+            self._display_most_recent_active_check()
             state_payload = self._state_payload(now=moment)
             event_payload = self._identity_payload() | {
                 "check_index": check_index,
@@ -5018,7 +6248,9 @@ class _LiveVerification:
                     event_payload,
                 )
                 self._persistence.write_state(self._payload)
-        self._progress.verification_check_started(event_payload)
+        self._emit_progress_unless_finished(
+            self._progress.verification_check_started, event_payload
+        )
 
     def check_finished(
         self,
@@ -5033,10 +6265,21 @@ class _LiveVerification:
     ) -> None:
         moment = _utc_now()
         with self._lock:
-            self._check_started_at = None
-            self._current_check_index = check_index
-            self._current_check_name = name
-            self._current_check_kind = kind
+            if self._finished:
+                return
+            # Under a parallel recipe a background check can finish while a
+            # different one is still running: hand the display slot to another
+            # live check so heartbeats keep flowing, and only clear the check
+            # timer once the last active check retires.
+            if self._active_checks.pop(check_index, None) is not None:
+                if self._active_checks:
+                    if check_index == self._current_check_index:
+                        self._display_most_recent_active_check()
+                else:
+                    self._check_started_at = None
+                    self._current_check_index = check_index
+                    self._current_check_name = name
+                    self._current_check_kind = kind
             state_payload = self._state_payload(now=moment)
             event_payload = self._identity_payload() | {
                 "check_index": check_index,
@@ -5057,7 +6300,9 @@ class _LiveVerification:
                     event_payload,
                 )
                 self._persistence.write_state(self._payload)
-        self._progress.verification_check_finished(event_payload)
+        self._emit_progress_unless_finished(
+            self._progress.verification_check_finished, event_payload
+        )
 
     def finish(
         self,
@@ -5067,6 +6312,15 @@ class _LiveVerification:
         reason: str,
         error: str | None = None,
     ) -> None:
+        with self._lock:
+            # Claim the terminal transition before anything that blocks. A
+            # parallel recipe that was abandoned mid-flight leaves command
+            # checks running, and their late callbacks — including any that
+            # land while the heartbeat thread is being joined — must not
+            # resurrect `active_verification` or append behind
+            # `verification_finished`.
+            self._finished = True
+            self._active_checks.clear()
         self._stop.set()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=1)
@@ -5095,7 +6349,8 @@ class _LiveVerification:
                     event_payload,
                 )
                 self._persistence.write_state(self._payload)
-        self._progress.verification_finished(event_payload)
+        with self._progress_lock:
+            self._progress.verification_finished(event_payload)
         self._notify_agent_mux(
             AGENT_MUX_VERIFICATION_FINISH_EVENT,
             AGENT_MUX_VERIFICATION_FINISH_REASON,
@@ -5111,12 +6366,18 @@ class _LiveVerification:
         while not self._stop.wait(self._heartbeat_interval):
             heartbeat = self._record_heartbeat()
             if heartbeat is not None:
-                self._progress.verification_heartbeat(heartbeat)
+                self._emit_progress_unless_finished(
+                    self._progress.verification_heartbeat, heartbeat
+                )
 
     def _record_heartbeat(self) -> dict[str, Any] | None:
         moment = _utc_now()
         with self._lock:
-            if self._started_at is None or self._check_started_at is None:
+            if (
+                self._finished
+                or self._started_at is None
+                or self._check_started_at is None
+            ):
                 return None
             self._heartbeat_count += 1
             self._last_heartbeat_at = moment
@@ -5583,6 +6844,24 @@ def _readiness_gate_passed(report: preflight.PreflightReport) -> bool:
     return True
 
 
+def _resume_gate_passed(report: preflight.PreflightReport) -> bool:
+    """Return True when a reduced report may stand in for a full one.
+
+    Deliberately wider than :func:`_readiness_gate_passed`: what licenses the
+    skip is the readiness SHA match that ``run_resume_preflight`` already
+    verified, not the lifecycle state, so a crash-resumed plan left at
+    ``running`` qualifies too. The strict loop-ready gate still runs against
+    whichever report is adopted, and normalizes ``running`` through the usual
+    manifest-readiness auto-repair.
+    """
+    if not report.ok:
+        return False
+    readiness = report.readiness
+    if readiness is None:
+        return False
+    return readiness.state in preflight.RESUME_READINESS_STATES
+
+
 def _review_only_complete_start(
     report: preflight.PreflightReport,
     *,
@@ -5725,6 +7004,36 @@ def _readiness_gate_blockers(
     )
 
 
+def _reduced_preflight_report(
+    plan_dir: Path,
+    *,
+    snapshot: plans.PlanSnapshot,
+    lock_info: state.LockInfo,
+    preflight_kwargs: dict[str, Any],
+) -> preflight.PreflightReport | None:
+    """Return a reduced report that may replace the full preflight, else None.
+
+    ``None`` means the caller must run the complete ``run_preflight`` once: the
+    plan is not resume-eligible, or the environment checks or the state outside
+    the readiness hash raised a finding. Those findings are recomputed by the
+    full run rather than merged here, so the ``not-loop-ready`` pause message
+    and ``_repair_readiness_gate`` always see every finding together.
+    """
+    report = preflight.run_resume_preflight(
+        plan_dir, snapshot=snapshot, **preflight_kwargs
+    )
+    if report is None:
+        return None
+    report = _strip_own_lock_findings(report, lock_info=lock_info)
+    if not _resume_gate_passed(report):
+        return None
+    if preflight.run_unhashed_state_checks(
+        plan_dir, snapshot=snapshot, cwd=preflight_kwargs["cwd"]
+    ):
+        return None
+    return report
+
+
 def _repair_readiness_gate(
     report: preflight.PreflightReport,
     *,
@@ -5739,6 +7048,7 @@ def _repair_readiness_gate(
     persistence: _RunPersistence,
     snapshot: plans.PlanSnapshot,
     review_requested: bool,
+    core_skipped: bool = False,
 ) -> tuple[preflight.PreflightReport, dict[str, Any]]:
     """Try to auto-repair progress/manifest-readiness-only gate failures.
 
@@ -5759,20 +7069,40 @@ def _repair_readiness_gate(
 
     Any other red/yellow finding is left in place, and the caller is
     expected to fall through to the usual ``not-loop-ready`` pause.
+
+    ``core_skipped`` says the incoming report is a reduced one; the rerun then
+    stays reduced too, because re-reading the same already-cleared plan files
+    is exactly the work the skip exists to avoid. It is reported back through
+    ``repair_payload`` and flips to False if a full rerun replaces the report.
     """
+    preflight_kwargs: dict[str, Any] = {
+        "cwd": cwd,
+        "harness": harness,
+        "commit_mode": commit_mode,
+        "state_dir": state_dir,
+        "max_pending_sessions": max_pending_sessions,
+    }
 
     def rerun() -> preflight.PreflightReport | None:
+        nonlocal core_skipped
         try:
+            if core_skipped:
+                # The repair rewrote manifest.md, so the readiness state the
+                # reduced path reads must come from a fresh snapshot.
+                reduced = _reduced_preflight_report(
+                    plan_dir,
+                    snapshot=plans.inspect_plan(plan_dir),
+                    lock_info=lock_info,
+                    preflight_kwargs=preflight_kwargs,
+                )
+                if reduced is not None:
+                    return reduced
             rerun_report = preflight.run_preflight(
-                plan_dir,
-                cwd=cwd,
-                harness=harness,
-                commit_mode=commit_mode,
-                state_dir=state_dir,
-                max_pending_sessions=max_pending_sessions,
+                plan_dir, **preflight_kwargs
             )
         except plans.PlanError:
             return None
+        core_skipped = False
         return _strip_own_lock_findings(rerun_report, lock_info=lock_info)
 
     attempted: list[str] = []
@@ -5873,6 +7203,7 @@ def _repair_readiness_gate(
         "errors": errors,
         "final_findings_by_severity": final_counts,
         "ok": _readiness_gate_passed(report),
+        "core_skipped": core_skipped,
     }
     return report, repair_payload
 
@@ -6104,6 +7435,229 @@ def _review_artifact_digests(plan_dir: Path) -> tuple[str | None, str | None]:
     return digests[0], digests[1]
 
 
+def _last_repairs_materialized_cycle(
+    event_path: Path,
+) -> dict[str, Any] | None:
+    """Return the most recent cycle that materialized repair sessions."""
+    for cycle in reversed(_read_prior_review_cycles(event_path)):
+        if cycle.get("disposition") == REVIEW_CYCLE_DISPOSITION_REPAIRS:
+            return cycle
+    return None
+
+
+def _prior_review_findings(plan_dir: Path) -> list[dict[str, Any]]:
+    """Return the structured findings of the review still on disk."""
+    verdict = review.load_review_verdict(plan_dir)
+    if not verdict.get("ok"):
+        return []
+    findings = verdict.get("findings")
+    return list(findings) if isinstance(findings, list) else []
+
+
+def _reviewed_baseline_dirty_paths(
+    cycle: Mapping[str, Any],
+) -> list[str] | None:
+    """Return the paths whose reviewed content differed from the cycle's base.
+
+    ``[]`` means the recorded commit *is* the tree the reviewer saw. ``None``
+    means the record cannot prove what that tree held: the reviewer saw
+    uncommitted content and the cycle carries no exact path evidence for it, so
+    no diff against the base can be shown to cover everything the repair
+    touched.
+    """
+    dirty = cycle.get("worktree_dirty")
+    if dirty is False:
+        return []
+    if dirty is not True:
+        return None
+    paths = cycle.get("dirty_paths")
+    if not isinstance(paths, list):
+        return None
+    return [str(path) for path in paths if path]
+
+
+def _compute_review_delta_context(
+    *,
+    event_path: Path,
+    plan_dir: Path,
+    cwd: Path,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Choose the scope of the review session about to be generated.
+
+    Returns ``(delta, fallback_reason)``. ``delta`` is ``None`` when there is
+    no prior repair cycle to re-verify at all; otherwise it carries ``mode``
+    ``"delta"`` (a resolvable, ancestor-verified base commit plus the files
+    Git reports as changed since it) or ``"full"`` (prior findings to
+    re-verify on top of an unnarrowed review).
+
+    Narrowing is only ever driven by Git. The changed-file set is the union of
+    the base-to-worktree diff, the base-to-index diff, the untracked files git
+    does not ignore, the
+    tracked entries marked assume-unchanged or skip-worktree (which no diff
+    compares against the working tree at all), and
+    the paths the reviewed tree already held uncommitted, so it covers
+    committed and uncommitted repairs alike and stays a superset of everything
+    that moved since the reviewer read the tree — including a path the repair
+    restored to its committed content, which the base-to-worktree diff no
+    longer shows, and a staged edit whose working file was restored, which only
+    the base-to-index diff still shows. A base
+    that is missing, unresolvable, no longer an ancestor, or undiffable, an
+    unlistable index, and a
+    dirty reviewed tree with no recorded path evidence, all drop the scope back
+    to full rather than substituting a file list the runner cannot prove
+    complete.
+
+    Every probe covers the whole repository and reports root-relative paths, so
+    neither a nested ``cwd`` nor a ``diff.relative=true`` config can drop a
+    repository-root repair from the scope.
+    """
+    cycle = _last_repairs_materialized_cycle(event_path)
+    if cycle is None:
+        return None, "no-prior-repair-cycle"
+
+    findings = _prior_review_findings(plan_dir)
+    if not findings:
+        return None, "prior-findings-unavailable"
+
+    degraded = {"mode": REVIEW_SCOPE_FULL, "prior_findings": findings}
+
+    base = cycle.get("repo_head")
+    if not isinstance(base, str) or not base:
+        return degraded, "no-recorded-base"
+
+    baseline_dirty = _reviewed_baseline_dirty_paths(cycle)
+    if baseline_dirty is None:
+        return degraded, "dirty-base-evidence-missing"
+
+    try:
+        resolved = _run_git(cwd, ["rev-parse", "--verify", f"{base}^{{commit}}"])
+        if resolved.returncode != 0:
+            return degraded, "base-unresolvable"
+        ancestor = _run_git(cwd, ["merge-base", "--is-ancestor", base, "HEAD"])
+        if ancestor.returncode != 0:
+            # A rebase, reset, or amend moved the recorded base off the current
+            # history; diffing against it would misreport the repair scope.
+            return degraded, "base-not-ancestor"
+        # Both probes are pinned to repository-wide, root-relative, rename-free
+        # output; see :data:`_DELTA_DIFF_FLAGS` for what each flag rules out.
+        names = _run_git(
+            cwd, ["diff", "--name-only", *_DELTA_DIFF_FLAGS, base]
+        )
+        if names.returncode != 0:
+            return degraded, "base-diff-failed"
+        index_names = _run_git(
+            cwd, ["diff", "--cached", "--name-only", *_DELTA_DIFF_FLAGS, base]
+        )
+        if index_names.returncode != 0:
+            return degraded, "index-diff-failed"
+        # Rooted at the repository top, so a repair that lands in a nested
+        # directory is still a repair the rereview sees, and filtered by git's
+        # ignore rules, which are the operator's declaration of what is not code
+        # under review. That deference is deliberately independent of
+        # ``--review-guard-include-ignored``: the flag governs the guard's
+        # evidence ("did anything move"), not the scope ("which code changed and
+        # must be reread"). A failed scan degrades to full scope rather than
+        # narrowing against a file list that is missing those paths.
+        untracked = _run_git(
+            cwd,
+            [
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "--full-name",
+                "--",
+                ":(top)",
+            ],
+        )
+        if untracked.returncode != 0:
+            return degraded, "untracked-scan-failed"
+        # Git never compares an assume-unchanged or skip-worktree entry against
+        # the working tree, so a repair to one is in none of the diffs above.
+        # Every flagged path therefore joins the scope wholesale: the same
+        # blindness that hides the repair also makes it impossible to tell
+        # which flagged entries moved.
+        index_flags = _run_git(
+            cwd, ["ls-files", "-v", "--full-name", "--", ":(top)"]
+        )
+        if index_flags.returncode != 0:
+            return degraded, "index-flags-scan-failed"
+    except RunError:
+        return degraded, "git-unavailable"
+
+    return (
+        {
+            "mode": REVIEW_SCOPE_DELTA,
+            "base_sha": base,
+            "changed_files": sorted(
+                {
+                    line
+                    for line in (
+                        *names.stdout.splitlines(),
+                        *index_names.stdout.splitlines(),
+                        *untracked.stdout.splitlines(),
+                        *_index_flagged_paths(index_flags.stdout),
+                        *baseline_dirty,
+                    )
+                    if line
+                }
+            ),
+            "baseline_dirty": bool(baseline_dirty),
+            "prior_findings": findings,
+        },
+        None,
+    )
+
+
+def _refresh_pending_review_scope(
+    *,
+    session: plans.SessionStatus,
+    event_path: Path,
+    plan_dir: Path,
+    cwd: Path,
+    run_id: str,
+    persistence: _RunPersistence,
+) -> bool:
+    """Re-derive a pending review session's scope, returning whether it moved.
+
+    A pending delta review may have been written by an earlier run: its file
+    list is static, and `git diff <base>` does not show untracked files, so an
+    untracked file created since then would be invisible to the reviewer. The
+    scope is therefore rebuilt from current Git evidence — widening to full
+    whenever that evidence can no longer prove a narrower one — immediately
+    before the session executes. Only the scope section is rewritten, so the
+    session keeps its identity, version marker, and pending handoff.
+    """
+    text = session.path.read_text(encoding="utf-8")
+    if REVIEW_SCOPE_HEADING not in text:
+        return False
+    delta, fallback_reason = _compute_review_delta_context(
+        event_path=event_path,
+        plan_dir=plan_dir,
+        cwd=cwd,
+    )
+    rescoped = rescoped_review_session_body(text, delta)
+    if rescoped is None or rescoped == text:
+        return False
+    session.path.write_text(rescoped, encoding="utf-8")
+    persistence.append_event(
+        event_path,
+        events.REVIEW_SCOPE_EVENT,
+        {
+            "run_id": run_id,
+            "session_id": session.id,
+            "scope": (
+                delta["mode"] if delta is not None else REVIEW_SCOPE_FULL
+            ),
+            "base_sha": (
+                delta.get("base_sha") if delta is not None else None
+            ),
+            "fallback_reason": fallback_reason,
+            "refreshed": True,
+        },
+    )
+    return True
+
+
 def _prior_review_cap(
     event_path: Path,
     resume: review_continuation.ReviewResume,
@@ -6299,6 +7853,7 @@ def _advance_review_cycle(
     snapshot: plans.PlanSnapshot,
     turn_payload: dict[str, Any],
     max_review_fix_cycles: int,
+    plan_cache: plans.PlanSnapshotCache,
 ) -> tuple[str, plans.PlanSnapshot]:
     """Advance the repair/rereview loop after a review session completed.
 
@@ -6339,6 +7894,11 @@ def _advance_review_cycle(
         cycle_record["review_output_sha256"],
         cycle_record["review_artifact_sha256"],
     ) = _review_artifact_digests(snapshot.plan_dir)
+    repo_state = turn_payload.get("review_repo_state")
+    repo_state = repo_state if isinstance(repo_state, dict) else {}
+    cycle_record["repo_head"] = repo_state.get("head")
+    cycle_record["worktree_dirty"] = repo_state.get("worktree_dirty")
+    cycle_record["dirty_paths"] = repo_state.get("dirty_paths")
 
     def record_and_complete(disposition: str) -> tuple[str, plans.PlanSnapshot]:
         _record_review_cycle(
@@ -6450,7 +8010,7 @@ def _advance_review_cycle(
         disposition=REVIEW_CYCLE_DISPOSITION_REPAIRS,
     )
     try:
-        refreshed = plans.inspect_plan(snapshot.plan_dir)
+        refreshed = plan_cache.get_fresh(snapshot.plan_dir)
     except plans.PlanError as error:
         with persistence.lock:
             payload["final_snapshot"] = _snapshot_payload(snapshot)
@@ -6587,6 +8147,125 @@ def _read_review_verdict(
     )
 
 
+def _enforce_review_mutation_guard(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    persistence: _RunPersistence,
+    cwd: Path,
+    before: plans.PlanSnapshot,
+    after: plans.PlanSnapshot | None,
+    fingerprint_before: dict[str, Any],
+    exclude: tuple[str, ...],
+    include_ignored: bool,
+    session_id: str,
+    session_label: str,
+    session_details: dict[str, Any],
+    turn_payload: dict[str, Any],
+    paths: dict[str, Path],
+    plan_cache: plans.PlanSnapshotCache,
+) -> bool:
+    """Compare the post-turn fingerprint against `fingerprint_before`.
+
+    Runs ahead of every result branch, so the turn's own outcome never
+    suppresses the verdict: a retryable pause such as ``timeout`` would
+    otherwise relaunch against the mutated tree and adopt it as the new
+    baseline. `after` is ``None`` when the post-turn plan could not be
+    inspected; the revert then targets the pre-turn snapshot, which names the
+    same session file. Returns ``True`` when the run must pause (the caller
+    must ``break``).
+    """
+    fingerprint_after = _capture_review_repo_fingerprint(
+        cwd,
+        before.plan_dir,
+        exclude=exclude,
+        include_ignored=include_ignored,
+    )
+    excluded = list(exclude)
+    unavailable = _review_guard_unavailable_detail(fingerprint_after)
+    if unavailable is not None:
+        reason = events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE
+        failure_note = (
+            f"review mutation guard unavailable: {unavailable['reason']}"
+        )
+        message = (
+            "review mutation guard unavailable after "
+            f"{session_label}: {unavailable['reason']}"
+        )
+        evidence: dict[str, Any] = {
+            "phase": "after",
+            "unavailable": unavailable,
+            "excluded": excluded,
+            "include_ignored": include_ignored,
+        }
+    elif fingerprint_after != fingerprint_before:
+        reason = "review-mutated-worktree"
+        changed_paths = _review_guard_changed_paths(
+            fingerprint_before, fingerprint_after
+        )
+        failure_note = (
+            "review mutation guard failed: repository content changed "
+            "outside the plan directory"
+        )
+        message = (
+            f"review session {session_label} mutated repository content "
+            "outside the plan directory"
+            f"{_review_guard_changed_summary(changed_paths)}"
+        )
+        evidence = {
+            "fingerprint_before": fingerprint_before,
+            "fingerprint_after": fingerprint_after,
+            "changed_paths": changed_paths,
+            "excluded": excluded,
+            "include_ignored": include_ignored,
+        }
+    else:
+        with persistence.lock:
+            turn_payload["review_mutation_guard"] = {
+                "passed": True,
+                "excluded": excluded,
+                "include_ignored": include_ignored,
+            }
+            repo_state = _review_repo_state(fingerprint_after)
+            if repo_state is not None:
+                turn_payload["review_repo_state"] = repo_state
+            _write_json_file(paths["result"], turn_payload)
+        return False
+
+    # Leaving the review complete would make an unguarded review permanent
+    # across a resume, so a failed guard always puts it back to pending.
+    revert_target = after if after is not None else before
+    reverted = _revert_session_status_to_pending(
+        revert_target, session_id, failure_note=failure_note
+    )
+    snapshot_after = _reinspect_after_revert(
+        before.plan_dir, revert_target, reverted, plan_cache
+    )
+    guard_record = {
+        "passed": False,
+        "reason": reason,
+        "reverted_to_pending": reverted is not None,
+        **evidence,
+    }
+    with persistence.lock:
+        payload["final_snapshot"] = _snapshot_payload(snapshot_after)
+        turn_payload["review_mutation_guard"] = guard_record
+        _write_json_file(paths["result"], turn_payload)
+    _pause_run(
+        event_path,
+        payload,
+        reason=reason,
+        message=message,
+        details={
+            **session_details,
+            **evidence,
+            "review_mutation_guard": guard_record,
+        },
+        persistence=persistence,
+    )
+    return True
+
+
 def _enforce_review_verdict(
     *,
     event_path: Path,
@@ -6599,13 +8278,15 @@ def _enforce_review_verdict(
     session_details: dict[str, Any],
     turn_payload: dict[str, Any],
     paths: dict[str, Path],
+    plan_cache: plans.PlanSnapshotCache,
     require_artifact: bool = False,
 ) -> bool:
     """Validate and persist the final review verdict.
 
-    ``require_artifact=True`` (generated v2 review sessions) additionally
-    requires a valid, consistent ``final-review.json``; v1 review sessions
-    stay Markdown-compatible. Returns ``True`` when the run should pause
+    ``require_artifact=True`` (review sessions at or above
+    :data:`STRUCTURED_REVIEW_MIN_VERSION`) additionally requires a valid,
+    consistent ``final-review.json``; v1 review sessions stay
+    Markdown-compatible. Returns ``True`` when the run should pause
     (the caller must ``break``).
     """
     review_path = final_review_output_path(before.plan_dir)
@@ -6618,7 +8299,9 @@ def _enforce_review_verdict(
         reverted = _revert_session_status_to_pending(
             after, session_id, failure_note=failure_note
         )
-        snapshot_after = _reinspect_after_revert(before.plan_dir, after, reverted)
+        snapshot_after = _reinspect_after_revert(
+            before.plan_dir, after, reverted, plan_cache
+        )
         details = {
             **session_details,
             "review_output_path": str(review_path),
@@ -6682,6 +8365,7 @@ def _enforce_session_verification(
     allow_not_loop_ready: bool,
     turn_payload: dict[str, Any],
     paths: dict[str, Path],
+    plan_cache: plans.PlanSnapshotCache,
     run_id: str | None,
     turn_index: int,
     total_sessions: int | None,
@@ -6701,7 +8385,9 @@ def _enforce_session_verification(
         reverted = _revert_session_status_to_pending(
             after, session_id, failure_note=failure_note
         )
-        snapshot_after = _reinspect_after_revert(before.plan_dir, after, reverted)
+        snapshot_after = _reinspect_after_revert(
+            before.plan_dir, after, reverted, plan_cache
+        )
         with persistence.lock:
             payload["final_snapshot"] = _snapshot_payload(snapshot_after)
             turn_payload["verification"] = {
@@ -6738,7 +8424,9 @@ def _enforce_session_verification(
         reverted = _revert_session_status_to_pending(
             after, session_id, failure_note=failure_note
         )
-        snapshot_after = _reinspect_after_revert(before.plan_dir, after, reverted)
+        snapshot_after = _reinspect_after_revert(
+            before.plan_dir, after, reverted, plan_cache
+        )
         with persistence.lock:
             payload["final_snapshot"] = _snapshot_payload(snapshot_after)
             turn_payload["verification"] = {
@@ -6782,6 +8470,7 @@ def _enforce_session_verification(
         check_count=check_count,
         check_names=tuple(check.name for check in contract_checks),
         check_kinds=tuple(check.kind for check in contract_checks),
+        parallel=contract.verify.parallel,
         heartbeat_interval=heartbeat_interval,
     )
 
@@ -6833,7 +8522,9 @@ def _enforce_session_verification(
         reverted = _revert_session_status_to_pending(
             after, session_id, failure_note=failure_note
         )
-        snapshot_after = _reinspect_after_revert(before.plan_dir, after, reverted)
+        snapshot_after = _reinspect_after_revert(
+            before.plan_dir, after, reverted, plan_cache
+        )
         with persistence.lock:
             payload["final_snapshot"] = _snapshot_payload(snapshot_after)
             turn_payload["verification"] = {
@@ -6865,7 +8556,9 @@ def _enforce_session_verification(
         reverted = _revert_session_status_to_pending(
             after, session_id, failure_note=failure_note
         )
-        snapshot_after = _reinspect_after_revert(before.plan_dir, after, reverted)
+        snapshot_after = _reinspect_after_revert(
+            before.plan_dir, after, reverted, plan_cache
+        )
         with persistence.lock:
             payload["final_snapshot"] = _snapshot_payload(snapshot_after)
             turn_payload["verification"] = {
@@ -6921,7 +8614,9 @@ def _enforce_session_verification(
         session_id,
         failure_note=f"verification failed: {summary}",
     )
-    snapshot_after = _reinspect_after_revert(before.plan_dir, after, reverted)
+    snapshot_after = _reinspect_after_revert(
+        before.plan_dir, after, reverted, plan_cache
+    )
 
     # Fingerprint this failure and compare against prior verify-failed events
     # for the same session (read before this pause is appended). The repair is
@@ -6962,11 +8657,12 @@ def _reinspect_after_revert(
     plan_dir: Path,
     fallback: plans.PlanSnapshot,
     reverted_path: Path | None,
+    plan_cache: plans.PlanSnapshotCache,
 ) -> plans.PlanSnapshot:
     if reverted_path is None:
         return fallback
     try:
-        return plans.inspect_plan(plan_dir)
+        return plan_cache.get_fresh(plan_dir)
     except plans.PlanError:
         return fallback
 
@@ -7032,6 +8728,8 @@ def _run_config_payload(
         "max_sessions": getattr(args, "max_sessions", None),
         "max_pending_sessions": getattr(args, "max_pending_sessions", None),
         "max_review_fix_cycles": _max_review_fix_cycles(args),
+        "review_guard_exclude": list(_review_guard_excludes(args)),
+        "review_guard_include_ignored": _review_guard_include_ignored(args),
         "commit_mode": commit_mode,
         "unsafe_bypass": _unsafe_bypass(args),
         "no_mailbox": _no_mailbox(args),
@@ -7260,7 +8958,8 @@ def _run_locked(
     reply_text: str | None = None,
     reply_origin: str = REPLY_ORIGIN_ARGV,
 ) -> tuple[int, dict[str, Any]]:
-    snapshot = plans.inspect_plan(args.plan_dir)
+    plan_cache = plans.PlanSnapshotCache()
+    snapshot = plan_cache.get(args.plan_dir)
     if not args.dry_run:
         plans.save_plan_metadata(snapshot.plan_dir, cwd)
     state_dir = state.plan_state_dir(snapshot.plan_dir, args.state_dir)
@@ -7269,6 +8968,8 @@ def _run_locked(
     state_path = state_dir / events.STATE_FILE_NAME
     mailbox_activation = _mailbox_activation_payload(args, snapshot.plan_dir)
     mailbox_enabled = bool(mailbox_activation["enabled"])
+    review_guard_excludes = _review_guard_excludes(args)
+    review_guard_include_ignored = _review_guard_include_ignored(args)
 
     # Detect state stranded under a moved plan's old path hash *before* this
     # run writes its own state.json (which would suppress the scan). A scan
@@ -7508,18 +9209,39 @@ def _run_locked(
         )
 
     allow_not_loop_ready = _allow_not_loop_ready(args)
-    preflight_report = preflight.run_preflight(
+    max_pending_sessions = getattr(args, "max_pending_sessions", None)
+    preflight_kwargs: dict[str, Any] = {
+        "cwd": cwd,
+        "harness": args.harness,
+        "commit_mode": commit_mode,
+        "state_dir": args.state_dir,
+        "max_pending_sessions": max_pending_sessions,
+    }
+    resume_report = _reduced_preflight_report(
         snapshot.plan_dir,
-        cwd=cwd,
-        harness=args.harness,
-        commit_mode=commit_mode,
-        state_dir=args.state_dir,
-        max_pending_sessions=getattr(args, "max_pending_sessions", None),
+        snapshot=snapshot,
+        lock_info=lock_info,
+        preflight_kwargs=preflight_kwargs,
     )
-    preflight_report = _strip_own_lock_findings(
-        preflight_report, lock_info=lock_info
-    )
+    core_skipped = resume_report is not None
+    if core_skipped:
+        preflight_report = resume_report
+        persistence.append_event(
+            event_path,
+            events.PREFLIGHT_SKIPPED_EVENT,
+            {
+                "readiness_state": preflight_report.readiness.state,
+                "readiness_sha256": preflight_report.expected_readiness_sha256,
+            },
+        )
+    else:
+        preflight_report = _strip_own_lock_findings(
+            preflight.run_preflight(snapshot.plan_dir, **preflight_kwargs),
+            lock_info=lock_info,
+        )
     gate_payload = _readiness_gate_payload(preflight_report)
+    if core_skipped:
+        gate_payload["core_skipped"] = True
     gate_passed = gate_payload["ok"]
     review_only_complete_start = _review_only_complete_start(
         preflight_report,
@@ -7544,13 +9266,17 @@ def _run_locked(
             harness=args.harness,
             commit_mode=commit_mode,
             state_dir=args.state_dir,
-            max_pending_sessions=getattr(args, "max_pending_sessions", None),
+            max_pending_sessions=max_pending_sessions,
             event_path=event_path,
             persistence=persistence,
             snapshot=snapshot,
             review_requested=review_requested,
+            core_skipped=core_skipped,
         )
+        core_skipped = bool(repair_payload["core_skipped"])
         gate_payload = _readiness_gate_payload(preflight_report)
+        if core_skipped:
+            gate_payload["core_skipped"] = True
         gate_passed = gate_payload["ok"]
         review_only_complete_start = _review_only_complete_start(
             preflight_report,
@@ -7672,7 +9398,7 @@ def _run_locked(
                 ]
 
         try:
-            status_snapshot = plans.inspect_plan(snapshot.plan_dir)
+            status_snapshot = plan_cache.get(snapshot.plan_dir)
             plan_error = None
         except plans.PlanError as error:
             status_snapshot = None
@@ -7952,7 +9678,7 @@ def _run_locked(
                             break
 
                         try:
-                            snapshot = plans.inspect_plan(snapshot.plan_dir)
+                            snapshot = plan_cache.get_fresh(snapshot.plan_dir)
                         except plans.PlanError as error:
                             _pause_run(
                                 event_path,
@@ -8031,10 +9757,28 @@ def _run_locked(
                         # to ``rereview`` and creates a fresh review.
                         continue
 
+                    review_delta, review_scope_fallback = (
+                        _compute_review_delta_context(
+                            event_path=event_path,
+                            plan_dir=snapshot.plan_dir,
+                            cwd=cwd,
+                        )
+                    )
+                    review_scope = (
+                        review_delta["mode"]
+                        if review_delta is not None
+                        else REVIEW_SCOPE_FULL
+                    )
+                    review_base_sha = (
+                        review_delta.get("base_sha")
+                        if review_delta is not None
+                        else None
+                    )
                     try:
                         review_file, review_created = ensure_generated_review_session(
                             snapshot.plan_dir,
                             review_harness=args.review_harness,
+                            delta=review_delta,
                         )
                     except (plans.PlanError, OSError) as error:
                         with persistence.lock:
@@ -8059,6 +9803,18 @@ def _run_locked(
                     if review_created:
                         persistence.append_event(
                             event_path,
+                            events.REVIEW_SCOPE_EVENT,
+                            {
+                                "run_id": run_id,
+                                "session_id": review_file.session_id.value,
+                                "scope": review_scope,
+                                "base_sha": review_base_sha,
+                                "fallback_reason": review_scope_fallback,
+                                "refreshed": False,
+                            },
+                        )
+                        persistence.append_event(
+                            event_path,
                             events.REVIEW_SESSION_CREATED_EVENT,
                             {
                                 "run_id": run_id,
@@ -8072,10 +9828,12 @@ def _run_locked(
                                         snapshot.plan_dir
                                     ))
                                 ),
+                                "review_scope": review_scope,
+                                "review_base_sha": review_base_sha,
                             },
                         )
                     try:
-                        snapshot = plans.inspect_plan(snapshot.plan_dir)
+                        snapshot = plan_cache.get_fresh(snapshot.plan_dir)
                     except plans.PlanError as error:
                         _pause_run(
                             event_path,
@@ -8117,6 +9875,39 @@ def _run_locked(
             is_review_session = is_generated_review_session_file(
                 pending_session.path
             )
+            if is_review_session:
+                try:
+                    rescoped = _refresh_pending_review_scope(
+                        session=pending_session,
+                        event_path=event_path,
+                        plan_dir=snapshot.plan_dir,
+                        cwd=cwd,
+                        run_id=run_id,
+                        persistence=persistence,
+                    )
+                    if rescoped:
+                        _refresh_active_readiness_state(
+                            payload, snapshot.plan_dir, persistence
+                        )
+                        snapshot = plan_cache.get_fresh(snapshot.plan_dir)
+                except (plans.PlanError, OSError) as error:
+                    with persistence.lock:
+                        payload["final_snapshot"] = _snapshot_payload(snapshot)
+                    _pause_run(
+                        event_path,
+                        payload,
+                        reason="malformed-plan",
+                        message=(
+                            "the pending review session's scope could not be "
+                            f"re-derived from current Git evidence: {error}"
+                        ),
+                        details={
+                            **_session_details_payload(pending_session.id),
+                            "error": str(error),
+                        },
+                        persistence=persistence,
+                    )
+                    break
             review_session_version = (
                 generated_review_session_version(pending_session.path)
                 if is_review_session
@@ -8377,6 +10168,47 @@ def _run_locked(
 
             with run_control_lock:
                 run_control_context = dict(active_turn)
+            # Captured before the reply is consumed and before `turn_started`:
+            # an unusable guard has to stop the run without spending the turn.
+            review_fingerprint_before: dict[str, Any] | None = (
+                _capture_review_repo_fingerprint(
+                    cwd,
+                    before.plan_dir,
+                    exclude=review_guard_excludes,
+                    include_ignored=review_guard_include_ignored,
+                )
+                if is_review_session
+                else None
+            )
+            if review_fingerprint_before is not None:
+                unavailable = _review_guard_unavailable_detail(
+                    review_fingerprint_before
+                )
+                if unavailable is not None:
+                    with persistence.lock:
+                        payload["final_snapshot"] = _snapshot_payload(before)
+                    _pause_run(
+                        event_path,
+                        payload,
+                        reason=events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,
+                        message=(
+                            "review mutation guard unavailable before "
+                            f"{session_label}: {unavailable['reason']}"
+                        ),
+                        details={
+                            **session_details,
+                            "review_mutation_guard": {
+                                "passed": False,
+                                "reason": events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,
+                                "phase": "before",
+                                "unavailable": unavailable,
+                                "excluded": list(review_guard_excludes),
+                                "include_ignored": review_guard_include_ignored,
+                            },
+                        },
+                        persistence=persistence,
+                    )
+                    break
             if use_reply_prompt:
                 assert (
                     reply_source_meta is not None
@@ -8408,11 +10240,6 @@ def _run_locked(
                     reply_event_payload,
                 )
             persistence.append_event(event_path, "turn_started", active_turn)
-            review_fingerprint_before: dict[str, Any] | None = (
-                _capture_review_repo_fingerprint(cwd, before.plan_dir)
-                if is_review_session
-                else None
-            )
             live_turn.start()
             _notify_agent_mux_loop_turn_started(payload, active_turn, persistence)
             try:
@@ -8466,7 +10293,7 @@ def _run_locked(
             previous_turn_finished_at = turn_finished_at
             plan_error = None
             try:
-                after = plans.inspect_plan(before.plan_dir)
+                after = plan_cache.get_fresh(before.plan_dir)
             except plans.PlanError as error:
                 after = None
                 plan_error = str(error)
@@ -8490,6 +10317,29 @@ def _run_locked(
             _notify_agent_mux_loop_turn_finished(
                 payload, live_turn_payload, persistence
             )
+
+            # Ahead of every result branch: a retryable pause (timeout,
+            # transport failure) would otherwise relaunch the review against
+            # its own mutation and adopt it as the new baseline.
+            if is_review_session and review_fingerprint_before is not None:
+                if _enforce_review_mutation_guard(
+                    event_path=event_path,
+                    payload=payload,
+                    persistence=persistence,
+                    cwd=cwd,
+                    before=before,
+                    after=after,
+                    fingerprint_before=review_fingerprint_before,
+                    exclude=review_guard_excludes,
+                    include_ignored=review_guard_include_ignored,
+                    session_id=session_id,
+                    session_label=session_label,
+                    session_details=session_details,
+                    turn_payload=turn_payload,
+                    paths=paths,
+                    plan_cache=plan_cache,
+                ):
+                    break
 
             if result.interrupted:
                 with persistence.lock:
@@ -8693,49 +10543,6 @@ def _run_locked(
                 )
                 break
 
-            if is_review_session and review_fingerprint_before is not None:
-                review_fingerprint_after = _capture_review_repo_fingerprint(
-                    cwd, before.plan_dir
-                )
-                if review_fingerprint_after != review_fingerprint_before:
-                    failure_note = (
-                        "review mutation guard failed: repository content changed "
-                        "outside the plan directory"
-                    )
-                    reverted = _revert_session_status_to_pending(
-                        after, session_id, failure_note=failure_note
-                    )
-                    snapshot_after = _reinspect_after_revert(
-                        before.plan_dir, after, reverted
-                    )
-                    details = {
-                        **session_details,
-                        "fingerprint_before": review_fingerprint_before,
-                        "fingerprint_after": review_fingerprint_after,
-                    }
-                    with persistence.lock:
-                        payload["final_snapshot"] = _snapshot_payload(snapshot_after)
-                        turn_payload["review_mutation_guard"] = {
-                            "passed": False,
-                            "reason": "review-mutated-worktree",
-                            "reverted_to_pending": reverted is not None,
-                            "fingerprint_before": review_fingerprint_before,
-                            "fingerprint_after": review_fingerprint_after,
-                        }
-                        _write_json_file(paths["result"], turn_payload)
-                    _pause_run(
-                        event_path,
-                        payload,
-                        reason="review-mutated-worktree",
-                        message=(
-                            f"review session {session_label} mutated repository "
-                            "content outside the plan directory"
-                        ),
-                        details=details,
-                        persistence=persistence,
-                    )
-                    break
-
             expected_change = (
                 _session_status_change_payload(
                     session_id,
@@ -8813,6 +10620,7 @@ def _run_locked(
                 allow_not_loop_ready=allow_not_loop_ready,
                 turn_payload=turn_payload,
                 paths=paths,
+                plan_cache=plan_cache,
                 run_id=run_id,
                 turn_index=turn_index,
                 total_sessions=total_sessions,
@@ -8830,10 +10638,11 @@ def _run_locked(
                 session_details=session_details,
                 turn_payload=turn_payload,
                 paths=paths,
+                plan_cache=plan_cache,
                 require_artifact=(
                     review_session_version is not None
                     and review_session_version
-                    >= GENERATED_REVIEW_SESSION_VERSION
+                    >= STRUCTURED_REVIEW_MIN_VERSION
                 ),
             ):
                 break
@@ -8883,7 +10692,7 @@ def _run_locked(
                 break
             if ledger_updates:
                 try:
-                    after = plans.inspect_plan(before.plan_dir)
+                    after = plan_cache.get_fresh(before.plan_dir)
                 except plans.PlanError as error:
                     with persistence.lock:
                         payload["final_snapshot"] = _snapshot_payload(after)
@@ -8970,6 +10779,7 @@ def _run_locked(
                     snapshot=snapshot,
                     turn_payload=turn_payload,
                     max_review_fix_cycles=max_review_fix_cycles,
+                    plan_cache=plan_cache,
                 )
                 review_resume = _set_review_resume(
                     snapshot=snapshot,
@@ -9033,7 +10843,7 @@ def _run_locked(
         # loop exit (including max-sessions, stop-after-current, and pauses)
         # publishes the plan's final continuation state.
         try:
-            final_review_snapshot = plans.inspect_plan(snapshot.plan_dir)
+            final_review_snapshot = plan_cache.get(snapshot.plan_dir)
         except plans.PlanError:
             # Preserve the run's existing malformed-plan pause and its last
             # safely computed projection when the final plan is unreadable.
@@ -9301,6 +11111,8 @@ _RESUME_OVERLAY_DESTS: tuple[str, ...] = (
     "max_sessions",
     "max_pending_sessions",
     "max_review_fix_cycles",
+    "review_guard_exclude",
+    "review_guard_include_ignored",
     "commit_mode",
     "note",
     "unsafe_bypass",

@@ -767,7 +767,7 @@ def _eventless_review_disposition(
     verdict = review.load_review_verdict(
         plan_dir,
         require_artifact=(
-            version is None or version >= review.GENERATED_REVIEW_SESSION_VERSION
+            version is None or version >= review.STRUCTURED_REVIEW_MIN_VERSION
         ),
     )
     if (

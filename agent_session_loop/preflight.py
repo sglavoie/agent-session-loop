@@ -60,6 +60,7 @@ from .plans import (
     PlanSnapshot,
     ProgressEntry,
     ReadinessMetadata,
+    ReadinessState,
     SessionFile,
     canonicalize_path,
     inspect_plan,
@@ -2040,6 +2041,106 @@ def run_environment_preflight(
         plan_dir=canonical_dir,
         findings=env_findings,
         snapshot=snapshot,
+    )
+
+
+RESUME_READINESS_STATES: tuple[ReadinessState, ...] = ("loop-ready", "running")
+
+
+def run_resume_preflight(
+    plan_dir: str | Path,
+    *,
+    snapshot: PlanSnapshot | None,
+    cwd: str | Path | None = None,
+    harness: str | None = None,
+    commit_mode: CommitMode | None = None,
+    state_dir: str | Path | None = None,
+    max_pending_sessions: int | None = None,
+) -> PreflightReport | None:
+    """Run an environment-only preflight when plan checks are redundant.
+
+    Eligible only when a plan snapshot is supplied, the manifest carries
+    parseable readiness metadata whose state is in
+    :data:`RESUME_READINESS_STATES`, and the recorded readiness SHA-256 still
+    matches the locally recomputed stable hash. That equality proves the plan
+    files have not changed since preflight last cleared them, so every check
+    whose only inputs are those files repeats a known-good verdict: contract
+    parsing, ambiguity sentinels, path references, verification-scope linting,
+    and the per-command runnability probes (~95% of a full preflight).
+
+    The two checks whose inputs live *outside* the readiness hash — the
+    progress journal and recorded baseline evidence — are not covered by that
+    proof and are not skipped by this optimization; they move to
+    :func:`run_unhashed_state_checks`, which a caller runs to decide whether
+    this reduced report may be trusted.
+
+    Returns ``None`` when any precondition fails so callers fall back to the
+    full :func:`run_preflight`. ``contracts_by_session`` is always empty: the
+    runner re-reads the contract of each session as it starts it.
+    """
+    if snapshot is None:
+        return None
+
+    try:
+        _, readiness, expected_hash = _check_manifest_readiness_block(snapshot)
+    except PlanError:
+        return None
+    if readiness is None:
+        return None
+    if readiness.state not in RESUME_READINESS_STATES:
+        return None
+    if readiness.readiness_sha256 != expected_hash:
+        return None
+
+    canonical_dir = canonicalize_path(plan_dir)
+    findings = _run_environment_checks(
+        plan_dir=canonical_dir,
+        snapshot=snapshot,
+        cwd=cwd,
+        harness=harness,
+        commit_mode=commit_mode,
+        state_dir=state_dir,
+        max_pending_sessions=max_pending_sessions,
+    )
+    return PreflightReport(
+        plan_dir=canonical_dir,
+        findings=findings,
+        snapshot=snapshot,
+        readiness=readiness,
+        expected_readiness_sha256=expected_hash,
+        contracts_by_session={},
+    )
+
+
+def run_unhashed_state_checks(
+    plan_dir: str | Path,
+    *,
+    snapshot: PlanSnapshot,
+    cwd: str | Path | None = None,
+) -> tuple[PreflightFinding, ...]:
+    """Check the plan state that ``stable_readiness_sha256`` does not cover.
+
+    ``progress.md`` and ``baseline-results.json`` are deliberately outside the
+    readiness hash, so a matching SHA proves nothing about them. A caller that
+    accepts a :func:`run_resume_preflight` report has to confirm them here or
+    it silently drops the runner's progress auto-repair and its
+    stale-baseline gate. Completion contracts are re-parsed because the
+    baseline check needs them and a malformed contract must stay fail-closed.
+
+    Any returned finding means the reduced report cannot stand in for a full
+    one, so the caller falls back to :func:`run_preflight`.
+    """
+    canonical_dir = canonicalize_path(plan_dir)
+    contract_findings, contracts_by_session = _check_session_contracts(snapshot)
+    return (
+        contract_findings
+        + _check_progress_journal(snapshot)
+        + _check_baselines(
+            contracts_by_session,
+            cwd,
+            snapshot,
+            plan_dir=canonical_dir,
+        )
     )
 
 

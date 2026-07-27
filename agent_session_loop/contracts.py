@@ -93,9 +93,16 @@ VerificationCheck = Union[CommandCheck, FileExistsCheck, RegexInFileCheck]
 
 @dataclass(frozen=True)
 class VerifyRecipe:
-    """Ordered tuple of verification checks for a session."""
+    """Ordered tuple of verification checks for a session.
+
+    ``parallel`` opts the recipe's command checks into concurrent execution.
+    Results, artifacts, and failure reporting stay in declared order either
+    way, so the author is responsible for the commands being side-effect-free
+    with respect to one another.
+    """
 
     checks: tuple[VerificationCheck, ...]
+    parallel: bool = False
 
 
 @dataclass(frozen=True)
@@ -364,6 +371,13 @@ def _parse_verify_payload(payload: object, *, session_id: SessionId) -> VerifyRe
                 f"{declared_id.value!r}; expected {session_id.value!r}"
             )
 
+    raw_parallel = payload.get("parallel", False)
+    if not isinstance(raw_parallel, bool):
+        raise PlanError(
+            f"session {session_id.value} Verify JSON 'parallel' must be a "
+            f"boolean; got {raw_parallel!r}"
+        )
+
     raw_checks = payload.get("checks")
     if not isinstance(raw_checks, list) or len(raw_checks) == 0:
         raise PlanError(
@@ -383,7 +397,7 @@ def _parse_verify_payload(payload: object, *, session_id: SessionId) -> VerifyRe
         seen_names.add(check.name)
         checks.append(check)
 
-    return VerifyRecipe(checks=tuple(checks))
+    return VerifyRecipe(checks=tuple(checks), parallel=raw_parallel)
 
 
 def parse_completion_contract(

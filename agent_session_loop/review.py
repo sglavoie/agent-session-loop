@@ -7,8 +7,11 @@ the versioned structured review artifact:
   must be exactly one machine-readable ``Status:`` verdict line.
 - ``final-review.json`` — the machine-readable structured review artifact
   (schema :data:`REVIEW_ARTIFACT_VERSION`). Required for review sessions
-  generated at :data:`GENERATED_REVIEW_SESSION_VERSION` >= 2; v1 review
-  sessions remain Markdown-only compatible.
+  whose marker version is >= :data:`STRUCTURED_REVIEW_MIN_VERSION`; v1 review
+  sessions remain Markdown-only compatible. Enforcement is pinned to that
+  minimum rather than to :data:`GENERATED_REVIEW_SESSION_VERSION` so bumping
+  the generated version never retroactively exempts pending review sessions
+  written at an older version.
 
 Both the runner (``agent_session_loop.runner``) and the autopilot helper
 (``skills/asl/scripts/asl_autopilot.py``) build their verdict payloads through
@@ -50,7 +53,13 @@ REVIEW_SESSION_VERSION_MARKER_TEMPLATE = (
 _REVIEW_SESSION_VERSION_MARKER_RE = re.compile(
     r"<!--\s*asl:generated-review-session\s+version=([0-9]+)\s*-->"
 )
-GENERATED_REVIEW_SESSION_VERSION = 2
+GENERATED_REVIEW_SESSION_VERSION = 3
+
+# Lowest marker version that must produce ``final-review.json``. Pinned
+# independently of GENERATED_REVIEW_SESSION_VERSION: raising the generated
+# version must never drop artifact enforcement for review sessions already
+# pending on disk at an older version.
+STRUCTURED_REVIEW_MIN_VERSION = 2
 
 # Schema version stamped on ``final-review.json``. The parser fail-closes on
 # any other value so future schema changes cannot be half-read.
@@ -478,7 +487,8 @@ def load_review_verdict(
     when ``final-review.json`` is present (and valid and consistent) they also
     carry ``artifact_version``, ``findings``, and ``review_artifact_path``.
 
-    ``require_artifact=True`` (generated v2 review sessions) makes a missing
+    ``require_artifact=True`` (review sessions at or above
+    :data:`STRUCTURED_REVIEW_MIN_VERSION`) makes a missing
     ``final-review.json`` a failure. A present-but-invalid artifact always
     fails, regardless of ``require_artifact``.
     """
@@ -506,7 +516,8 @@ def load_review_verdict(
                 "reason": REVIEW_REASON_MISSING_ARTIFACT,
                 "error": (
                     f"{FINAL_REVIEW_ARTIFACT_FILENAME} is required for "
-                    "generated v2 review sessions"
+                    "generated review sessions at version "
+                    f"{STRUCTURED_REVIEW_MIN_VERSION} or newer"
                 ),
                 "review_output_path": str(review_path),
                 "review_artifact_path": str(artifact_path),
@@ -671,7 +682,7 @@ def review_verdict_payload(
     missing review reports a stable ``reason`` from the shared vocabulary.
 
     When the governing generated review session is version
-    :data:`GENERATED_REVIEW_SESSION_VERSION` or newer, a missing
+    :data:`STRUCTURED_REVIEW_MIN_VERSION` or newer, a missing
     ``final-review.json`` is enforced as ``missing-review-artifact`` — matching
     runner and continuation enforcement — while legacy v1 Markdown-only reviews
     remain accepted.
@@ -694,7 +705,7 @@ def review_verdict_payload(
         snapshot.plan_dir,
         require_artifact=(
             review_session_version is not None
-            and review_session_version >= GENERATED_REVIEW_SESSION_VERSION
+            and review_session_version >= STRUCTURED_REVIEW_MIN_VERSION
         ),
     )
     summary, summary_total = _review_verdict_summary(verdict)
