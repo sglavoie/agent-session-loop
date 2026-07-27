@@ -973,6 +973,63 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(mailbox.LEASE_EXPIRED, expired.reason)
         self.assertEqual(lease, expired.lease)
 
+    def test_v2_lease_projects_question_metadata_without_text(self) -> None:
+        supervisor_id = self.message_id()
+        question_id = self.message_id()
+        updated = datetime(2026, 7, 24, 12, 0, tzinfo=timezone.utc)
+        lease = mailbox.write_lease(
+            self.plan_dir,
+            supervisor_id,
+            state_dir=self.state_dir,
+            updated_at=updated.isoformat(),
+            run_id="run-current",
+            projection_seq=7,
+            unanswered_questions=1,
+            latest_unanswered_question_id=question_id,
+            latest_unanswered_question_created_at=updated.isoformat(),
+        )
+
+        self.assertEqual(mailbox.MAILBOX_LEASE_BYTES, self.lease_path().stat().st_size)
+        raw = self.lease_path().read_text(encoding="utf-8")
+        self.assertNotIn("private question", raw)
+        view = mailbox.read_lease(
+            self.plan_dir,
+            state_dir=self.state_dir,
+            now=updated + timedelta(seconds=1),
+        )
+        self.assertTrue(view.fresh)
+        self.assertEqual(lease, view.lease)
+        assert view.lease is not None
+        self.assertEqual("run-current", view.lease.run_id)
+        self.assertEqual(7, view.lease.projection_seq)
+        self.assertEqual(1, view.lease.unanswered_questions)
+        self.assertEqual(
+            question_id, view.lease.latest_unanswered_question_id
+        )
+
+    def test_v1_lease_remains_readable_without_projection(self) -> None:
+        updated = datetime(2026, 7, 24, 12, 0, tzinfo=timezone.utc)
+        payload = {
+            "supervisor_id": self.message_id(),
+            "updated_at": updated.isoformat(),
+            "version": 1,
+        }
+        path = self.lease_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        encoded = (json.dumps(payload, separators=(",", ":")) + "\n").encode()
+        path.write_bytes(encoded.ljust(mailbox.MAILBOX_LEASE_BYTES, b" "))
+
+        view = mailbox.read_lease(
+            self.plan_dir,
+            state_dir=self.state_dir,
+            now=updated + timedelta(seconds=1),
+        )
+        self.assertTrue(view.fresh)
+        assert view.lease is not None
+        self.assertEqual(1, view.lease.version)
+        self.assertIsNone(view.lease.run_id)
+        self.assertIsNone(view.lease.unanswered_questions)
+
     def test_missing_malformed_and_future_leases_are_not_fresh(self) -> None:
         now = datetime(2026, 7, 24, 12, 0, tzinfo=timezone.utc)
         missing = mailbox.read_lease(

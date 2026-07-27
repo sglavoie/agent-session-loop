@@ -2670,8 +2670,12 @@ class MailboxWatcherTest(unittest.TestCase):
             last_seq=3,
         )
 
-        def write_lease(plan_dir, supervisor_id, *, state_dir=None):
-            writes.append((plan_dir, supervisor_id, state_dir))
+        def write_lease(
+            plan_dir, supervisor_id, *, state_dir=None, **projection
+        ):
+            writes.append(
+                (plan_dir, supervisor_id, state_dir, projection)
+            )
 
         def read_mailbox(plan_dir, *, state_dir=None):
             reads.append((plan_dir, state_dir))
@@ -2694,7 +2698,7 @@ class MailboxWatcherTest(unittest.TestCase):
         self.assertEqual(watcher.poll(now=5.0), (question,))
         self.assertEqual(watcher.poll(now=10.0), ())
         watcher.poll(now=30.0)
-        self.assertEqual(len(writes), 2)
+        self.assertEqual(len(writes), 4)
         self.assertEqual(len(reads), 3)
 
         outbox = watcher.outbox_payload()
@@ -2719,8 +2723,12 @@ class MailboxWatcherTest(unittest.TestCase):
         )
         views = iter((empty_view, question_view))
 
-        def write_lease(plan_dir, supervisor_id, *, state_dir=None):
-            writes.append((plan_dir, supervisor_id, state_dir))
+        def write_lease(
+            plan_dir, supervisor_id, *, state_dir=None, **projection
+        ):
+            writes.append(
+                (plan_dir, supervisor_id, state_dir, projection)
+            )
             if len(writes) == 2:
                 raise OSError("transient lease write failure")
 
@@ -2790,8 +2798,12 @@ class MailboxWatcherTest(unittest.TestCase):
             last_seq=0,
         )
 
-        def write_lease(plan_dir, supervisor_id, *, state_dir=None):
-            writes.append((plan_dir, supervisor_id, state_dir))
+        def write_lease(
+            plan_dir, supervisor_id, *, state_dir=None, **projection
+        ):
+            writes.append(
+                (plan_dir, supervisor_id, state_dir, projection)
+            )
             if len(writes) == 1:
                 raise autopilot._mailbox.MailboxError(
                     autopilot._mailbox.ERROR_LEASE_WRITE,
@@ -2835,7 +2847,7 @@ class MailboxWatcherTest(unittest.TestCase):
         )
         self.assertTrue(watcher.enabled)
         self.assertIn("MAILBOX lease renewal recovered", progress)
-        self.assertEqual(len(writes), 2)
+        self.assertEqual(len(writes), 3)
         self.assertEqual(
             watcher.outbox_payload()["lease_supervision"],
             {
@@ -2879,7 +2891,7 @@ class MailboxWatcherTest(unittest.TestCase):
             )
 
         self.assertTrue(watcher.enabled)
-        self.assertEqual(len(writes), 3)
+        self.assertEqual(len(writes), 4)
         self.assertEqual(
             progress.count(
                 "MAILBOX WARN lease renewal failed; retry scheduled"
@@ -2890,10 +2902,105 @@ class MailboxWatcherTest(unittest.TestCase):
             watcher.outbox_payload()["lease_supervision"],
             {
                 "degraded": True,
-                "renewal_failures": 3,
+                "renewal_failures": 4,
                 "renewal_recoveries": 0,
             },
         )
+
+    def test_projects_only_observed_unanswered_questions_for_exact_run(
+        self,
+    ) -> None:
+        writes = []
+        question = self._question(seq=1, text="private question body")
+        reply = autopilot._mailbox.MailboxMessage(
+            seq=3,
+            id="00000000-0000-0000-0000-000000000012",
+            kind=autopilot._mailbox.KIND_REPLY,
+            created_at="2026-07-24T19:00:02+00:00",
+            text="handled",
+            to=question.id,
+        )
+        guidance = autopilot._mailbox.MailboxMessage(
+            seq=2,
+            id="00000000-0000-0000-0000-000000000013",
+            kind=autopilot._mailbox.KIND_GUIDANCE,
+            created_at="2026-07-24T19:00:01+00:00",
+            text="unrelated guidance",
+        )
+        views = iter(
+            (
+                autopilot._mailbox.MailboxView(
+                    mailbox_path=autopilot.Path(self.mailbox_path),
+                    messages=(question,),
+                    last_seq=1,
+                ),
+                autopilot._mailbox.MailboxView(
+                    mailbox_path=autopilot.Path(self.mailbox_path),
+                    messages=(question, guidance),
+                    last_seq=2,
+                ),
+                autopilot._mailbox.MailboxView(
+                    mailbox_path=autopilot.Path(self.mailbox_path),
+                    messages=(question, guidance, reply),
+                    last_seq=3,
+                ),
+            )
+        )
+
+        def write_lease(
+            plan_dir, supervisor_id, *, state_dir=None, **projection
+        ):
+            writes.append(projection)
+
+        watcher = autopilot._MailboxWatcher.from_status(
+            self._status(last_seq=0),
+            clock=lambda: 0.0,
+            read_mailbox=lambda *_args, **_kwargs: next(views),
+            write_lease=write_lease,
+            supervisor_id="00000000-0000-0000-0000-000000000099",
+        )
+        self.assertIsNotNone(watcher)
+        assert watcher is not None
+        watcher.set_run_id("run-current")
+        watcher.establish(now=0.0)
+        watcher.poll(now=5.0)
+        watcher.poll(now=10.0)
+        watcher.poll(now=15.0)
+
+        self.assertEqual(
+            writes,
+            [
+                {
+                    "projection_seq": 0,
+                    "run_id": "run-current",
+                    "unanswered_questions": 0,
+                },
+                {
+                    "latest_unanswered_question_created_at": (
+                        question.created_at
+                    ),
+                    "latest_unanswered_question_id": question.id,
+                    "projection_seq": 1,
+                    "run_id": "run-current",
+                    "unanswered_questions": 1,
+                },
+                {
+                    "latest_unanswered_question_created_at": (
+                        question.created_at
+                    ),
+                    "latest_unanswered_question_id": question.id,
+                    "projection_seq": 1,
+                    "run_id": "run-current",
+                    "unanswered_questions": 1,
+                },
+                {
+                    "projection_seq": 3,
+                    "run_id": "run-current",
+                    "unanswered_questions": 0,
+                },
+            ],
+        )
+        self.assertNotIn(question.text, repr(writes))
 
     def test_invoke_run_polls_at_five_seconds_and_streams_reply_once(self) -> None:
         clock = _ManualClock()

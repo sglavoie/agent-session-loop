@@ -596,11 +596,57 @@ class _MailboxWatcher:
         self._next_poll_at: Optional[float] = None
         self._next_lease_at: Optional[float] = None
         self._questions: list[dict[str, Any]] = []
+        self._observed_question_ids: set[str] = set()
+        self._pending_questions: tuple[_mailbox.MailboxMessage, ...] = ()
+        self._projection_seq = since
+        self.run_id: Optional[str] = None
         self._progress_records: list[str] = []
         self._lease_degraded = False
         self._lease_renewal_failures = 0
         self._lease_renewal_recoveries = 0
         self.enabled = False
+
+    def set_run_id(
+        self,
+        run_id: Optional[str],
+        *,
+        now: Optional[float] = None,
+    ) -> bool:
+        """Bind the lease projection to one authoritative runner identity."""
+        if not isinstance(run_id, str) or not run_id:
+            return False
+        if run_id == self.run_id:
+            return True
+        if self.run_id is not None:
+            # A watcher can survive a bounded relaunch, but questions observed
+            # for the previous run must never be projected onto its successor.
+            self._observed_question_ids.clear()
+            self._pending_questions = ()
+        self.run_id = run_id
+        if self.enabled:
+            resolved_now = self._clock() if now is None else now
+            self._renew_lease(resolved_now)
+        return True
+
+    def observe_status(
+        self,
+        status: object,
+        *,
+        now: Optional[float] = None,
+    ) -> bool:
+        """Adopt a run id only when status attributes state to the live lock."""
+        if not isinstance(status, dict):
+            return False
+        run_id = _runner_run_id(status)
+        if run_id is None:
+            return False
+        lock_created_at = _lock_created_at(status)
+        if (
+            _parse_timestamp(lock_created_at) is not None
+            and not _state_written_after_lock(status, lock_created_at)
+        ):
+            return False
+        return self.set_run_id(run_id, now=now)
 
     @classmethod
     def from_status(
@@ -703,11 +749,32 @@ class _MailboxWatcher:
 
     def _renew_lease(self, resolved_now: float) -> bool:
         """Renew now while preserving observation after a write failure."""
+        projection: dict[str, Any] = {}
+        if self.run_id is not None:
+            projection = {
+                "run_id": self.run_id,
+                "projection_seq": self._projection_seq,
+                "unanswered_questions": len(self._pending_questions),
+            }
+            if self._pending_questions:
+                latest = max(
+                    self._pending_questions,
+                    key=lambda question: question.seq,
+                )
+                projection.update(
+                    {
+                        "latest_unanswered_question_id": latest.id,
+                        "latest_unanswered_question_created_at": (
+                            latest.created_at
+                        ),
+                    }
+                )
         try:
             self._write_lease(
                 self.plan_dir,
                 self.supervisor_id,
                 state_dir=self.state_root,
+                **projection,
             )
         except (OSError, _mailbox.MailboxError):
             self._lease_renewal_failures += 1
@@ -768,13 +835,8 @@ class _MailboxWatcher:
         assert self._next_poll_at is not None
         assert self._next_lease_at is not None
 
-        if resolved_now >= self._next_lease_at:
-            # Keep both mailbox observation and the lease deadline armed after
-            # failure. Advancing from ``resolved_now`` avoids a zero-timeout
-            # retry spin when the backing filesystem remains unavailable.
-            self._renew_lease(resolved_now)
-
         questions: tuple[_mailbox.MailboxMessage, ...] = ()
+        read_succeeded = False
         if force_read or resolved_now >= self._next_poll_at:
             self._next_poll_at = resolved_now + self._poll_interval
             try:
@@ -783,17 +845,49 @@ class _MailboxWatcher:
                     state_dir=self.state_root,
                 )
             except (OSError, _mailbox.MailboxError):
-                return ()
-            if self._include_unanswered_backlog:
-                questions = view.unanswered_questions
-                self._include_unanswered_backlog = False
+                pass
             else:
-                questions = view.messages_since(
-                    self.last_seq,
-                    kinds=(_mailbox.KIND_QUESTION,),
+                read_succeeded = True
+                if self._include_unanswered_backlog:
+                    questions = view.unanswered_questions
+                    self._include_unanswered_backlog = False
+                else:
+                    questions = view.messages_since(
+                        self.last_seq,
+                        kinds=(_mailbox.KIND_QUESTION,),
+                    )
+                self.last_seq = max(self.last_seq, view.last_seq)
+                self._observed_question_ids.update(
+                    question.id for question in questions
                 )
-            self.last_seq = max(self.last_seq, view.last_seq)
-            self._questions.extend(question.to_payload() for question in questions)
+                pending_questions = tuple(
+                    question
+                    for question in view.unanswered_questions
+                    if question.id in self._observed_question_ids
+                )
+                previous_pending_ids = {
+                    question.id for question in self._pending_questions
+                }
+                pending_ids = {
+                    question.id for question in pending_questions
+                }
+                if pending_ids != previous_pending_ids:
+                    # The reducer generation advances only when the projected
+                    # pending set changes. Guidance, acknowledgements, rejected
+                    # lines, and unchanged polls must not reassert a question
+                    # the user explicitly cleared.
+                    self._projection_seq = max(
+                        self._projection_seq, view.last_seq
+                    )
+                self._pending_questions = pending_questions
+                self._questions.extend(
+                    question.to_payload() for question in questions
+                )
+        if read_succeeded or resolved_now >= self._next_lease_at:
+            # Every successful mailbox read republishes the projection. This
+            # both bounds detection latency and repairs a lease temporarily
+            # replaced by another supervisor mailbox command.
+            self._renew_lease(resolved_now)
         return questions
 
     def drain_progress_records(self) -> tuple[str, ...]:
@@ -1395,11 +1489,20 @@ def _invoke_run(
             "_invoke_error": True,
         }
 
+    observed_status_probe = status_probe
+    if status_probe is not None and mailbox_watcher is not None:
+        def observed_status_probe():
+            status = status_probe()
+            mailbox_watcher.observe_status(status, now=clock())
+            return status
+
     # Prefer the event-driven tailer (opened from the first `asl status`
     # payload's events_path); keep `status_probe` as the per-tick fallback seam.
     tailer = events_tailer
     if tailer is None:
-        tailer = _build_events_tailer(status_probe, clock, stall_threshold)
+        tailer = _build_events_tailer(
+            observed_status_probe, clock, stall_threshold
+        )
 
     start = clock()
     heartbeat_deadline = start + heartbeat_interval
@@ -1471,9 +1574,9 @@ def _invoke_run(
                             stall_threshold,
                             events_stale=events_stale,
                         )
-            if message is None and status_probe is not None:
+            if message is None and observed_status_probe is not None:
                 try:
-                    snapshot = _status_snapshot(status_probe())
+                    snapshot = _status_snapshot(observed_status_probe())
                 except Exception:
                     snapshot = {"state": "unknown"}
                 message = _format_heartbeat(
@@ -2276,6 +2379,7 @@ def supervise_run(
                 if candidate is not None and candidate.establish(now=now):
                     mailbox_watcher = candidate
             if mailbox_watcher is not None:
+                mailbox_watcher.set_run_id(attached_run_id, now=now)
                 _poll_mailbox_watcher(
                     mailbox_watcher,
                     now=now,

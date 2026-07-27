@@ -530,7 +530,10 @@ and the preparation `reason`, then records the ordinary terminal pause without
 changing its reason, details, notification, or exit behavior. Non-fresh lease
 reasons are `missing`, `invalid-size`, `empty`, `invalid-json`, `not-object`,
 `unsupported-version`, `invalid-supervisor-id`, `invalid-updated-at`,
-`future-updated-at`, and `expired`. I/O, capacity, and context reasons are
+`invalid-run-id`, `invalid-projection-seq`, `invalid-unanswered-questions`,
+`invalid-latest-question-id`, `invalid-latest-question-created-at`,
+`incomplete-question-projection`, `future-updated-at`, and `expired`. I/O,
+capacity, and context reasons are
 `lease-read-error`, `mailbox-full`, `mailbox-read-error`,
 `mailbox-write-error`, `no-paused-run`, `missing-question-context`, and
 `reply-context-mismatch`.
@@ -1365,12 +1368,28 @@ record count, full state, and best-effort errors. Its lease fields include
 `lease_present`, `lease_fresh`, `lease_reason`, and `lease_error`. The stable
 lease-reason vocabulary is `missing`, `invalid-size`, `empty`, `invalid-json`,
 `not-object`, `unsupported-version`, `invalid-supervisor-id`,
-`invalid-updated-at`, `future-updated-at`, and `expired`. An absent lease is
+`invalid-updated-at`, `invalid-run-id`, `invalid-projection-seq`,
+`invalid-unanswered-questions`, `invalid-latest-question-id`,
+`invalid-latest-question-created-at`, `incomplete-question-projection`,
+`future-updated-at`, and `expired`. An absent lease is
 projected as `lease_present: false` with `lease_reason: null`; a fresh lease
 has `lease_fresh: true` with `lease_reason: null`. Stale or malformed leases
 carry their classification in `lease_reason`, while `lease_error` carries a
 best-effort malformed/unreadable detail and is otherwise `null`. The projection
-never returns raw message bodies. Both `status --json` and a live run's state
+never returns raw message bodies.
+
+Supervisor lease schema v2 remains a fixed 512-byte record and adds an optional,
+text-free question projection: `run_id`, `projection_seq`,
+`unanswered_questions`, `latest_unanswered_question_id`, and
+`latest_unanswered_question_created_at`. The latest-question fields are absent
+when the count is zero. The autopilot binds the projection only after status
+attributes `state.json` to the current lock holder and republishes it after each
+successful five-second mailbox poll. The projection sequence advances only when
+the observed unanswered-question set changes, so unrelated mailbox records
+cannot reassert an acknowledged question. Readers continue to accept v1 leases,
+which carry no question projection.
+
+Both `status --json` and a live run's state
 expose compact `waiting_for_reply` metadata while a bounded answer wait is
 active. The adjacent top-level `waiting_for_reply_status` field is `live` when
 its hard deadline is still in the future and the plan has an active runner

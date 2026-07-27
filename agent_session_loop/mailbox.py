@@ -29,7 +29,8 @@ from . import state
 MAILBOX_FILE_NAME = "mailbox.jsonl"
 MAILBOX_LEASE_FILE_NAME = "mailbox-lease.json"
 MAILBOX_SCHEMA_VERSION = 1
-MAILBOX_LEASE_VERSION = 1
+MAILBOX_LEASE_VERSION = 2
+MAILBOX_LEASE_SUPPORTED_VERSIONS = (1, MAILBOX_LEASE_VERSION)
 MAILBOX_MAX_BYTES = 4 * 1024 * 1024
 # The smallest compact record produced with normal generated metadata is an
 # acknowledgement with a one-digit ``upto`` value, a canonical UUID, and a
@@ -85,6 +86,12 @@ LEASE_NOT_OBJECT = "not-object"
 LEASE_UNSUPPORTED_VERSION = "unsupported-version"
 LEASE_INVALID_SUPERVISOR_ID = "invalid-supervisor-id"
 LEASE_INVALID_UPDATED_AT = "invalid-updated-at"
+LEASE_INVALID_RUN_ID = "invalid-run-id"
+LEASE_INVALID_PROJECTION_SEQ = "invalid-projection-seq"
+LEASE_INVALID_UNANSWERED_QUESTIONS = "invalid-unanswered-questions"
+LEASE_INVALID_LATEST_QUESTION_ID = "invalid-latest-question-id"
+LEASE_INVALID_LATEST_QUESTION_CREATED_AT = "invalid-latest-question-created-at"
+LEASE_INCOMPLETE_QUESTION_PROJECTION = "incomplete-question-projection"
 LEASE_FUTURE_UPDATED_AT = "future-updated-at"
 LEASE_EXPIRED = "expired"
 
@@ -297,14 +304,31 @@ class MailboxLease:
 
     supervisor_id: str
     updated_at: str
+    run_id: str | None = None
+    projection_seq: int | None = None
+    unanswered_questions: int | None = None
+    latest_unanswered_question_id: str | None = None
+    latest_unanswered_question_created_at: str | None = None
     version: int = MAILBOX_LEASE_VERSION
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "supervisor_id": self.supervisor_id,
             "updated_at": self.updated_at,
             "version": self.version,
         }
+        if self.version >= 2 and self.run_id is not None:
+            payload["run_id"] = self.run_id
+            payload["projection_seq"] = self.projection_seq
+            payload["unanswered_questions"] = self.unanswered_questions
+            if self.latest_unanswered_question_id is not None:
+                payload[
+                    "latest_unanswered_question_id"
+                ] = self.latest_unanswered_question_id
+                payload[
+                    "latest_unanswered_question_created_at"
+                ] = self.latest_unanswered_question_created_at
+        return payload
 
 
 @dataclass(frozen=True)
@@ -325,7 +349,7 @@ class MailboxLeaseView:
         return self.lease.updated_at if self.lease is not None else None
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "fresh": self.fresh,
             "lease_path": str(self.lease_path),
             "reason": self.reason,
@@ -335,6 +359,21 @@ class MailboxLeaseView:
                 self.lease.version if self.lease is not None else None
             ),
         }
+        if self.lease is not None:
+            payload.update(
+                {
+                    "latest_unanswered_question_created_at": (
+                        self.lease.latest_unanswered_question_created_at
+                    ),
+                    "latest_unanswered_question_id": (
+                        self.lease.latest_unanswered_question_id
+                    ),
+                    "projection_seq": self.lease.projection_seq,
+                    "run_id": self.lease.run_id,
+                    "unanswered_questions": self.lease.unanswered_questions,
+                }
+            )
+        return payload
 
 
 def mailbox_path_for_plan(
@@ -1011,6 +1050,11 @@ def write_lease(
     *,
     state_dir: str | Path | None = None,
     updated_at: str | None = None,
+    run_id: str | None = None,
+    projection_seq: int | None = None,
+    unanswered_questions: int | None = None,
+    latest_unanswered_question_id: str | None = None,
+    latest_unanswered_question_created_at: str | None = None,
 ) -> MailboxLease:
     """Create or renew the fixed-size supervisor lease under an exclusive lock."""
     if not _is_uuid(supervisor_id):
@@ -1018,9 +1062,62 @@ def write_lease(
     resolved_updated_at = _utc_now_iso() if updated_at is None else updated_at
     if _parse_timestamp(resolved_updated_at, require_utc=True) is None:
         raise MailboxError(LEASE_INVALID_UPDATED_AT)
+    projection_values = (
+        projection_seq,
+        unanswered_questions,
+        latest_unanswered_question_id,
+        latest_unanswered_question_created_at,
+    )
+    if run_id is None:
+        if any(value is not None for value in projection_values):
+            raise MailboxError(LEASE_INCOMPLETE_QUESTION_PROJECTION)
+    else:
+        if not isinstance(run_id, str) or run_id.strip() == "":
+            raise MailboxError(LEASE_INVALID_RUN_ID)
+        if (
+            isinstance(projection_seq, bool)
+            or not isinstance(projection_seq, int)
+            or projection_seq < 0
+        ):
+            raise MailboxError(LEASE_INVALID_PROJECTION_SEQ)
+        if (
+            isinstance(unanswered_questions, bool)
+            or not isinstance(unanswered_questions, int)
+            or unanswered_questions < 0
+        ):
+            raise MailboxError(LEASE_INVALID_UNANSWERED_QUESTIONS)
+        if unanswered_questions == 0:
+            if (
+                latest_unanswered_question_id is not None
+                or latest_unanswered_question_created_at is not None
+            ):
+                raise MailboxError(LEASE_INCOMPLETE_QUESTION_PROJECTION)
+        else:
+            assert isinstance(projection_seq, int)
+            if projection_seq == 0:
+                raise MailboxError(LEASE_INVALID_PROJECTION_SEQ)
+            if not _is_uuid(latest_unanswered_question_id):
+                raise MailboxError(LEASE_INVALID_LATEST_QUESTION_ID)
+            if (
+                _parse_timestamp(
+                    latest_unanswered_question_created_at,
+                    require_utc=True,
+                )
+                is None
+            ):
+                raise MailboxError(
+                    LEASE_INVALID_LATEST_QUESTION_CREATED_AT
+                )
     lease = MailboxLease(
         supervisor_id=supervisor_id,
         updated_at=resolved_updated_at,
+        run_id=run_id,
+        projection_seq=projection_seq,
+        unanswered_questions=unanswered_questions,
+        latest_unanswered_question_id=latest_unanswered_question_id,
+        latest_unanswered_question_created_at=(
+            latest_unanswered_question_created_at
+        ),
     )
     data = _lease_bytes(lease)
     lease_path = lease_path_for_plan(plan_dir, state_dir)
@@ -1125,7 +1222,7 @@ def read_lease(
     if (
         isinstance(version, bool)
         or not isinstance(version, int)
-        or version != MAILBOX_LEASE_VERSION
+        or version not in MAILBOX_LEASE_SUPPORTED_VERSIONS
     ):
         return _invalid_lease_view(lease_path, LEASE_UNSUPPORTED_VERSION)
     supervisor_id = payload.get("supervisor_id")
@@ -1137,9 +1234,88 @@ def read_lease(
         return _invalid_lease_view(lease_path, LEASE_INVALID_UPDATED_AT)
     assert isinstance(supervisor_id, str)
     assert isinstance(updated_at, str)
+    run_id: str | None = None
+    projection_seq: int | None = None
+    unanswered_questions: int | None = None
+    latest_unanswered_question_id: str | None = None
+    latest_unanswered_question_created_at: str | None = None
+    if version >= 2 and "run_id" in payload:
+        run_id_value = payload.get("run_id")
+        if not isinstance(run_id_value, str) or run_id_value.strip() == "":
+            return _invalid_lease_view(lease_path, LEASE_INVALID_RUN_ID)
+        projection_seq_value = payload.get("projection_seq")
+        if (
+            isinstance(projection_seq_value, bool)
+            or not isinstance(projection_seq_value, int)
+            or projection_seq_value < 0
+        ):
+            return _invalid_lease_view(
+                lease_path, LEASE_INVALID_PROJECTION_SEQ
+            )
+        unanswered_value = payload.get("unanswered_questions")
+        if (
+            isinstance(unanswered_value, bool)
+            or not isinstance(unanswered_value, int)
+            or unanswered_value < 0
+        ):
+            return _invalid_lease_view(
+                lease_path, LEASE_INVALID_UNANSWERED_QUESTIONS
+            )
+        latest_id_value = payload.get("latest_unanswered_question_id")
+        latest_created_value = payload.get(
+            "latest_unanswered_question_created_at"
+        )
+        if unanswered_value == 0:
+            if latest_id_value is not None or latest_created_value is not None:
+                return _invalid_lease_view(
+                    lease_path, LEASE_INCOMPLETE_QUESTION_PROJECTION
+                )
+        else:
+            if projection_seq_value == 0:
+                return _invalid_lease_view(
+                    lease_path, LEASE_INVALID_PROJECTION_SEQ
+                )
+            if not _is_uuid(latest_id_value):
+                return _invalid_lease_view(
+                    lease_path, LEASE_INVALID_LATEST_QUESTION_ID
+                )
+            if (
+                _parse_timestamp(latest_created_value, require_utc=True)
+                is None
+            ):
+                return _invalid_lease_view(
+                    lease_path,
+                    LEASE_INVALID_LATEST_QUESTION_CREATED_AT,
+                )
+            assert isinstance(latest_id_value, str)
+            assert isinstance(latest_created_value, str)
+            latest_unanswered_question_id = latest_id_value
+            latest_unanswered_question_created_at = latest_created_value
+        run_id = run_id_value
+        projection_seq = projection_seq_value
+        unanswered_questions = unanswered_value
+    elif version >= 2 and any(
+        field in payload
+        for field in (
+            "projection_seq",
+            "unanswered_questions",
+            "latest_unanswered_question_id",
+            "latest_unanswered_question_created_at",
+        )
+    ):
+        return _invalid_lease_view(
+            lease_path, LEASE_INCOMPLETE_QUESTION_PROJECTION
+        )
     lease = MailboxLease(
         supervisor_id=supervisor_id,
         updated_at=updated_at,
+        run_id=run_id,
+        projection_seq=projection_seq,
+        unanswered_questions=unanswered_questions,
+        latest_unanswered_question_id=latest_unanswered_question_id,
+        latest_unanswered_question_created_at=(
+            latest_unanswered_question_created_at
+        ),
         version=version,
     )
     updated_utc = updated.astimezone(timezone.utc)
