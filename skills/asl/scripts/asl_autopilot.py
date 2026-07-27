@@ -117,6 +117,44 @@ QUESTION_PREVIEW_MAX_CHARS = 240
 # via the `stall_threshold` kwarg only — deliberately not a CLI flag.
 DEFAULT_STALL_IDLE_THRESHOLD = 90.0
 
+# Hard escalation bars sitting *above* the soft 90s WARN, which stays a
+# terminal noop below them. Crossing a bar ends supervision with
+# `reason: "worker_hung"` so the supervising session regains control; the
+# `asl run` child is never killed or waited on — it stays alive with the lock
+# held, so re-running the same command re-attaches. Overridable via kwargs
+# only — deliberately not CLI flags.
+#
+# `DEFAULT_HANG_ESCALATION_PROBES`: consecutive heartbeat ticks whose snapshot
+# carries a runner `hang_suspected` block of the result-received class before
+# escalating (~60s at the 30s tick cadence). The runner already confirmed the
+# harness result arrived while the process stays alive, so two corroborating
+# ticks are enough. `DEFAULT_HANG_IDLE_CEILING`: hard idle backstop (seconds);
+# any tick at or above it escalates regardless of hang class. Deliberately
+# conservative so a legitimate long sleep/network wait below the ceiling never
+# churns — the runner-side block and its AgentMux notification already
+# surfaced the suspicion.
+DEFAULT_HANG_ESCALATION_PROBES = 2
+DEFAULT_HANG_IDLE_CEILING = 900.0
+
+# Escalation classes carried in the `worker_hung` result's `hang.class`. The
+# first two mirror the runner's `hang_suspected.reason` values
+# (`runner.HANG_REASON_RESULT_RECEIVED` / `runner.HANG_REASON_ZERO_CPU`); the
+# ceiling class marks an idle overrun with no (or a different) runner block.
+HANG_CLASS_RESULT_RECEIVED = "result_received_process_alive"
+HANG_CLASS_ZERO_CPU = "zero_cpu_idle"
+HANG_CLASS_IDLE_CEILING = "idle_ceiling_exceeded"
+
+# Fixed operator guidance attached to every `worker_hung` result. Notify-only
+# by default: the supervisor inspects and asks the human before any kill.
+HANG_NEXT_STEPS = (
+    "verify the tree with ps -axo pid,ppid,state,time,command vs "
+    "hang_suspected.process_tree",
+    "ask the user before killing anything",
+    "if approved: kill only the identified leaf (deepest 0-CPU descendant), "
+    "never asl run / runner",
+    "re-run the same supervision command to re-attach",
+)
+
 # Pause classification is owned by `agent_session_loop.pause_policy`, the single
 # source of truth for which pauses are recoverable, which require a human, the
 # same-session retry budget, and the transport backoff schedule. These names are
@@ -1058,7 +1096,7 @@ def _status_snapshot(status: object) -> dict:
 
     active_turn = runner_state.get("active_turn") or status.get("active_turn")
     if isinstance(active_turn, dict) and active_turn:
-        return {
+        snapshot = {
             "state": "running",
             "session_id": active_turn.get("session_id"),
             "session_number": active_turn.get("session_number"),
@@ -1067,6 +1105,13 @@ def _status_snapshot(status: object) -> dict:
             "elapsed_seconds": active_turn.get("elapsed_seconds"),
             **common,
         }
+        # The runner's hang sentinel persists its suspicion block on the live
+        # turn; carrying it here covers the attach path and the per-tick probe
+        # fallback, so escalation sees the same evidence either way.
+        hang_suspected = active_turn.get("hang_suspected")
+        if isinstance(hang_suspected, dict):
+            snapshot["hang_suspected"] = hang_suspected
+        return snapshot
 
     active_verification = runner_state.get("active_verification") or status.get(
         "active_verification"
@@ -1173,16 +1218,21 @@ class _EventsTailer:
             self._snapshot = snapshot
 
         if name == _events.TURN_HEARTBEAT_EVENT:
-            update_snapshot(
-                {
-                    "state": "running",
-                    "session_id": payload.get("session_id"),
-                    "session_number": payload.get("session_number"),
-                    "total_sessions": payload.get("total_sessions"),
-                    "idle_seconds": payload.get("idle_seconds"),
-                    "elapsed_seconds": payload.get("elapsed_seconds"),
-                }
-            )
+            snapshot = {
+                "state": "running",
+                "session_id": payload.get("session_id"),
+                "session_number": payload.get("session_number"),
+                "total_sessions": payload.get("total_sessions"),
+                "idle_seconds": payload.get("idle_seconds"),
+                "elapsed_seconds": payload.get("elapsed_seconds"),
+            }
+            # The runner duplicates its live `hang_suspected` block into every
+            # heartbeat while suspicion is active; a heartbeat without the
+            # block is an implicit retraction (the fold drops the key).
+            hang_suspected = payload.get("hang_suspected")
+            if isinstance(hang_suspected, dict):
+                snapshot["hang_suspected"] = hang_suspected
+            update_snapshot(snapshot)
         elif name == "turn_started":
             update_snapshot(
                 {
@@ -1194,6 +1244,28 @@ class _EventsTailer:
                     "elapsed_seconds": 0,
                 }
             )
+        elif name == _events.TURN_HANG_SUSPECTED_EVENT:
+            # One-shot per suspicion episode; fold onto the current snapshot so
+            # escalation sees the block even before the next heartbeat rides in.
+            snapshot = dict(self._snapshot)
+            hang_suspected = payload.get("hang_suspected")
+            if isinstance(hang_suspected, dict):
+                snapshot["hang_suspected"] = hang_suspected
+                update_snapshot(snapshot)
+        elif name == _events.TURN_HANG_CLEARED_EVENT:
+            snapshot = dict(self._snapshot)
+            snapshot.pop("hang_suspected", None)
+            # A retraction invalidates the idle reading from any earlier
+            # record in the same batch: keeping it would let a pre-clear
+            # 900s heartbeat trip the idle ceiling on the very tick the
+            # runner withdrew suspicion. The runner emits the turn's fresh
+            # idle on the cleared payload; without it, drop the stale value.
+            idle = payload.get("idle_seconds")
+            if isinstance(idle, (int, float)) and not isinstance(idle, bool):
+                snapshot["idle_seconds"] = idle
+            else:
+                snapshot.pop("idle_seconds", None)
+            update_snapshot(snapshot)
         elif name == _events.VERIFICATION_HEARTBEAT_EVENT:
             update_snapshot({"state": "verifying"})
         elif (
@@ -1422,6 +1494,148 @@ def _format_heartbeat(
     return f"chunk {chunk_index}: running {int(elapsed)}s | {detail}"
 
 
+def _snapshot_idle_seconds(snapshot: dict, block: Optional[dict]):
+    """Best-available idle reading: the snapshot's, else the hang block's."""
+    idle = snapshot.get("idle_seconds")
+    if not isinstance(idle, (int, float)) or isinstance(idle, bool):
+        idle = block.get("idle_seconds") if block is not None else None
+    if isinstance(idle, (int, float)) and not isinstance(idle, bool):
+        return float(idle)
+    return None
+
+
+class _HangEscalation:
+    """Decide when a runner-suspected worker hang becomes a hard escalation.
+
+    Folds one heartbeat snapshot per supervision tick. Two policies form hard
+    bars above the soft ``WARN possibly stalled`` line, which stays unchanged
+    below them:
+
+    - **result-received** (:data:`HANG_CLASS_RESULT_RECEIVED`): the runner's
+      ``hang_suspected`` block reports the harness result already arrived
+      while the process stays alive. After ``probes`` consecutive ticks
+      (default 2, ~60s at the 30s cadence) escalate — the turn's real work is
+      done, so waiting longer only blocks the supervising session.
+    - **idle ceiling**: any tick whose idle seconds reach ``idle_ceiling``
+      (default 900s) escalates regardless of hang class —
+      :data:`HANG_CLASS_ZERO_CPU` when the runner's block confirms the
+      zero-CPU class, else :data:`HANG_CLASS_IDLE_CEILING`. Deliberately
+      conservative for zero-cpu so a legitimate long sleep/network wait below
+      the ceiling never churns; the runner-side block and AgentMux
+      notification already surfaced it.
+
+    Any tick without a result-received block — including an explicit
+    ``turn_hang_cleared`` retraction or a heartbeat that dropped the block —
+    resets the consecutive-probe count.
+
+    Probe counting is bound to one suspicion episode, identified by the
+    block's ``detected_at``: the runner keeps it stable across refreshes of
+    the same episode and stamps a fresh value when suspicion re-arms after a
+    clear. A result-received block from a different episode resets the count
+    before being counted, so a clear plus re-arm folded between two polls —
+    where only the final snapshot is visible — cannot combine two episodes
+    into the required consecutive probes.
+    """
+
+    def __init__(
+        self,
+        *,
+        probes: int = DEFAULT_HANG_ESCALATION_PROBES,
+        idle_ceiling: float = DEFAULT_HANG_IDLE_CEILING,
+    ) -> None:
+        self._probes_required = probes
+        self._idle_ceiling = idle_ceiling
+        self._result_probes = 0
+        self._result_episode: object = None
+
+    def observe(self, snapshot: object) -> Optional[dict]:
+        """Fold one tick's snapshot; return the escalation verdict or None."""
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+        block = snapshot.get("hang_suspected")
+        if not isinstance(block, dict):
+            block = None
+        reason = block.get("reason") if block is not None else None
+        if reason == HANG_CLASS_RESULT_RECEIVED:
+            episode = block.get("detected_at")
+            if episode != self._result_episode:
+                self._result_probes = 0
+                self._result_episode = episode
+            self._result_probes += 1
+        else:
+            self._result_probes = 0
+            self._result_episode = None
+        idle_seconds = _snapshot_idle_seconds(snapshot, block)
+
+        def verdict(hang_class: str) -> dict:
+            return {
+                "class": hang_class,
+                "hang_suspected": block,
+                "idle_seconds": idle_seconds,
+                "probes": self._result_probes,
+            }
+
+        if self._result_probes >= self._probes_required:
+            return verdict(HANG_CLASS_RESULT_RECEIVED)
+        if idle_seconds is not None and idle_seconds >= self._idle_ceiling:
+            return verdict(
+                HANG_CLASS_ZERO_CPU
+                if reason == HANG_CLASS_ZERO_CPU
+                else HANG_CLASS_IDLE_CEILING
+            )
+        return None
+
+
+def _hang_payload(
+    escalation: dict,
+    parsed: dict,
+    status: object,
+    *,
+    supervised_child_pid: Optional[int] = None,
+    detached: Optional[bool] = None,
+) -> dict:
+    """Build the structured ``hang`` block of a ``worker_hung`` result.
+
+    Carries everything the supervising session needs to inspect the hang
+    without killing anything: the escalation class, the runner's verbatim
+    ``hang_suspected`` block (or null), the observed idle seconds and probe
+    count, the plan/state/events paths and the hung turn's artifact paths from
+    the last status payload, and the fixed :data:`HANG_NEXT_STEPS` guidance.
+    ``supervised_child_pid``/``detached`` are attached only for self-launched
+    chunks, whose ``asl run`` child stays alive (lock held, re-attachable)
+    after the helper returns.
+    """
+    status_dict = status if isinstance(status, dict) and status.get("ok") else {}
+    active_turn = status_dict.get("active_turn")
+    if not isinstance(active_turn, dict):
+        runner_state = status_dict.get("runner_state")
+        if isinstance(runner_state, dict):
+            active_turn = runner_state.get("active_turn")
+    if not isinstance(active_turn, dict):
+        active_turn = {}
+    payload = {
+        "class": escalation.get("class"),
+        "hang_suspected": escalation.get("hang_suspected"),
+        "idle_seconds": escalation.get("idle_seconds"),
+        "probes": escalation.get("probes"),
+        "plan_dir": status_dict.get("plan_dir") or parsed.get("plan_dir"),
+        "state_path": status_dict.get("state_path"),
+        "events_path": status_dict.get("events_path"),
+        "artifact_paths": {
+            "stdout": active_turn.get("stdout_path"),
+            "stderr": active_turn.get("stderr_path"),
+            "last_message": active_turn.get("last_message_path"),
+            "result": active_turn.get("result_path"),
+        },
+        "next_steps": list(HANG_NEXT_STEPS),
+    }
+    if supervised_child_pid is not None:
+        payload["supervised_child_pid"] = supervised_child_pid
+    if detached is not None:
+        payload["detached"] = detached
+    return payload
+
+
 def _invoke_run(
     parsed: dict,
     *,
@@ -1435,6 +1649,8 @@ def _invoke_run(
     events_tailer=None,
     mailbox_watcher: Optional[_MailboxWatcher] = None,
     stall_threshold: float = DEFAULT_STALL_IDLE_THRESHOLD,
+    hang_escalation_probes: int = DEFAULT_HANG_ESCALATION_PROBES,
+    hang_idle_ceiling: float = DEFAULT_HANG_IDLE_CEILING,
 ) -> dict:
     """Start one ``asl run`` chunk, wait with heartbeats, return its JSON.
 
@@ -1464,6 +1680,14 @@ def _invoke_run(
     tick falls back to the injectable ``status_probe`` (the historical idle-only
     behavior) and finally to the plain ``running, elapsed Ns`` line. The initial
     started/resumed heartbeat is never probed.
+
+    Above the soft WARN sit the hard hang bars (see :class:`_HangEscalation`):
+    ``hang_escalation_probes`` consecutive ticks carrying a result-received
+    ``hang_suspected`` block, or any tick at/above ``hang_idle_ceiling`` idle
+    seconds, stop the wait loop and return a ``{"_worker_hung": True, ...}``
+    marker (mirroring the ``_invoke_error`` marker) **without killing or
+    waiting on the child** — the ``asl run`` process stays alive with the lock
+    held, so re-running the same supervision command re-attaches.
 
     When ``reply_text`` is supplied this launches the resume path: ``asl run``
     is invoked with ``--reply-stdin`` appended and the reply is streamed on the
@@ -1508,6 +1732,38 @@ def _invoke_run(
             observed_status_probe, clock, stall_threshold
         )
 
+    hang_escalation = _HangEscalation(
+        probes=hang_escalation_probes, idle_ceiling=hang_idle_ceiling
+    )
+
+    def worker_hung_marker(escalation: dict) -> dict:
+        # Escalate without killing or waiting on the child: probe status once
+        # for fresh plan/state/events/artifact paths, then hand control back.
+        escalation_status: object = None
+        if observed_status_probe is not None:
+            try:
+                escalation_status = observed_status_probe()
+            except Exception:
+                escalation_status = None
+        marker = {
+            "ok": False,
+            "paused": False,
+            "reason": "worker_hung",
+            "_worker_hung": True,
+            "hang": _hang_payload(
+                escalation,
+                parsed,
+                escalation_status,
+                supervised_child_pid=getattr(proc, "pid", None),
+                detached=True,
+            ),
+        }
+        if isinstance(escalation_status, dict):
+            marker["status"] = escalation_status
+        if mailbox_watcher is not None:
+            marker["outbox"] = mailbox_watcher.outbox_payload()
+        return marker
+
     start = clock()
     heartbeat_deadline = start + heartbeat_interval
     heartbeat(
@@ -1549,6 +1805,7 @@ def _invoke_run(
 
             elapsed = now - start
             message: Optional[str] = None
+            tick_snapshot: dict = {}
             if tailer is not None:
                 try:
                     snapshot, events_stale = tailer.snapshot()
@@ -1557,6 +1814,7 @@ def _invoke_run(
                     # to the subprocess probe seam on this and later ticks.
                     tailer = None
                 else:
+                    tick_snapshot = snapshot
                     # Only trust the tailer when it yields a usable
                     # (running/verifying) snapshot. An unknown/paused snapshot
                     # means the event stream told us nothing this tick — a
@@ -1583,12 +1841,20 @@ def _invoke_run(
                     snapshot = _status_snapshot(observed_status_probe())
                 except Exception:
                     snapshot = {"state": "unknown"}
+                tick_snapshot = snapshot
                 message = _format_heartbeat(
                     chunk_index, elapsed, snapshot, stall_threshold
                 )
             if message is None:
                 message = f"chunk {chunk_index}: running, elapsed {int(elapsed)}s"
             heartbeat(message)
+            escalation = hang_escalation.observe(tick_snapshot)
+            if escalation is not None:
+                heartbeat(
+                    f"chunk {chunk_index}: escalating worker_hung — "
+                    f"{escalation['class']}; leaving the `asl run` child alive"
+                )
+                return worker_hung_marker(escalation)
             steps = max(
                 1,
                 int((now - heartbeat_deadline) // heartbeat_interval) + 1,
@@ -1988,6 +2254,7 @@ def _run_result(
     completed: Optional[int] = None,
     pending: Optional[int] = None,
     outbox: Optional[dict] = None,
+    hang: Optional[dict] = None,
 ) -> dict:
     """Build a stable ``stage: run`` supervision result payload."""
     result: dict = {"ok": ok, "stage": RUN_STAGE, "reason": reason, "chunks": chunks}
@@ -1997,6 +2264,8 @@ def _run_result(
         result["pending"] = pending
     if error is not None:
         result["error"] = error
+    if hang is not None:
+        result["hang"] = hang
     if status is not None:
         result["status"] = status
     if run is not None:
@@ -2164,6 +2433,8 @@ def supervise_run(
     max_chunks: int = DEFAULT_MAX_CHUNKS,
     max_retries: int = DEFAULT_MAX_RETRIES,
     mailbox_watcher_factory=_MailboxWatcher.from_status,
+    hang_escalation_probes: int = DEFAULT_HANG_ESCALATION_PROBES,
+    hang_idle_ceiling: float = DEFAULT_HANG_IDLE_CEILING,
 ) -> dict:
     """Drive an ``asl run`` to completion within a global session budget.
 
@@ -2237,7 +2508,14 @@ def supervise_run(
     :func:`_invoke_run`), and the attach-wait heartbeat reuses the ``status``
     payload already fetched this iteration to surface the same session/idle
     detail and a ``WARN possibly stalled`` line once ``idle_seconds`` crosses
-    ``stall_threshold``. A bounded ``waiting_for_reply`` state suppresses
+    ``stall_threshold``. Above that soft warning sit two hard hang bars
+    (``hang_escalation_probes`` consecutive observations of the runner's
+    ``result_received_process_alive`` suspicion, or any observation with idle at
+    or beyond ``hang_idle_ceiling``): a self-launched chunk's ``_worker_hung``
+    marker and the attach path's own :class:`_HangEscalation` tracker both map
+    to ``run_result(False, "worker_hung", hang=...)`` — the ``asl run`` child is
+    never killed or waited on, so re-running the same command re-attaches. A
+    bounded ``waiting_for_reply`` state suppresses
     event-silence warnings only until its hard deadline; an overdue or malformed
     deadline is reported as possibly stalled. Between attach heartbeats the loop
     only ``os.stat``s ``events.jsonl`` (via the ``events_stat`` seam) and services
@@ -2269,6 +2547,8 @@ def supervise_run(
                 status_probe=lambda: status_invoker(parsed),
                 mailbox_watcher=mailbox_watcher,
                 stall_threshold=stall_threshold,
+                hang_escalation_probes=hang_escalation_probes,
+                hang_idle_ceiling=hang_idle_ceiling,
             )
 
     chunks = 0
@@ -2304,6 +2584,12 @@ def supervise_run(
     attached_run_id: Optional[str] = None
     attached_lock_created_at: Optional[str] = None
     attached_pending: Optional[int] = None
+    # Hard hang bars for the attach path: each full status probe is one
+    # observation, mirroring the per-tick observations a self-launched chunk
+    # feeds from its events tailer.
+    attach_hang_escalation = _HangEscalation(
+        probes=hang_escalation_probes, idle_ceiling=hang_idle_ceiling
+    )
 
     while True:
         status = status_invoker(parsed)
@@ -2388,6 +2674,19 @@ def supervise_run(
                     mailbox_watcher,
                     now=now,
                     heartbeat=heartbeat,
+                )
+            escalation = attach_hang_escalation.observe(_status_snapshot(status))
+            if escalation is not None:
+                heartbeat(
+                    "attached to active run; escalating worker_hung — "
+                    f"{escalation['class']}"
+                )
+                return run_result(
+                    False,
+                    "worker_hung",
+                    status=status,
+                    chunks=chunks,
+                    hang=_hang_payload(escalation, parsed, status),
                 )
             if attach_start is None:
                 attach_start = now
@@ -2537,6 +2836,19 @@ def supervise_run(
                     if isinstance(run_payload, dict)
                     else "run invocation returned no payload"
                 ),
+            )
+        if run_payload.get("_worker_hung"):
+            # The chunk escalated a hard hang; the `asl run` child is still
+            # alive and holds the plan lock, so surface it untouched for the
+            # operator (re-running the same command re-attaches).
+            marker_status = run_payload.get("status")
+            hang = run_payload.get("hang")
+            return run_result(
+                False,
+                "worker_hung",
+                status=marker_status if isinstance(marker_status, dict) else status,
+                chunks=chunks,
+                hang=hang if isinstance(hang, dict) else None,
             )
         if run_payload.get("paused"):
             pause_reason = (
@@ -2763,6 +3075,10 @@ def run_autopilot(
     required. A run that stops ``user_required`` (a quota/auth/invalid-model
     harness failure) is passed through untouched — no ``asl questions`` fetch,
     since no reply can clear it — so the caller can surface the reset info. A
+    run that stops ``worker_hung`` (a hard hang bar fired) is likewise passed
+    through untouched — no ``asl questions`` fetch and no review read — carrying
+    its ``hang`` payload so the operator can inspect the still-alive ``asl run``
+    child before deciding anything. A
     run that completes after using ``--review-harness`` has its
     ``final-review.md`` verdict parsed: findings re-tag the result as
     ``review_findings`` so the caller can hand the unresolved findings and any
@@ -2838,9 +3154,49 @@ def _review_resume_guidance(result: dict) -> Optional[str]:
     )
 
 
+def _hung_leaf_command(hang: dict) -> Optional[str]:
+    """Command string of the deepest descendant in the sampled process tree.
+
+    ``process_tree`` is BFS-ordered (parents before children), so the last
+    entry is the deepest descendant — the best hung-leaf candidate.
+    """
+    block = hang.get("hang_suspected")
+    if not isinstance(block, dict):
+        return None
+    tree = block.get("process_tree")
+    if not isinstance(tree, list) or not tree:
+        return None
+    leaf = tree[-1]
+    if not isinstance(leaf, dict):
+        return None
+    command = leaf.get("command")
+    if isinstance(command, str) and command:
+        return command
+    return None
+
+
 def _human_summary(result: dict) -> str:
     """One-line human summary for non-JSON output."""
     reason = result.get("reason", "unknown")
+    if reason == "worker_hung":
+        hang = result.get("hang")
+        hang = hang if isinstance(hang, dict) else {}
+        hang_class = hang.get("class") or "unknown"
+        idle_seconds = hang.get("idle_seconds")
+        if isinstance(idle_seconds, (int, float)) and not isinstance(
+            idle_seconds, bool
+        ):
+            idle_text = f"idle {int(idle_seconds)}s"
+        else:
+            idle_text = "idle unknown"
+        summary = f"stopped: worker_hung - {hang_class} ({idle_text})"
+        leaf = _hung_leaf_command(hang)
+        if leaf:
+            summary = f"{summary}; deepest descendant: {leaf}"
+        return (
+            f"{summary}; the `asl run` child is still alive — inspect before "
+            "killing anything; re-run the same command to re-attach"
+        )
     if reason == "review_findings":
         guidance = _review_resume_guidance(result)
         review = result.get("review") or {}

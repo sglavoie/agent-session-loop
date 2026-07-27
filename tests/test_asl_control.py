@@ -1743,6 +1743,473 @@ class LiveTurnSchedulerTests(unittest.TestCase):
             self.assertIsNone(persisted["active_turn"])
 
 
+class _AfterEvaluateSentinel(runner._HangSentinel):
+    """Sentinel whose ``evaluate`` runs a one-shot hook after returning.
+
+    Deterministically reproduces the F-003 window: the hook fires after the
+    verdict is computed but before ``_record_heartbeat`` folds it, exactly
+    where resumed output used to be overtaken by the stale assessment.
+    """
+
+    after_evaluate = None
+
+    def evaluate(self, **kwargs):
+        assessment = super().evaluate(**kwargs)
+        hook, self.after_evaluate = self.after_evaluate, None
+        if hook is not None:
+            hook()
+        return assessment
+
+
+class HangSentinelTests(unittest.TestCase):
+    """Unit coverage for the heartbeat-tick hang classifier."""
+
+    NOW = datetime(2026, 7, 24, 12, 0, tzinfo=timezone.utc)
+
+    @staticmethod
+    def tree(cpu_seconds: float) -> list[dict[str, object]]:
+        return [
+            {
+                "pid": 123,
+                "ppid": 1,
+                "state": "S",
+                "cpu_seconds": cpu_seconds,
+                "command": "claude --print",
+            }
+        ]
+
+    def make_sentinel(
+        self,
+        samples: list[list[dict[str, object]] | None],
+        *,
+        monotonic=None,
+    ) -> tuple["runner._HangSentinel", list[int]]:
+        sample_calls: list[int] = []
+        queue = list(samples)
+
+        def sample_tree(pid: int):
+            sample_calls.append(pid)
+            return queue.pop(0) if queue else None
+
+        sentinel = runner._HangSentinel(
+            sample_tree=sample_tree,
+            monotonic=(lambda: 0.0) if monotonic is None else monotonic,
+            trigger_idle_seconds=120.0,
+            confirm_samples=2,
+            cpu_epsilon_seconds=0.5,
+            result_grace_seconds=45.0,
+        )
+        return sentinel, sample_calls
+
+    def test_idle_below_trigger_never_samples_or_suspects(self) -> None:
+        sentinel, calls = self.make_sentinel([self.tree(1.0)])
+        sentinel.note_harness_pid(123)
+
+        assessment = sentinel.evaluate(idle_seconds=119.9, now=self.NOW)
+
+        self.assertIsNone(assessment.suspected)
+        self.assertIsNone(assessment.transition)
+        self.assertEqual([], calls)
+
+    def test_zero_cpu_confirms_only_after_consecutive_samples(self) -> None:
+        sentinel, calls = self.make_sentinel(
+            [self.tree(10.0), self.tree(10.1), self.tree(10.2), self.tree(10.2)]
+        )
+        sentinel.note_harness_pid(123)
+
+        first = sentinel.evaluate(idle_seconds=120.0, now=self.NOW)
+        second = sentinel.evaluate(idle_seconds=150.0, now=self.NOW)
+        third = sentinel.evaluate(idle_seconds=180.0, now=self.NOW)
+
+        self.assertIsNone(first.suspected)
+        self.assertIsNone(second.suspected)
+        self.assertEqual("suspected", third.transition)
+        block = third.suspected
+        assert block is not None
+        self.assertEqual(runner.HANG_REASON_ZERO_CPU, block["reason"])
+        self.assertEqual(123, block["harness_pid"])
+        self.assertEqual(180.0, block["idle_seconds"])
+        self.assertEqual(2, block["confirm_samples"])
+        self.assertAlmostEqual(0.1, block["cpu_delta_seconds"], places=6)
+        self.assertEqual(123, block["process_tree"][0]["pid"])
+        self.assertIsNone(block["result_seen_at"])
+        self.assertNotIn("process_tree_error", block)
+
+        fourth = sentinel.evaluate(idle_seconds=210.0, now=self.NOW)
+        self.assertIsNone(fourth.transition)
+        assert fourth.suspected is not None
+        self.assertEqual(block["detected_at"], fourth.suspected["detected_at"])
+        self.assertEqual(3, fourth.suspected["confirm_samples"])
+        self.assertEqual([123] * 4, calls)
+
+    def test_cpu_positive_sample_resets_streak_and_retracts(self) -> None:
+        sentinel, _calls = self.make_sentinel(
+            [
+                self.tree(10.0),
+                self.tree(10.0),
+                self.tree(10.0),
+                self.tree(25.0),
+                self.tree(25.0),
+                self.tree(25.1),
+            ]
+        )
+        sentinel.note_harness_pid(123)
+
+        sentinel.evaluate(idle_seconds=120.0, now=self.NOW)
+        sentinel.evaluate(idle_seconds=150.0, now=self.NOW)
+        suspected = sentinel.evaluate(idle_seconds=180.0, now=self.NOW)
+        self.assertEqual("suspected", suspected.transition)
+
+        cleared = sentinel.evaluate(idle_seconds=210.0, now=self.NOW)
+        self.assertEqual("cleared", cleared.transition)
+        self.assertIsNone(cleared.suspected)
+        assert cleared.retracted is not None
+        self.assertEqual(runner.HANG_REASON_ZERO_CPU, cleared.retracted["reason"])
+        self.assertAlmostEqual(
+            15.0, cleared.retracted["cpu_delta_seconds"], places=6
+        )
+
+        # The streak restarts from a fresh baseline: one zero-delta sample is
+        # not enough, two are.
+        rebaselined = sentinel.evaluate(idle_seconds=240.0, now=self.NOW)
+        self.assertIsNone(rebaselined.suspected)
+        resuspected = sentinel.evaluate(idle_seconds=270.0, now=self.NOW)
+        self.assertEqual("suspected", resuspected.transition)
+
+    def test_result_grace_without_pid(self) -> None:
+        clock = {"now": 0.0}
+        sentinel, calls = self.make_sentinel([], monotonic=lambda: clock["now"])
+        sentinel.note_final_result()
+
+        clock["now"] = 44.9
+        early = sentinel.evaluate(idle_seconds=44.9, now=self.NOW)
+        self.assertIsNone(early.suspected)
+
+        clock["now"] = 45.0
+        assessment = sentinel.evaluate(idle_seconds=45.0, now=self.NOW)
+        self.assertEqual("suspected", assessment.transition)
+        block = assessment.suspected
+        assert block is not None
+        self.assertEqual(runner.HANG_REASON_RESULT_RECEIVED, block["reason"])
+        self.assertIsNone(block["harness_pid"])
+        self.assertIsNone(block["process_tree"])
+        self.assertNotIn("process_tree_error", block)
+        self.assertIsNotNone(block["result_seen_at"])
+        self.assertEqual([], calls)
+
+    def test_result_grace_outranks_zero_cpu(self) -> None:
+        clock = {"now": 0.0}
+        sentinel, calls = self.make_sentinel(
+            [self.tree(5.0), self.tree(5.0), self.tree(5.0)],
+            monotonic=lambda: clock["now"],
+        )
+        sentinel.note_harness_pid(123)
+        sentinel.note_final_result()
+
+        sentinel.evaluate(idle_seconds=200.0, now=self.NOW)
+        sentinel.evaluate(idle_seconds=230.0, now=self.NOW)
+        clock["now"] = 60.0
+        assessment = sentinel.evaluate(idle_seconds=260.0, now=self.NOW)
+
+        self.assertEqual("suspected", assessment.transition)
+        block = assessment.suspected
+        assert block is not None
+        self.assertEqual(runner.HANG_REASON_RESULT_RECEIVED, block["reason"])
+        self.assertEqual(123, block["harness_pid"])
+        self.assertEqual(123, block["process_tree"][0]["pid"])
+        self.assertEqual([123] * 3, calls)
+
+    def test_ps_failure_never_confirms(self) -> None:
+        sentinel, calls = self.make_sentinel([])
+        sentinel.note_harness_pid(123)
+
+        for idle in (120.0, 150.0, 180.0, 210.0):
+            assessment = sentinel.evaluate(idle_seconds=idle, now=self.NOW)
+            self.assertIsNone(assessment.suspected)
+            self.assertIsNone(assessment.transition)
+        self.assertEqual([123] * 4, calls)
+
+    def test_ps_failure_resets_confirm_streak(self) -> None:
+        sentinel, _calls = self.make_sentinel(
+            [
+                self.tree(5.0),
+                self.tree(5.0),
+                None,
+                self.tree(5.0),
+                self.tree(5.0),
+                self.tree(5.0),
+            ]
+        )
+        sentinel.note_harness_pid(123)
+
+        outcomes = [
+            sentinel.evaluate(idle_seconds=120.0 + index, now=self.NOW).transition
+            for index in range(6)
+        ]
+
+        self.assertEqual([None, None, None, None, None, "suspected"], outcomes)
+
+    def test_ps_failure_records_error_on_result_grace_block(self) -> None:
+        clock = {"now": 100.0}
+        sentinel, calls = self.make_sentinel([], monotonic=lambda: clock["now"])
+        sentinel.note_harness_pid(123)
+        sentinel.note_final_result()
+
+        clock["now"] = 200.0
+        assessment = sentinel.evaluate(idle_seconds=90.0, now=self.NOW)
+
+        block = assessment.suspected
+        assert block is not None
+        self.assertEqual(runner.HANG_REASON_RESULT_RECEIVED, block["reason"])
+        self.assertIsNone(block["process_tree"])
+        self.assertEqual("process tree sample failed", block["process_tree_error"])
+        self.assertEqual([123], calls)
+
+    def test_note_activity_retracts_and_resets_counters(self) -> None:
+        sentinel, _calls = self.make_sentinel(
+            [
+                self.tree(5.0),
+                self.tree(5.0),
+                self.tree(5.0),
+                self.tree(5.0),
+                self.tree(5.0),
+                self.tree(5.0),
+            ]
+        )
+        sentinel.note_harness_pid(123)
+        sentinel.evaluate(idle_seconds=120.0, now=self.NOW)
+        sentinel.evaluate(idle_seconds=150.0, now=self.NOW)
+        suspected = sentinel.evaluate(idle_seconds=180.0, now=self.NOW)
+        self.assertEqual("suspected", suspected.transition)
+        # The heartbeat fold announces the episode before persisting it;
+        # only announced episodes are handed back for a cleared event.
+        self.assertTrue(sentinel.confirm_assessment(suspected))
+
+        retracted = sentinel.note_activity()
+        assert retracted is not None
+        self.assertEqual(runner.HANG_REASON_ZERO_CPU, retracted["reason"])
+        self.assertIsNone(sentinel.note_activity())
+
+        # Counters restart: a fresh baseline plus two confirming samples are
+        # required before suspicion returns.
+        self.assertIsNone(
+            sentinel.evaluate(idle_seconds=210.0, now=self.NOW).suspected
+        )
+        self.assertIsNone(
+            sentinel.evaluate(idle_seconds=240.0, now=self.NOW).suspected
+        )
+        self.assertEqual(
+            "suspected",
+            sentinel.evaluate(idle_seconds=270.0, now=self.NOW).transition,
+        )
+
+    def test_note_activity_during_sample_discards_the_assessment(self) -> None:
+        sample_calls = {"count": 0}
+        holder: list[runner._HangSentinel] = []
+
+        def sample_tree(pid: int):
+            sample_calls["count"] += 1
+            if sample_calls["count"] == 3:
+                # Output resumes while the confirming tick's ps sample is
+                # still in flight.
+                holder[0].note_activity()
+            return self.tree(5.0)
+
+        sentinel = runner._HangSentinel(
+            sample_tree=sample_tree,
+            monotonic=lambda: 0.0,
+            trigger_idle_seconds=120.0,
+            confirm_samples=2,
+            cpu_epsilon_seconds=0.5,
+            result_grace_seconds=45.0,
+        )
+        holder.append(sentinel)
+        sentinel.note_harness_pid(123)
+
+        self.assertIsNone(
+            sentinel.evaluate(idle_seconds=120.0, now=self.NOW).suspected
+        )
+        self.assertIsNone(
+            sentinel.evaluate(idle_seconds=150.0, now=self.NOW).suspected
+        )
+        racing = sentinel.evaluate(idle_seconds=180.0, now=self.NOW)
+        self.assertIsNone(racing.suspected)
+        self.assertIsNone(racing.transition)
+
+        # The retraction reset the counters: a fresh baseline plus two
+        # confirming samples are required before suspicion returns.
+        self.assertIsNone(
+            sentinel.evaluate(idle_seconds=210.0, now=self.NOW).suspected
+        )
+        self.assertIsNone(
+            sentinel.evaluate(idle_seconds=240.0, now=self.NOW).suspected
+        )
+        self.assertEqual(
+            "suspected",
+            sentinel.evaluate(idle_seconds=270.0, now=self.NOW).transition,
+        )
+
+    def test_output_between_evaluate_and_heartbeat_fold_discards_stale_assessment(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            clock = {"now": 0.0}
+            sentinel = _AfterEvaluateSentinel(
+                sample_tree=lambda pid: None,
+                monotonic=lambda: clock["now"],
+                trigger_idle_seconds=120.0,
+                confirm_samples=2,
+                cpu_epsilon_seconds=0.5,
+                result_grace_seconds=45.0,
+            )
+            live_turn = runner._LiveTurn(
+                payload={"state_path": str(tmp_dir / "state.json")},
+                event_path=tmp_dir / "events.jsonl",
+                progress=mock.Mock(),
+                active_turn=LiveTurnSchedulerTests.active_turn(),
+                hang_sentinel=sentinel,
+            )
+            live_turn.note_final_result()
+            clock["now"] = 100.0  # past the 45s result grace: evaluate suspects
+            sentinel.after_evaluate = lambda: live_turn.record_activity(
+                "stdout", "resumed output"
+            )
+
+            with mock.patch.object(
+                runner, "_notify_agent_mux_loop_turn_heartbeat"
+            ), mock.patch.object(
+                runner, "_notify_agent_mux_loop_turn_hang_suspected"
+            ) as suspected_notify, mock.patch.object(
+                runner, "_notify_agent_mux_loop_turn_hang_cleared"
+            ) as cleared_notify:
+                heartbeat = live_turn._record_heartbeat()
+
+            # The verdict sampled a pre-activity generation, so the fold
+            # discards it instead of resurrecting it after the output.
+            self.assertNotIn("hang_suspected", heartbeat)
+            self.assertEqual(0.0, heartbeat["idle_seconds"])
+            state = json.loads(
+                (tmp_dir / "state.json").read_text(encoding="utf-8")
+            )
+            self.assertNotIn("hang_suspected", state["active_turn"])
+            names = [
+                record["name"]
+                for record in read_jsonl(tmp_dir / "events.jsonl")
+            ]
+            # No suspected event — and no orphan cleared for an episode that
+            # was never announced.
+            self.assertEqual([events.TURN_HEARTBEAT_EVENT], names)
+            suspected_notify.assert_not_called()
+            cleared_notify.assert_not_called()
+
+    def test_activity_during_heartbeat_refresh_keeps_cleared_after_suspected(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            clock = {"now": 0.0}
+            sentinel = _AfterEvaluateSentinel(
+                sample_tree=lambda pid: None,
+                monotonic=lambda: clock["now"],
+                trigger_idle_seconds=120.0,
+                confirm_samples=2,
+                cpu_epsilon_seconds=0.5,
+                result_grace_seconds=45.0,
+            )
+            live_turn = runner._LiveTurn(
+                payload={"state_path": str(tmp_dir / "state.json")},
+                event_path=tmp_dir / "events.jsonl",
+                progress=mock.Mock(),
+                active_turn=LiveTurnSchedulerTests.active_turn(),
+                hang_sentinel=sentinel,
+            )
+            live_turn.note_final_result()
+            clock["now"] = 100.0
+
+            with mock.patch.object(
+                runner, "_notify_agent_mux_loop_turn_heartbeat"
+            ), mock.patch.object(
+                runner, "_notify_agent_mux_loop_turn_hang_suspected"
+            ) as suspected_notify, mock.patch.object(
+                runner, "_notify_agent_mux_loop_turn_hang_cleared"
+            ) as cleared_notify:
+                # Tick 1 announces the suspicion.
+                live_turn._record_heartbeat()
+                # Tick 2's refresh verdict goes stale when output resumes
+                # between evaluate() and the fold.
+                sentinel.after_evaluate = lambda: live_turn.record_activity(
+                    "stdout", "resumed output"
+                )
+                live_turn._record_heartbeat()
+
+            records = read_jsonl(tmp_dir / "events.jsonl")
+            names = [record["name"] for record in records]
+            self.assertEqual(1, names.count(events.TURN_HANG_SUSPECTED_EVENT))
+            self.assertEqual(1, names.count(events.TURN_HANG_CLEARED_EVENT))
+            # The clear is final: nothing suspected is emitted after it.
+            self.assertLess(
+                names.index(events.TURN_HANG_SUSPECTED_EVENT),
+                names.index(events.TURN_HANG_CLEARED_EVENT),
+            )
+            cleared_payload = records[
+                names.index(events.TURN_HANG_CLEARED_EVENT)
+            ]["payload"]
+            # The cleared event carries the turn's fresh idle reading; the
+            # stale pre-clear value stays confined to the retracted block.
+            self.assertEqual(0.0, cleared_payload["idle_seconds"])
+            self.assertGreater(
+                cleared_payload["hang_suspected"]["idle_seconds"], 0.0
+            )
+            state = json.loads(
+                (tmp_dir / "state.json").read_text(encoding="utf-8")
+            )
+            self.assertNotIn("hang_suspected", state["active_turn"])
+            last_heartbeat = [
+                record
+                for record in records
+                if record["name"] == events.TURN_HEARTBEAT_EVENT
+            ][-1]
+            self.assertNotIn("hang_suspected", last_heartbeat["payload"])
+            self.assertEqual(1, suspected_notify.call_count)
+            self.assertEqual(1, cleared_notify.call_count)
+
+    def test_stop_set_skips_sentinel_sampling(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            calls: list[int] = []
+
+            def sample_tree(pid: int):
+                calls.append(pid)
+                return self.tree(1.0)
+
+            sentinel = runner._HangSentinel(
+                sample_tree=sample_tree,
+                monotonic=time.monotonic,
+                trigger_idle_seconds=0.0,
+                confirm_samples=2,
+                cpu_epsilon_seconds=0.5,
+                result_grace_seconds=45.0,
+            )
+            live_turn = runner._LiveTurn(
+                payload={"state_path": str(tmp_dir / "state.json")},
+                event_path=tmp_dir / "events.jsonl",
+                progress=mock.Mock(),
+                active_turn=LiveTurnSchedulerTests.active_turn(),
+                hang_sentinel=sentinel,
+            )
+            live_turn.note_harness_pid(123)
+
+            live_turn._stop.set()
+            heartbeat = live_turn._record_heartbeat()
+            self.assertEqual([], calls)
+            self.assertNotIn("hang_suspected", heartbeat)
+
+            live_turn._stop.clear()
+            live_turn._record_heartbeat()
+            self.assertEqual([123], calls)
+
+
 class ControlCliTests(unittest.TestCase):
     """`asl control`: the CLI producer surface for the durable control queue.
 

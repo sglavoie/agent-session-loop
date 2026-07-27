@@ -43,6 +43,7 @@ from . import (
     pause_policy,
     plans,
     preflight,
+    process_tree,
     progress_repair,
     qna,
     responses,
@@ -65,6 +66,15 @@ from .formatting import (
 NOT_IMPLEMENTED_EXIT = 2
 INTERRUPTED_EXIT = 130
 HEARTBEAT_INTERVAL_SECONDS = 30.0
+HANG_TRIGGER_IDLE_SECONDS = 120.0
+HANG_CONFIRM_SAMPLES = 2
+HANG_CPU_EPSILON_SECONDS = 0.5
+HANG_RESULT_GRACE_SECONDS = 45.0
+HANG_TRIGGER_IDLE_ENV_VAR = "ASL_HANG_TRIGGER_IDLE_SECONDS"
+HANG_CONFIRM_SAMPLES_ENV_VAR = "ASL_HANG_CONFIRM_SAMPLES"
+HANG_RESULT_GRACE_ENV_VAR = "ASL_HANG_RESULT_GRACE_SECONDS"
+HANG_REASON_RESULT_RECEIVED = "result_received_process_alive"
+HANG_REASON_ZERO_CPU = "zero_cpu_idle"
 LIVE_CONTROL_POLL_INTERVAL_SECONDS = 5.0
 VERIFICATION_HEARTBEAT_INTERVAL_SECONDS = 30.0
 COMMIT_MODE_PER_SESSION = "per-session"
@@ -125,6 +135,8 @@ AGENT_MUX_START_EVENT = agent_mux_delivery.START_EVENT
 AGENT_MUX_TURN_START_EVENT = agent_mux_delivery.TURN_START_EVENT
 AGENT_MUX_TURN_HEARTBEAT_EVENT = agent_mux_delivery.TURN_HEARTBEAT_EVENT
 AGENT_MUX_TURN_FINISH_EVENT = agent_mux_delivery.TURN_FINISH_EVENT
+AGENT_MUX_TURN_HANG_SUSPECTED_EVENT = agent_mux_delivery.TURN_HANG_SUSPECTED_EVENT
+AGENT_MUX_TURN_HANG_CLEARED_EVENT = agent_mux_delivery.TURN_HANG_CLEARED_EVENT
 AGENT_MUX_VERIFICATION_START_EVENT = agent_mux_delivery.VERIFICATION_START_EVENT
 AGENT_MUX_VERIFICATION_HEARTBEAT_EVENT = (
     agent_mux_delivery.VERIFICATION_HEARTBEAT_EVENT
@@ -140,6 +152,10 @@ AGENT_MUX_START_REASON = agent_mux_delivery.START_REASON
 AGENT_MUX_TURN_START_REASON = agent_mux_delivery.TURN_START_REASON
 AGENT_MUX_TURN_HEARTBEAT_REASON = agent_mux_delivery.TURN_HEARTBEAT_REASON
 AGENT_MUX_TURN_FINISH_REASON = agent_mux_delivery.TURN_FINISH_REASON
+AGENT_MUX_TURN_HANG_SUSPECTED_REASON = (
+    agent_mux_delivery.TURN_HANG_SUSPECTED_REASON
+)
+AGENT_MUX_TURN_HANG_CLEARED_REASON = agent_mux_delivery.TURN_HANG_CLEARED_REASON
 AGENT_MUX_VERIFICATION_START_REASON = agent_mux_delivery.VERIFICATION_START_REASON
 AGENT_MUX_VERIFICATION_HEARTBEAT_REASON = (
     agent_mux_delivery.VERIFICATION_HEARTBEAT_REASON
@@ -4386,6 +4402,54 @@ def _notify_agent_mux_loop_wait_ended(
     )
 
 
+def _notify_agent_mux_loop_turn_hang_suspected(
+    payload: dict[str, Any],
+    active_turn: dict[str, Any],
+    *,
+    hang_reason: str,
+    hang_idle_seconds: float | None,
+    harness_pid: int | None,
+    persistence: _RunPersistence | None = None,
+) -> None:
+    # Bounded scalars only; the sampled process tree stays in
+    # state.json / events.jsonl rather than riding the notification.
+    _notify_agent_mux_loop(
+        AGENT_MUX_TURN_HANG_SUSPECTED_EVENT,
+        payload,
+        reason=AGENT_MUX_TURN_HANG_SUSPECTED_REASON,
+        active_turn=active_turn,
+        extra={
+            "hang_reason": hang_reason,
+            "hang_idle_seconds": hang_idle_seconds,
+            "harness_pid": harness_pid,
+        },
+        persistence=persistence,
+    )
+
+
+def _notify_agent_mux_loop_turn_hang_cleared(
+    payload: dict[str, Any],
+    active_turn: dict[str, Any],
+    *,
+    hang_reason: str,
+    hang_idle_seconds: float | None,
+    harness_pid: int | None,
+    persistence: _RunPersistence | None = None,
+) -> None:
+    _notify_agent_mux_loop(
+        AGENT_MUX_TURN_HANG_CLEARED_EVENT,
+        payload,
+        reason=AGENT_MUX_TURN_HANG_CLEARED_REASON,
+        active_turn=active_turn,
+        extra={
+            "hang_reason": hang_reason,
+            "hang_idle_seconds": hang_idle_seconds,
+            "harness_pid": harness_pid,
+        },
+        persistence=persistence,
+    )
+
+
 def _notify_agent_mux_loop_paused(
     payload: dict[str, Any],
     persistence: _RunPersistence | None = None,
@@ -5281,22 +5345,32 @@ class _StderrOutputCoordinator:
         if not self.enabled:
             return
         with self._lock:
-            print(
-                f"[{_local_timestamp()}] {message}",
-                file=self._target_stream(),
-                flush=True,
-            )
-
-    def emit_lines(self, messages: list[str]) -> None:
-        if not self.enabled:
-            return
-        with self._lock:
-            for message in messages:
+            try:
                 print(
                     f"[{_local_timestamp()}] {message}",
                     file=self._target_stream(),
                     flush=True,
                 )
+            except (BrokenPipeError, OSError):
+                # The sink reader is gone (e.g. an escalating helper exited
+                # and abandoned this run's pipe). Disable the sink for the
+                # rest of the run; durable truth stays in state.json /
+                # events.jsonl / plan files.
+                self.enabled = False
+
+    def emit_lines(self, messages: list[str]) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            try:
+                for message in messages:
+                    print(
+                        f"[{_local_timestamp()}] {message}",
+                        file=self._target_stream(),
+                        flush=True,
+                    )
+            except (BrokenPipeError, OSError):
+                self.enabled = False
 
     def write_unprefixed(self, text: str) -> int:
         if not self.enabled:
@@ -5316,10 +5390,13 @@ class _StderrOutputCoordinator:
 
         if complete_lines:
             with self._lock:
-                stream = self._target_stream()
-                for line in complete_lines:
-                    stream.write(line)
-                stream.flush()
+                try:
+                    stream = self._target_stream()
+                    for line in complete_lines:
+                        stream.write(line)
+                    stream.flush()
+                except (BrokenPipeError, OSError):
+                    self.enabled = False
         return len(text)
 
     def flush_thread(self) -> None:
@@ -5330,10 +5407,13 @@ class _StderrOutputCoordinator:
         with self._buffer_lock:
             buffered = self._thread_buffers.pop(thread_id, "")
         with self._lock:
-            stream = self._target_stream()
-            if buffered:
-                stream.write(buffered)
-            stream.flush()
+            try:
+                stream = self._target_stream()
+                if buffered:
+                    stream.write(buffered)
+                stream.flush()
+            except (BrokenPipeError, OSError):
+                self.enabled = False
 
 
 class _ProgressReporter:
@@ -5782,6 +5862,282 @@ def _compact_status_lines(
     return lines
 
 
+def _hang_env_seconds(name: str, default: float) -> float:
+    """Return a finite positive float override from ``name`` or ``default``.
+
+    Modeled on :func:`_agent_mux_notify_timeout`: anything unparsable,
+    non-positive, or non-finite fails safe onto the default so a bad
+    override can never disable or destabilize hang detection.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        return default
+    if value <= 0 or not math.isfinite(value):
+        return default
+    return value
+
+
+def _hang_trigger_idle_seconds() -> float:
+    return _hang_env_seconds(HANG_TRIGGER_IDLE_ENV_VAR, HANG_TRIGGER_IDLE_SECONDS)
+
+
+def _hang_result_grace_seconds() -> float:
+    return _hang_env_seconds(HANG_RESULT_GRACE_ENV_VAR, HANG_RESULT_GRACE_SECONDS)
+
+
+def _hang_confirm_samples() -> int:
+    raw = os.environ.get(HANG_CONFIRM_SAMPLES_ENV_VAR)
+    if raw is None:
+        return HANG_CONFIRM_SAMPLES
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        return HANG_CONFIRM_SAMPLES
+    return value if value >= 1 else HANG_CONFIRM_SAMPLES
+
+
+@dataclass
+class _HangAssessment:
+    """One heartbeat-tick verdict from :class:`_HangSentinel`.
+
+    ``suspected`` is the current (possibly refreshed) suspicion block or
+    ``None``; ``transition`` is ``"suspected"``/``"cleared"`` only on the tick
+    the state actually flips; ``retracted`` carries the old block on
+    ``"cleared"`` so the event and notification can name what was withdrawn.
+    ``generation`` is the sentinel activity generation the verdict sampled;
+    ``confirm_assessment`` rejects the verdict at fold time when output has
+    resumed since, so a stale suspicion can never be persisted after a newer
+    clear.
+    """
+
+    suspected: dict[str, Any] | None = None
+    transition: str | None = None
+    retracted: dict[str, Any] | None = None
+    generation: int = 0
+
+
+class _HangSentinel:
+    """Classify a silent harness turn as suspected-hung from heartbeat ticks.
+
+    Fed by the harness observation hooks (``note_harness_pid`` /
+    ``note_final_result``) and by ``note_activity`` on resumed output;
+    ``evaluate`` runs once per heartbeat tick. ``evaluate`` spawns ``ps``
+    through ``sample_tree`` and must never be called under
+    ``_LiveTurn._lock``.
+    """
+
+    def __init__(
+        self,
+        *,
+        sample_tree: Callable[
+            [int], list[dict[str, Any]] | None
+        ] = process_tree.sample_process_tree,
+        monotonic: Callable[[], float] = time.monotonic,
+        trigger_idle_seconds: float | None = None,
+        confirm_samples: int | None = None,
+        cpu_epsilon_seconds: float = HANG_CPU_EPSILON_SECONDS,
+        result_grace_seconds: float | None = None,
+    ) -> None:
+        self._sample_tree = sample_tree
+        self._monotonic = monotonic
+        self._trigger_idle_seconds = (
+            _hang_trigger_idle_seconds()
+            if trigger_idle_seconds is None
+            else trigger_idle_seconds
+        )
+        self._confirm_samples = (
+            _hang_confirm_samples() if confirm_samples is None else confirm_samples
+        )
+        self._cpu_epsilon_seconds = cpu_epsilon_seconds
+        self._result_grace_seconds = (
+            _hang_result_grace_seconds()
+            if result_grace_seconds is None
+            else result_grace_seconds
+        )
+        self._lock = threading.Lock()
+        self._harness_pid: int | None = None
+        self._result_seen_at: datetime | None = None
+        self._result_seen_monotonic: float | None = None
+        self._last_cpu_seconds: float | None = None
+        self._zero_cpu_streak = 0
+        self._suspected: dict[str, Any] | None = None
+        # Bumped on every note_activity; assessments carry the generation
+        # they sampled so any verdict outlived by resumed output is discarded
+        # (mid-sample by evaluate, post-return by confirm_assessment).
+        self._activity_generation = 0
+        # True once the current episode's suspected event was confirmed for
+        # persistence; only announced episodes yield a retracted block (and
+        # thus a cleared event), keeping suspected/cleared pairs matched.
+        self._announced = False
+
+    def note_harness_pid(self, pid: int) -> None:
+        with self._lock:
+            self._harness_pid = pid
+
+    def note_final_result(self) -> None:
+        with self._lock:
+            if self._result_seen_monotonic is None:
+                self._result_seen_at = _utc_now()
+                self._result_seen_monotonic = self._monotonic()
+
+    def note_activity(self) -> dict[str, Any] | None:
+        """Retract suspicion on resumed output; return the retracted block.
+
+        Returns ``None`` for an unannounced episode (its suspected event was
+        never confirmed for persistence) so no orphan cleared event is
+        emitted for a suspicion nobody was ever told about.
+        """
+        with self._lock:
+            self._activity_generation += 1
+            retracted = self._suspected if self._announced else None
+            self._suspected = None
+            self._announced = False
+            self._zero_cpu_streak = 0
+            self._last_cpu_seconds = None
+            return retracted
+
+    def confirm_assessment(self, assessment: _HangAssessment) -> bool:
+        """Atomically re-validate an assessment immediately before folding.
+
+        Returns ``False`` when output resumed after the assessment sampled
+        its activity generation — the verdict is stale and must be discarded
+        wholesale. On success marks a live suspicion announced, so a
+        subsequent ``note_activity`` retraction emits its paired cleared
+        event strictly after the suspected event the caller is persisting
+        (the caller holds the fold lock across confirm and persist).
+        """
+        with self._lock:
+            if assessment.generation != self._activity_generation:
+                return False
+            if self._suspected is not None:
+                self._announced = True
+            return True
+
+    def evaluate(self, *, idle_seconds: float, now: datetime) -> _HangAssessment:
+        with self._lock:
+            pid = self._harness_pid
+            result_seen_at = self._result_seen_at
+            result_seen_monotonic = self._result_seen_monotonic
+            previous = self._suspected
+            generation = self._activity_generation
+
+        result_grace_hit = (
+            result_seen_monotonic is not None
+            and self._monotonic() - result_seen_monotonic
+            >= self._result_grace_seconds
+        )
+        should_sample = pid is not None and (
+            result_grace_hit
+            or idle_seconds >= self._trigger_idle_seconds
+            or previous is not None
+        )
+        tree: list[dict[str, Any]] | None = None
+        tree_error: str | None = None
+        if should_sample:
+            assert pid is not None
+            # The ps spawn happens here, outside every lock.
+            tree = self._sample_tree(pid)
+            if tree is None:
+                tree_error = "process tree sample failed"
+
+        with self._lock:
+            if generation != self._activity_generation:
+                # note_activity ran while ps sampled; the idle reading and
+                # any verdict built from it are stale — discard this tick.
+                return _HangAssessment(generation=generation)
+
+            cpu_delta: float | None = None
+            cpu_positive = False
+            if tree is not None:
+                cpu_total = process_tree.total_cpu_seconds(tree)
+                if self._last_cpu_seconds is not None:
+                    cpu_delta = cpu_total - self._last_cpu_seconds
+                    if cpu_delta <= self._cpu_epsilon_seconds:
+                        self._zero_cpu_streak += 1
+                    else:
+                        self._zero_cpu_streak = 0
+                        cpu_positive = True
+                self._last_cpu_seconds = cpu_total
+            elif should_sample:
+                # A failed sample never confirms: demand a fresh consecutive
+                # run of successful zero-delta samples.
+                self._zero_cpu_streak = 0
+                self._last_cpu_seconds = None
+
+            reason: str | None = None
+            if result_grace_hit:
+                reason = HANG_REASON_RESULT_RECEIVED
+            elif (
+                pid is not None
+                and idle_seconds >= self._trigger_idle_seconds
+                and self._zero_cpu_streak >= self._confirm_samples
+            ):
+                reason = HANG_REASON_ZERO_CPU
+
+            checked_at = _isoformat(now)
+            if reason is not None:
+                block: dict[str, Any] = {
+                    "reason": reason,
+                    "detected_at": (
+                        previous["detected_at"]
+                        if previous is not None
+                        else checked_at
+                    ),
+                    "idle_seconds": idle_seconds,
+                    "harness_pid": pid,
+                    "result_seen_at": (
+                        _isoformat(result_seen_at)
+                        if result_seen_at is not None
+                        else None
+                    ),
+                    "confirm_samples": self._zero_cpu_streak,
+                    "cpu_delta_seconds": cpu_delta,
+                    "process_tree": tree,
+                    "last_checked_at": checked_at,
+                }
+                if tree_error is not None:
+                    block["process_tree_error"] = tree_error
+                self._suspected = block
+                return _HangAssessment(
+                    suspected=dict(block),
+                    transition="suspected" if previous is None else None,
+                    generation=generation,
+                )
+            if previous is not None and cpu_positive:
+                self._suspected = None
+                self._announced = False
+                retracted = dict(previous)
+                retracted["cpu_delta_seconds"] = cpu_delta
+                retracted["last_checked_at"] = checked_at
+                return _HangAssessment(
+                    transition="cleared",
+                    retracted=retracted,
+                    generation=generation,
+                )
+            if previous is not None:
+                # A ps failure (or a streak broken by one) refreshes rather
+                # than retracts: absence of evidence is not activity.
+                refreshed = dict(previous)
+                refreshed["idle_seconds"] = idle_seconds
+                refreshed["confirm_samples"] = self._zero_cpu_streak
+                refreshed["cpu_delta_seconds"] = cpu_delta
+                refreshed["process_tree"] = tree
+                refreshed["last_checked_at"] = checked_at
+                refreshed.pop("process_tree_error", None)
+                if tree_error is not None:
+                    refreshed["process_tree_error"] = tree_error
+                self._suspected = refreshed
+                return _HangAssessment(
+                    suspected=dict(refreshed),
+                    generation=generation,
+                )
+            return _HangAssessment(generation=generation)
+
+
 class _LiveTurn:
     """Thread-safe live state and periodic-work manager for one harness turn."""
 
@@ -5798,6 +6154,7 @@ class _LiveTurn:
         poll_interval: float | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         wait: Callable[[float], bool] | None = None,
+        hang_sentinel: _HangSentinel | None = None,
     ) -> None:
         self._payload = payload
         self._event_path = event_path
@@ -5808,6 +6165,11 @@ class _LiveTurn:
         self._poll_callback = poll_callback
         self._poll_interval = poll_interval
         self._monotonic = monotonic
+        self._hang_sentinel = (
+            _HangSentinel(monotonic=monotonic)
+            if hang_sentinel is None
+            else hang_sentinel
+        )
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._wait = self._stop.wait if wait is None else wait
@@ -5824,9 +6186,18 @@ class _LiveTurn:
         self._thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
         self._thread.start()
 
+    def note_harness_pid(self, pid: int) -> None:
+        self._hang_sentinel.note_harness_pid(pid)
+
+    def note_final_result(self) -> None:
+        self._hang_sentinel.note_final_result()
+
     def record_activity(self, stream_name: harnesses.StreamName, text: str) -> None:
         signal_to_report: dict[str, Any] | None = None
         now = _utc_now()
+        hang_retracted = self._hang_sentinel.note_activity()
+        hang_cleared_payload: dict[str, Any] | None = None
+        active_turn_snapshot: dict[str, Any] | None = None
         with self._lock:
             self._last_activity_at = now
             self._active_turn["last_activity_at"] = _isoformat(now)
@@ -5841,11 +6212,15 @@ class _LiveTurn:
             self._active_turn[char_key] = int(self._active_turn.get(char_key, 0)) + len(
                 text
             )
+            if hang_retracted is not None:
+                self._active_turn.pop("hang_suspected", None)
+                hang_cleared_payload = self._hang_event_payload(hang_retracted, now)
 
             signal = _live_action_signal(stream_name, text)
             if signal is not None and self._active_turn.get("action_required") is None:
                 signal_to_report = self._action_required_payload(signal, now)
                 self._active_turn["action_required"] = signal_to_report
+            active_turn_snapshot = dict(self._active_turn)
             with self._persistence.lock:
                 if signal_to_report is not None:
                     self._payload["action_required"] = signal_to_report
@@ -5854,11 +6229,26 @@ class _LiveTurn:
                         events.ACTION_REQUIRED_EVENT,
                         signal_to_report,
                     )
-                self._payload["active_turn"] = dict(self._active_turn)
+                if hang_cleared_payload is not None:
+                    self._persistence.append_event(
+                        self._event_path,
+                        events.TURN_HANG_CLEARED_EVENT,
+                        hang_cleared_payload,
+                    )
+                self._payload["active_turn"] = active_turn_snapshot
                 self._persistence.write_state(self._payload)
 
         if signal_to_report is not None:
             self._progress.action_required(signal_to_report)
+        if hang_retracted is not None and not self._stop.is_set():
+            _notify_agent_mux_loop_turn_hang_cleared(
+                self._payload,
+                active_turn_snapshot,
+                hang_reason=hang_retracted["reason"],
+                hang_idle_seconds=hang_retracted.get("idle_seconds"),
+                harness_pid=hang_retracted.get("harness_pid"),
+                persistence=self._persistence,
+            )
 
     def stop(self) -> None:
         self._stop.set()
@@ -5947,7 +6337,30 @@ class _LiveTurn:
 
     def _record_heartbeat(self) -> dict[str, Any]:
         now = _utc_now()
+        # Hang-sentinel sampling spawns ps, so it stays outside ``self._lock``
+        # (same discipline as the amx notify below) and is skipped once
+        # ``_stop`` is set so ``stop()``/``finish()`` never wait behind ps.
+        assessment: _HangAssessment | None = None
+        if not self._stop.is_set():
+            with self._lock:
+                idle_seconds = _duration_seconds(self._last_activity_at, now)
+            assessment = self._hang_sentinel.evaluate(
+                idle_seconds=idle_seconds,
+                now=now,
+            )
+        hang_event: tuple[str, dict[str, Any]] | None = None
         with self._lock:
+            if (
+                assessment is not None
+                and assessment.suspected is not None
+                and not self._hang_sentinel.confirm_assessment(assessment)
+            ):
+                # Output resumed between evaluate() and this fold: the
+                # verdict is stale. Folding it would re-add a retracted
+                # block or persist suspected after a newer clear. Cleared
+                # verdicts are exempt — they are the sole carrier of their
+                # retraction and can never invert the event order.
+                assessment = None
             heartbeat_count = int(self._active_turn.get("heartbeat_count", 0)) + 1
             heartbeat = {
                 "run_id": self._active_turn["run_id"],
@@ -5975,9 +6388,33 @@ class _LiveTurn:
             self._active_turn["heartbeat_count"] = heartbeat_count
             self._active_turn["elapsed_seconds"] = heartbeat["elapsed_seconds"]
             self._active_turn["idle_seconds"] = heartbeat["idle_seconds"]
+            if assessment is not None:
+                if assessment.suspected is not None:
+                    self._active_turn["hang_suspected"] = assessment.suspected
+                    heartbeat["hang_suspected"] = assessment.suspected
+                else:
+                    self._active_turn.pop("hang_suspected", None)
+                if assessment.transition == "suspected":
+                    assert assessment.suspected is not None
+                    hang_event = (
+                        events.TURN_HANG_SUSPECTED_EVENT,
+                        self._hang_event_payload(assessment.suspected, now),
+                    )
+                elif assessment.transition == "cleared":
+                    assert assessment.retracted is not None
+                    hang_event = (
+                        events.TURN_HANG_CLEARED_EVENT,
+                        self._hang_event_payload(assessment.retracted, now),
+                    )
             active_turn_snapshot = dict(self._active_turn)
             with self._persistence.lock:
                 self._payload["active_turn"] = active_turn_snapshot
+                if hang_event is not None:
+                    self._persistence.append_event(
+                        self._event_path,
+                        hang_event[0],
+                        hang_event[1],
+                    )
                 self._persistence.append_event(
                     self._event_path,
                     events.TURN_HEARTBEAT_EVENT,
@@ -5994,7 +6431,61 @@ class _LiveTurn:
                 self._persistence,
                 cancelled=self._stop.is_set,
             )
+            if assessment is not None and assessment.transition == "suspected":
+                block = assessment.suspected
+                assert block is not None
+                _notify_agent_mux_loop_turn_hang_suspected(
+                    self._payload,
+                    active_turn_snapshot,
+                    hang_reason=block["reason"],
+                    hang_idle_seconds=block.get("idle_seconds"),
+                    harness_pid=block.get("harness_pid"),
+                    persistence=self._persistence,
+                )
+            elif assessment is not None and assessment.transition == "cleared":
+                retracted = assessment.retracted
+                assert retracted is not None
+                _notify_agent_mux_loop_turn_hang_cleared(
+                    self._payload,
+                    active_turn_snapshot,
+                    hang_reason=retracted["reason"],
+                    hang_idle_seconds=retracted.get("idle_seconds"),
+                    harness_pid=retracted.get("harness_pid"),
+                    persistence=self._persistence,
+                )
         return heartbeat
+
+    def _hang_event_payload(
+        self,
+        block: dict[str, Any],
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Build a hang lifecycle event payload; call under ``self._lock``.
+
+        ``idle_seconds`` is the turn's current idle reading (0.0 on the
+        activity-retraction path), distinct from the possibly-stale value
+        inside ``block``, so cleared-event consumers can replace a pre-clear
+        idle sample instead of acting on it.
+        """
+        payload = {
+            "run_id": self._active_turn["run_id"],
+            "turn_index": self._active_turn["turn_index"],
+            "session": self._active_turn["session"],
+            "session_id": self._active_turn.get("session_id"),
+            "total_sessions": self._active_turn.get("total_sessions"),
+            "harness": self._active_turn.get("harness"),
+            "artifact_dir": self._active_turn["artifact_dir"],
+            "stdout_path": self._active_turn["stdout_path"],
+            "stderr_path": self._active_turn["stderr_path"],
+            "last_message_path": self._active_turn["last_message_path"],
+            "result_path": self._active_turn["result_path"],
+            "created_at": _isoformat(now),
+            "idle_seconds": self._active_turn.get("idle_seconds"),
+            "hang_suspected": dict(block),
+        }
+        if self._active_turn.get("session_number") is not None:
+            payload["session_number"] = self._active_turn["session_number"]
+        return payload
 
     def _action_required_payload(
         self,
@@ -10254,6 +10745,8 @@ def _run_locked(
                     stream_callback=stream_callback,
                     model=requested_model,
                     effort=requested_effort,
+                    on_spawn=live_turn.note_harness_pid,
+                    on_final_result=live_turn.note_final_result,
                 )
             except KeyboardInterrupt:
                 invocation = build_harness_invocation(
@@ -11091,10 +11584,16 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
 
 def _emit_run_payload(args: argparse.Namespace, payload: dict[str, Any]) -> None:
     _attach_interactive_help(args, payload)
-    if args.json:
-        responses.print_json(payload)
-    else:
-        _print_text_outcome(payload)
+    try:
+        if args.json:
+            responses.print_json(payload)
+        else:
+            _print_text_outcome(payload)
+    except (BrokenPipeError, OSError):
+        # A recovered run whose original pipe reader exited (helper
+        # early-exit) must not crash on its final emission; the same payload
+        # is already durable in state.json / result.json.
+        pass
 
 
 # Flag dests rehydrated from a persisted ``run_config`` by ``asl run --resume``.

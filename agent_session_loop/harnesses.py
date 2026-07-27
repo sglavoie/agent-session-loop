@@ -14,6 +14,7 @@ import shutil
 import signal
 import subprocess
 import threading
+import time
 from typing import IO, Literal
 
 from . import config
@@ -23,6 +24,27 @@ HarnessName = Literal["codex", "claude", "copilot"]
 HARNESS_NAMES: tuple[HarnessName, ...] = ("codex", "claude", "copilot")
 StreamName = Literal["stdout", "stderr"]
 StreamCallback = Callable[[StreamName, str], None]
+
+
+# A dead harness process closes its pipes, so the reader threads see EOF at
+# once. This bound only exists for a descendant that outlives the harness and
+# keeps the inherited pipes open: such a process is never stopped, so this
+# caps what an abandoned turn pays to walk away from it (mirrors
+# verification._ABANDONED_READER_JOIN_SECONDS).
+_ABANDONED_READER_JOIN_SECONDS = 5.0
+
+
+def _join_readers(
+    readers: tuple[threading.Thread, ...], *, timeout: float | None
+) -> None:
+    """Join the pipe readers, optionally under a shared deadline."""
+    if timeout is None:
+        for reader in readers:
+            reader.join()
+        return
+    deadline = time.monotonic() + timeout
+    for reader in readers:
+        reader.join(timeout=max(0.0, deadline - time.monotonic()))
 
 
 class HarnessError(Exception):
@@ -58,6 +80,16 @@ class HarnessResult:
 class _OutputProcessor:
     """Normalize harness output before it is logged and persisted."""
 
+    @property
+    def final_result_seen(self) -> bool:
+        """Whether a terminal result record has been observed on stdout.
+
+        Only the claude stream-json processor can report one; processors that
+        do not parse structured output never do, which correctly disables any
+        result-based detection for their harnesses.
+        """
+        return False
+
     def process_chunk(self, stream_name: StreamName, text: str) -> str:
         del stream_name
         return text
@@ -81,6 +113,11 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
         self._emitted_text = False
         self._assistant_messages: list[str] = []
         self._final_result: str | None = None
+        self._final_result_seen = False
+
+    @property
+    def final_result_seen(self) -> bool:
+        return self._final_result_seen
 
     def process_chunk(self, stream_name: StreamName, text: str) -> str:
         if stream_name != "stdout":
@@ -135,6 +172,7 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
                     return self._format_text_lines(text)
             return []
         if record_type == "result":
+            self._final_result_seen = True
             result = record.get("result")
             if isinstance(result, str):
                 self._final_result = result
@@ -316,6 +354,8 @@ class HarnessAdapter:
         stream_callback: StreamCallback | None = None,
         model: str | None = None,
         effort: str | None = None,
+        on_spawn: Callable[[int], None] | None = None,
+        on_final_result: Callable[[], None] | None = None,
     ) -> HarnessResult:
         invocation = self.build_invocation(
             cwd=cwd,
@@ -343,10 +383,30 @@ class HarnessAdapter:
                 f"{self.name} executable not found: {self.executable}"
             ) from error
 
+        if on_spawn is not None:
+            try:
+                on_spawn(process.pid)
+            except Exception:
+                pass
+
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
         reader_errors: list[BaseException] = []
         output_processor = self.output_processor()
+        final_result_fired = threading.Event()
+        # Quiescence guard for abandoned readers: a reader that outlives the
+        # bounded join still holds the stream callback, hooks, and output
+        # state, so a late write from a pipe-holding descendant could fire
+        # them after this turn has finished. Every per-chunk side effect runs
+        # under this lock behind an abandonment check, and abandonment is
+        # flipped under the same lock, so once ``abandon_readers`` returns no
+        # reader can start a new side effect and any in-flight one is done.
+        side_effect_lock = threading.Lock()
+        abandoned = threading.Event()
+
+        def abandon_readers() -> None:
+            with side_effect_lock:
+                abandoned.set()
 
         def read_stream(
             stream_name: StreamName,
@@ -355,18 +415,35 @@ class HarnessAdapter:
         ) -> None:
             try:
                 for chunk in iter(pipe.readline, ""):
-                    processed_chunk = output_processor.process_chunk(
-                        stream_name,
-                        chunk,
-                    )
-                    if not processed_chunk:
-                        continue
-                    chunks.append(processed_chunk)
-                    if stream_callback is not None:
-                        try:
-                            stream_callback(stream_name, processed_chunk)
-                        except Exception as error:
-                            reader_errors.append(error)
+                    with side_effect_lock:
+                        if abandoned.is_set():
+                            break
+                        processed_chunk = output_processor.process_chunk(
+                            stream_name,
+                            chunk,
+                        )
+                        # Only stdout parsing can flip final_result_seen, so
+                        # this branch runs on a single thread and the Event
+                        # guard makes the hook fire exactly once.
+                        if (
+                            stream_name == "stdout"
+                            and on_final_result is not None
+                            and not final_result_fired.is_set()
+                            and output_processor.final_result_seen
+                        ):
+                            final_result_fired.set()
+                            try:
+                                on_final_result()
+                            except Exception:
+                                pass
+                        if not processed_chunk:
+                            continue
+                        chunks.append(processed_chunk)
+                        if stream_callback is not None:
+                            try:
+                                stream_callback(stream_name, processed_chunk)
+                            except Exception as error:
+                                reader_errors.append(error)
             except Exception as error:
                 reader_errors.append(error)
             finally:
@@ -397,8 +474,11 @@ class HarnessAdapter:
                 process.kill()
                 process.wait()
 
-            stdout_thread.join()
-            stderr_thread.join()
+            _join_readers(
+                (stdout_thread, stderr_thread),
+                timeout=_ABANDONED_READER_JOIN_SECONDS,
+            )
+            abandon_readers()
         except KeyboardInterrupt:
             if process.poll() is None:
                 process.terminate()
@@ -409,6 +489,7 @@ class HarnessAdapter:
                     process.wait()
             stdout_thread.join(timeout=1)
             stderr_thread.join(timeout=1)
+            abandon_readers()
             return HarnessResult(
                 name=self.name,
                 argv=invocation.argv,
@@ -602,6 +683,8 @@ def run_harness(
     stream_callback: StreamCallback | None = None,
     model: str | None = None,
     effort: str | None = None,
+    on_spawn: Callable[[int], None] | None = None,
+    on_final_result: Callable[[], None] | None = None,
 ) -> HarnessResult:
     """Run one harness turn through the selected adapter."""
     return get_adapter(name).run(
@@ -614,6 +697,8 @@ def run_harness(
         stream_callback=stream_callback,
         model=model,
         effort=effort,
+        on_spawn=on_spawn,
+        on_final_result=on_final_result,
     )
 
 

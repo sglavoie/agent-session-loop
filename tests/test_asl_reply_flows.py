@@ -1796,6 +1796,191 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
                 self.assertFalse(outcome["acknowledged"])
 
 
+class AgentMuxTurnHangNotificationTests(unittest.TestCase):
+    """Hang lifecycle delivery payload bounds, phase mapping, and fail-open."""
+
+    def setUp(self) -> None:
+        self.enterContext(agent_mux_notify_enabled())
+        agent_mux_delivery.reset_legacy_cache()
+        self.addCleanup(agent_mux_delivery.reset_legacy_cache)
+
+    @staticmethod
+    def _accepted_delivery() -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            ["/opt/amx"],
+            0,
+            stdout=json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "accepted",
+                    "retryable": False,
+                    "reason": "accepted",
+                    "trace_id": "trace-hang",
+                }
+            ),
+            stderr="",
+        )
+
+    @staticmethod
+    def _hang_payload(tmp_dir: Path) -> dict[str, object]:
+        return {
+            "run_id": "run-hang",
+            "plan_dir": str(tmp_dir / "plan"),
+            "cwd": str(tmp_dir / "repo"),
+            "harness": "claude",
+            "state_path": str(tmp_dir / "state.json"),
+            "events_path": str(tmp_dir / "events.jsonl"),
+        }
+
+    @staticmethod
+    def _active_turn() -> dict[str, object]:
+        return {
+            "turn_index": 3,
+            "session": "2",
+            "harness": "claude",
+            "heartbeat_count": 7,
+        }
+
+    def test_turn_hang_suspected_delivers_bounded_scalars(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._hang_payload(Path(tmp))
+
+            with (
+                mock.patch.object(
+                    runner.shutil, "which", return_value="/opt/amx"
+                ),
+                mock.patch.object(
+                    runner.subprocess,
+                    "run",
+                    return_value=self._accepted_delivery(),
+                ) as run,
+            ):
+                runner._notify_agent_mux_loop_turn_hang_suspected(
+                    payload,
+                    self._active_turn(),
+                    hang_reason="result_received_process_alive",
+                    hang_idle_seconds=187.5,
+                    harness_pid=4242,
+                )
+
+            run.assert_called_once()
+            args, kwargs = run.call_args
+            self.assertEqual("AgentSessionLoopTurnHangSuspected", args[0][-1])
+            hook_payload = json.loads(kwargs["input"])
+            self.assertEqual("turn_hang_suspected", hook_payload["reason"])
+            self.assertEqual("turn", hook_payload["phase"])
+            self.assertEqual(
+                "result_received_process_alive", hook_payload["hang_reason"]
+            )
+            self.assertEqual(187.5, hook_payload["hang_idle_seconds"])
+            self.assertEqual(4242, hook_payload["harness_pid"])
+            self.assertEqual(3, hook_payload["turn_index"])
+            self.assertEqual("2", hook_payload["session"])
+            self.assertNotIn("process_tree", hook_payload)
+
+    def test_turn_hang_cleared_maps_to_turn_phase(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._hang_payload(Path(tmp))
+
+            with (
+                mock.patch.object(
+                    runner.shutil, "which", return_value="/opt/amx"
+                ),
+                mock.patch.object(
+                    runner.subprocess,
+                    "run",
+                    return_value=self._accepted_delivery(),
+                ) as run,
+            ):
+                runner._notify_agent_mux_loop_turn_hang_cleared(
+                    payload,
+                    self._active_turn(),
+                    hang_reason="output_resumed",
+                    hang_idle_seconds=201.0,
+                    harness_pid=4242,
+                )
+
+            args, kwargs = run.call_args
+            self.assertEqual("AgentSessionLoopTurnHangCleared", args[0][-1])
+            hook_payload = json.loads(kwargs["input"])
+            self.assertEqual("turn_hang_cleared", hook_payload["reason"])
+            self.assertEqual("turn", hook_payload["phase"])
+            self.assertEqual("output_resumed", hook_payload["hang_reason"])
+            self.assertEqual(201.0, hook_payload["hang_idle_seconds"])
+            self.assertEqual(4242, hook_payload["harness_pid"])
+            self.assertNotIn("process_tree", hook_payload)
+
+    def test_hang_notifications_omit_unknown_scalars(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._hang_payload(Path(tmp))
+
+            with (
+                mock.patch.object(
+                    runner.shutil, "which", return_value="/opt/amx"
+                ),
+                mock.patch.object(
+                    runner.subprocess,
+                    "run",
+                    return_value=self._accepted_delivery(),
+                ) as run,
+            ):
+                runner._notify_agent_mux_loop_turn_hang_suspected(
+                    payload,
+                    self._active_turn(),
+                    hang_reason="zero_cpu_ceiling",
+                    hang_idle_seconds=None,
+                    harness_pid=None,
+                )
+
+            hook_payload = json.loads(run.call_args.kwargs["input"])
+            self.assertEqual("zero_cpu_ceiling", hook_payload["hang_reason"])
+            self.assertNotIn("hang_idle_seconds", hook_payload)
+            self.assertNotIn("harness_pid", hook_payload)
+
+    def test_hang_notifications_stay_fail_open_when_amx_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            payload = self._hang_payload(tmp_dir)
+            events_path = Path(str(payload["events_path"]))
+
+            with (
+                mock.patch.object(runner.shutil, "which", return_value=None),
+                mock.patch.object(runner.subprocess, "run") as run,
+            ):
+                runner._notify_agent_mux_loop_turn_hang_suspected(
+                    payload,
+                    self._active_turn(),
+                    hang_reason="result_received_process_alive",
+                    hang_idle_seconds=90.0,
+                    harness_pid=4242,
+                )
+                runner._notify_agent_mux_loop_turn_hang_cleared(
+                    payload,
+                    self._active_turn(),
+                    hang_reason="output_resumed",
+                    hang_idle_seconds=95.0,
+                    harness_pid=4242,
+                )
+
+            run.assert_not_called()
+            outcomes = [
+                record["payload"]
+                for record in read_jsonl(events_path)
+                if record.get("name") == events.AGENT_MUX_DELIVERY_EVENT
+            ]
+            self.assertEqual(
+                [
+                    runner.AGENT_MUX_TURN_HANG_SUSPECTED_EVENT,
+                    runner.AGENT_MUX_TURN_HANG_CLEARED_EVENT,
+                ],
+                [outcome["agent_mux_event"] for outcome in outcomes],
+            )
+            for outcome in outcomes:
+                self.assertEqual("unavailable", outcome["final_status"])
+                self.assertEqual("agent_mux_missing", outcome["reason"])
+                self.assertFalse(outcome["acknowledged"])
+
+
 class RunResumeConfigTests(unittest.TestCase):
     """`asl run --resume` rehydrates flags from the persisted run_config."""
 

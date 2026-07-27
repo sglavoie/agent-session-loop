@@ -69,7 +69,10 @@ Run it with the user's exact command:
 `--json` emits a single machine-readable result on stdout; progress heartbeats
 go to stderr. Each heartbeat carries live progress — the running session label,
 `(n/total)`, and `idle <n>s` since the child last emitted output — and escalates
-to a `WARN possibly stalled` line once idle time crosses the stall threshold. To
+to a `WARN possibly stalled` line once idle time crosses the stall threshold.
+The WARN is soft: supervision keeps waiting. Above it sit two hard hang bars
+that end supervision with `reason: worker_hung` while leaving the run alive —
+see "reason: worker_hung" in Step 2. To
 override the runner's cycle cap at launch, include `--max-review-fix-cycles N`
 inside the `--command` string (`0` still reviews but creates no repair sessions).
 
@@ -170,6 +173,32 @@ If the helper reports `reason: user_required` (a foreign active lock) or a
 paused run may also cite a `command-not-runnable` readiness finding (an
 unresolved `argv[0]`, or a non-importable `python -m <module>`); surface it
 rather than resuming.
+
+#### reason: worker_hung
+
+Two hard hang bars sit above the soft `WARN possibly stalled` line: the
+runner's `result_received_process_alive` suspicion observed on consecutive
+probes, or any probe whose idle time reaches the idle ceiling (classed
+`zero_cpu_idle` when the runner's suspicion says so, else
+`idle_ceiling_exceeded`). When either fires, the helper stops with
+`reason: worker_hung` **without killing or waiting on anything** — the
+supervised `asl run` child stays alive and keeps the plan lock.
+
+Read `result.hang` first. It carries the `class`, the runner's `hang_suspected`
+block verbatim (including its sampled `process_tree`), `idle_seconds`,
+`probes`, the plan/state/events paths, and the active turn's artifact paths;
+`supervised_child_pid` and `detached` appear only when the helper launched the
+chunk itself. Then:
+
+1. **Re-verify before trusting the snapshot** — pids get reused, so match on
+   command strings, not pids: compare
+   `ps -axo pid,ppid,state,time,command` against
+   `hang.hang_suspected.process_tree`.
+2. **Ask the user before killing anything.**
+3. If approved, kill **only the identified leaf** — the deepest zero-CPU
+   descendant (e.g. a `perl .../diff-so-fancy` pager wedged under the worker's
+   `/bin/zsh -c`) — never the runner or the `asl run` process.
+4. Re-run the same helper command to re-attach and continue supervision.
 
 ### Step 3: Handle review findings
 

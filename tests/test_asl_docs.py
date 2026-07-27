@@ -1681,6 +1681,50 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
                 normalized_section,
             )
 
+    def test_worker_hung_docs_match_runner_and_autopilot(self) -> None:
+        module_path = REPO_ROOT / "skills" / "asl" / "scripts" / "asl_autopilot.py"
+        spec = importlib.util.spec_from_file_location(
+            "asl_autopilot_hang_docs_regression", module_path
+        )
+        self.assertIsNotNone(spec)
+        assert spec is not None
+        autopilot = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(autopilot)
+
+        # The helper's escalation classes are the runner's persisted hang
+        # reasons plus the helper-only idle-ceiling class.
+        self.assertEqual(
+            runner.HANG_REASON_RESULT_RECEIVED,
+            autopilot.HANG_CLASS_RESULT_RECEIVED,
+        )
+        self.assertEqual(runner.HANG_REASON_ZERO_CPU, autopilot.HANG_CLASS_ZERO_CPU)
+
+        skill = (REPO_ROOT / "skills" / "asl" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        surfaces = {
+            "skills/asl/SKILL.md": skill,
+            "skills/asl/scripts/asl_autopilot.py": module_path.read_text(
+                encoding="utf-8"
+            ),
+        }
+        for name, text in surfaces.items():
+            self.assertIn(
+                "worker_hung", text, f"{name} never mentions worker_hung"
+            )
+            for token in (
+                autopilot.HANG_CLASS_RESULT_RECEIVED,
+                autopilot.HANG_CLASS_ZERO_CPU,
+                autopilot.HANG_CLASS_IDLE_CEILING,
+            ):
+                self.assertIn(token, text, f"{name} never mentions {token!r}")
+        # The pause subsection pins the non-destructive escalation contract.
+        self.assertIn("reason: worker_hung", skill)
+        self.assertIn("without killing or waiting on anything", skill)
+        self.assertIn("never the runner or the `asl run` process", skill)
+        self.assertIn("re-attach", skill)
+
     def test_review_continuation_surfaces_share_documented_contract(self) -> None:
         self.assertIn("absolute cross-run cap", self.docs)
         self.assertIn(events.REVIEW_REPAIR_REOPENED_EVENT, self.docs)

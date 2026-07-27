@@ -8,7 +8,7 @@ import argparse
 from collections.abc import Callable
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import dataclasses
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import errno
 import hashlib
 import importlib.util
@@ -67,7 +67,9 @@ from agent_session_loop.formatting import (
 )
 from tests.support import (
     REPO_ROOT,
+    assert_marked_pids_alive,
     assert_marked_pids_exited,
+    kill_marked_pids,
     patched_env,
     write_plan,
     write_process_tree_scripts,
@@ -5298,6 +5300,420 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         turn = payload["turns"][0]
         self.assertIsNone(turn["after"])
         self.assertIn("missing context.md", turn["plan_error"])
+
+
+class HarnessReaderJoinAndHookTests(unittest.TestCase):
+    """Direct adapter-run tests for bounded reader joins and observation hooks."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp_dir = Path(tmp.name)
+
+    def _write_executable(self, name: str, source: str) -> Path:
+        path = self.tmp_dir / name
+        path.write_text(source, encoding="utf-8")
+        path.chmod(path.stat().st_mode | stat.S_IXUSR)
+        return path
+
+    def test_reader_join_bounded_despite_pipe_holding_grandchild(self) -> None:
+        root = self.tmp_dir / "trees"
+        _parent_script, grandchild_script = write_process_tree_scripts(root)
+        self.addCleanup(kill_marked_pids, root / "grandchildren")
+        fake_harness = self._write_executable(
+            "fake-copilot",
+            "\n".join(
+                [
+                    "#!/usr/bin/env python3",
+                    "import pathlib, subprocess, sys, time",
+                    f"root = pathlib.Path({str(root)!r})",
+                    "subprocess.Popen(",
+                    "    [",
+                    "        sys.executable,",
+                    f"        {str(grandchild_script)!r},",
+                    "        'harness',",
+                    "        str(root),",
+                    "    ],",
+                    "    start_new_session=True,",
+                    ")",
+                    "while not (root / 'grandchildren' / 'harness').exists():",
+                    "    time.sleep(0.01)",
+                    "print('harness done', flush=True)",
+                    "",
+                ]
+            ),
+        )
+        fired: list[int] = []
+
+        start = time.monotonic()
+        result = harnesses.CopilotAdapter(executable=str(fake_harness)).run(
+            cwd=self.tmp_dir,
+            plan_dir=self.tmp_dir,
+            prompt="noop",
+            on_final_result=lambda: fired.append(1),
+        )
+        elapsed = time.monotonic() - start
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("harness done", result.stdout)
+        # The detached grandchild inherited the output pipes and is still
+        # alive, so the reader threads never saw EOF: control returned through
+        # the bounded join instead of waiting out the grandchild's 60s sleep.
+        self.assertLess(elapsed, 30.0)
+        assert_marked_pids_alive(
+            root / "grandchildren", label="detached grandchild"
+        )
+        # The passthrough processor never reports a final result, so the hook
+        # stays silent for harnesses without structured output.
+        self.assertEqual([], fired)
+
+    def test_hooks_receive_real_pid_and_fire_final_result_once(self) -> None:
+        pid_path = self.tmp_dir / "harness-pid"
+        fake_claude = self._write_executable(
+            "fake-claude",
+            "\n".join(
+                [
+                    "#!/usr/bin/env python3",
+                    "import json, os, pathlib",
+                    f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid()))",
+                    "records = [",
+                    "    {",
+                    "        'type': 'system',",
+                    "        'subtype': 'init',",
+                    "        'model': 'claude-test',",
+                    "        'session_id': 'session-hooks',",
+                    "    },",
+                    "    {",
+                    "        'type': 'assistant',",
+                    "        'message': {",
+                    "            'content': [{'type': 'text', 'text': 'working'}],",
+                    "        },",
+                    "    },",
+                    "    {",
+                    "        'type': 'result',",
+                    "        'subtype': 'success',",
+                    "        'result': 'done',",
+                    "        'num_turns': 1,",
+                    "        'duration_ms': 10,",
+                    "    },",
+                    "    {'type': 'system', 'subtype': 'status', 'status': 'late'},",
+                    "]",
+                    "for record in records:",
+                    "    print(json.dumps(record), flush=True)",
+                    "print('trailing plain line', flush=True)",
+                    "",
+                ]
+            ),
+        )
+        config_home = self.tmp_dir / "config"
+        config_path = config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps({"claude": {"executable": str(fake_claude)}}),
+            encoding="utf-8",
+        )
+        spawn_pids: list[int] = []
+        fired: list[int] = []
+
+        with patched_env(XDG_CONFIG_HOME=str(config_home)):
+            result = harnesses.run_harness(
+                "claude",
+                cwd=self.tmp_dir,
+                plan_dir=self.tmp_dir,
+                prompt="/session-run plan/",
+                on_spawn=spawn_pids.append,
+                on_final_result=lambda: fired.append(1),
+            )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            [int(pid_path.read_text(encoding="utf-8"))], spawn_pids
+        )
+        # Two stdout reads follow the result record; a second fire would have
+        # landed there if the Event guard did not hold.
+        self.assertEqual(1, len(fired))
+        self.assertIn("claude result: success", result.stdout)
+        self.assertIn("claude status: late", result.stdout)
+
+    def test_late_write_after_abandoned_readers_cannot_resurrect_finished_state(
+        self,
+    ) -> None:
+        root = self.tmp_dir / "trees"
+        for name in ("pending", "grandchildren", "late"):
+            (root / name).mkdir(parents=True, exist_ok=True)
+        self.addCleanup(kill_marked_pids, root / "grandchildren")
+        grandchild_script = root / "late_writer.py"
+        grandchild_script.write_text(
+            "\n".join(
+                [
+                    "import json, os, pathlib, sys, time",
+                    "root = pathlib.Path(sys.argv[1])",
+                    "pending = root / 'pending' / 'harness-grandchild'",
+                    "pending.write_text(str(os.getpid()))",
+                    "os.replace(pending, root / 'grandchildren' / 'harness')",
+                    "while not (root / 'trigger').exists():",
+                    "    time.sleep(0.01)",
+                    "record = {",
+                    "    'type': 'result',",
+                    "    'subtype': 'success',",
+                    "    'result': 'resurrection',",
+                    "}",
+                    "sys.stdout.write(json.dumps(record) + '\\n')",
+                    "sys.stdout.write('resurrection plain line\\n')",
+                    "sys.stdout.flush()",
+                    "(root / 'late' / 'harness').write_text('wrote')",
+                    "time.sleep(60)",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        fake_claude = self._write_executable(
+            "fake-claude",
+            "\n".join(
+                [
+                    "#!/usr/bin/env python3",
+                    "import json, pathlib, subprocess, sys, time",
+                    f"root = pathlib.Path({str(root)!r})",
+                    "subprocess.Popen(",
+                    "    [",
+                    "        sys.executable,",
+                    f"        {str(grandchild_script)!r},",
+                    "        str(root),",
+                    "    ],",
+                    "    start_new_session=True,",
+                    ")",
+                    "while not (root / 'grandchildren' / 'harness').exists():",
+                    "    time.sleep(0.01)",
+                    "message = {'content': [{'type': 'text', 'text': 'working'}]}",
+                    "print(",
+                    "    json.dumps({'type': 'assistant', 'message': message}),",
+                    "    flush=True,",
+                    ")",
+                    "while not (root / 'drained').exists():",
+                    "    time.sleep(0.01)",
+                    "",
+                ]
+            ),
+        )
+
+        state_path = self.tmp_dir / "state.json"
+        event_path = self.tmp_dir / "events.jsonl"
+        stdout_log = self.tmp_dir / "stdout.log"
+        stderr_log = self.tmp_dir / "stderr.log"
+        payload: dict[str, object] = {"state_path": str(state_path)}
+        started_at = runner._isoformat(runner._utc_now())
+
+        def make_active_turn(session: int) -> dict[str, object]:
+            return {
+                "run_id": "run-late-writer",
+                "turn_index": session,
+                "session": session,
+                "session_id": str(session),
+                "total_sessions": 2,
+                "harness": "claude",
+                "started_at": started_at,
+                "last_activity_at": started_at,
+                "heartbeat_count": 0,
+            }
+
+        live_turn = runner._LiveTurn(
+            payload=payload,
+            event_path=event_path,
+            progress=mock.Mock(),
+            active_turn=make_active_turn(1),
+            heartbeat_interval=3600.0,
+        )
+        fired: list[int] = []
+
+        def stream_callback(stream_name: harnesses.StreamName, text: str) -> None:
+            log_path = stdout_log if stream_name == "stdout" else stderr_log
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(text)
+            live_turn.record_activity(stream_name, text)
+            if "working" in text:
+                (root / "drained").write_text("ok", encoding="utf-8")
+
+        live_turn.start()
+        with mock.patch.object(harnesses, "_ABANDONED_READER_JOIN_SECONDS", 0.5):
+            result = harnesses.ClaudeAdapter(executable=str(fake_claude)).run(
+                cwd=self.tmp_dir,
+                plan_dir=self.tmp_dir,
+                prompt="noop",
+                stream_callback=stream_callback,
+                on_final_result=lambda: fired.append(1),
+            )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("claude text: working", result.stdout)
+        self.assertEqual([], fired)
+
+        live_turn.finish(runner._utc_now())
+        later_turn = runner._LiveTurn(
+            payload=payload,
+            event_path=event_path,
+            progress=mock.Mock(),
+            active_turn=make_active_turn(2),
+            heartbeat_interval=3600.0,
+        )
+        later_turn.start()
+        self.addCleanup(later_turn.stop)
+
+        state_before = state_path.read_bytes()
+        events_before = event_path.read_bytes() if event_path.exists() else b""
+        stdout_log_before = stdout_log.read_bytes()
+        stderr_log_before = (
+            stderr_log.read_bytes() if stderr_log.exists() else b""
+        )
+
+        (root / "trigger").write_text("go", encoding="utf-8")
+        wait_until((root / "late" / "harness").exists)
+        # Grace period for the abandoned reader to wake on the late write:
+        # the quiescence guard makes it exit without side effects, so nothing
+        # asserted below may change.
+        time.sleep(1.0)
+
+        self.assertEqual([], fired)
+        self.assertNotIn("resurrection", result.stdout)
+        self.assertEqual(state_before, state_path.read_bytes())
+        self.assertEqual(
+            events_before,
+            event_path.read_bytes() if event_path.exists() else b"",
+        )
+        self.assertEqual(stdout_log_before, stdout_log.read_bytes())
+        self.assertEqual(
+            stderr_log_before,
+            stderr_log.read_bytes() if stderr_log.exists() else b"",
+        )
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(2, state["active_turn"]["session"])
+        assert_marked_pids_alive(
+            root / "grandchildren", label="late-writing grandchild"
+        )
+
+
+class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
+    """_LiveTurn + fake sampler end-to-end persistence of hang suspicion."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp_dir = Path(tmp.name)
+        self.state_path = self.tmp_dir / "state.json"
+        self.event_path = self.tmp_dir / "events.jsonl"
+
+    @staticmethod
+    def tree(cpu_seconds: float) -> list[dict[str, object]]:
+        return [
+            {
+                "pid": 4242,
+                "ppid": 1,
+                "state": "S",
+                "cpu_seconds": cpu_seconds,
+                "command": "claude --print",
+            }
+        ]
+
+    def test_suspicion_persists_and_clears_on_activity(self) -> None:
+        samples = [self.tree(9.0) for _ in range(4)]
+
+        def sample_tree(pid: int):
+            return samples.pop(0)
+
+        sentinel = runner._HangSentinel(
+            sample_tree=sample_tree,
+            monotonic=time.monotonic,
+            trigger_idle_seconds=120.0,
+            confirm_samples=2,
+            cpu_epsilon_seconds=0.5,
+            result_grace_seconds=45.0,
+        )
+        started_at = runner._isoformat(runner._utc_now() - timedelta(seconds=600))
+        active_turn: dict[str, object] = {
+            "run_id": "run-hang",
+            "turn_index": 1,
+            "session": 3,
+            "session_id": "3",
+            "total_sessions": 3,
+            "harness": "claude",
+            "artifact_dir": str(self.tmp_dir),
+            "stdout_path": str(self.tmp_dir / "stdout.log"),
+            "stderr_path": str(self.tmp_dir / "stderr.log"),
+            "last_message_path": str(self.tmp_dir / "last-message.txt"),
+            "result_path": str(self.tmp_dir / "result.json"),
+            "started_at": started_at,
+            "last_activity_at": started_at,
+            "heartbeat_count": 0,
+        }
+        live_turn = runner._LiveTurn(
+            payload={"state_path": str(self.state_path)},
+            event_path=self.event_path,
+            progress=mock.Mock(),
+            active_turn=active_turn,
+            hang_sentinel=sentinel,
+        )
+        live_turn.note_harness_pid(4242)
+
+        # Baseline, first confirm, second confirm: suspicion lands on the
+        # third heartbeat tick.
+        for _ in range(3):
+            live_turn._record_heartbeat()
+
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        block = state["active_turn"]["hang_suspected"]
+        self.assertEqual(runner.HANG_REASON_ZERO_CPU, block["reason"])
+        self.assertEqual(4242, block["harness_pid"])
+        self.assertEqual(2, block["confirm_samples"])
+        self.assertGreaterEqual(block["idle_seconds"], 120.0)
+        self.assertEqual(4242, block["process_tree"][0]["pid"])
+
+        records = read_jsonl(self.event_path)
+        suspected = [
+            record
+            for record in records
+            if record["name"] == events.TURN_HANG_SUSPECTED_EVENT
+        ]
+        self.assertEqual(1, len(suspected))
+        self.assertEqual(
+            runner.HANG_REASON_ZERO_CPU,
+            suspected[0]["payload"]["hang_suspected"]["reason"],
+        )
+
+        # A later heartbeat refreshes in place: no duplicate suspected event,
+        # and the heartbeat payload carries the block for the status tailer.
+        live_turn._record_heartbeat()
+        records = read_jsonl(self.event_path)
+        suspected = [
+            record
+            for record in records
+            if record["name"] == events.TURN_HANG_SUSPECTED_EVENT
+        ]
+        self.assertEqual(1, len(suspected))
+        heartbeats = [
+            record
+            for record in records
+            if record["name"] == events.TURN_HEARTBEAT_EVENT
+        ]
+        self.assertEqual(
+            runner.HANG_REASON_ZERO_CPU,
+            heartbeats[-1]["payload"]["hang_suspected"]["reason"],
+        )
+
+        live_turn.record_activity("stdout", "resumed output")
+
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertNotIn("hang_suspected", state["active_turn"])
+        records = read_jsonl(self.event_path)
+        cleared = [
+            record
+            for record in records
+            if record["name"] == events.TURN_HANG_CLEARED_EVENT
+        ]
+        self.assertEqual(1, len(cleared))
+        self.assertEqual(
+            runner.HANG_REASON_ZERO_CPU,
+            cleared[0]["payload"]["hang_suspected"]["reason"],
+        )
 
 
 if __name__ == "__main__":

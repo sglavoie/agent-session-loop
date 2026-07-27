@@ -3848,6 +3848,652 @@ class _FakeTailer:
         return pair
 
 
+def _hang_block(
+    reason=autopilot.HANG_CLASS_RESULT_RECEIVED, *, idle=162.0, process_tree=None
+):
+    """Runner-shaped ``hang_suspected`` block (session-3 sentinel contract)."""
+    return {
+        "reason": reason,
+        "detected_at": "2026-07-24T19:02:00+00:00",
+        "idle_seconds": idle,
+        "harness_pid": 4242,
+        "result_seen_at": (
+            "2026-07-24T19:01:00+00:00"
+            if reason == autopilot.HANG_CLASS_RESULT_RECEIVED
+            else None
+        ),
+        "confirm_samples": 2,
+        "cpu_delta_seconds": 0.0,
+        "process_tree": process_tree,
+        "last_checked_at": "2026-07-24T19:03:00+00:00",
+    }
+
+
+def _hung_running_snapshot(idle=162.0, *, reason=autopilot.HANG_CLASS_RESULT_RECEIVED):
+    """Tailer-shaped running snapshot carrying a hang_suspected block."""
+    return {
+        "state": "running",
+        "session_id": "tidy-db-writes",
+        "session_number": 3,
+        "total_sessions": 8,
+        "idle_seconds": idle,
+        "elapsed_seconds": 300,
+        "hang_suspected": _hang_block(reason, idle=idle),
+    }
+
+
+def _hung_run_status(idle=162.0, *, reason=autopilot.HANG_CLASS_RESULT_RECEIVED):
+    """Full ``asl status`` payload with paths + a hang-suspected live turn."""
+    return {
+        "ok": True,
+        "plan_dir": "/tmp/plan",
+        "state_path": "/tmp/plan/.asl/state.json",
+        "events_path": "/tmp/plan/.asl/events.jsonl",
+        "active_turn": {
+            "session_id": "tidy-db-writes",
+            "session_number": 3,
+            "total_sessions": 8,
+            "idle_seconds": idle,
+            "elapsed_seconds": 300,
+            "stdout_path": "/tmp/plan/.asl/turn-stdout.log",
+            "stderr_path": "/tmp/plan/.asl/turn-stderr.log",
+            "last_message_path": "/tmp/plan/.asl/last-message.txt",
+            "result_path": "/tmp/plan/.asl/result.json",
+            "hang_suspected": _hang_block(reason, idle=idle),
+        },
+    }
+
+
+def _hung_attach_status(idle=162.0, *, reason=autopilot.HANG_CLASS_RESULT_RECEIVED):
+    """Attach-disposition status whose live turn carries a hang block."""
+    status = _attach_status(idle)
+    status["runner_state"]["active_turn"]["hang_suspected"] = _hang_block(
+        reason, idle=idle
+    )
+    return status
+
+
+class _HangingPopen:
+    """``communicate`` always times out; killing or waiting is forbidden.
+
+    Models a wedged ``asl run`` child: the escalation path must return the
+    ``_worker_hung`` marker while this process object stays untouched.
+    """
+
+    pid = 4242
+
+    def __init__(self):
+        self.returncode = None
+        self.argv = None
+        self.kwargs = None
+
+    def __call__(self, argv, **kwargs):
+        self.argv = argv
+        self.kwargs = kwargs
+        return self
+
+    def communicate(self, input=None, timeout=None):
+        raise subprocess.TimeoutExpired(cmd="asl run", timeout=timeout)
+
+    def kill(self):  # pragma: no cover - guard
+        raise AssertionError("worker_hung must not kill the `asl run` child")
+
+    def terminate(self):  # pragma: no cover - guard
+        raise AssertionError("worker_hung must not terminate the `asl run` child")
+
+    def wait(self, timeout=None):  # pragma: no cover - guard
+        raise AssertionError("worker_hung must not wait on the `asl run` child")
+
+
+class HangEscalationPolicyTest(unittest.TestCase):
+    """`_HangEscalation` hard bars above the soft stall WARN."""
+
+    def test_result_received_needs_consecutive_probes(self) -> None:
+        policy = autopilot._HangEscalation(probes=2, idle_ceiling=900.0)
+        self.assertIsNone(policy.observe(_hung_running_snapshot()))
+        verdict = policy.observe(_hung_running_snapshot())
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict["class"], autopilot.HANG_CLASS_RESULT_RECEIVED)
+        self.assertEqual(verdict["probes"], 2)
+        self.assertEqual(verdict["idle_seconds"], 162.0)
+        self.assertEqual(
+            verdict["hang_suspected"]["reason"],
+            autopilot.HANG_CLASS_RESULT_RECEIVED,
+        )
+
+    def test_retraction_resets_the_probe_count(self) -> None:
+        policy = autopilot._HangEscalation(probes=2, idle_ceiling=900.0)
+        self.assertIsNone(policy.observe(_hung_running_snapshot()))
+        # A tick without the block (turn_hang_cleared, or a heartbeat that
+        # dropped it) resets the consecutive count.
+        healthy = {"state": "running", "idle_seconds": 3}
+        self.assertIsNone(policy.observe(healthy))
+        self.assertIsNone(policy.observe(_hung_running_snapshot()))
+        verdict = policy.observe(_hung_running_snapshot())
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict["probes"], 2)
+
+    def test_rearmed_new_episode_resets_the_probe_count(self) -> None:
+        # F-001: two result-received blocks with different detected_at values
+        # are different suspicion episodes; the second must count as probe 1,
+        # not inherit the prior episode's streak.
+        policy = autopilot._HangEscalation(probes=2, idle_ceiling=900.0)
+        self.assertIsNone(policy.observe(_hung_running_snapshot()))
+        rearmed = _hung_running_snapshot()
+        rearmed["hang_suspected"]["detected_at"] = "2026-07-24T19:05:30+00:00"
+        self.assertIsNone(policy.observe(rearmed))
+        verdict = policy.observe(rearmed)
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict["class"], autopilot.HANG_CLASS_RESULT_RECEIVED)
+        self.assertEqual(verdict["probes"], 2)
+
+    def test_idle_ceiling_without_block_is_idle_ceiling_exceeded(self) -> None:
+        policy = autopilot._HangEscalation(probes=2, idle_ceiling=900.0)
+        verdict = policy.observe({"state": "running", "idle_seconds": 950})
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict["class"], autopilot.HANG_CLASS_IDLE_CEILING)
+        self.assertEqual(verdict["probes"], 0)
+        self.assertIsNone(verdict["hang_suspected"])
+        self.assertEqual(verdict["idle_seconds"], 950.0)
+
+    def test_idle_ceiling_with_zero_cpu_block_keeps_the_runner_class(self) -> None:
+        policy = autopilot._HangEscalation(probes=2, idle_ceiling=900.0)
+        snapshot = _hung_running_snapshot(950, reason=autopilot.HANG_CLASS_ZERO_CPU)
+        verdict = policy.observe(snapshot)
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict["class"], autopilot.HANG_CLASS_ZERO_CPU)
+
+    def test_idle_falls_back_to_the_hang_block_reading(self) -> None:
+        policy = autopilot._HangEscalation(probes=2, idle_ceiling=900.0)
+        snapshot = {
+            "state": "running",
+            "hang_suspected": _hang_block(
+                autopilot.HANG_CLASS_ZERO_CPU, idle=950.0
+            ),
+        }
+        verdict = policy.observe(snapshot)
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict["class"], autopilot.HANG_CLASS_ZERO_CPU)
+        self.assertEqual(verdict["idle_seconds"], 950.0)
+
+    def test_below_the_bars_never_escalates(self) -> None:
+        policy = autopilot._HangEscalation(probes=2, idle_ceiling=900.0)
+        # Zero-cpu suspicion below the ceiling is deliberately conservative:
+        # the runner already surfaced it; the helper keeps waiting.
+        snapshot = _hung_running_snapshot(300, reason=autopilot.HANG_CLASS_ZERO_CPU)
+        for _ in range(5):
+            self.assertIsNone(policy.observe(snapshot))
+
+
+class EventsTailerHangTest(unittest.TestCase):
+    """The tailer folds hang blocks from heartbeats and one-shot hang events."""
+
+    def test_heartbeat_folds_and_drops_the_hang_block(self) -> None:
+        clock = _clock_from([0.0, 1.0, 2.0, 3.0])
+        with_block = _turn_heartbeat_record(162)
+        with_block["payload"]["hang_suspected"] = _hang_block()
+        tailer = autopilot._EventsTailer(
+            "events.jsonl",
+            clock=clock,
+            follow=_batch_follower([[with_block], [_turn_heartbeat_record(4)]]),
+        )
+        snapshot, _ = tailer.snapshot()
+        self.assertEqual(
+            snapshot["hang_suspected"]["reason"],
+            autopilot.HANG_CLASS_RESULT_RECEIVED,
+        )
+        # A heartbeat without the block is an implicit retraction.
+        snapshot, _ = tailer.snapshot()
+        self.assertNotIn("hang_suspected", snapshot)
+
+    def test_one_shot_hang_events_set_and_clear_suspicion(self) -> None:
+        clock = _clock_from([0.0, 1.0, 2.0, 3.0, 4.0])
+        suspected = {
+            "name": autopilot._events.TURN_HANG_SUSPECTED_EVENT,
+            "payload": {"hang_suspected": _hang_block()},
+        }
+        cleared = {
+            "name": autopilot._events.TURN_HANG_CLEARED_EVENT,
+            "payload": {},
+        }
+        tailer = autopilot._EventsTailer(
+            "events.jsonl",
+            clock=clock,
+            follow=_batch_follower(
+                [[_turn_heartbeat_record(30)], [suspected], [cleared]]
+            ),
+        )
+        snapshot, _ = tailer.snapshot()
+        self.assertNotIn("hang_suspected", snapshot)
+        snapshot, _ = tailer.snapshot()
+        # The one-shot event folds onto the running snapshot in place.
+        self.assertEqual(snapshot["state"], "running")
+        self.assertEqual(snapshot["session_id"], "tidy-db-writes")
+        self.assertIn("hang_suspected", snapshot)
+        snapshot, _ = tailer.snapshot()
+        self.assertNotIn("hang_suspected", snapshot)
+
+    def test_same_batch_ceiling_heartbeat_then_clear_resets_stale_idle(self) -> None:
+        # F-003: a 900s heartbeat and its retraction folded in one batch must
+        # not leave the stale idle reading behind for the ceiling check.
+        clock = _clock_from([0.0, 1.0, 2.0])
+        hung = _turn_heartbeat_record(900)
+        hung["payload"]["hang_suspected"] = _hang_block(
+            autopilot.HANG_CLASS_ZERO_CPU, idle=900.0
+        )
+        cleared = {
+            "name": autopilot._events.TURN_HANG_CLEARED_EVENT,
+            "payload": {
+                "idle_seconds": 0.0,
+                "hang_suspected": _hang_block(
+                    autopilot.HANG_CLASS_ZERO_CPU, idle=900.0
+                ),
+            },
+        }
+        tailer = autopilot._EventsTailer(
+            "events.jsonl",
+            clock=clock,
+            follow=_batch_follower([[hung, cleared]]),
+        )
+        snapshot, _ = tailer.snapshot()
+        self.assertNotIn("hang_suspected", snapshot)
+        self.assertEqual(snapshot["idle_seconds"], 0.0)
+        policy = autopilot._HangEscalation(probes=2, idle_ceiling=900.0)
+        self.assertIsNone(policy.observe(snapshot))
+
+    def test_same_batch_clear_then_rearm_starts_a_new_episode(self) -> None:
+        # F-001: a clear and a re-armed suspicion folded between two polls
+        # leave only the new block visible; its different detected_at must
+        # reset the probe count instead of inheriting the old episode's.
+        clock = _clock_from([0.0, 1.0, 2.0, 3.0])
+        first = _turn_heartbeat_record(162)
+        first["payload"]["hang_suspected"] = _hang_block()
+        cleared = {
+            "name": autopilot._events.TURN_HANG_CLEARED_EVENT,
+            "payload": {"idle_seconds": 0.0, "hang_suspected": _hang_block()},
+        }
+        rearmed_block = _hang_block(idle=45.0)
+        rearmed_block["detected_at"] = "2026-07-24T19:05:30+00:00"
+        rearmed = {
+            "name": autopilot._events.TURN_HANG_SUSPECTED_EVENT,
+            "payload": {"hang_suspected": dict(rearmed_block)},
+        }
+        followup = _turn_heartbeat_record(75)
+        followup["payload"]["hang_suspected"] = dict(rearmed_block)
+        tailer = autopilot._EventsTailer(
+            "events.jsonl",
+            clock=clock,
+            follow=_batch_follower([[first], [cleared, rearmed], [followup]]),
+        )
+        policy = autopilot._HangEscalation(probes=2, idle_ceiling=900.0)
+        snapshot, _ = tailer.snapshot()
+        self.assertIsNone(policy.observe(snapshot))
+        snapshot, _ = tailer.snapshot()
+        self.assertEqual(
+            snapshot["hang_suspected"]["detected_at"],
+            "2026-07-24T19:05:30+00:00",
+        )
+        # One observation of the re-armed episode is probe 1, never probe 2.
+        self.assertIsNone(policy.observe(snapshot))
+        snapshot, _ = tailer.snapshot()
+        verdict = policy.observe(snapshot)
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict["class"], autopilot.HANG_CLASS_RESULT_RECEIVED)
+        self.assertEqual(verdict["probes"], 2)
+
+    def test_clear_without_idle_drops_the_stale_reading(self) -> None:
+        # A cleared payload without the runner's fresh idle (older runners)
+        # still invalidates the pre-clear value instead of retaining it.
+        clock = _clock_from([0.0, 1.0, 2.0])
+        hung = _turn_heartbeat_record(900)
+        hung["payload"]["hang_suspected"] = _hang_block(
+            autopilot.HANG_CLASS_ZERO_CPU, idle=900.0
+        )
+        cleared = {
+            "name": autopilot._events.TURN_HANG_CLEARED_EVENT,
+            "payload": {},
+        }
+        tailer = autopilot._EventsTailer(
+            "events.jsonl",
+            clock=clock,
+            follow=_batch_follower([[hung, cleared]]),
+        )
+        snapshot, _ = tailer.snapshot()
+        self.assertNotIn("hang_suspected", snapshot)
+        self.assertNotIn("idle_seconds", snapshot)
+        policy = autopilot._HangEscalation(probes=2, idle_ceiling=900.0)
+        self.assertIsNone(policy.observe(snapshot))
+
+
+class InvokeRunHangEscalationTest(unittest.TestCase):
+    """`_invoke_run` returns the `_worker_hung` marker without touching the child."""
+
+    def _parsed(self) -> dict:
+        return {"argv": ["asl", "run", "/tmp/plan", "--json"], "plan_dir": "/tmp/plan"}
+
+    def _run(self, *, tailer, status_probe=None, **kwargs):
+        beats: list = []
+        popen = _HangingPopen()
+        payload = autopilot._invoke_run(
+            self._parsed(),
+            chunk_index=1,
+            clock=_counter_clock(),
+            heartbeat=beats.append,
+            heartbeat_interval=0.01,
+            popen=popen,
+            status_probe=status_probe,
+            events_tailer=tailer,
+            **kwargs,
+        )
+        return payload, beats, popen
+
+    def test_result_received_probes_escalate_without_killing(self) -> None:
+        tailer = _FakeTailer([(_hung_running_snapshot(), False)])
+        payload, beats, popen = self._run(
+            tailer=tailer,
+            status_probe=lambda: _hung_run_status(),
+        )
+        # _HangingPopen raises from kill/terminate/wait, so reaching here at
+        # all proves the child was left alone.
+        self.assertTrue(payload["_worker_hung"])
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual(payload["reason"], "worker_hung")
+        hang = payload["hang"]
+        self.assertEqual(hang["class"], autopilot.HANG_CLASS_RESULT_RECEIVED)
+        self.assertEqual(hang["probes"], 2)
+        self.assertEqual(hang["supervised_child_pid"], 4242)
+        self.assertTrue(hang["detached"])
+        self.assertEqual(hang["plan_dir"], "/tmp/plan")
+        self.assertEqual(hang["state_path"], "/tmp/plan/.asl/state.json")
+        self.assertEqual(hang["events_path"], "/tmp/plan/.asl/events.jsonl")
+        self.assertEqual(
+            hang["artifact_paths"],
+            {
+                "stdout": "/tmp/plan/.asl/turn-stdout.log",
+                "stderr": "/tmp/plan/.asl/turn-stderr.log",
+                "last_message": "/tmp/plan/.asl/last-message.txt",
+                "result": "/tmp/plan/.asl/result.json",
+            },
+        )
+        self.assertEqual(len(hang["next_steps"]), 4)
+        # The freshly probed status rides on the marker for supervise_run.
+        self.assertEqual(payload["status"]["plan_dir"], "/tmp/plan")
+        joined = "\n".join(beats)
+        self.assertIn("escalating worker_hung", joined)
+        self.assertIn("leaving the `asl run` child alive", joined)
+
+    def test_first_result_received_probe_does_not_escalate(self) -> None:
+        # One result-received tick then a healthy tick, then the ordinary
+        # timeout loop would continue — cap it with a final clean payload.
+        tailer = _FakeTailer(
+            [
+                (_hung_running_snapshot(), False),
+                ({"state": "running", "idle_seconds": 3}, False),
+            ]
+        )
+        popen = FakeTimeoutPopen(
+            timeout_count=2,
+            stdout='{"ok": true, "paused": false, "reason": "all-complete"}',
+        )
+        payload = autopilot._invoke_run(
+            self._parsed(),
+            chunk_index=1,
+            clock=_counter_clock(),
+            heartbeat=lambda *_: None,
+            heartbeat_interval=0.01,
+            popen=popen,
+            events_tailer=tailer,
+        )
+        self.assertEqual(payload["reason"], "all-complete")
+        self.assertNotIn("_worker_hung", payload)
+
+    def test_idle_ceiling_escalates_without_status_probe(self) -> None:
+        tailer = _FakeTailer(
+            [({"state": "running", "session_id": "s7", "idle_seconds": 950}, False)]
+        )
+        payload, _beats, _popen = self._run(tailer=tailer, status_probe=None)
+        self.assertTrue(payload["_worker_hung"])
+        hang = payload["hang"]
+        self.assertEqual(hang["class"], autopilot.HANG_CLASS_IDLE_CEILING)
+        self.assertEqual(hang["probes"], 0)
+        self.assertIsNone(hang["hang_suspected"])
+        # No status payload: plan_dir falls back to the parsed command; the
+        # path fields degrade to None rather than being omitted.
+        self.assertEqual(hang["plan_dir"], "/tmp/plan")
+        self.assertIsNone(hang["state_path"])
+        self.assertEqual(
+            hang["artifact_paths"],
+            {"stdout": None, "stderr": None, "last_message": None, "result": None},
+        )
+        self.assertNotIn("status", payload)
+
+
+class SuperviseRunWorkerHungTest(unittest.TestCase):
+    """`supervise_run` maps hang escalations to `worker_hung` results."""
+
+    PARSED = {"plan_dir": "/tmp/plan", "argv": ["asl", "run", "/tmp/plan", "--json"]}
+
+    def test_marker_from_chunk_maps_to_worker_hung_result(self) -> None:
+        hang = {"class": autopilot.HANG_CLASS_RESULT_RECEIVED, "probes": 2}
+        marker_status = {"ok": True, "plan_dir": "/tmp/plan", "marker": True}
+        marker = {
+            "ok": False,
+            "paused": False,
+            "reason": "worker_hung",
+            "_worker_hung": True,
+            "hang": hang,
+            "status": marker_status,
+        }
+        run = _RunScript([marker])
+        result = autopilot.supervise_run(
+            dict(self.PARSED),
+            status_invoker=_StatusScript([_status_payload(1)]),
+            run_invoker=run,
+            clock=_counter_clock(),
+            sleep=lambda *_: None,
+            heartbeat=lambda *_: None,
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "worker_hung")
+        self.assertEqual(result["hang"], hang)
+        # The marker's escalation-time status is fresher than the launch probe.
+        self.assertTrue(result["status"]["marker"])
+        self.assertEqual(result["chunks"], 1)
+
+    def test_marker_without_status_falls_back_to_the_loop_probe(self) -> None:
+        marker = {
+            "ok": False,
+            "paused": False,
+            "reason": "worker_hung",
+            "_worker_hung": True,
+            "hang": {"class": autopilot.HANG_CLASS_IDLE_CEILING},
+        }
+        result = autopilot.supervise_run(
+            dict(self.PARSED),
+            status_invoker=_StatusScript([_status_payload(1)]),
+            run_invoker=_RunScript([marker]),
+            clock=_counter_clock(),
+            sleep=lambda *_: None,
+            heartbeat=lambda *_: None,
+        )
+        self.assertEqual(result["reason"], "worker_hung")
+        self.assertEqual(result["status"]["counts"]["pending"], 1)
+
+    def test_attach_path_escalates_after_consecutive_hung_probes(self) -> None:
+        beats: list = []
+        status = _StatusScript([_hung_attach_status(), _hung_attach_status()])
+        result = autopilot.supervise_run(
+            dict(self.PARSED),
+            status_invoker=status,
+            run_invoker=_never_run,
+            clock=_counter_clock(),
+            sleep=lambda *_: None,
+            heartbeat=beats.append,
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "worker_hung")
+        hang = result["hang"]
+        self.assertEqual(hang["class"], autopilot.HANG_CLASS_RESULT_RECEIVED)
+        self.assertEqual(hang["probes"], 2)
+        # Attach mode launched nothing, so there is no child pid to report.
+        self.assertNotIn("supervised_child_pid", hang)
+        self.assertNotIn("detached", hang)
+        self.assertIn("escalating worker_hung", "\n".join(beats))
+
+    def test_attach_probe_from_a_different_episode_resets_the_count(self) -> None:
+        # The attach-path policy instance keys on episode identity too: a
+        # second probe whose block carries a new detected_at is probe 1 of
+        # the re-armed episode, so escalation waits for the third probe.
+        first = _hung_attach_status()
+        rearmed = _hung_attach_status()
+        rearmed["runner_state"]["active_turn"]["hang_suspected"][
+            "detected_at"
+        ] = "2026-07-24T19:05:30+00:00"
+        status = _StatusScript([first, rearmed, rearmed])
+        result = autopilot.supervise_run(
+            dict(self.PARSED),
+            status_invoker=status,
+            run_invoker=_never_run,
+            clock=_counter_clock(),
+            sleep=lambda *_: None,
+            heartbeat=lambda *_: None,
+        )
+        self.assertEqual(result["reason"], "worker_hung")
+        self.assertEqual(result["hang"]["probes"], 2)
+        self.assertEqual(status.calls, 3)
+
+    def test_attach_idle_ceiling_escalates_without_a_hang_block(self) -> None:
+        status = _StatusScript([_attach_status(950)])
+        result = autopilot.supervise_run(
+            dict(self.PARSED),
+            status_invoker=status,
+            run_invoker=_never_run,
+            clock=_counter_clock(),
+            sleep=lambda *_: None,
+            heartbeat=lambda *_: None,
+        )
+        self.assertEqual(result["reason"], "worker_hung")
+        self.assertEqual(result["hang"]["class"], autopilot.HANG_CLASS_IDLE_CEILING)
+        self.assertIsNone(result["hang"]["hang_suspected"])
+
+    def test_attach_soft_stall_below_the_bars_keeps_waiting(self) -> None:
+        # idle 96 crosses the 90s soft WARN but no hard bar: supervision must
+        # keep polling and complete normally (soft-stall behavior unchanged).
+        beats: list = []
+        status = _StatusScript([_attach_status(96), _status_payload(0)])
+        result = autopilot.supervise_run(
+            dict(self.PARSED),
+            status_invoker=status,
+            run_invoker=_never_run,
+            clock=_counter_clock(),
+            sleep=lambda *_: None,
+            heartbeat=beats.append,
+            stall_threshold=90.0,
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "complete")
+        joined = "\n".join(beats)
+        self.assertIn("WARN possibly stalled", joined)
+        self.assertNotIn("escalating worker_hung", joined)
+
+
+class RunAutopilotWorkerHungTest(unittest.TestCase):
+    """`run_autopilot` passes a `worker_hung` stop through untouched."""
+
+    def _args(self, command="asl run /tmp/plan --review-harness codex"):
+        parser = autopilot.build_arg_parser()
+        return parser.parse_args(["--command", command])
+
+    def test_worker_hung_skips_questions_and_review(self) -> None:
+        hang = {
+            "class": autopilot.HANG_CLASS_ZERO_CPU,
+            "idle_seconds": 8412.0,
+            "next_steps": list(autopilot.HANG_NEXT_STEPS),
+        }
+
+        def hung_supervisor(parsed):
+            return {
+                "ok": False,
+                "stage": autopilot.RUN_STAGE,
+                "reason": "worker_hung",
+                "chunks": 1,
+                "hang": hang,
+            }
+
+        def fail_questioner(parsed):  # pragma: no cover - must not run
+            raise AssertionError("asl questions must not be fetched for worker_hung")
+
+        def fail_review_reader(parsed):  # pragma: no cover - must not run
+            raise AssertionError("no review verdict is read for worker_hung")
+
+        result = autopilot.run_autopilot(
+            self._args(),
+            supervisor=hung_supervisor,
+            questioner=fail_questioner,
+            review_reader=fail_review_reader,
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "worker_hung")
+        self.assertEqual(result["hang"], hang)
+        self.assertNotIn("questions", result)
+        self.assertNotIn("questions_error", result)
+        self.assertNotIn("review", result)
+
+
+class HumanSummaryWorkerHungTest(unittest.TestCase):
+    """The one-line summary names the class, idle time, and hung leaf."""
+
+    def test_summary_names_class_idle_and_leaf_command(self) -> None:
+        tree = [
+            {
+                "pid": 4243,
+                "ppid": 4242,
+                "state": "S",
+                "cpu_seconds": 12.0,
+                "command": "node /usr/local/bin/harness",
+            },
+            {
+                "pid": 4244,
+                "ppid": 4243,
+                "state": "S",
+                "cpu_seconds": 0.2,
+                "command": "/bin/zsh -c git diff | diff-so-fancy",
+            },
+            {
+                "pid": 4245,
+                "ppid": 4244,
+                "state": "S+",
+                "cpu_seconds": 0.0,
+                "command": "perl /usr/local/bin/diff-so-fancy",
+            },
+        ]
+        result = {
+            "ok": False,
+            "reason": "worker_hung",
+            "hang": {
+                "class": autopilot.HANG_CLASS_ZERO_CPU,
+                "idle_seconds": 8412.0,
+                "hang_suspected": _hang_block(
+                    autopilot.HANG_CLASS_ZERO_CPU, idle=8412.0, process_tree=tree
+                ),
+            },
+        }
+        summary = autopilot._human_summary(result)
+        self.assertIn("worker_hung", summary)
+        self.assertIn(autopilot.HANG_CLASS_ZERO_CPU, summary)
+        self.assertIn("idle 8412s", summary)
+        self.assertIn("perl /usr/local/bin/diff-so-fancy", summary)
+        self.assertIn("inspect before killing", summary)
+        self.assertIn("re-run the same command to re-attach", summary)
+
+    def test_summary_survives_a_missing_hang_payload(self) -> None:
+        summary = autopilot._human_summary({"ok": False, "reason": "worker_hung"})
+        self.assertIn("worker_hung", summary)
+        self.assertIn("idle unknown", summary)
+        self.assertNotIn("deepest descendant", summary)
+
+
 _FAKE_ASL = textwrap.dedent(
     '''\
     #!/usr/bin/env python3
