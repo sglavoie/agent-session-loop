@@ -4787,6 +4787,7 @@ def _ensure_mailbox_question(
     state_dir_arg: str | None,
     question_id: str,
     text: str,
+    run_id: str,
 ) -> mailbox.MailboxMessage:
     """Append one deterministic question or reuse the identical existing one."""
 
@@ -4830,6 +4831,7 @@ def _ensure_mailbox_question(
             text,
             state_dir=state_dir_arg,
             message_id=question_id,
+            run_id=run_id,
         )
     except mailbox.MailboxError as error:
         if error.reason != mailbox.REJECT_DUPLICATE_ID:
@@ -4924,6 +4926,7 @@ def _prepare_mailbox_reply_wait(
         state_dir_arg=state_dir_arg,
         question_id=question_id,
         text=context.last_message,
+        run_id=run_id,
     )
     try:
         prepared_view = mailbox.read_mailbox(
@@ -4941,7 +4944,7 @@ def _prepare_mailbox_reply_wait(
         context=context,
         question=question,
         waiting_for_reply=waiting_for_reply,
-        pending_outbox=len(prepared_view.unanswered_questions),
+        pending_outbox=len(prepared_view.open_questions(run_id)),
         settings=settings,
         started_monotonic=started_monotonic,
     )
@@ -4975,6 +4978,7 @@ def _wait_for_mailbox_reply(
     state_dir_arg: str | None,
     payload: dict[str, Any],
     question_id: str,
+    run_id: str,
     settings: _MailboxReplyWaitSettings,
     persistence: _RunPersistence,
     poll_controls: Callable[[], None] | None = None,
@@ -5023,7 +5027,7 @@ def _wait_for_mailbox_reply(
                 last_read_token = current_token
 
         if view is not None:
-            pending_outbox = len(view.unanswered_questions)
+            pending_outbox = len(view.open_questions(run_id))
             reply = view.reply_for(question_id)
             if reply is not None:
                 return _MailboxReplyWaitResult(
@@ -10948,6 +10952,7 @@ def _run_locked(
                                 state_dir_arg=args.state_dir,
                                 payload=payload,
                                 question_id=prepared_wait.question.id,
+                                run_id=run_id,
                                 settings=prepared_wait.settings,
                                 persistence=persistence,
                                 poll_controls=mailbox_poll,

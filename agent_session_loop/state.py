@@ -689,6 +689,7 @@ def _runner_state_payload(
 def _mailbox_status_payload(
     plan_dir: Path,
     state_dir: str | Path | None,
+    active_run_id: str | None = None,
 ) -> dict[str, Any]:
     """Project the append-only mailbox and lease without mutating either file."""
     # Local import avoids a module cycle: mailbox path resolution depends on
@@ -711,6 +712,7 @@ def _mailbox_status_payload(
         "last_seq": 0,
         "pending_guidance": 0,
         "unanswered_questions": 0,
+        "open_questions": 0,
         "rejected_records": 0,
         "error": None,
         "lease_updated_at": None,
@@ -730,6 +732,7 @@ def _mailbox_status_payload(
         payload["last_seq"] = None
         payload["pending_guidance"] = None
         payload["unanswered_questions"] = None
+        payload["open_questions"] = None
         payload["rejected_records"] = None
         payload["error"] = str(error)
     else:
@@ -746,6 +749,7 @@ def _mailbox_status_payload(
                 "last_seq": view.last_seq,
                 "pending_guidance": counts.pending_guidance,
                 "unanswered_questions": counts.unanswered_questions,
+                "open_questions": len(view.open_questions(active_run_id)),
                 "rejected_records": counts.rejected,
             }
         )
@@ -845,6 +849,28 @@ def _stale_runner_state(
         True,
         f"runner state has not finished but lock is stale: {lock_info.reason}",
     )
+
+
+def _live_run_id(
+    runner_state: dict[str, Any],
+    lock_info: LockInfo | None,
+) -> str | None:
+    """Return the run id of a process that can still consume a mailbox answer.
+
+    Stricter than :func:`_stale_runner_state`, which reports a *finished* run as
+    non-stale: a finished or paused run is equally unable to act on a reply, so
+    its questions are history rather than a live block.
+    """
+    run_id = runner_state.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return None
+    if not runner_state.get("present") or runner_state.get("error"):
+        return None
+    if runner_state.get("paused") or runner_state.get("run_finished_at"):
+        return None
+    if lock_info is None or not lock_info.active:
+        return None
+    return run_id
 
 
 def _migrate_command_text(
@@ -963,7 +989,11 @@ def status_payload(
     stale_unfinished, stale_reason = _stale_runner_state(runner_state, lock_info)
     runner_state["stale_unfinished"] = stale_unfinished
     runner_state["stale_reason"] = stale_reason
-    mailbox_status = _mailbox_status_payload(snapshot.plan_dir, state_dir)
+    mailbox_status = _mailbox_status_payload(
+        snapshot.plan_dir,
+        state_dir,
+        _live_run_id(runner_state, lock_info),
+    )
     progress_journal = _progress_journal_payload(snapshot.plan_dir)
     review_resume = review_continuation.evaluate_review_continuation(
         snapshot, event_path
@@ -1037,12 +1067,22 @@ def _print_text_status(payload: dict[str, Any]) -> None:
             print(f"Mailbox: unreadable/malformed ({mailbox_error})")
         elif mailbox_status.get("active"):
             full_suffix = ", full" if mailbox_status.get("full") else ""
+            open_questions = mailbox_status.get("open_questions")
+            unanswered = mailbox_status.get("unanswered_questions")
+            # Disclose the historical total only when it exceeds what the live
+            # run can act on, so a stale record reads as history at a glance.
+            history_suffix = (
+                f" ({unanswered} unanswered historical)"
+                if isinstance(open_questions, int)
+                and isinstance(unanswered, int)
+                and unanswered > open_questions
+                else ""
+            )
             print(
                 "Mailbox: active"
                 f"{full_suffix}, seq {mailbox_status.get('last_seq')}, "
                 f"{mailbox_status.get('pending_guidance')} pending guidance, "
-                f"{mailbox_status.get('unanswered_questions')} unanswered "
-                "questions, "
+                f"{open_questions} open questions{history_suffix}, "
                 f"{mailbox_status.get('size_bytes')}/"
                 f"{mailbox_status.get('max_bytes')} bytes"
             )

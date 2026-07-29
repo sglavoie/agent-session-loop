@@ -663,6 +663,15 @@ class _MailboxWatcher:
         self._lease_renewal_recoveries = 0
         self.enabled = False
 
+    def _open_questions(
+        self,
+        view,
+    ) -> tuple[_mailbox.MailboxMessage, ...]:
+        """Return unanswered questions the bound run can still consume."""
+        if self.run_id is None:
+            return ()
+        return view.open_questions(self.run_id)
+
     def set_run_id(
         self,
         run_id: Optional[str],
@@ -925,8 +934,10 @@ class _MailboxWatcher:
             else:
                 read_succeeded = True
                 if self._include_unanswered_backlog:
-                    questions = view.unanswered_questions
-                    self._include_unanswered_backlog = False
+                    # The backlog is only meaningful once an identity is bound,
+                    # so stay armed until then rather than dropping it.
+                    questions = self._open_questions(view)
+                    self._include_unanswered_backlog = self.run_id is None
                 else:
                     questions = view.messages_since(
                         self.last_seq,
@@ -938,7 +949,7 @@ class _MailboxWatcher:
                 )
                 pending_questions = tuple(
                     question
-                    for question in view.unanswered_questions
+                    for question in self._open_questions(view)
                     if question.id in self._observed_question_ids
                 )
                 previous_pending_ids = {
@@ -1088,7 +1099,7 @@ def _status_snapshot(status: object) -> dict:
     )
     mailbox_status = status.get("mailbox")
     pending_outbox = (
-        mailbox_status.get("unanswered_questions")
+        mailbox_status.get("open_questions")
         if isinstance(mailbox_status, dict)
         else None
     )

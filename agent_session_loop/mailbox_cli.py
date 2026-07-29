@@ -414,6 +414,20 @@ def _supervisor_write(
     return context, message, supervisor_id
 
 
+def _status_run_id(context: cli_common.PlanCommandContext) -> str | None:
+    """Return the run a worker question belongs to, or None when unattributable.
+
+    A torn or absent state read degrades to an unattributed question, which is
+    never counted as open. That is the safe direction: it under-reports a live
+    block instead of resurrecting one after the run ends.
+    """
+    runner_state = context.status.get("runner_state")
+    if not isinstance(runner_state, dict):
+        return None
+    run_id = runner_state.get("run_id")
+    return run_id if isinstance(run_id, str) and run_id else None
+
+
 def _mailbox_reply_projection(
     context: cli_common.PlanCommandContext,
     args: argparse.Namespace,
@@ -473,7 +487,7 @@ def _notify_agent_mux_mailbox_reply(
         )
         if (
             post_reply.last_seq < message.seq
-            or post_reply.unanswered_questions
+            or post_reply.open_questions(projection.run_id)
         ):
             return None
 
@@ -836,6 +850,7 @@ def ask_from_args(args: argparse.Namespace) -> int:
                 context.snapshot.plan_dir,
                 text,
                 state_dir=args.state_dir,
+                run_id=_status_run_id(context),
             )
         else:
             initial_view = mailbox.read_mailbox(

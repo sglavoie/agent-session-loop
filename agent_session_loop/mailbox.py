@@ -37,6 +37,10 @@ MAILBOX_MAX_BYTES = 4 * 1024 * 1024
 # generated UTC timestamp with six fractional-second digits. Once less than this
 # remains, no ordinary mailbox append can succeed.
 MAILBOX_MIN_APPEND_BYTES = 128
+# Questions record the run that owns them. A runner id is
+# ``<timestamp>-<pid>`` (~30 characters); the bound only keeps a hostile or
+# corrupt value from consuming the mailbox capacity budget.
+MAILBOX_MAX_RUN_ID_CHARS = 128
 MAILBOX_LEASE_BYTES = 512
 MAILBOX_LEASE_FRESH_SECONDS = 90.0
 MAILBOX_CHANGE_TOKEN_UNAVAILABLE = object()
@@ -124,6 +128,7 @@ class MailboxMessage:
     text: str | None = None
     to: str | None = None
     upto: int | None = None
+    run_id: str | None = None
     version: int = MAILBOX_SCHEMA_VERSION
 
     def to_record(self) -> dict[str, Any]:
@@ -140,6 +145,8 @@ class MailboxMessage:
             payload["to"] = self.to
         if self.upto is not None:
             payload["upto"] = self.upto
+        if self.run_id is not None:
+            payload["run_id"] = self.run_id
         return payload
 
     def to_payload(self) -> dict[str, Any]:
@@ -236,6 +243,25 @@ class MailboxView:
             message
             for message in self.messages
             if message.kind == KIND_QUESTION and message.id not in answered
+        )
+
+    def open_questions(
+        self,
+        run_id: str | None,
+    ) -> tuple[MailboxMessage, ...]:
+        """Return unanswered questions ``run_id`` can still consume answers for.
+
+        The mailbox outlives every run, so an unanswered question whose owning
+        run has ended is history, not a live block: nothing is waiting on it and
+        no reply can reach a worker. Questions predating run attribution carry no
+        ``run_id`` and are therefore never open.
+        """
+        if not isinstance(run_id, str) or not run_id:
+            return ()
+        return tuple(
+            message
+            for message in self.unanswered_questions
+            if message.run_id == run_id
         )
 
     @property
@@ -414,6 +440,15 @@ def _is_uuid(value: object) -> bool:
     return True
 
 
+def _valid_run_id(value: object) -> bool:
+    """Accept a run identifier, treating anything malformed as unattributed."""
+    return (
+        isinstance(value, str)
+        and value.strip() != ""
+        and len(value) <= MAILBOX_MAX_RUN_ID_CHARS
+    )
+
+
 def _parse_timestamp(value: object, *, require_utc: bool = False) -> datetime | None:
     if not isinstance(value, str) or value == "":
         return None
@@ -560,6 +595,14 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
         text: str | None = None
         target: str | None = None
         upto: int | None = None
+        # A malformed or absent owner degrades the question to unattributed
+        # rather than rejecting the line: history written before run
+        # attribution must keep parsing.
+        run_id: str | None = (
+            payload.get("run_id")
+            if kind == KIND_QUESTION and _valid_run_id(payload.get("run_id"))
+            else None
+        )
         if kind in (KIND_GUIDANCE, KIND_QUESTION, KIND_REPLY):
             text_value = payload.get("text")
             if not isinstance(text_value, str) or text_value.strip() == "":
@@ -629,6 +672,7 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
             text=text,
             to=target,
             upto=upto,
+            run_id=run_id,
             version=version,
         )
         messages.append(message)
@@ -758,6 +802,7 @@ def _normalize_append_record(
     upto: int | None,
     message_id: str | None,
     created_at: str | None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     if kind not in MESSAGE_KINDS:
         raise MailboxError(REJECT_UNKNOWN_KIND, str(kind))
@@ -778,6 +823,8 @@ def _normalize_append_record(
         if not isinstance(text, str) or text.strip() == "":
             raise MailboxError(REJECT_MISSING_TEXT)
         record["text"] = text
+    if kind == KIND_QUESTION and _valid_run_id(run_id):
+        record["run_id"] = run_id
     if kind == KIND_REPLY:
         if not _is_uuid(target):
             raise MailboxError(REJECT_INVALID_TARGET)
@@ -806,6 +853,7 @@ def _append_record(
     upto: int | None = None,
     message_id: str | None = None,
     created_at: str | None = None,
+    run_id: str | None = None,
 ) -> MailboxMessage:
     record = _normalize_append_record(
         kind=kind,
@@ -814,6 +862,7 @@ def _append_record(
         upto=upto,
         message_id=message_id,
         created_at=created_at,
+        run_id=run_id,
     )
     encoded_record = (
         json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -927,6 +976,7 @@ def _append_record(
         text=record.get("text"),
         to=record.get("to"),
         upto=record.get("upto"),
+        run_id=record.get("run_id"),
     )
 
 
@@ -955,6 +1005,7 @@ def append_question(
     state_dir: str | Path | None = None,
     message_id: str | None = None,
     created_at: str | None = None,
+    run_id: str | None = None,
 ) -> MailboxMessage:
     return _append_record(
         plan_dir,
@@ -963,6 +1014,7 @@ def append_question(
         text=text,
         message_id=message_id,
         created_at=created_at,
+        run_id=run_id,
     )
 
 

@@ -934,8 +934,8 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         normalized_surface_docs = " ".join(surface_docs.split())
         self.assertIn(
             "`wait-cleared` carries the wait identity and deadlines, "
-            "the exit `reason`, and `pending_outbox`, the measured "
-            "unanswered-question count",
+            "the exit `reason`, and `pending_outbox`, the measured count "
+            "of questions open for that run",
             normalized_surface_docs,
         )
         live_wait_docs = mailbox_docs.split(

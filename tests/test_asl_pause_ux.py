@@ -365,6 +365,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 state_dir_arg=None,
                 payload=payload,
                 question_id=question_id,
+                run_id="RUN-TEST",
                 settings=settings,
                 persistence=persistence,
                 monotonic=monotonic,
@@ -407,6 +408,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 state_dir_arg=None,
                 payload={},
                 question_id="00000000-0000-0000-0000-000000000012",
+                run_id="RUN-TEST",
                 settings=settings,
                 persistence=runner._RunPersistence(
                     write_state=False,

@@ -641,6 +641,7 @@ def _review_resume(
 
 LOCK_CREATED_AT = "2026-07-24T18:59:00+00:00"
 RUN_STARTED_AT = "2026-07-24T19:00:00+00:00"
+ATTACHED_RUN_ID = "run-attached"
 OLDER_RUN_STARTED_AT = "2026-07-24T18:00:00+00:00"
 
 
@@ -691,7 +692,7 @@ def _attach_waiting_status(*, pending_outbox=1, session_id="12"):
         "waiting_for_reply": waiting,
     }
     status["waiting_for_reply"] = waiting
-    status["mailbox"] = {"unanswered_questions": pending_outbox}
+    status["mailbox"] = {"open_questions": pending_outbox}
     return status
 
 
@@ -2748,13 +2749,14 @@ class MailboxWatcherTest(unittest.TestCase):
             },
         }
 
-    def _question(self, *, seq=2, text="Need a decision"):
+    def _question(self, *, seq=2, text="Need a decision", run_id=None):
         return autopilot._mailbox.MailboxMessage(
             seq=seq,
             id="00000000-0000-0000-0000-000000000011",
             kind=autopilot._mailbox.KIND_QUESTION,
             created_at="2026-07-24T19:00:00+00:00",
             text=text,
+            run_id=run_id,
         )
 
     def test_resolves_paths_renews_lease_and_returns_questions_once(self) -> None:
@@ -3015,7 +3017,9 @@ class MailboxWatcherTest(unittest.TestCase):
         self,
     ) -> None:
         writes = []
-        question = self._question(seq=1, text="private question body")
+        question = self._question(
+            seq=1, text="private question body", run_id="run-current"
+        )
         reply = autopilot._mailbox.MailboxMessage(
             seq=3,
             id="00000000-0000-0000-0000-000000000012",
@@ -3111,13 +3115,16 @@ class MailboxWatcherTest(unittest.TestCase):
     ) -> None:
         clock = _ManualClock()
         writes: list[dict] = []
-        old_question = self._question(seq=1, text="old run question")
+        old_question = self._question(
+            seq=1, text="old run question", run_id="run-old"
+        )
         current_question = autopilot._mailbox.MailboxMessage(
             seq=2,
             id="00000000-0000-0000-0000-000000000022",
             kind=autopilot._mailbox.KIND_QUESTION,
             created_at="2026-07-24T19:01:00+00:00",
             text="current run question",
+            run_id="run-current",
         )
         old_view = autopilot._mailbox.MailboxView(
             mailbox_path=autopilot.Path(self.mailbox_path),
@@ -3355,8 +3362,17 @@ class AttachedMailboxWatcherTest(unittest.TestCase):
         self.mailbox_path = os.path.join(self.state_path, "mailbox.jsonl")
         self.lease_path = os.path.join(self.state_path, "mailbox-lease.json")
 
-    def _attach_status(self):
+    def _attach_status(self, *, run_id=ATTACHED_RUN_ID):
         status = _attach_status(10)
+        status["runner_state"].update(
+            {
+                "present": True,
+                "error": None,
+                "run_id": run_id,
+                "run_started_at": RUN_STARTED_AT,
+                "run_finished_at": None,
+            }
+        )
         status.update(
             {
                 "state_dir": self.state_path,
@@ -3365,6 +3381,7 @@ class AttachedMailboxWatcherTest(unittest.TestCase):
                     "lease_path": self.lease_path,
                     "last_seq": 3,
                     "unanswered_questions": 1,
+                    "open_questions": 1,
                 },
             }
         )
@@ -3378,6 +3395,7 @@ class AttachedMailboxWatcherTest(unittest.TestCase):
             kind=autopilot._mailbox.KIND_QUESTION,
             created_at="2026-07-24T18:59:00+00:00",
             text="answered before this supervisor attached",
+            run_id=ATTACHED_RUN_ID,
         )
         reply = autopilot._mailbox.MailboxMessage(
             seq=2,
@@ -3393,6 +3411,7 @@ class AttachedMailboxWatcherTest(unittest.TestCase):
             kind=autopilot._mailbox.KIND_QUESTION,
             created_at="2026-07-24T19:00:00+00:00",
             text="unanswered before this supervisor attached",
+            run_id=ATTACHED_RUN_ID,
         )
         view = autopilot._mailbox.MailboxView(
             mailbox_path=autopilot.Path(self.mailbox_path),
@@ -3450,6 +3469,142 @@ class AttachedMailboxWatcherTest(unittest.TestCase):
             [unanswered.id],
         )
         self.assertIn("pending outbox 1", "\n".join(beats))
+
+    def test_attach_never_resurfaces_a_question_an_earlier_run_abandoned(
+        self,
+    ) -> None:
+        clock = _ManualClock()
+        orphan = autopilot._mailbox.MailboxMessage(
+            seq=3,
+            id="00000000-0000-0000-0000-000000000012",
+            kind=autopilot._mailbox.KIND_QUESTION,
+            created_at="2026-07-24T05:00:00+00:00",
+            text="wrangler auth expired",
+            run_id="run-that-paused-14-hours-ago",
+        )
+        view = autopilot._mailbox.MailboxView(
+            mailbox_path=autopilot.Path(self.mailbox_path),
+            messages=(orphan,),
+            last_seq=3,
+        )
+        lease_writes: list[dict] = []
+        created = []
+
+        def factory(status, **kwargs):
+            watcher = autopilot._MailboxWatcher.from_status(
+                status,
+                **kwargs,
+                read_mailbox=lambda *_args, **_kwargs: view,
+                write_lease=(
+                    lambda *_args, **projection: lease_writes.append(projection)
+                ),
+                supervisor_id="00000000-0000-0000-0000-000000000099",
+            )
+            created.append(watcher)
+            return watcher
+
+        attach = self._attach_status()
+        status = _StatusScript([attach] * 7 + [_status_payload(0)])
+        beats: list[str] = []
+        result = autopilot.supervise_run(
+            {
+                "plan_dir": "/tmp/plan",
+                "argv": ["asl", "run", "/tmp/plan", "--json"],
+            },
+            status_invoker=status,
+            run_invoker=_never_run,
+            clock=clock,
+            sleep=clock.advance,
+            heartbeat=beats.append,
+            poll_interval=5.0,
+            heartbeat_interval=30.0,
+            mailbox_watcher_factory=factory,
+        )
+
+        self.assertTrue(result["ok"], result)
+        watcher = created[0]
+        assert watcher is not None
+        self.assertEqual(watcher.run_id, ATTACHED_RUN_ID)
+        self.assertEqual(
+            [], [beat for beat in beats if beat.startswith("QUESTION ")]
+        )
+        self.assertEqual([], result["outbox"]["questions"])
+        projections = [
+            write for write in lease_writes if "run_id" in write
+        ]
+        self.assertTrue(projections)
+        # The reducer generation stays at the attach cursor: a question the
+        # previous run abandoned is never a pending-set delta.
+        self.assertTrue(
+            all(
+                write["unanswered_questions"] == 0
+                and write["projection_seq"] == 3
+                and "latest_unanswered_question_id" not in write
+                for write in projections
+            ),
+            projections,
+        )
+
+    def test_attach_adopts_the_backlog_once_run_id_binds_late(self) -> None:
+        clock = _ManualClock()
+        question = autopilot._mailbox.MailboxMessage(
+            seq=3,
+            id="00000000-0000-0000-0000-000000000012",
+            kind=autopilot._mailbox.KIND_QUESTION,
+            created_at="2026-07-24T19:00:00+00:00",
+            text="unanswered before this supervisor attached",
+            run_id=ATTACHED_RUN_ID,
+        )
+        view = autopilot._mailbox.MailboxView(
+            mailbox_path=autopilot.Path(self.mailbox_path),
+            messages=(question,),
+            last_seq=3,
+        )
+        created = []
+
+        def factory(status, **kwargs):
+            watcher = autopilot._MailboxWatcher.from_status(
+                status,
+                **kwargs,
+                read_mailbox=lambda *_args, **_kwargs: view,
+                write_lease=lambda *_args, **_kw: None,
+                supervisor_id="00000000-0000-0000-0000-000000000099",
+            )
+            created.append(watcher)
+            return watcher
+
+        # The first probe carries no run id, so the backlog must stay armed.
+        unbound = self._attach_status()
+        unbound["runner_state"].pop("run_id")
+        bound = self._attach_status()
+        status = _StatusScript(
+            [unbound] + [bound] * 6 + [_status_payload(0)]
+        )
+        beats: list[str] = []
+        result = autopilot.supervise_run(
+            {
+                "plan_dir": "/tmp/plan",
+                "argv": ["asl", "run", "/tmp/plan", "--json"],
+            },
+            status_invoker=status,
+            run_invoker=_never_run,
+            clock=clock,
+            sleep=clock.advance,
+            heartbeat=beats.append,
+            poll_interval=5.0,
+            heartbeat_interval=30.0,
+            mailbox_watcher_factory=factory,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(created[0].run_id, ATTACHED_RUN_ID)
+        self.assertEqual(
+            [item["id"] for item in result["outbox"]["questions"]],
+            [question.id],
+        )
+        self.assertEqual(
+            1, len([beat for beat in beats if beat.startswith("QUESTION ")])
+        )
 
     def test_no_mailbox_attach_never_constructs_a_watcher(self) -> None:
         def fail_factory(*_args, **_kwargs):  # pragma: no cover - guard
@@ -3550,7 +3705,7 @@ class InvokeRunHeartbeatTest(unittest.TestCase):
 
     def test_running_line_includes_pending_outbox_count(self) -> None:
         status = _running_status(34)
-        status["mailbox"] = {"unanswered_questions": 3}
+        status["mailbox"] = {"open_questions": 3}
         popen = FakeTimeoutPopen(timeout_count=1, stdout=self.FINAL_JSON)
         _payload, beats = self._run(popen=popen, status_probe=lambda: status)
         self.assertIn("pending outbox 3", beats[1])

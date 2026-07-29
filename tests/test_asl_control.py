@@ -820,6 +820,121 @@ class MailboxTests(unittest.TestCase):
             ),
         )
 
+    def test_open_questions_are_scoped_to_the_owning_run(self) -> None:
+        legacy = mailbox.append_question(
+            self.plan_dir,
+            "predates run attribution",
+            state_dir=self.state_dir,
+            created_at=self.timestamp(),
+        )
+        other = mailbox.append_question(
+            self.plan_dir,
+            "belongs to an earlier run",
+            state_dir=self.state_dir,
+            created_at=self.timestamp(),
+            run_id="run-A",
+        )
+        mine = mailbox.append_question(
+            self.plan_dir,
+            "belongs to the live run",
+            state_dir=self.state_dir,
+            created_at=self.timestamp(),
+            run_id="run-B",
+        )
+
+        self.assertIsNone(legacy.run_id)
+        self.assertEqual("run-A", other.run_id)
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        self.assertEqual((legacy, other, mine), view.unanswered_questions)
+        self.assertEqual((mine,), view.open_questions("run-B"))
+        self.assertEqual((other,), view.open_questions("run-A"))
+        self.assertEqual((), view.open_questions("run-C"))
+        self.assertEqual((), view.open_questions(None))
+        self.assertEqual((), view.open_questions(""))
+
+    def test_question_run_id_round_trips_and_stays_off_other_kinds(
+        self,
+    ) -> None:
+        question = mailbox.append_question(
+            self.plan_dir,
+            "which shape?",
+            state_dir=self.state_dir,
+            created_at=self.timestamp(),
+            run_id="run-A",
+        )
+        legacy = mailbox.append_question(
+            self.plan_dir,
+            "unattributed",
+            state_dir=self.state_dir,
+            created_at=self.timestamp(),
+        )
+        guidance = mailbox.append_guidance(
+            self.plan_dir,
+            "keep it small",
+            state_dir=self.state_dir,
+            created_at=self.timestamp(),
+        )
+        reply = mailbox.append_reply(
+            self.plan_dir,
+            question.id,
+            "one object",
+            state_dir=self.state_dir,
+            created_at=self.timestamp(),
+        )
+
+        self.assertEqual("run-A", question.to_record()["run_id"])
+        # Records written before run attribution stay byte-identical.
+        self.assertNotIn("run_id", legacy.to_record())
+        self.assertNotIn("run_id", guidance.to_record())
+        self.assertNotIn("run_id", reply.to_record())
+        path = mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir)
+        records = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(["run-A"], [r["run_id"] for r in records if "run_id" in r])
+        self.assertEqual(
+            [mailbox.MAILBOX_SCHEMA_VERSION] * 4,
+            [r["version"] for r in records],
+        )
+
+    def test_malformed_question_run_id_parses_as_unattributed(self) -> None:
+        cases = (
+            ("non-string", 123),
+            ("blank", ""),
+            ("whitespace", "   "),
+            ("null", None),
+            ("oversized", "x" * (mailbox.MAILBOX_MAX_RUN_ID_CHARS + 1)),
+        )
+        for label, raw in cases:
+            with self.subTest(label):
+                mailbox.append_question(
+                    self.plan_dir,
+                    f"question {label}",
+                    state_dir=self.state_dir,
+                    created_at=self.timestamp(),
+                )
+                path = mailbox.mailbox_path_for_plan(
+                    self.plan_dir, self.state_dir
+                )
+                lines = path.read_text(encoding="utf-8").splitlines()
+                record = json.loads(lines[-1])
+                record["run_id"] = raw
+                lines[-1] = json.dumps(record, sort_keys=True)
+                path.write_text(
+                    "".join(f"{line}\n" for line in lines), encoding="utf-8"
+                )
+
+                view = mailbox.read_mailbox(
+                    self.plan_dir, state_dir=self.state_dir
+                )
+
+                # Degrades to unattributed rather than rejecting the line.
+                self.assertEqual((), view.rejected)
+                self.assertIsNone(view.messages[-1].run_id)
+                self.assertIn(view.messages[-1], view.unanswered_questions)
+                self.assertEqual((), view.open_questions("run-A"))
+
     def test_concurrent_readers_and_writers_observe_only_complete_lines(
         self,
     ) -> None:
@@ -2921,6 +3036,7 @@ class MailboxCliTests(unittest.TestCase):
             self.plan_dir,
             "Which shape?",
             state_dir=self.state_dir,
+            run_id="lease-run-not-current-state",
         )
         mailbox.write_lease(
             self.plan_dir,
@@ -2984,6 +3100,59 @@ class MailboxCliTests(unittest.TestCase):
         self.assertNotIn("Which shape?", delivery_shape)
         self.assertNotIn("Use one object.", delivery_shape)
 
+    def test_reply_fast_clear_ignores_a_question_abandoned_by_an_earlier_run(
+        self,
+    ) -> None:
+        mailbox.append_question(
+            self.plan_dir,
+            "Wrangler auth expired?",
+            state_dir=self.state_dir,
+            run_id="run-that-already-paused",
+        )
+        question = mailbox.append_question(
+            self.plan_dir,
+            "Which shape?",
+            state_dir=self.state_dir,
+            run_id="run-2",
+        )
+        mailbox.write_lease(
+            self.plan_dir,
+            "00000000-0000-0000-0000-000000000099",
+            state_dir=self.state_dir,
+            run_id="run-2",
+            projection_seq=question.seq,
+            unanswered_questions=1,
+            latest_unanswered_question_id=question.id,
+            latest_unanswered_question_created_at=question.created_at,
+        )
+
+        with (
+            patched_env(KITTY_WINDOW_ID="42"),
+            mock.patch.object(
+                agent_mux_delivery,
+                "notify",
+                return_value={"final_status": "accepted"},
+            ) as notify,
+        ):
+            code, _payload = self.payload_from(
+                mailbox_cli.inbox_reply_from_args,
+                self.args(text="Use one object.", to=question.id),
+            )
+
+        self.assertEqual(0, code)
+        notify.assert_called_once()
+        # The orphan stays in the file as history; it just no longer gates.
+        self.assertEqual(
+            ("run-that-already-paused",),
+            tuple(
+                message.run_id
+                for message in mailbox.unanswered_questions(
+                    self.plan_dir,
+                    state_dir=self.state_dir,
+                )
+            ),
+        )
+
     def test_reply_fast_clear_requires_fresh_matching_sole_question(
         self,
     ) -> None:
@@ -2991,11 +3160,13 @@ class MailboxCliTests(unittest.TestCase):
             self.plan_dir,
             "First?",
             state_dir=self.state_dir,
+            run_id="run-1",
         )
         second = mailbox.append_question(
             self.plan_dir,
             "Second?",
             state_dir=self.state_dir,
+            run_id="run-1",
         )
         mailbox.write_lease(
             self.plan_dir,
@@ -3029,6 +3200,7 @@ class MailboxCliTests(unittest.TestCase):
             self.plan_dir,
             "Proceed?",
             state_dir=self.state_dir,
+            run_id="run-1",
         )
         mailbox.write_lease(
             self.plan_dir,
@@ -3663,6 +3835,33 @@ class MailboxCliTests(unittest.TestCase):
         self.assertIn(
             f"seq {oversized.seq} (id {oversized.id})",
             rendered,
+        )
+
+    def test_ask_stamps_the_live_run_and_degrades_without_one(self) -> None:
+        code, unattributed = self.payload_from(
+            mailbox_cli.ask_from_args,
+            self.args(text="asked before any run wrote state"),
+        )
+        self.assertEqual(0, code)
+
+        _write_state_payload(
+            self.plan_dir,
+            self.state_dir,
+            {"run_id": "run-live", "ok": True, "paused": False},
+        )
+        code, attributed = self.payload_from(
+            mailbox_cli.ask_from_args,
+            self.args(text="asked by the live run"),
+        )
+        self.assertEqual(0, code)
+
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        by_id = {question.id: question for question in view.messages}
+        self.assertIsNone(by_id[unattributed["question_id"]].run_id)
+        self.assertEqual("run-live", by_id[attributed["question_id"]].run_id)
+        self.assertEqual(
+            (by_id[attributed["question_id"]],),
+            view.open_questions("run-live"),
         )
 
     def test_ask_new_then_resume_is_idempotent(self) -> None:

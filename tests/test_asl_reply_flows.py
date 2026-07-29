@@ -75,6 +75,8 @@ from tests.support import (
     init_git_repo,
     read_jsonl,
     _contract_block,
+    _write_lock_file,
+    _write_state_payload,
 )
 
 
@@ -938,6 +940,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 state_dir_arg=None,
                 payload={},
                 question_id=question_id,
+                run_id="RUN-TEST",
                 settings=settings,
                 persistence=runner._RunPersistence(
                     write_state=False,
@@ -1037,6 +1040,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                     state_dir_arg=None,
                     payload={},
                     question_id=question_id,
+                    run_id="RUN-TEST",
                     settings=settings,
                     persistence=runner._RunPersistence(
                         write_state=False,
@@ -1170,6 +1174,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 state_dir_arg=None,
                 payload={},
                 question_id=question_id,
+                run_id="RUN-TEST",
                 settings=settings,
                 persistence=runner._RunPersistence(
                     write_state=False,
@@ -1194,6 +1199,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             kind=mailbox.KIND_QUESTION,
             created_at="2026-07-24T12:00:00+00:00",
             text="Which option?",
+            run_id="RUN-TEST",
         )
         exhausted_view = mailbox.MailboxView(
             mailbox_path=Path("/tmp/mailbox.jsonl"),
@@ -1234,6 +1240,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 state_dir_arg=None,
                 payload={},
                 question_id=question_id,
+                run_id="RUN-TEST",
                 settings=settings,
                 persistence=runner._RunPersistence(
                     write_state=False,
@@ -1352,6 +1359,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                     state_dir_arg=str(state_dir),
                     payload={},
                     question_id=question_id,
+                    run_id="RUN-TEST",
                     settings=settings,
                     persistence=runner._RunPersistence(
                         write_state=False,
@@ -1467,6 +1475,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                     plan_dir=plan_dir,
                     state_dir_arg=str(state_dir),
                     question_id=question_id,
+                    run_id="RUN-TEST",
                     text=question_text,
                 )
 
@@ -1529,11 +1538,69 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                         plan_dir=Path("/tmp/plan"),
                         state_dir_arg=None,
                         question_id=question_id,
+                        run_id="RUN-TEST",
                         text="Which option?",
                     )
 
                 self.assertEqual(expected_reason, raised.exception.reason)
                 append_question.assert_not_called()
+
+    def test_abandoned_escalation_stops_counting_once_the_run_pauses(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("pending",))
+            run_id = "run-that-times-out"
+            question_id = runner._mailbox_question_id(
+                plan_dir=plan_dir,
+                run_id=run_id,
+                session_id="1",
+                turn_index=2,
+            )
+
+            question = runner._ensure_mailbox_question(
+                plan_dir=plan_dir,
+                state_dir_arg=str(state_dir),
+                question_id=question_id,
+                text="RUNNER_PAUSE: wrangler auth expired",
+                run_id=run_id,
+            )
+
+            self.assertEqual(run_id, question.run_id)
+            live_view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+            self.assertEqual((question,), live_view.open_questions(run_id))
+
+            # The wait times out, the run pauses, and nothing ever answers.
+            _write_state_payload(
+                plan_dir,
+                state_dir,
+                {
+                    "run_id": run_id,
+                    "ok": False,
+                    "paused": True,
+                    "reason": "blocked",
+                    "run_finished_at": "2026-07-24T01:45:51+00:00",
+                },
+            )
+            _write_lock_file(plan_dir, state_dir, pid=os.getpid())
+
+            payload = state.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
+
+            status = payload["mailbox"]
+            self.assertEqual(1, status["unanswered_questions"])
+            self.assertEqual(0, status["open_questions"])
+            # History is preserved: the fix retires the record, never rewrites it.
+            self.assertEqual(
+                (question,),
+                mailbox.read_mailbox(
+                    plan_dir, state_dir=state_dir
+                ).unanswered_questions,
+            )
 
     def test_full_malformed_mailbox_falls_back_without_a_live_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

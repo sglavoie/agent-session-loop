@@ -535,6 +535,14 @@ This is live bounded activity, not a real pause: it emits
 `mailbox`/`wait-started`, but does not emit `run_paused`, release the run, or
 notify Agent Mux of a pause.
 
+Every published question records the `run_id` that owns it. A question is
+**open** only while that run is live — present, readable, unpaused, unfinished,
+and holding an active lock. The mailbox is append-only and outlives every run,
+so a question whose owner has ended is history: nothing waits on it and no
+reply can reach a worker. A fallback pause therefore retires its own escalation
+without appending a further record, and questions written before run
+attribution carry no `run_id` and are never open.
+
 The runner waits five minutes initially. Lease freshness is checked only at an
 active deadline. At that checkpoint, a fresh supervisor lease extends the wait by 60 seconds,
 never beyond the absolute 15-minute limit; an absent or stale
@@ -558,8 +566,11 @@ terminal pause the non-mailbox flow would have recorded.
 When `asl inbox reply` sees a fresh v2 supervisor projection proving that the
 target was the sole unanswered question, it captures that projection before
 renewing the lease. After the first reply append succeeds, a post-append
-mailbox snapshot must show no unanswered questions before ASL emits the
-text-free `AgentSessionLoopMailboxReply` Agent Mux marker. Its public fields are
+mailbox snapshot must show no open questions for the projected `run_id` before
+ASL emits the text-free `AgentSessionLoopMailboxReply` Agent Mux marker. A
+question an earlier run abandoned — or a legacy question with no `run_id` —
+therefore never suppresses the marker, while a genuinely open sibling question
+for the same run still does. Its public fields are
 `run_id`, `state_path`, `question_id`, reply `source_sequence`,
 `mailbox_projection_sequence`, `emitted_time`, and a stable
 `<run-id>:mailbox-reply:<reply-sequence>` source event ID. It never carries the
@@ -620,8 +631,8 @@ counts, capacity, rejected-record count, lease freshness, and compact
 `waiting_for_reply` identity/deadlines without raw message bodies.
 `guidance-observed` carries message identity, physical sequence, character
 length, and SHA-256 digest. `wait-cleared` carries the wait identity and
-deadlines, the exit `reason`, and `pending_outbox`, the measured
-unanswered-question count when a final mailbox snapshot is available.
+deadlines, the exit `reason`, and `pending_outbox`, the measured count of
+questions open for that run when a final mailbox snapshot is available.
 `wait-preparation-failed` carries run/session/turn identity and the exact
 preparation `reason`, without creating live-wait state.
 `asl tail` renders that reason and identity explicitly rather than falling back
@@ -1609,7 +1620,12 @@ report `commit_mode: null` and `commits: []`.
 `status --json` adds a read-only `mailbox` projection. It reports the canonical
 mailbox and lease paths, presence/activation, byte size and 4 MiB limit,
 physical `last_seq`, pending-guidance and unanswered-question counts, rejected
-record count, full state, and best-effort errors. Its lease fields include
+record count, full state, and best-effort errors. Alongside the file-faithful
+`unanswered_questions` total it reports `open_questions`, the subset owned by a
+run that is still live; it is `0` when no live run holds the plan and `null`
+when the mailbox cannot be read. The text `Mailbox:` line leads with the open
+count and appends the historical total only when the two differ, so an
+abandoned record reads as history rather than a live block. Its lease fields include
 `lease_present`, `lease_fresh`, `lease_reason`, and `lease_error`. The stable
 lease-reason vocabulary is `missing`, `invalid-size`, `empty`, `invalid-json`,
 `not-object`, `unsupported-version`, `invalid-supervisor-id`,
@@ -1633,6 +1649,13 @@ successful five-second mailbox poll. The projection sequence advances only when
 the observed unanswered-question set changes, so unrelated mailbox records
 cannot reassert an acknowledged question. Readers continue to accept v1 leases,
 which carry no question projection.
+
+The mailbox record schema version is **not** bumped for question ownership:
+`run_id` is an optional question-only field that older readers ignore and newer
+readers treat as absent when malformed, blank, or over 128 characters. A bad
+value degrades the question to unattributed rather than rejecting the line, so
+the reject vocabulary is unchanged and history written before run attribution
+keeps parsing.
 
 Before every self-launch or relaunch, the autopilot removes the previous
 `run_id`, observed question IDs, and pending projection while preserving the

@@ -70,6 +70,7 @@ from tests.support import (
     write_plan,
     write_plan_with_ids,
     fail_open_for_path,
+    _write_lock_file,
     _write_state_payload,
 )
 
@@ -2474,6 +2475,8 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertEqual(2, status["last_seq"])
             self.assertEqual(1, status["pending_guidance"])
             self.assertEqual(1, status["unanswered_questions"])
+            # No live run guards this plan, so the question is history.
+            self.assertEqual(0, status["open_questions"])
             self.assertEqual(0, status["rejected_records"])
             self.assertIsNone(status["error"])
             self.assertIsNotNone(status["lease_updated_at"])
@@ -2488,8 +2491,124 @@ class ParserAndStateTests(unittest.TestCase):
             output = buffer.getvalue()
             self.assertIn("Mailbox: active", output)
             self.assertIn("1 pending guidance", output)
-            self.assertIn("1 unanswered questions", output)
+            self.assertIn("0 open questions (1 unanswered historical)", output)
             self.assertIn("Mailbox lease: fresh", output)
+
+    def test_status_payload_counts_open_questions_only_for_the_live_run(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            mailbox.append_question(
+                plan_dir,
+                "from a run that already ended",
+                state_dir=state_dir,
+                run_id="RUN-OLD",
+            )
+            mailbox.append_question(
+                plan_dir,
+                "predates run attribution",
+                state_dir=state_dir,
+            )
+            mailbox.append_question(
+                plan_dir,
+                "the live run is blocked on this",
+                state_dir=state_dir,
+                run_id="RUN-LIVE",
+            )
+            _write_state_payload(
+                plan_dir,
+                state_dir,
+                {"run_id": "RUN-LIVE", "ok": True, "paused": False},
+            )
+            _write_lock_file(plan_dir, state_dir, pid=os.getpid())
+
+            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+
+            status = payload["mailbox"]
+            self.assertEqual(3, status["unanswered_questions"])
+            self.assertEqual(1, status["open_questions"])
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                state._print_text_status(payload)
+            output = buffer.getvalue()
+            self.assertIn("1 open questions (3 unanswered historical)", output)
+
+    def test_status_payload_retires_open_questions_once_the_run_ends(
+        self,
+    ) -> None:
+        cases = (
+            ("paused", {"run_id": "RUN-LIVE", "paused": True}),
+            (
+                "finished",
+                {
+                    "run_id": "RUN-LIVE",
+                    "paused": False,
+                    "run_finished_at": "2026-07-29T01:45:51+00:00",
+                },
+            ),
+        )
+        for label, runner_payload in cases:
+            with self.subTest(label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    plan_dir = Path(tmp) / "plan"
+                    state_dir = Path(tmp) / "state"
+                    write_plan(plan_dir, ("pending",))
+                    mailbox.append_question(
+                        plan_dir,
+                        "abandoned when the wait timed out",
+                        state_dir=state_dir,
+                        run_id="RUN-LIVE",
+                    )
+                    _write_state_payload(
+                        plan_dir, state_dir, runner_payload
+                    )
+                    _write_lock_file(
+                        plan_dir, state_dir, pid=os.getpid()
+                    )
+
+                    payload = state.status_payload(
+                        plans.inspect_plan(plan_dir), state_dir
+                    )
+
+                    status = payload["mailbox"]
+                    self.assertEqual(1, status["unanswered_questions"])
+                    self.assertEqual(0, status["open_questions"])
+
+    def test_live_run_id_requires_a_readable_unfinished_lock_guarded_run(
+        self,
+    ) -> None:
+        active = state.LockInfo(
+            path=Path("/tmp/lock.json"),
+            pid=os.getpid(),
+            plan_dir="/tmp/plan",
+            created_at="2026-07-29T00:00:00+00:00",
+            stale=False,
+            reason="active",
+            raw={},
+        )
+        stale = dataclasses.replace(active, stale=True, reason="stale")
+        live = {"present": True, "error": None, "run_id": "RUN-LIVE"}
+
+        self.assertEqual("RUN-LIVE", state._live_run_id(live, active))
+        self.assertIsNone(state._live_run_id(live, stale))
+        self.assertIsNone(state._live_run_id(live, None))
+        self.assertIsNone(state._live_run_id({**live, "paused": True}, active))
+        self.assertIsNone(
+            state._live_run_id(
+                {**live, "run_finished_at": "2026-07-29T01:00:00+00:00"},
+                active,
+            )
+        )
+        self.assertIsNone(
+            state._live_run_id({**live, "error": "unreadable"}, active)
+        )
+        self.assertIsNone(
+            state._live_run_id({**live, "present": False}, active)
+        )
+        self.assertIsNone(state._live_run_id({"present": True}, active))
 
     def test_min_append_bytes_matches_generated_acknowledgement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
