@@ -1058,7 +1058,15 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         self.assertIsNone(fresh_result.reply)
         self.assertEqual("timeout", fresh_result.reason)
         self.assertEqual(settings.hard_seconds, fresh_elapsed)
-        self.assertEqual(10, fresh_checks)
+        # The first probe fires at the base deadline; each fresh lease then
+        # buys one extension, so the ratchet spans the base-to-hard gap.
+        self.assertEqual(
+            int(
+                (settings.hard_seconds - settings.base_seconds)
+                // settings.lease_extension_seconds
+            ),
+            fresh_checks,
+        )
         self.assertIsNone(stale_result.reply)
         self.assertEqual("supervisor-lost", stale_result.reason)
         self.assertNotEqual(fresh_result.reason, stale_result.reason)

@@ -143,7 +143,7 @@ session. Do not stop the helper, invoke `--reply-stdin`, or report a terminal
 pause while this live wait is active. The runner waits five minutes initially.
 Lease freshness is checked only at an active deadline: a fresh lease extends
 the wait by 60 seconds, while an absent or stale lease ends it. The runner
-never waits beyond 15 minutes. An already-committed reply takes precedence over
+never waits beyond 30 minutes. An already-committed reply takes precedence over
 mailbox exhaustion and is delivered even when the mailbox is full. If no reply
 is available, timeout, mailbox fullness/unavailability, or a stale lease at an
 active deadline falls back to the existing terminal pause flow below; there is

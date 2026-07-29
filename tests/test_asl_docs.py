@@ -585,7 +585,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "waits five minutes initially",
             "Lease freshness is checked only at an\nactive deadline",
             "extends the wait by 60 seconds",
-            "15-minute limit",
+            "30-minute limit",
             "ordinary\nterminal pause",
             "next\nimplementation invocation",
             "never affect generated review turns",
@@ -700,7 +700,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         )[0]
 
         self.assertIn(
-            "`--wait-timeout` accepts 0 through 900 seconds and requires `--wait`.",
+            "`--wait-timeout` accepts 0 through 1800 seconds and requires `--wait`.",
             mailbox_docs,
         )
         self.assertIn(
@@ -965,7 +965,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "`asl run --no-mailbox`",
             "The five mailbox commands",
             "Lease freshness is checked only at an active\ndeadline",
-            "15-minute\nabsolute maximum",
+            "30-minute\nabsolute maximum",
             "`asl control set-model",
             "no runner/supervisor thread",
             "no Workbench",
@@ -979,7 +979,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "asl inbox reply <plan-dir> --to <question-id>",
             "continue the same\nsession",
             "Lease freshness is checked only at an active deadline",
-            "never waits beyond 15 minutes",
+            "never waits beyond 30 minutes",
             "already-committed reply takes precedence over\nmailbox exhaustion",
             "affect only the next implementation invocation",
         ):

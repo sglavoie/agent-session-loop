@@ -481,7 +481,7 @@ The five mailbox commands share normal plan-reference, `--state-dir`, and
   guidance remains pending for later runs.
 - `asl ask` appends a worker question, or resumes an existing one with
   `--question-id`. `--wait` polls for a reply for 90 seconds by default;
-  `--wait-timeout` accepts 0 through 900 seconds and requires `--wait`.
+  `--wait-timeout` accepts 0 through 1800 seconds and requires `--wait`.
   Supplying `--wait-timeout` alone fails with `reason: invalid-timeout`. An
   unanswered bounded wait returns success with `timed_out: true`, allowing the
   worker to reuse the same question ID or emit `RUNNER_PAUSE:` as a fallback.
@@ -490,7 +490,7 @@ The five mailbox commands share normal plan-reference, `--state-dir`, and
   metadata changes.
 - `asl outbox wait` lets a supervisor long-poll questions after the stateless
   physical `--since` cursor. Its default timeout is 300 seconds, its maximum is
-  900, and `next_since` advances through every physical mailbox line so
+  1800, and `next_since` advances through every physical mailbox line so
   guidance, acknowledgements, and malformed records cannot replay questions.
   It polls mailbox metadata every five seconds and likewise re-parses only
   after the log changes.
@@ -514,7 +514,7 @@ With `--json`, failures use the common error envelope and the following stable
   receives neither or both question text and `--question-id`,
   `invalid-target` when a reply target is not a valid question UUID,
   `invalid-since` when the outbox cursor is not a non-negative integer, and
-  `invalid-timeout` when a timeout is outside 0 through 900 seconds or
+  `invalid-timeout` when a timeout is outside 0 through 1800 seconds or
   `--wait-timeout` is supplied without `--wait`.
 - Mailbox-state errors are `question-not-found`,
   `question-already-answered`, `mailbox-full`, `mailbox-read-error`, and
@@ -545,7 +545,7 @@ attribution carry no `run_id` and are never open.
 
 The runner waits five minutes initially. Lease freshness is checked only at an
 active deadline. At that checkpoint, a fresh supervisor lease extends the wait by 60 seconds,
-never beyond the absolute 15-minute limit; an absent or stale
+never beyond the absolute 30-minute limit; an absent or stale
 lease ends the live wait. The runner polls the mailbox every two seconds and
 tolerates sustained mailbox or checkpoint lease I/O failure for ten seconds
 before falling back. A first reply starts an explicit one-shot continuation of
@@ -2048,7 +2048,7 @@ session. The helper keeps the complete question record in its eventual
 including the pending-outbox count, rather than a stalled or paused run.
 
 If nobody answers before the runner's five-minute, lease-extendable,
-15-minute-absolute wait expires—or mailbox I/O/fullness forces fallback—the
+30-minute-absolute wait expires—or mailbox I/O/fullness forces fallback—the
 runner records its ordinary terminal pause. The helper then uses the existing
 pause behavior below; no separate mailbox-only terminal status is introduced.
 

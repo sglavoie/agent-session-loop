@@ -1089,7 +1089,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         metavar="SECONDS",
         help=(
             "Reply wait timeout in seconds; requires --wait "
-            "(default: 90; maximum: 900)"
+            "(default: 90; maximum: 1800)"
         ),
     )
     ask_parser.set_defaults(handler_ref="mailbox_cli:ask_from_args")
@@ -1119,7 +1119,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         type=float,
         default=300.0,
         metavar="SECONDS",
-        help="Long-poll timeout in seconds (default: 300; maximum: 900)",
+        help="Long-poll timeout in seconds (default: 300; maximum: 1800)",
     )
     outbox_wait_parser.set_defaults(
         handler_ref="mailbox_cli:outbox_wait_from_args",

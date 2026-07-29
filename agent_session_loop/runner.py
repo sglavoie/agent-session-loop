@@ -211,12 +211,12 @@ REVIEW_GUARD_EXCLUDE_ENV_VAR = "ASL_REVIEW_GUARD_EXCLUDE"
 
 # A runner that receives a reply-capable pause remains live for five minutes.
 # An active supervisor lease may extend that deadline one minute at a time,
-# but never beyond fifteen minutes from the start of the wait. Environment
+# but never beyond thirty minutes from the start of the wait. Environment
 # overrides are deliberately narrow test seams; invalid, non-finite, or
 # non-positive values fall back to these production defaults.
 MAILBOX_REPLY_WAIT_BASE_SECONDS = 5 * 60.0
 MAILBOX_REPLY_WAIT_LEASE_EXTENSION_SECONDS = 60.0
-MAILBOX_REPLY_WAIT_HARD_SECONDS = 15 * 60.0
+MAILBOX_REPLY_WAIT_HARD_SECONDS = 30 * 60.0
 MAILBOX_REPLY_WAIT_POLL_SECONDS = 2.0
 MAILBOX_REPLY_WAIT_IO_GRACE_SECONDS = 10.0
 MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST = "supervisor-lost"
