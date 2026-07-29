@@ -555,6 +555,20 @@ mailbox, or missing question context clears `waiting_for_reply` and records the
 same ordinary
 terminal pause the non-mailbox flow would have recorded.
 
+When `asl inbox reply` sees a fresh v2 supervisor projection proving that the
+target was the sole unanswered question, it captures that projection before
+renewing the lease. After the first reply append succeeds, a post-append
+mailbox snapshot must show no unanswered questions before ASL emits the
+text-free `AgentSessionLoopMailboxReply` Agent Mux marker. Its public fields are
+`run_id`, `state_path`, `question_id`, reply `source_sequence`,
+`mailbox_projection_sequence`, `emitted_time`, and a stable
+`<run-id>:mailbox-reply:<reply-sequence>` source event ID. It never carries the
+question or reply body. Missing, stale, malformed, multi-question, or
+mismatched evidence skips the marker; Agent Mux discovery, delivery, timeout,
+or acknowledgement failure never changes the successful mailbox reply result.
+The supervisor lease's later zero-question projection remains the compatibility
+fallback.
+
 If the live wait cannot be prepared, the runner first emits an additive
 `mailbox`/`wait-preparation-failed` event with the run/session/turn identity
 and the preparation `reason`, then records the ordinary terminal pause without
@@ -1620,6 +1634,14 @@ the observed unanswered-question set changes, so unrelated mailbox records
 cannot reassert an acknowledged question. Readers continue to accept v1 leases,
 which carry no question projection.
 
+Before every self-launch or relaunch, the autopilot removes the previous
+`run_id`, observed question IDs, and pending projection while preserving the
+physical mailbox cursor, then publishes an unbound lease. Status is re-probed at
+mailbox deadlines until `state.json` is proven newer than the current child
+lock; only then can that run's v2 projection return. This prevents a watcher
+that survives multiple chunks from refreshing an earlier run's question under
+its successor.
+
 Both `status --json` and a live run's state
 expose compact `waiting_for_reply` metadata while a bounded answer wait is
 active. The adjacent top-level `waiting_for_reply_status` field is `live` when
@@ -2081,8 +2103,10 @@ terminal verdict (`ok` is `true` only for a clean completion):
   for a different run; a human must resolve the conflict before supervising.
 - `blocked` (`ok: false`): a chunk stopped without completing and without a
   recoverable pause (the child's non-paused failure reason is attached).
-- `capped` (`ok: false`): the `max_chunks` safety budget (pause-retry/review
-  relaunches or attach polls) was exhausted before the plan settled.
+- `capped` (`ok: false`): a safety budget was exhausted before the plan settled
+  — `max_chunks` self-launched pause-retry/review relaunches, or
+  `attach_max_seconds` (default 12h) of wall clock within a single attach
+  episode. Both are kwargs-only, with no CLI flag.
 - `status-error` / `run-error` (`ok: false`): `asl status --json` or `asl run`
   itself failed to produce a usable payload.
 - `empty-reply` (`ok: false`): `--reply-stdin` was requested but stdin carried

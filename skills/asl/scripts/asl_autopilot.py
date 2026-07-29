@@ -92,12 +92,26 @@ _ENV_ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 # between `asl status` probes while attached to a run someone else is driving.
 # `HEARTBEAT_INTERVAL` throttles the concise stderr progress lines (stdout stays
 # reserved for the final JSON). `MAX_CHUNKS` bounds how many self-launched
-# relaunches (pause retries and review continuations) or attach-waits we perform
-# before giving up, so a stalled plan can never loop forever. (`--max-sessions`
-# is a separate global session budget, not this safety bound.)
+# relaunches (pause retries and review continuations) we perform before giving
+# up, so a stalled plan can never loop forever. (`--max-sessions` is a separate
+# global session budget, not this safety bound.)
 DEFAULT_POLL_INTERVAL = 5.0
 DEFAULT_HEARTBEAT_INTERVAL = 30.0
 DEFAULT_MAX_CHUNKS = 50
+
+# Attach-mode backstop, measured in wall clock since the current attach episode
+# began rather than in polls: one attach poll lasts 5s (`events.jsonl` grew) to
+# 30s (the heartbeat interval elapsed), so a poll count drains ~6x faster on a
+# busy run than a quiet one — fastest exactly when the run is healthiest. What
+# polices progress here is the hang bars below; this only covers the residual
+# case they cannot see, an active lock whose holder publishes no readable
+# `runner_state`, leaving `_status_snapshot` at `{"state": "unknown"}` so
+# neither bar can ever fire. Set far above `DEFAULT_HANG_IDLE_CEILING` so any
+# run with readable telemetry escalates first, and above the wall-clock length
+# of a real plan: capping early costs a supervision gap, where a worker question
+# can time out into a terminal `blocked` pause with nobody watching. Overridable
+# via kwargs only — deliberately not a CLI flag.
+DEFAULT_ATTACH_MAX_SECONDS = 43200.0
 
 # Self-launched children share their process wait with mailbox supervision:
 # check for new questions every five seconds and renew the supervisor lease on
@@ -642,6 +656,7 @@ class _MailboxWatcher:
         self._pending_questions: tuple[_mailbox.MailboxMessage, ...] = ()
         self._projection_seq = since
         self.run_id: Optional[str] = None
+        self._requires_lock_correlation = False
         self._progress_records: list[str] = []
         self._lease_degraded = False
         self._lease_renewal_failures = 0
@@ -665,6 +680,7 @@ class _MailboxWatcher:
             self._observed_question_ids.clear()
             self._pending_questions = ()
         self.run_id = run_id
+        self._requires_lock_correlation = False
         if self.enabled:
             resolved_now = self._clock() if now is None else now
             self._renew_lease(resolved_now)
@@ -683,6 +699,11 @@ class _MailboxWatcher:
         if run_id is None:
             return False
         lock_created_at = _lock_created_at(status)
+        if self._requires_lock_correlation and (
+            _parse_timestamp(lock_created_at) is None
+            or not _state_written_after_lock(status, lock_created_at)
+        ):
+            return False
         if (
             _parse_timestamp(lock_created_at) is not None
             and not _state_written_after_lock(status, lock_created_at)
@@ -775,18 +796,31 @@ class _MailboxWatcher:
         self._renew_lease(resolved_now)
         return True
 
-    def renew_before_launch(self, *, now: Optional[float] = None) -> bool:
-        """Refresh an established lease immediately before another child launch.
+    def prepare_for_launch(
+        self,
+        *,
+        now: Optional[float] = None,
+        renew_lease: bool = True,
+    ) -> bool:
+        """Unbind stale run evidence immediately before a self-launched child.
 
-        Relaunch preparation can spend long enough in status probing and
-        transport backoff for the last periodic renewal to expire. Keep the
-        watcher armed on failure, matching periodic-renewal behavior, so
-        readable mailbox questions remain observable while a later renewal can
-        recover.
+        The durable physical cursor survives so old mailbox records are not
+        replayed, but the previous run's identity and pending-question set must
+        disappear before a successor can start. The next identity is accepted
+        only from state proven to have been written after that child's live
+        lock. A newly established watcher already wrote the unbound lease, so
+        its caller may set ``renew_lease=False`` to avoid a duplicate write.
         """
         if not self.enabled:
             return False
         resolved_now = self._clock() if now is None else now
+        self.run_id = None
+        self._observed_question_ids.clear()
+        self._pending_questions = ()
+        self._include_unanswered_backlog = False
+        self._requires_lock_correlation = True
+        if not renew_lease:
+            return True
         return self._renew_lease(resolved_now)
 
     def _renew_lease(self, resolved_now: float) -> bool:
@@ -1724,6 +1758,19 @@ def _invoke_run(
             mailbox_watcher.observe_status(status, now=clock())
             return status
 
+    def refresh_unbound_mailbox_run() -> None:
+        """Best-effort rebind after the child has written lock-owned state."""
+        if (
+            mailbox_watcher is None
+            or mailbox_watcher.run_id is not None
+            or observed_status_probe is None
+        ):
+            return
+        try:
+            observed_status_probe()
+        except Exception:
+            pass
+
     # Prefer the event-driven tailer (opened from the first `asl status`
     # payload's events_path); keep `status_probe` as the per-tick fallback seam.
     tailer = events_tailer
@@ -1779,6 +1826,7 @@ def _invoke_run(
     while True:
         now = clock()
         deadlines = [heartbeat_deadline]
+        mailbox_deadline: Optional[float] = None
         if mailbox_watcher is not None:
             mailbox_deadline = mailbox_watcher.next_deadline()
             if mailbox_deadline is not None:
@@ -1795,6 +1843,11 @@ def _invoke_run(
             pending_input = None
             now = clock()
             if mailbox_watcher is not None:
+                if (
+                    mailbox_deadline is not None
+                    and now >= mailbox_deadline
+                ):
+                    refresh_unbound_mailbox_run()
                 _poll_mailbox_watcher(
                     mailbox_watcher,
                     now=now,
@@ -1862,6 +1915,7 @@ def _invoke_run(
             heartbeat_deadline += steps * heartbeat_interval
 
     if mailbox_watcher is not None:
+        refresh_unbound_mailbox_run()
         _poll_mailbox_watcher(
             mailbox_watcher,
             now=clock(),
@@ -2431,6 +2485,7 @@ def supervise_run(
     heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     stall_threshold: float = DEFAULT_STALL_IDLE_THRESHOLD,
     max_chunks: int = DEFAULT_MAX_CHUNKS,
+    attach_max_seconds: float = DEFAULT_ATTACH_MAX_SECONDS,
     max_retries: int = DEFAULT_MAX_RETRIES,
     mailbox_watcher_factory=_MailboxWatcher.from_status,
     hang_escalation_probes: int = DEFAULT_HANG_ESCALATION_PROBES,
@@ -2500,8 +2555,11 @@ def supervise_run(
     paused run via ``asl run --reply-stdin`` (reply streamed on stdin); later
     chunks run normally so the supervisor can carry the plan the rest of the way.
 
-    ``max_chunks`` bounds both self-launched relaunches and attach polls so a
-    wedged plan can never loop forever.
+    ``max_chunks`` bounds self-launched relaunches; attach polls are bounded
+    instead by ``attach_max_seconds`` of wall clock per attach episode (reset
+    once the attached lock clears), since a poll costs 5–30s depending on how
+    chatty the run is and a count would bound nothing consistent. A genuinely
+    wedged attached run is caught by the hang bars below, not by this deadline.
 
     Both heartbeat sites carry live progress and pending outbox counts.
     Self-launched chunks derive each tick from the plan's ``events.jsonl`` (see
@@ -2552,7 +2610,6 @@ def supervise_run(
             )
 
     chunks = 0
-    attach_polls = 0
     attach_start: Optional[float] = None
     last_attach_beat: Optional[float] = None
     retry_counts: dict = {}
@@ -2620,7 +2677,6 @@ def supervise_run(
 
         pending = _pending_count(status)
         if disposition == "attach":
-            attach_polls += 1
             # Record who holds the plan and how much work was pending when we
             # first attached, so the unlocked iteration below can attribute this
             # run's progress and read its persisted terminal reason. A lock
@@ -2648,7 +2704,11 @@ def supervise_run(
                 or _state_written_after_lock(status, attached_lock_created_at)
             ):
                 attached_run_id = observed_run_id
-            if attach_polls > max_chunks:
+            now = clock()
+            if attach_start is None:
+                attach_start = now
+            attach_elapsed = now - attach_start
+            if attach_elapsed >= attach_max_seconds:
                 return run_result(
                     False,
                     "capped",
@@ -2656,10 +2716,10 @@ def supervise_run(
                     chunks=chunks,
                     error=(
                         "attached run did not finish within the supervision "
-                        f"budget ({max_chunks} polls)"
+                        f"budget ({int(attach_elapsed)}s attached, limit "
+                        f"{int(attach_max_seconds)}s)"
                     ),
                 )
-            now = clock()
             if not parsed.get("no_mailbox") and mailbox_watcher is None:
                 candidate = mailbox_watcher_factory(
                     status,
@@ -2688,8 +2748,6 @@ def supervise_run(
                     chunks=chunks,
                     hang=_hang_payload(escalation, parsed, status),
                 )
-            if attach_start is None:
-                attach_start = now
             if last_attach_beat is None or now - last_attach_beat >= heartbeat_interval:
                 context = (
                     f"(pending {pending}, elapsed {int(now - attach_start)}s)"
@@ -2751,6 +2809,7 @@ def supervise_run(
             attached_pending = None
             attached_run_id = None
             attached_lock_created_at = None
+            attach_start = None
 
         # A spent budget with impl sessions still pending is a clean, intentional
         # early stop — never a failure or a pause. When the budget is spent
@@ -2821,8 +2880,12 @@ def supervise_run(
                 candidate = mailbox_watcher_factory(status, clock=clock)
                 if candidate is not None and candidate.establish(now=launch_now):
                     mailbox_watcher = candidate
+                    mailbox_watcher.prepare_for_launch(
+                        now=launch_now,
+                        renew_lease=False,
+                    )
             else:
-                mailbox_watcher.renew_before_launch(now=launch_now)
+                mailbox_watcher.prepare_for_launch(now=launch_now)
         run_payload = run_invoker(launch_parsed, chunks)
         if not isinstance(run_payload, dict) or run_payload.get("_invoke_error"):
             return run_result(

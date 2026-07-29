@@ -2914,6 +2914,147 @@ class MailboxCliTests(unittest.TestCase):
             reply_payload["supervisor_id"], second_lease.supervisor_id
         )
 
+    def test_reply_emits_text_free_agent_mux_clear_from_prewrite_projection(
+        self,
+    ) -> None:
+        question = mailbox.append_question(
+            self.plan_dir,
+            "Which shape?",
+            state_dir=self.state_dir,
+        )
+        mailbox.write_lease(
+            self.plan_dir,
+            "00000000-0000-0000-0000-000000000099",
+            state_dir=self.state_dir,
+            run_id="lease-run-not-current-state",
+            projection_seq=question.seq,
+            unanswered_questions=1,
+            latest_unanswered_question_id=question.id,
+            latest_unanswered_question_created_at=question.created_at,
+        )
+
+        with (
+            patched_env(KITTY_WINDOW_ID="42"),
+            mock.patch.object(
+                agent_mux_delivery,
+                "notify",
+                return_value={"final_status": "accepted"},
+            ) as notify,
+        ):
+            code, reply_payload = self.payload_from(
+                mailbox_cli.inbox_reply_from_args,
+                self.args(text="Use one object.", to=question.id),
+            )
+
+        self.assertEqual(0, code)
+        notify.assert_called_once()
+        event_name, payload = notify.call_args.args
+        kwargs = notify.call_args.kwargs
+        self.assertEqual(
+            agent_mux_delivery.MAILBOX_REPLY_EVENT, event_name
+        )
+        self.assertEqual("lease-run-not-current-state", payload["run_id"])
+        self.assertEqual(str(self.plan_dir.resolve()), payload["plan_dir"])
+        self.assertEqual(
+            str(
+                state.plan_state_dir(self.plan_dir, self.state_dir)
+                / events.STATE_FILE_NAME
+            ),
+            payload["state_path"],
+        )
+        self.assertEqual(42, payload["kitty_window_id"])
+        self.assertEqual(
+            agent_mux_delivery.MAILBOX_REPLY_REASON, kwargs["reason"]
+        )
+        self.assertEqual(question.id, kwargs["extra"]["question_id"])
+        self.assertEqual(
+            str(question.seq),
+            kwargs["extra"]["mailbox_projection_sequence"],
+        )
+        reply_seq = reply_payload["message"]["seq"]
+        self.assertEqual(reply_seq, kwargs["allocate_sequence"]())
+        self.assertEqual(
+            f"lease-run-not-current-state:mailbox-reply:{reply_seq}",
+            kwargs["extra"]["source_event_id"],
+        )
+        delivery_shape = json.dumps(
+            {"payload": payload, "extra": kwargs["extra"]},
+            sort_keys=True,
+        )
+        self.assertNotIn("Which shape?", delivery_shape)
+        self.assertNotIn("Use one object.", delivery_shape)
+
+    def test_reply_fast_clear_requires_fresh_matching_sole_question(
+        self,
+    ) -> None:
+        first = mailbox.append_question(
+            self.plan_dir,
+            "First?",
+            state_dir=self.state_dir,
+        )
+        second = mailbox.append_question(
+            self.plan_dir,
+            "Second?",
+            state_dir=self.state_dir,
+        )
+        mailbox.write_lease(
+            self.plan_dir,
+            "00000000-0000-0000-0000-000000000099",
+            state_dir=self.state_dir,
+            run_id="run-1",
+            projection_seq=second.seq,
+            unanswered_questions=2,
+            latest_unanswered_question_id=second.id,
+            latest_unanswered_question_created_at=second.created_at,
+        )
+
+        with mock.patch.object(agent_mux_delivery, "notify") as notify:
+            code, _payload = self.payload_from(
+                mailbox_cli.inbox_reply_from_args,
+                self.args(text="Second answer", to=second.id),
+            )
+
+        self.assertEqual(0, code)
+        notify.assert_not_called()
+        self.assertEqual(
+            (first,),
+            mailbox.unanswered_questions(
+                self.plan_dir,
+                state_dir=self.state_dir,
+            ),
+        )
+
+    def test_reply_succeeds_when_agent_mux_delivery_fails(self) -> None:
+        question = mailbox.append_question(
+            self.plan_dir,
+            "Proceed?",
+            state_dir=self.state_dir,
+        )
+        mailbox.write_lease(
+            self.plan_dir,
+            "00000000-0000-0000-0000-000000000099",
+            state_dir=self.state_dir,
+            run_id="run-1",
+            projection_seq=question.seq,
+            unanswered_questions=1,
+            latest_unanswered_question_id=question.id,
+            latest_unanswered_question_created_at=question.created_at,
+        )
+
+        with mock.patch.object(
+            agent_mux_delivery,
+            "notify",
+            side_effect=RuntimeError("AgentMux unavailable"),
+        ):
+            code, payload = self.payload_from(
+                mailbox_cli.inbox_reply_from_args,
+                self.args(text="Proceed.", to=question.id),
+            )
+
+        self.assertEqual(0, code)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("reply", payload["message"]["kind"])
+
     def test_guidance_reads_multiline_stdin_verbatim(self) -> None:
         body = "first line\nsecond line\n"
         with mock.patch("sys.stdin", io.StringIO(body)):

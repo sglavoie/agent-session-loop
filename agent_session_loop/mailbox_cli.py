@@ -4,14 +4,24 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import math
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import time
 from typing import Any, Callable, Sequence
 import uuid
 
-from . import cli_common, mailbox, mailbox_rendering, responses
+from . import (
+    agent_mux_delivery,
+    cli_common,
+    mailbox,
+    mailbox_rendering,
+    responses,
+)
 
 
 COMMAND_INBOX_GUIDANCE = "inbox-guidance"
@@ -54,6 +64,15 @@ class _OutboxWaitResult:
     next_since: int
     timed_out: bool
     lease_supervision: _LeaseSupervision
+
+
+@dataclass(frozen=True)
+class _MailboxReplyProjection:
+    """Authoritative pre-reply evidence for one supervisor question."""
+
+    run_id: str
+    projection_seq: int
+    question_id: str
 
 
 def _message_payload(message: mailbox.MailboxMessage) -> dict[str, Any]:
@@ -360,6 +379,7 @@ def _supervisor_write(
     command_name: str,
     text_label: str,
     append: Callable[[Path], mailbox.MailboxMessage],
+    before_lease: Callable[[cli_common.PlanCommandContext], None] | None = None,
 ) -> tuple[cli_common.PlanCommandContext, mailbox.MailboxMessage, str] | None:
     context = _resolve(
         args,
@@ -368,6 +388,11 @@ def _supervisor_write(
     )
     if context is None:
         return None
+    if before_lease is not None:
+        try:
+            before_lease(context)
+        except Exception:  # noqa: BLE001 - optional evidence stays fail-open
+            pass
     supervisor_id = str(uuid.uuid4())
     try:
         # Establish the lease first.  If the state root is unwritable, this
@@ -387,6 +412,112 @@ def _supervisor_write(
         )
         return None
     return context, message, supervisor_id
+
+
+def _mailbox_reply_projection(
+    context: cli_common.PlanCommandContext,
+    args: argparse.Namespace,
+    question_id: str,
+) -> _MailboxReplyProjection | None:
+    """Capture a fresh v2 single-question projection before renewing the lease."""
+    try:
+        view = mailbox.read_lease(
+            context.snapshot.plan_dir,
+            state_dir=args.state_dir,
+        )
+    except (OSError, mailbox.MailboxError):
+        return None
+    lease = view.lease
+    if (
+        not view.fresh
+        or lease is None
+        or lease.version != mailbox.MAILBOX_LEASE_VERSION
+        or not isinstance(lease.run_id, str)
+        or not lease.run_id.strip()
+        or isinstance(lease.projection_seq, bool)
+        or not isinstance(lease.projection_seq, int)
+        or lease.projection_seq <= 0
+        or lease.unanswered_questions != 1
+        or lease.latest_unanswered_question_id != question_id
+    ):
+        return None
+    return _MailboxReplyProjection(
+        run_id=lease.run_id,
+        projection_seq=lease.projection_seq,
+        question_id=question_id,
+    )
+
+
+def _kitty_window_id() -> int | None:
+    raw = os.environ.get("KITTY_WINDOW_ID")
+    try:
+        value = int(raw) if raw is not None else 0
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _notify_agent_mux_mailbox_reply(
+    context: cli_common.PlanCommandContext,
+    args: argparse.Namespace,
+    message: mailbox.MailboxMessage,
+    projection: _MailboxReplyProjection | None,
+) -> dict[str, Any] | None:
+    """Best-effort fast clear after a reply authoritatively empties the outbox."""
+    if projection is None or message.to != projection.question_id:
+        return None
+    try:
+        post_reply = mailbox.read_mailbox(
+            context.snapshot.plan_dir,
+            state_dir=args.state_dir,
+        )
+        if (
+            post_reply.last_seq < message.seq
+            or post_reply.unanswered_questions
+        ):
+            return None
+
+        runner_state = context.status.get("runner_state")
+        harness = (
+            runner_state.get("harness")
+            if isinstance(runner_state, dict)
+            and isinstance(runner_state.get("harness"), str)
+            else None
+        )
+        payload: dict[str, Any] = {
+            "run_id": projection.run_id,
+            "plan_dir": str(context.snapshot.plan_dir),
+            "cwd": os.getcwd(),
+            "state_path": context.status.get("state_path"),
+            "harness": harness,
+        }
+        kitty_window_id = _kitty_window_id()
+        if kitty_window_id is not None:
+            payload["kitty_window_id"] = kitty_window_id
+        return agent_mux_delivery.notify(
+            agent_mux_delivery.MAILBOX_REPLY_EVENT,
+            payload,
+            reason=agent_mux_delivery.MAILBOX_REPLY_REASON,
+            active_turn=None,
+            extra={
+                "question_id": projection.question_id,
+                "mailbox_projection_sequence": str(
+                    projection.projection_seq
+                ),
+                "source_event_id": (
+                    f"{projection.run_id}:mailbox-reply:{message.seq}"
+                ),
+            },
+            enabled=agent_mux_delivery.notify_enabled(),
+            timeout=agent_mux_delivery.notify_timeout(),
+            allocate_sequence=lambda: message.seq,
+            record_outcome=lambda _outcome: None,
+            resolve_binary=shutil.which,
+            run_command=subprocess.run,
+            emitted_at=lambda: datetime.now(timezone.utc),
+        )
+    except Exception:  # noqa: BLE001 - mailbox replies never depend on AgentMux
+        return None
 
 
 def inbox_guidance_from_args(args: argparse.Namespace) -> int:
@@ -450,6 +581,12 @@ def inbox_reply_from_args(args: argparse.Namespace) -> int:
     )
     if text is None:
         return 1
+    projection: _MailboxReplyProjection | None = None
+
+    def capture_projection(context: cli_common.PlanCommandContext) -> None:
+        nonlocal projection
+        projection = _mailbox_reply_projection(context, args, args.to)
+
     result = _supervisor_write(
         args,
         command_name=COMMAND_INBOX_REPLY,
@@ -460,10 +597,12 @@ def inbox_reply_from_args(args: argparse.Namespace) -> int:
             text,
             state_dir=args.state_dir,
         ),
+        before_lease=capture_projection,
     )
     if result is None:
         return 1
     context, message, supervisor_id = result
+    _notify_agent_mux_mailbox_reply(context, args, message, projection)
     payload = responses.success_payload(
         COMMAND_INBOX_REPLY,
         plan_dir=str(context.snapshot.plan_dir),

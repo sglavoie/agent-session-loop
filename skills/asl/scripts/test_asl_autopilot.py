@@ -803,6 +803,31 @@ class _RunScript:
         return self.payloads[index]
 
 
+class _AttachClock:
+    """Clock advanced by status probes, not by `clock()` calls.
+
+    Attach-deadline tests would otherwise depend on how many times the loop
+    calls `clock()` per iteration, an internal detail of the events-wait slicing.
+    """
+
+    def __init__(self, statuses, *, step):
+        self._script = _StatusScript(statuses)
+        self._step = step
+        self.now = 0.0
+
+    def status(self, parsed):
+        payload = self._script(parsed)
+        self.now += self._step
+        return payload
+
+    def __call__(self):
+        return self.now
+
+    @property
+    def calls(self):
+        return self._script.calls
+
+
 def _never_run(parsed, chunk_index):  # pragma: no cover - guard for attach paths
     raise AssertionError("run_invoker must not be called")
 
@@ -858,7 +883,7 @@ class ClassifyLockTest(unittest.TestCase):
 class SuperviseRunInjectedTest(unittest.TestCase):
     """Drive the supervision loop with injected status/run invokers."""
 
-    def _supervise(self, status_invoker, run_invoker, *, parsed=None, **kwargs):
+    def _supervise(self, status_invoker, run_invoker, *, parsed=None, clock=None, **kwargs):
         return autopilot.supervise_run(
             parsed
             or {
@@ -867,7 +892,7 @@ class SuperviseRunInjectedTest(unittest.TestCase):
             },
             status_invoker=status_invoker,
             run_invoker=run_invoker,
-            clock=_counter_clock(),
+            clock=clock or _counter_clock(),
             sleep=lambda *_: None,
             heartbeat=lambda *_: None,
             **kwargs,
@@ -1388,6 +1413,52 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "capped")
         self.assertEqual(result["chunks"], 3)
+
+    def test_attach_capped_by_elapsed_time(self) -> None:
+        # An attached run that never releases its lock would poll forever;
+        # attach_max_seconds bounds it in wall clock and surfaces `capped`.
+        driver = _AttachClock([_status_payload(1, lock=_active_lock())], step=30.0)
+        result = self._supervise(
+            driver.status, _never_run, clock=driver,
+            events_stat=lambda _path: None, attach_max_seconds=90.0,
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "capped")
+        self.assertIn("limit 90s", result["error"])
+        # The self-launch counter is untouched by attach polls.
+        self.assertEqual(result["chunks"], 0)
+        self.assertEqual(driver.calls, 4)
+
+    def test_attach_is_not_bounded_by_max_chunks(self) -> None:
+        # Regression guard: the two budgets are independent, so a tiny relaunch
+        # cap must not evict the supervisor from a healthy attach loop.
+        attached = _status_payload(1, lock=_active_lock())
+        driver = _AttachClock([attached] * 6 + [_status_payload(0)], step=1.0)
+        result = self._supervise(
+            driver.status, _never_run, clock=driver,
+            events_stat=lambda _path: None, max_chunks=1, attach_max_seconds=3600.0,
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "complete")
+        self.assertEqual(driver.calls, 7)
+
+    def test_attach_deadline_is_per_episode_not_cumulative(self) -> None:
+        # Cumulative elapsed at the final attach poll is 160s; a cumulative
+        # bound would cap. Per-episode elapsed never exceeds 40s.
+        attached = _status_payload(1, lock=_active_lock())
+        driver = _AttachClock(
+            [attached, attached, _status_payload(1),
+             attached, attached, _status_payload(0)],
+            step=40.0,
+        )
+        run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
+        result = self._supervise(
+            driver.status, run, clock=driver,
+            events_stat=lambda _path: None, attach_max_seconds=100.0,
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "complete")
+        self.assertEqual(run.chunks, [1])
 
     def _budget_parsed(self, max_sessions):
         return {
@@ -3034,6 +3105,119 @@ class MailboxWatcherTest(unittest.TestCase):
             ],
         )
         self.assertNotIn(question.text, repr(writes))
+
+    def test_relaunch_drops_old_projection_and_rebinds_from_current_lock(
+        self,
+    ) -> None:
+        clock = _ManualClock()
+        writes: list[dict] = []
+        old_question = self._question(seq=1, text="old run question")
+        current_question = autopilot._mailbox.MailboxMessage(
+            seq=2,
+            id="00000000-0000-0000-0000-000000000022",
+            kind=autopilot._mailbox.KIND_QUESTION,
+            created_at="2026-07-24T19:01:00+00:00",
+            text="current run question",
+        )
+        old_view = autopilot._mailbox.MailboxView(
+            mailbox_path=autopilot.Path(self.mailbox_path),
+            messages=(old_question,),
+            last_seq=1,
+        )
+        current_view = autopilot._mailbox.MailboxView(
+            mailbox_path=autopilot.Path(self.mailbox_path),
+            messages=(old_question, current_question),
+            last_seq=2,
+        )
+        views = iter((old_view, current_view, current_view))
+
+        def write_lease(
+            _plan_dir, _supervisor_id, *, state_dir=None, **projection
+        ):
+            writes.append(projection)
+
+        watcher = autopilot._MailboxWatcher(
+            plan_dir=self.plan_dir,
+            state_root=self.state_root,
+            state_path=self.state_path,
+            mailbox_path=self.mailbox_path,
+            lease_path=self.lease_path,
+            since=0,
+            clock=clock,
+            read_mailbox=lambda *_args, **_kwargs: next(views),
+            write_lease=write_lease,
+            supervisor_id="00000000-0000-0000-0000-000000000099",
+        )
+        watcher.set_run_id("run-old")
+        watcher.establish(now=0.0)
+        clock.advance(5.0)
+        watcher.poll(now=clock())
+        self.assertEqual(watcher.last_seq, 1)
+        self.assertEqual(writes[-1]["run_id"], "run-old")
+        self.assertEqual(
+            writes[-1]["latest_unanswered_question_id"],
+            old_question.id,
+        )
+
+        watcher.prepare_for_launch(now=clock())
+        unbound_write = len(writes) - 1
+        self.assertEqual(writes[unbound_write], {})
+        self.assertIsNone(watcher.run_id)
+        self.assertEqual(watcher.last_seq, 1)
+
+        stale_status = _leftover_state_attach_status(
+            1,
+            run_id="run-old",
+        )
+        current_status = _attached_run_status(
+            1,
+            run_id="run-current",
+        )
+        statuses = iter((stale_status, current_status, current_status))
+        status_calls = 0
+
+        def status_probe():
+            nonlocal status_calls
+            status_calls += 1
+            return next(statuses, current_status)
+
+        final = '{"ok": true, "paused": false, "reason": "all-complete"}'
+        payload = autopilot._invoke_run(
+            {
+                "argv": ["asl", "run", self.plan_dir, "--json"],
+                "plan_dir": self.plan_dir,
+            },
+            chunk_index=2,
+            clock=clock,
+            heartbeat=lambda *_: None,
+            popen=_DeadlinePopen(clock, final),
+            status_probe=status_probe,
+            mailbox_watcher=watcher,
+        )
+
+        self.assertEqual(payload["reason"], "all-complete")
+        self.assertGreaterEqual(status_calls, 2)
+        self.assertEqual(watcher.run_id, "run-current")
+        self.assertEqual(watcher.last_seq, 2)
+        successor_writes = writes[unbound_write + 1 :]
+        self.assertTrue(successor_writes)
+        self.assertFalse(
+            any(write.get("run_id") == "run-old" for write in successor_writes)
+        )
+        self.assertTrue(
+            any(
+                write.get("run_id") == "run-current"
+                and write.get("latest_unanswered_question_id")
+                == current_question.id
+                for write in successor_writes
+            )
+        )
+        self.assertFalse(
+            any(
+                write.get("latest_unanswered_question_id") == old_question.id
+                for write in successor_writes
+            )
+        )
 
     def test_invoke_run_polls_at_five_seconds_and_streams_reply_once(self) -> None:
         clock = _ManualClock()
