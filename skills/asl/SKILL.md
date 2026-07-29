@@ -85,6 +85,14 @@ final structured `outbox`. The watcher keeps one physical-sequence cursor
 across attach and self-launch transitions, then stops renewing and lets the
 lease expire when supervision returns.
 
+One-shot supervisor commands do not displace a live helper. When the on-disk
+lease is fresh and carries a question projection, `asl inbox guidance`,
+`asl inbox reply`, and `asl outbox wait` heartbeat it — the helper's
+supervisor identity and projection survive with only the lease timestamp
+refreshed. Only a missing, stale, or unprojected lease is taken over with a
+fresh supervisor identity, so a human stepping into an unsupervised plan
+still registers as its supervisor.
+
 #### Send live guidance or future-turn controls
 
 The helper owns the foreground, so send live commands from a separate shell (or
@@ -142,12 +150,16 @@ concurrent reply wins, and the runner consumes it once to continue the same
 session. Do not stop the helper, invoke `--reply-stdin`, or report a terminal
 pause while this live wait is active. The runner waits five minutes initially.
 Lease freshness is checked only at an active deadline: a fresh lease extends
-the wait by 60 seconds, while an absent or stale lease ends it. The runner
+the wait by 60 seconds, while an absent or stale lease ends it — unless the
+runner detected a system suspend, which grants the supervisor a 90-second
+awake grace to re-prove liveness before a stale lease ends the wait. Inside
+that grace a stale lease neither ends the wait nor extends it, and the grace
+never stretches the hard cap. The runner
 never waits beyond 30 minutes. An already-committed reply takes precedence over
 mailbox exhaustion and is delivered even when the mailbox is full. If no reply
 is available, timeout, mailbox fullness/unavailability, or a stale lease at an
-active deadline falls back to the existing terminal pause flow below; there is
-no mailbox-only terminal status.
+active deadline that outlasts any post-suspend grace falls back to the
+existing terminal pause flow below; there is no mailbox-only terminal status.
 
 Retry mechanics are helper-owned — see the result payload's `pause_policy`.
 The helper auto-retries recoverable same-session pauses (`verify-failed`, `transport-failed`, `timeout`, `no-status-change`) up to twice per session and reason. Only `transport-failed` backs off before relaunching (5 seconds, then 30 seconds); the other recoverable pauses retry immediately. An unclassified `nonzero-exit` pause is never retried. When a pause genuinely needs an answer, the result carries `reason: needs_agent_reply` with a `questions` block holding the resolver prompt, the paused agent's last message, the pause metadata, and artifact paths.

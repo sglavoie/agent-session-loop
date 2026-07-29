@@ -3029,6 +3029,225 @@ class MailboxCliTests(unittest.TestCase):
             reply_payload["supervisor_id"], second_lease.supervisor_id
         )
 
+    def _write_projected_lease(
+        self,
+        supervisor_id: str,
+        question: mailbox.MailboxMessage,
+        *,
+        run_id: str = "run-live",
+        age_seconds: float = 30.0,
+    ) -> mailbox.MailboxLease:
+        anchored = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+        return mailbox.write_lease(
+            self.plan_dir,
+            supervisor_id,
+            state_dir=self.state_dir,
+            updated_at=anchored.isoformat(),
+            run_id=run_id,
+            projection_seq=question.seq,
+            unanswered_questions=1,
+            latest_unanswered_question_id=question.id,
+            latest_unanswered_question_created_at=question.created_at,
+        )
+
+    def _lease_on_disk(self) -> mailbox.MailboxLease:
+        view = mailbox.read_lease(self.plan_dir, state_dir=self.state_dir)
+        self.assertTrue(view.fresh)
+        assert view.lease is not None
+        return view.lease
+
+    def assert_heartbeat(
+        self,
+        original: mailbox.MailboxLease,
+        after: mailbox.MailboxLease,
+    ) -> None:
+        """Everything but ``updated_at`` survived byte-identically."""
+        self.assertEqual(
+            original,
+            dataclasses.replace(after, updated_at=original.updated_at),
+        )
+        self.assertNotEqual(original.updated_at, after.updated_at)
+
+    def test_inbox_guidance_heartbeats_fresh_projected_lease(self) -> None:
+        question = mailbox.append_question(
+            self.plan_dir,
+            "Which shape?",
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+        supervisor_id = str(uuid.uuid4())
+        original = self._write_projected_lease(supervisor_id, question)
+
+        code, payload = self.payload_from(
+            mailbox_cli.inbox_guidance_from_args,
+            self.args(text="Keep the parser lazy."),
+        )
+
+        self.assertEqual(0, code)
+        after = self._lease_on_disk()
+        self.assert_heartbeat(original, after)
+        self.assertEqual(supervisor_id, after.supervisor_id)
+        self.assertEqual(supervisor_id, payload["supervisor_id"])
+
+    def test_inbox_reply_heartbeats_fresh_projected_lease(self) -> None:
+        question = mailbox.append_question(
+            self.plan_dir,
+            "Which shape?",
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+        supervisor_id = str(uuid.uuid4())
+        original = self._write_projected_lease(supervisor_id, question)
+
+        with mock.patch.object(
+            agent_mux_delivery,
+            "notify",
+            return_value={"final_status": "accepted"},
+        ):
+            code, payload = self.payload_from(
+                mailbox_cli.inbox_reply_from_args,
+                self.args(text="Use one object.", to=question.id),
+            )
+
+        self.assertEqual(0, code)
+        after = self._lease_on_disk()
+        self.assert_heartbeat(original, after)
+        self.assertEqual(supervisor_id, after.supervisor_id)
+        self.assertEqual(supervisor_id, payload["supervisor_id"])
+
+    def test_outbox_wait_heartbeats_fresh_projected_lease(self) -> None:
+        question = mailbox.append_question(
+            self.plan_dir,
+            "Which shape?",
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+        supervisor_id = str(uuid.uuid4())
+        original = self._write_projected_lease(supervisor_id, question)
+
+        code, payload = self.payload_from(
+            mailbox_cli.outbox_wait_from_args,
+            self.args(since=0, timeout=0),
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual(
+            [question.id],
+            [item["id"] for item in payload["questions"]],
+        )
+        after = self._lease_on_disk()
+        self.assert_heartbeat(original, after)
+        self.assertEqual(supervisor_id, after.supervisor_id)
+
+    def test_stale_projected_lease_is_taken_over_without_projection(
+        self,
+    ) -> None:
+        question = mailbox.append_question(
+            self.plan_dir,
+            "Which shape?",
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+        stale_id = str(uuid.uuid4())
+        self._write_projected_lease(
+            stale_id,
+            question,
+            age_seconds=mailbox.MAILBOX_LEASE_FRESH_SECONDS + 60.0,
+        )
+
+        code, payload = self.payload_from(
+            mailbox_cli.inbox_guidance_from_args,
+            self.args(text="Keep the parser lazy."),
+        )
+
+        self.assertEqual(0, code)
+        after = self._lease_on_disk()
+        self.assertNotEqual(stale_id, after.supervisor_id)
+        self.assertIsNone(after.run_id)
+        self.assertIsNone(after.unanswered_questions)
+        self.assertEqual(after.supervisor_id, payload["supervisor_id"])
+
+    def test_missing_v1_and_unprojected_leases_are_taken_over(self) -> None:
+        lease_path = mailbox.lease_path_for_plan(self.plan_dir, self.state_dir)
+
+        with self.subTest(state="missing"):
+            self.assertFalse(lease_path.exists())
+            code, payload = self.payload_from(
+                mailbox_cli.inbox_guidance_from_args,
+                self.args(text="first"),
+            )
+            self.assertEqual(0, code)
+            after = self._lease_on_disk()
+            self.assertIsNone(after.run_id)
+            self.assertEqual(after.supervisor_id, payload["supervisor_id"])
+
+        with self.subTest(state="v1-fresh"):
+            v1_id = str(uuid.uuid4())
+            raw = json.dumps(
+                {
+                    "supervisor_id": v1_id,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "version": 1,
+                },
+                separators=(",", ":"),
+            ).encode()
+            lease_path.write_bytes(
+                (raw + b"\n").ljust(mailbox.MAILBOX_LEASE_BYTES, b" ")
+            )
+            code, payload = self.payload_from(
+                mailbox_cli.inbox_guidance_from_args,
+                self.args(text="second"),
+            )
+            self.assertEqual(0, code)
+            after = self._lease_on_disk()
+            self.assertNotEqual(v1_id, after.supervisor_id)
+            self.assertEqual(mailbox.MAILBOX_LEASE_VERSION, after.version)
+            self.assertIsNone(after.run_id)
+            self.assertEqual(after.supervisor_id, payload["supervisor_id"])
+
+        with self.subTest(state="unprojected-fresh-v2"):
+            before = self._lease_on_disk()
+            code, payload = self.payload_from(
+                mailbox_cli.inbox_guidance_from_args,
+                self.args(text="third"),
+            )
+            self.assertEqual(0, code)
+            after = self._lease_on_disk()
+            self.assertNotEqual(before.supervisor_id, after.supervisor_id)
+            self.assertIsNone(after.run_id)
+            self.assertEqual(after.supervisor_id, payload["supervisor_id"])
+
+    def test_unreadable_lease_degrades_to_takeover(self) -> None:
+        question = mailbox.append_question(
+            self.plan_dir,
+            "Which shape?",
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+        live_id = str(uuid.uuid4())
+        self._write_projected_lease(live_id, question)
+        unreadable = mailbox.MailboxError(
+            mailbox.ERROR_LEASE_READ,
+            "temporarily unavailable",
+            path=mailbox.lease_path_for_plan(self.plan_dir, self.state_dir),
+        )
+
+        with mock.patch.object(
+            mailbox_cli.mailbox,
+            "read_lease",
+            side_effect=unreadable,
+        ):
+            code, payload = self.payload_from(
+                mailbox_cli.inbox_guidance_from_args,
+                self.args(text="Keep the parser lazy."),
+            )
+
+        self.assertEqual(0, code)
+        after = self._lease_on_disk()
+        self.assertNotEqual(live_id, after.supervisor_id)
+        self.assertIsNone(after.run_id)
+        self.assertEqual(after.supervisor_id, payload["supervisor_id"])
+
     def test_reply_emits_text_free_agent_mux_clear_from_prewrite_projection(
         self,
     ) -> None:
@@ -3194,6 +3413,186 @@ class MailboxCliTests(unittest.TestCase):
                 state_dir=self.state_dir,
             ),
         )
+
+    def test_reply_before_first_supervisor_poll_fires_predates_fast_clear(
+        self,
+    ) -> None:
+        guidance = mailbox.append_guidance(
+            self.plan_dir,
+            "Prefer the flat layout.",
+            state_dir=self.state_dir,
+        )
+        question = mailbox.append_question(
+            self.plan_dir,
+            "Which shape?",
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+        # The supervisor's last poll predates the question: the lease still
+        # projects zero unanswered questions at the guidance sequence.
+        mailbox.write_lease(
+            self.plan_dir,
+            "00000000-0000-0000-0000-000000000099",
+            state_dir=self.state_dir,
+            run_id="run-live",
+            projection_seq=guidance.seq,
+            unanswered_questions=0,
+        )
+
+        with mock.patch.object(
+            agent_mux_delivery,
+            "notify",
+            return_value={"final_status": "accepted"},
+        ) as notify:
+            code, reply_payload = self.payload_from(
+                mailbox_cli.inbox_reply_from_args,
+                self.args(text="Use one object.", to=question.id),
+            )
+
+        self.assertEqual(0, code)
+        notify.assert_called_once()
+        event_name, payload = notify.call_args.args
+        kwargs = notify.call_args.kwargs
+        self.assertEqual(agent_mux_delivery.MAILBOX_REPLY_EVENT, event_name)
+        self.assertEqual("run-live", payload["run_id"])
+        self.assertEqual(question.id, kwargs["extra"]["question_id"])
+        reply_seq = reply_payload["message"]["seq"]
+        self.assertEqual(
+            str(reply_seq),
+            kwargs["extra"]["mailbox_projection_sequence"],
+        )
+        self.assertNotEqual(
+            str(guidance.seq),
+            kwargs["extra"]["mailbox_projection_sequence"],
+        )
+
+    def test_reply_before_first_supervisor_poll_at_sequence_zero_fires_fast_clear(
+        self,
+    ) -> None:
+        # The supervisor polled while the mailbox was still empty: its lease
+        # validly projects zero unanswered questions at sequence 0, which
+        # predates the mailbox's first-ever question.
+        mailbox.write_lease(
+            self.plan_dir,
+            "00000000-0000-0000-0000-000000000099",
+            state_dir=self.state_dir,
+            run_id="run-live",
+            projection_seq=0,
+            unanswered_questions=0,
+        )
+        question = mailbox.append_question(
+            self.plan_dir,
+            "Which shape?",
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+        self.assertEqual(1, question.seq)
+
+        with mock.patch.object(
+            agent_mux_delivery,
+            "notify",
+            return_value={"final_status": "accepted"},
+        ) as notify:
+            code, reply_payload = self.payload_from(
+                mailbox_cli.inbox_reply_from_args,
+                self.args(text="Use one object.", to=question.id),
+            )
+
+        self.assertEqual(0, code)
+        notify.assert_called_once()
+        event_name, payload = notify.call_args.args
+        kwargs = notify.call_args.kwargs
+        self.assertEqual(agent_mux_delivery.MAILBOX_REPLY_EVENT, event_name)
+        self.assertEqual("run-live", payload["run_id"])
+        self.assertEqual(question.id, kwargs["extra"]["question_id"])
+        reply_seq = reply_payload["message"]["seq"]
+        self.assertEqual(
+            str(reply_seq),
+            kwargs["extra"]["mailbox_projection_sequence"],
+        )
+        self.assertNotEqual(
+            "0",
+            kwargs["extra"]["mailbox_projection_sequence"],
+        )
+
+    def test_predates_fast_clear_still_defers_to_post_append_open_question(
+        self,
+    ) -> None:
+        first = mailbox.append_question(
+            self.plan_dir,
+            "First?",
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+        second = mailbox.append_question(
+            self.plan_dir,
+            "Second?",
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+        # The lease predates `second`, so the projection is captured, but the
+        # authoritative post-append re-read still sees `first` open.
+        mailbox.write_lease(
+            self.plan_dir,
+            "00000000-0000-0000-0000-000000000099",
+            state_dir=self.state_dir,
+            run_id="run-live",
+            projection_seq=first.seq,
+            unanswered_questions=1,
+            latest_unanswered_question_id=first.id,
+            latest_unanswered_question_created_at=first.created_at,
+        )
+
+        with mock.patch.object(agent_mux_delivery, "notify") as notify:
+            code, _payload = self.payload_from(
+                mailbox_cli.inbox_reply_from_args,
+                self.args(text="Second answer.", to=second.id),
+            )
+
+        self.assertEqual(0, code)
+        notify.assert_not_called()
+        self.assertEqual(
+            (first,),
+            mailbox.unanswered_questions(
+                self.plan_dir,
+                state_dir=self.state_dir,
+            ),
+        )
+
+    def test_predates_fast_clear_rejects_lease_naming_a_different_run(
+        self,
+    ) -> None:
+        mailbox.append_guidance(
+            self.plan_dir,
+            "Prefer the flat layout.",
+            state_dir=self.state_dir,
+        )
+        question = mailbox.append_question(
+            self.plan_dir,
+            "Which shape?",
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+        # Same predates shape as the firing case, but the lease attributes a
+        # different run; without the run comparison the post-append re-read
+        # would find no open questions for `run-other` and fire.
+        mailbox.write_lease(
+            self.plan_dir,
+            "00000000-0000-0000-0000-000000000099",
+            state_dir=self.state_dir,
+            run_id="run-other",
+            projection_seq=1,
+            unanswered_questions=0,
+        )
+
+        with mock.patch.object(agent_mux_delivery, "notify") as notify:
+            code, _payload = self.payload_from(
+                mailbox_cli.inbox_reply_from_args,
+                self.args(text="Use one object.", to=question.id),
+            )
+
+        self.assertEqual(0, code)
+        notify.assert_not_called()
 
     def test_reply_succeeds_when_agent_mux_delivery_fails(self) -> None:
         question = mailbox.append_question(

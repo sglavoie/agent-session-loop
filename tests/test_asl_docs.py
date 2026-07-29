@@ -610,10 +610,153 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         )
         self.assertIn(
             "If no reply is available, timeout, a stale lease at an active "
-            "deadline, a full/unavailable mailbox",
+            "deadline that outlasts any post-suspend grace, a full/unavailable "
+            "mailbox",
             normalized,
         )
         self.assertIn("such as `mailbox-full`", normalized)
+        self.assertIn(
+            "an absent, stale, or otherwise non-fresh supervisor lease with "
+            "no post-suspend lease grace left to cover it",
+            normalized,
+        )
+        self.assertIn(
+            "grants the supervisor a 90-second awake grace to re-prove "
+            "liveness",
+            normalized,
+        )
+        self.assertIn(
+            "a non-fresh lease neither ends the wait nor extends the active "
+            "deadline, and the grace never extends the hard deadline",
+            normalized,
+        )
+        self.assertIn(
+            "`suspend_lease_grace_seconds`, the awake lease grace that "
+            "suspend applied",
+            normalized,
+        )
+        self.assertIn("`suspend_skew_seconds`", normalized)
+
+    def test_docs_describe_exclusive_reply_reserve_and_availability(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        mailbox_docs = docs.split(
+            "## Live Mailbox and Future-Turn Model Control", 1
+        )[1]
+        normalized = " ".join(mailbox_docs.split())
+
+        # Pin the documented reserve and minimum-reply sizes to their constants.
+        self.assertEqual(512 * 1024, mailbox.MAILBOX_REPLY_RESERVE_BYTES)
+        self.assertEqual(
+            mailbox.MAILBOX_REPLY_RESERVE_BYTES,
+            mailbox.MAILBOX_QUESTION_RESERVE_BYTES,
+        )
+        self.assertEqual(176, mailbox.MAILBOX_MIN_REPLY_BYTES)
+        self.assertIn(
+            "The final 512 KiB below the cap is a reserve that only `reply` "
+            "records may consume",
+            normalized,
+        )
+        self.assertIn(
+            "`guidance`, `question`, and `ack` appends fail `mailbox-full` "
+            "once they would cross into the reserve",
+            normalized,
+        )
+        self.assertIn(
+            "the reply that unblocks a waiting run can still land after "
+            "every other append kind reaches its effective cap",
+            normalized,
+        )
+        self.assertIn(
+            "`accepts_replies` separately reports whether capacity remains "
+            "for a minimal valid reply",
+            normalized,
+        )
+        self.assertIn(
+            "`full` itself keeps its file-faithful physical-cap meaning",
+            normalized,
+        )
+
+        status_docs = docs.split("## JSON Output", 1)[1].split(
+            "\n## Pause Semantics", 1
+        )[0]
+        status_normalized = " ".join(status_docs.split())
+        self.assertIn(
+            "Beside `full` it reports `accepts_questions` and "
+            "`accepts_replies`",
+            status_normalized,
+        )
+        self.assertIn(
+            "the latter is true only when capacity remains for a minimal "
+            "valid reply",
+            status_normalized,
+        )
+        self.assertIn(
+            "both fields are `null` alongside `full` rather than defaulting "
+            "to `true`",
+            status_normalized,
+        )
+        self.assertIn(
+            "`non-reply writes refused (replies still accepted)` only when "
+            "`accepts_replies` is true",
+            status_normalized,
+        )
+        self.assertIn(
+            "`reply capacity exhausted` and never overclaims that a reply "
+            "can land",
+            status_normalized,
+        )
+
+    def test_docs_describe_bounded_question_body(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        mailbox_docs = docs.split(
+            "## Live Mailbox and Future-Turn Model Control", 1
+        )[1]
+        normalized = " ".join(mailbox_docs.split())
+
+        # Pin the documented character bound to the constant it describes.
+        self.assertEqual(16000, runner.MAILBOX_QUESTION_TEXT_MAX_CHARS)
+        self.assertIn(
+            "The question body a waiting runner publishes is itself bounded: "
+            "at most the first 16,000 characters of the last-message artifact",
+            normalized,
+        )
+        self.assertIn(
+            "truncated deterministically and given a footer naming the "
+            "on-disk artifact path that holds the full text",
+            normalized,
+        )
+
+    def test_docs_and_skill_describe_lease_heartbeat_vs_takeover(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        skill = self._read("skills/asl/SKILL.md")
+        normalized_docs = " ".join(docs.split())
+        normalized_skill = " ".join(skill.split())
+
+        self.assertNotIn("establish or renew a lease", normalized_docs)
+        for marker in (
+            "decide between a heartbeat and a takeover",
+            "re-emits the same `supervisor_id` and question projection "
+            "with only `updated_at` refreshed",
+            "takes over with a new random supervisor identity and no "
+            "projection",
+        ):
+            self.assertIn(
+                marker,
+                normalized_docs,
+                msg=f"docs omit lease heartbeat marker: {marker!r}",
+            )
+        for marker in (
+            "One-shot supervisor commands do not displace a live helper.",
+            "heartbeat it — the helper's supervisor identity and "
+            "projection survive with only the lease timestamp refreshed",
+            "Only a missing, stale, or unprojected lease is taken over "
+            "with a fresh supervisor identity",
+        ):
+            self.assertIn(
+                marker,
+                normalized_skill,
+                msg=f"skill omits lease heartbeat marker: {marker!r}",
+            )
 
     def test_docs_describe_guidance_rendering_bounds(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
@@ -934,8 +1077,13 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         normalized_surface_docs = " ".join(surface_docs.split())
         self.assertIn(
             "`wait-cleared` carries the wait identity and deadlines, "
-            "the exit `reason`, and `pending_outbox`, the measured count "
-            "of questions open for that run",
+            "the exit `reason`, `pending_outbox`, the measured count "
+            "of questions open for that run when a final mailbox snapshot "
+            "is available, and the `lease_supervisor_id`, `lease_updated_at`, "
+            "and `lease_reason` evidence for the last lease a non-reply exit "
+            "observed, plus `suspend_skew_seconds` and "
+            "`suspend_lease_grace_seconds` when the wait detected a system "
+            "suspend",
             normalized_surface_docs,
         )
         live_wait_docs = mailbox_docs.split(
@@ -979,6 +1127,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "asl inbox reply <plan-dir> --to <question-id>",
             "continue the same\nsession",
             "Lease freshness is checked only at an active deadline",
+            "awake grace to re-prove liveness before a stale lease ends the",
             "never waits beyond 30 minutes",
             "already-committed reply takes precedence over\nmailbox exhaustion",
             "affect only the next implementation invocation",

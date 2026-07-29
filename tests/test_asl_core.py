@@ -2434,6 +2434,8 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertEqual(0, status["size_bytes"])
             self.assertEqual(mailbox.MAILBOX_MAX_BYTES, status["max_bytes"])
             self.assertFalse(status["full"])
+            self.assertTrue(status["accepts_questions"])
+            self.assertTrue(status["accepts_replies"])
             self.assertEqual(0, status["last_seq"])
             self.assertEqual(0, status["pending_guidance"])
             self.assertEqual(0, status["unanswered_questions"])
@@ -2472,6 +2474,8 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertEqual(str(lease_path), status["lease_path"])
             self.assertGreater(status["size_bytes"], 0)
             self.assertFalse(status["full"])
+            self.assertTrue(status["accepts_questions"])
+            self.assertTrue(status["accepts_replies"])
             self.assertEqual(2, status["last_seq"])
             self.assertEqual(1, status["pending_guidance"])
             self.assertEqual(1, status["unanswered_questions"])
@@ -2637,6 +2641,41 @@ class ParserAndStateTests(unittest.TestCase):
                 len(mailbox_path.read_bytes()),
             )
 
+    def test_min_reply_bytes_matches_generated_minimal_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            question_id = "00000000-0000-4000-8000-000000000001"
+            reply_id = "00000000-0000-4000-8000-000000000002"
+            now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+            question = mailbox.append_question(
+                plan_dir,
+                "x",
+                state_dir=state_dir,
+                message_id=question_id,
+                created_at="2026-07-25T12:00:00.000000+00:00",
+            )
+            mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
+            size_before = mailbox_path.stat().st_size
+
+            with (
+                mock.patch.object(mailbox, "_new_id", return_value=reply_id),
+                mock.patch.object(mailbox, "_utc_now", return_value=now),
+            ):
+                appended = mailbox.append_reply(
+                    plan_dir,
+                    question.id,
+                    "x",
+                    state_dir=state_dir,
+                )
+
+            self.assertEqual(reply_id, appended.id)
+            self.assertEqual(
+                mailbox.MAILBOX_MIN_REPLY_BYTES,
+                mailbox_path.stat().st_size - size_before,
+            )
+
     def test_status_payload_surfaces_exhausted_and_malformed_mailboxes(
         self,
     ) -> None:
@@ -2645,12 +2684,21 @@ class ParserAndStateTests(unittest.TestCase):
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("pending",))
             created_at = "0001-01-01T00:00:00+00:00"
-            message_id = "00000000-0000-4000-8000-000000000001"
+            question_id = "00000000-0000-4000-8000-000000000001"
+            reply_id = "00000000-0000-4000-8000-000000000002"
+            question = mailbox.append_question(
+                plan_dir,
+                "x",
+                state_dir=state_dir,
+                message_id=question_id,
+                created_at=created_at,
+            )
             empty_text_record = {
                 "created_at": created_at,
-                "id": message_id,
-                "kind": mailbox.KIND_GUIDANCE,
+                "id": reply_id,
+                "kind": mailbox.KIND_REPLY,
                 "text": "",
+                "to": question.id,
                 "version": mailbox.MAILBOX_SCHEMA_VERSION,
             }
             record_overhead = len(
@@ -2666,11 +2714,15 @@ class ParserAndStateTests(unittest.TestCase):
                 - mailbox.MAILBOX_MIN_APPEND_BYTES
                 + 1
             )
-            mailbox.append_guidance(
+            current_size = mailbox.read_mailbox(
+                plan_dir, state_dir=state_dir
+            ).size_bytes
+            mailbox.append_reply(
                 plan_dir,
-                "x" * (target_size - record_overhead),
+                question.id,
+                "x" * (target_size - current_size - record_overhead),
                 state_dir=state_dir,
-                message_id=message_id,
+                message_id=reply_id,
                 created_at=created_at,
             )
 
@@ -2680,6 +2732,8 @@ class ParserAndStateTests(unittest.TestCase):
             )
             self.assertEqual(target_size, exhausted_view.size_bytes)
             self.assertTrue(exhausted_view.full)
+            self.assertFalse(exhausted_view.accepts_questions)
+            self.assertFalse(exhausted_view.accepts_replies)
             for append in (mailbox.append_guidance, mailbox.append_question):
                 with self.assertRaises(mailbox.MailboxError) as raised:
                     append(plan_dir, "x", state_dir=state_dir)
@@ -2694,6 +2748,8 @@ class ParserAndStateTests(unittest.TestCase):
 
             full_status = full_payload["mailbox"]
             self.assertTrue(full_status["full"])
+            self.assertFalse(full_status["accepts_questions"])
+            self.assertFalse(full_status["accepts_replies"])
             self.assertEqual(target_size, full_status["size_bytes"])
             self.assertEqual(
                 mailbox.MAILBOX_MAX_BYTES,
@@ -2718,6 +2774,175 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertFalse(malformed["lease_fresh"])
             self.assertEqual(mailbox.LEASE_INVALID_SIZE, malformed["lease_reason"])
             self.assertEqual(mailbox.LEASE_INVALID_SIZE, malformed["lease_error"])
+
+    def test_reply_reserve_cannot_be_consumed_by_guidance_or_acknowledgements(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            question = mailbox.append_question(
+                plan_dir,
+                "Which mode?",
+                state_dir=state_dir,
+                message_id="00000000-0000-4000-8000-000000000001",
+                created_at="0001-01-01T00:00:00+00:00",
+            )
+            created_at = "0001-01-01T00:00:00+00:00"
+            message_id = "00000000-0000-4000-8000-000000000002"
+            empty_text_record = {
+                "created_at": created_at,
+                "id": message_id,
+                "kind": mailbox.KIND_GUIDANCE,
+                "text": "",
+                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+            }
+            record_overhead = len(
+                json.dumps(
+                    empty_text_record,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+                + b"\n"
+            )
+            # Fill exactly to the shared non-reply cap. Only replies may use
+            # the final reserve below the physical file cap.
+            non_reply_cap = (
+                mailbox.MAILBOX_MAX_BYTES
+                - mailbox.MAILBOX_REPLY_RESERVE_BYTES
+            )
+            current_size = mailbox.read_mailbox(
+                plan_dir, state_dir=state_dir
+            ).size_bytes
+            mailbox.append_guidance(
+                plan_dir,
+                "x" * (non_reply_cap - current_size - record_overhead),
+                state_dir=state_dir,
+                message_id=message_id,
+                created_at=created_at,
+            )
+
+            view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+            self.assertEqual(non_reply_cap, view.size_bytes)
+            self.assertFalse(view.full)
+            self.assertFalse(view.accepts_questions)
+            self.assertTrue(view.accepts_replies)
+            view_payload = view.to_payload()
+            self.assertFalse(view_payload["full"])
+            self.assertFalse(view_payload["accepts_questions"])
+            self.assertTrue(view_payload["accepts_replies"])
+
+            for append in (mailbox.append_guidance, mailbox.append_question):
+                with self.assertRaises(mailbox.MailboxError) as raised:
+                    append(plan_dir, "one more?", state_dir=state_dir)
+                self.assertEqual(
+                    mailbox.ERROR_MAILBOX_FULL, raised.exception.reason
+                )
+            with self.assertRaises(mailbox.MailboxError) as raised:
+                mailbox.append_acknowledgement(
+                    plan_dir, view.last_seq, state_dir=state_dir
+                )
+            self.assertEqual(mailbox.ERROR_MAILBOX_FULL, raised.exception.reason)
+
+            reply = mailbox.append_reply(
+                plan_dir, question.id, "x", state_dir=state_dir
+            )
+            self.assertEqual(question.id, reply.to)
+
+            payload = state.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
+            status = payload["mailbox"]
+            self.assertFalse(status["full"])
+            self.assertFalse(status["accepts_questions"])
+            self.assertTrue(status["accepts_replies"])
+
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                state._print_text_status(payload)
+            output = buffer.getvalue()
+            self.assertIn(
+                "Mailbox: active, non-reply writes refused "
+                "(replies still accepted)",
+                output,
+            )
+            self.assertNotIn("Mailbox: active, full", output)
+
+    def test_status_reports_when_minimal_reply_cannot_land(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            created_at = "0001-01-01T00:00:00+00:00"
+            first_question = mailbox.append_question(
+                plan_dir,
+                "first?",
+                state_dir=state_dir,
+                message_id="00000000-0000-4000-8000-000000000001",
+                created_at=created_at,
+            )
+            second_question = mailbox.append_question(
+                plan_dir,
+                "second?",
+                state_dir=state_dir,
+                message_id="00000000-0000-4000-8000-000000000002",
+                created_at=created_at,
+            )
+            reply_id = "00000000-0000-4000-8000-000000000003"
+            empty_reply_record = {
+                "created_at": created_at,
+                "id": reply_id,
+                "kind": mailbox.KIND_REPLY,
+                "text": "",
+                "to": first_question.id,
+                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+            }
+            reply_overhead = len(
+                json.dumps(
+                    empty_reply_record,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+                + b"\n"
+            )
+            target_size = (
+                mailbox.MAILBOX_MAX_BYTES - mailbox.MAILBOX_MIN_REPLY_BYTES + 1
+            )
+            current_size = mailbox.read_mailbox(
+                plan_dir, state_dir=state_dir
+            ).size_bytes
+            mailbox.append_reply(
+                plan_dir,
+                first_question.id,
+                "x" * (target_size - current_size - reply_overhead),
+                state_dir=state_dir,
+                message_id=reply_id,
+                created_at=created_at,
+            )
+
+            view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+            self.assertEqual(target_size, view.size_bytes)
+            self.assertFalse(view.full)
+            self.assertFalse(view.accepts_replies)
+            with self.assertRaises(mailbox.MailboxError) as raised:
+                mailbox.append_reply(
+                    plan_dir, second_question.id, "x", state_dir=state_dir
+                )
+            self.assertEqual(mailbox.ERROR_MAILBOX_FULL, raised.exception.reason)
+
+            payload = state.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
+            status = payload["mailbox"]
+            self.assertFalse(status["full"])
+            self.assertFalse(status["accepts_replies"])
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                state._print_text_status(payload)
+            output = buffer.getvalue()
+            self.assertIn("reply capacity exhausted", output)
+            self.assertNotIn("replies still accepted", output)
 
     def test_status_payload_surfaces_mailbox_read_error_and_stale_lease(
         self,
@@ -2752,6 +2977,8 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertTrue(status["present"])
             self.assertIsNone(status["size_bytes"])
             self.assertIsNone(status["full"])
+            self.assertIsNone(status["accepts_questions"])
+            self.assertIsNone(status["accepts_replies"])
             self.assertIn(mailbox.ERROR_MAILBOX_READ, status["error"])
             self.assertTrue(status["lease_present"])
             self.assertFalse(status["lease_fresh"])

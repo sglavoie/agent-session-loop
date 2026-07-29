@@ -239,6 +239,95 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             self.assertEqual(1, records[1]["payload"]["pending_outbox"])
             self.assertEqual("question-1", records[1]["payload"]["question_id"])
 
+    def test_rebase_waiting_deadlines_rewrites_state_without_events(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            state_path = tmp_dir / events.STATE_FILE_NAME
+            event_path = tmp_dir / events.EVENTS_FILE_NAME
+            payload = {
+                "run_id": "run-1",
+                "ok": True,
+                "paused": False,
+                "reason": "",
+                "state_path": str(state_path),
+            }
+            started_at = datetime(2026, 7, 24, 12, tzinfo=timezone.utc)
+            waiting = runner._waiting_for_reply_payload(
+                question_id="question-1",
+                session_id="9",
+                turn_index=3,
+                started_at=started_at,
+                base_deadline=started_at + timedelta(minutes=5),
+                hard_deadline=started_at + timedelta(minutes=30),
+                last_lease_activity_at=None,
+            )
+            persistence = runner._RunPersistence()
+            runner._set_waiting_for_reply(
+                event_path,
+                payload,
+                waiting,
+                pending_outbox=1,
+                persistence=persistence,
+            )
+
+            # Eight hours of suspend later, only the deadlines move.
+            wake = started_at + timedelta(hours=8, seconds=2)
+            runner._rebase_waiting_deadlines(
+                payload,
+                question_id="question-1",
+                base_deadline=wake + timedelta(minutes=3),
+                hard_deadline=wake + timedelta(minutes=28),
+                persistence=persistence,
+            )
+
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+            records = read_jsonl(event_path)
+            rebased = payload["waiting_for_reply"]
+            self.assertEqual(rebased, persisted["waiting_for_reply"])
+            self.assertEqual(
+                (wake + timedelta(minutes=3)).isoformat(),
+                rebased["base_deadline"],
+            )
+            self.assertEqual(
+                (wake + timedelta(minutes=28)).isoformat(),
+                rebased["hard_deadline"],
+            )
+            self.assertEqual(waiting["started_at"], rebased["started_at"])
+            self.assertFalse(payload["paused"])
+            self.assertEqual(1, len(records))
+            self.assertEqual(
+                events.MAILBOX_ACTION_WAIT_STARTED,
+                records[0]["payload"]["action"],
+            )
+
+            lock_info = state.LockInfo(
+                path=tmp_dir / "plan-lock.json",
+                pid=os.getpid(),
+                plan_dir=str(tmp_dir),
+                created_at="2026-07-24T12:00:00+00:00",
+                stale=False,
+                reason="active",
+                raw={},
+            )
+            self.assertEqual(
+                state.WAITING_FOR_REPLY_STATUS_LIVE,
+                state.waiting_for_reply_status(
+                    rebased,
+                    lock_info=lock_info,
+                    now=wake,
+                ),
+            )
+            self.assertEqual(
+                state.WAITING_FOR_REPLY_STATUS_EXPIRED,
+                state.waiting_for_reply_status(
+                    waiting,
+                    lock_info=lock_info,
+                    now=wake,
+                ),
+            )
+
     def test_mailbox_reply_wait_settings_fail_safe_on_bad_overrides(self) -> None:
         settings = runner._mailbox_reply_wait_settings(
             {

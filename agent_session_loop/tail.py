@@ -246,6 +246,21 @@ def _mailbox_message(payload: dict[str, Any]) -> str:
             f"reason {payload.get('reason', 'unknown')}",
             f"pending outbox {payload.get('pending_outbox', 'unknown')}",
         ]
+        lease_supervisor_id = payload.get("lease_supervisor_id")
+        if lease_supervisor_id is not None:
+            details.append(f"lease supervisor {lease_supervisor_id}")
+        lease_updated_at = payload.get("lease_updated_at")
+        if lease_updated_at is not None:
+            details.append(f"lease updated {lease_updated_at}")
+        lease_reason = payload.get("lease_reason")
+        if lease_reason is not None:
+            details.append(f"lease reason {lease_reason}")
+        suspend_skew = payload.get("suspend_skew_seconds")
+        if suspend_skew is not None:
+            details.append(f"suspend skew {suspend_skew}s")
+        suspend_grace = payload.get("suspend_lease_grace_seconds")
+        if suspend_grace is not None:
+            details.append(f"suspend lease grace {suspend_grace}s")
         return f"mailbox: reply wait cleared ({', '.join(details)})"
     if action == events.MAILBOX_ACTION_WAIT_PREPARATION_FAILED:
         details = [

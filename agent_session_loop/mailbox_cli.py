@@ -73,6 +73,7 @@ class _MailboxReplyProjection:
     run_id: str
     projection_seq: int
     question_id: str
+    lease_predates_question: bool = False
 
 
 def _message_payload(message: mailbox.MailboxMessage) -> dict[str, Any]:
@@ -364,11 +365,49 @@ def _resolve(
 def _write_supervisor_lease(
     plan_dir: str | Path,
     state_dir: str | Path | None,
-    supervisor_id: str,
+    supervisor_id: str | None = None,
 ) -> mailbox.MailboxLease:
+    """Heartbeat a live supervisor's lease, or take over when none is alive.
+
+    A fresh, current-version lease that carries a ``run_id`` proves a live
+    supervisor is projecting this plan, so re-emit its ``supervisor_id`` and
+    question projection verbatim with only ``updated_at`` refreshed — a
+    heartbeat, not a takeover. A missing, stale, v1, or unprojected lease
+    means no supervisor is running, so the caller legitimately becomes one:
+    write ``supervisor_id`` (minted fresh when omitted) with no projection.
+    A lease read failure degrades to the takeover path (fail-open, as the
+    blind write always was).
+    """
+    lease: mailbox.MailboxLease | None
+    try:
+        view = mailbox.read_lease(plan_dir, state_dir=state_dir)
+    except (OSError, mailbox.MailboxError):
+        lease = None
+    else:
+        lease = view.lease if view.fresh else None
+    if (
+        lease is not None
+        and lease.version == mailbox.MAILBOX_LEASE_VERSION
+        and isinstance(lease.run_id, str)
+        and lease.run_id.strip()
+    ):
+        return mailbox.write_lease(
+            plan_dir,
+            lease.supervisor_id,
+            state_dir=state_dir,
+            run_id=lease.run_id,
+            projection_seq=lease.projection_seq,
+            unanswered_questions=lease.unanswered_questions,
+            latest_unanswered_question_id=(
+                lease.latest_unanswered_question_id
+            ),
+            latest_unanswered_question_created_at=(
+                lease.latest_unanswered_question_created_at
+            ),
+        )
     return mailbox.write_lease(
         plan_dir,
-        supervisor_id,
+        str(uuid.uuid4()) if supervisor_id is None else supervisor_id,
         state_dir=state_dir,
     )
 
@@ -393,14 +432,14 @@ def _supervisor_write(
             before_lease(context)
         except Exception:  # noqa: BLE001 - optional evidence stays fail-open
             pass
-    supervisor_id = str(uuid.uuid4())
     try:
         # Establish the lease first.  If the state root is unwritable, this
         # avoids appending a command the caller may retry after seeing failure.
-        _write_supervisor_lease(
+        # The reported supervisor_id comes from the lease that actually landed
+        # on disk: the live supervisor's on a heartbeat, ours on a takeover.
+        lease = _write_supervisor_lease(
             context.snapshot.plan_dir,
             args.state_dir,
-            supervisor_id,
         )
         message = append(context.snapshot.plan_dir)
     except mailbox.MailboxError as error:
@@ -411,7 +450,7 @@ def _supervisor_write(
             error=error,
         )
         return None
-    return context, message, supervisor_id
+    return context, message, lease.supervisor_id
 
 
 def _status_run_id(context: cli_common.PlanCommandContext) -> str | None:
@@ -433,7 +472,16 @@ def _mailbox_reply_projection(
     args: argparse.Namespace,
     question_id: str,
 ) -> _MailboxReplyProjection | None:
-    """Capture a fresh v2 single-question projection before renewing the lease."""
+    """Capture fresh v2 lease evidence for a reply before renewing the lease.
+
+    The lease supplies the owning ``run_id`` and supervisor liveness; it is
+    not required to already know the question. Accept it when its projection
+    names ``question_id`` as the latest unanswered question, or when it
+    demonstrably predates the question — its ``projection_seq`` is behind the
+    question's mailbox sequence — and attributes the same run the question
+    names. A ``projection_seq`` of 0 is a valid projection of a then-empty
+    mailbox and predates the mailbox's first question.
+    """
     try:
         view = mailbox.read_lease(
             context.snapshot.plan_dir,
@@ -450,15 +498,42 @@ def _mailbox_reply_projection(
         or not lease.run_id.strip()
         or isinstance(lease.projection_seq, bool)
         or not isinstance(lease.projection_seq, int)
-        or lease.projection_seq <= 0
-        or lease.unanswered_questions != 1
-        or lease.latest_unanswered_question_id != question_id
+        or lease.projection_seq < 0
+    ):
+        return None
+    if lease.latest_unanswered_question_id == question_id:
+        return _MailboxReplyProjection(
+            run_id=lease.run_id,
+            projection_seq=lease.projection_seq,
+            question_id=question_id,
+        )
+    try:
+        snapshot = mailbox.read_mailbox(
+            context.snapshot.plan_dir,
+            state_dir=args.state_dir,
+        )
+    except (OSError, mailbox.MailboxError):
+        return None
+    question = next(
+        (
+            message
+            for message in snapshot.messages
+            if message.kind == mailbox.KIND_QUESTION
+            and message.id == question_id
+        ),
+        None,
+    )
+    if (
+        question is None
+        or lease.projection_seq >= question.seq
+        or question.run_id != lease.run_id
     ):
         return None
     return _MailboxReplyProjection(
         run_id=lease.run_id,
         projection_seq=lease.projection_seq,
         question_id=question_id,
+        lease_predates_question=True,
     )
 
 
@@ -515,8 +590,13 @@ def _notify_agent_mux_mailbox_reply(
             active_turn=None,
             extra={
                 "question_id": projection.question_id,
+                # A lease that predates the question carries a stale
+                # generation; the reply's seq is monotonic in the same file,
+                # so it substitutes as a valid generation counter.
                 "mailbox_projection_sequence": str(
-                    projection.projection_seq
+                    message.seq
+                    if projection.lease_predates_question
+                    else projection.projection_seq
                 ),
                 "source_event_id": (
                     f"{projection.run_id}:mailbox-reply:{message.seq}"

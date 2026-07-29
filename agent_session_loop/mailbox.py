@@ -37,6 +37,15 @@ MAILBOX_MAX_BYTES = 4 * 1024 * 1024
 # generated UTC timestamp with six fractional-second digits. Once less than this
 # remains, no ordinary mailbox append can succeed.
 MAILBOX_MIN_APPEND_BYTES = 128
+# The smallest compact reply produced with normal generated metadata uses a
+# one-character body plus canonical UUIDs for both its id and target.
+MAILBOX_MIN_REPLY_BYTES = 176
+# Headroom below the cap that only replies may consume. Guidance, questions,
+# and acknowledgements stop at the reduced cap so they cannot strand a waiting
+# run by consuming the capacity its reply needs.
+MAILBOX_REPLY_RESERVE_BYTES = 512 * 1024
+# Backward-compatible name for callers that compute the reduced question cap.
+MAILBOX_QUESTION_RESERVE_BYTES = MAILBOX_REPLY_RESERVE_BYTES
 # Questions record the run that owns them. A runner id is
 # ``<timestamp>-<pid>`` (~30 characters); the bound only keeps a hostile or
 # corrupt value from consuming the mailbox capacity budget.
@@ -286,6 +295,20 @@ class MailboxView:
     def full(self) -> bool:
         return self.size_bytes + MAILBOX_MIN_APPEND_BYTES > MAILBOX_MAX_BYTES
 
+    @property
+    def accepts_replies(self) -> bool:
+        return self.size_bytes + MAILBOX_MIN_REPLY_BYTES <= MAILBOX_MAX_BYTES
+
+    @property
+    def accepts_questions(self) -> bool:
+        # Questions share the reduced non-reply cap with guidance and
+        # acknowledgements. Mirror ``full``'s exhaustion probe so the status
+        # key agrees with the append-site refusal boundary.
+        return (
+            self.size_bytes + MAILBOX_MIN_APPEND_BYTES
+            <= MAILBOX_MAX_BYTES - MAILBOX_REPLY_RESERVE_BYTES
+        )
+
     def messages_since(
         self,
         since: int,
@@ -313,6 +336,8 @@ class MailboxView:
 
     def to_payload(self) -> dict[str, Any]:
         return {
+            "accepts_questions": self.accepts_questions,
+            "accepts_replies": self.accepts_replies,
             "counts": self.counts.to_payload(),
             "full": self.full,
             "last_seq": self.last_seq,
@@ -931,10 +956,15 @@ def _append_record(
         separator = b"\n" if existing and not existing.endswith(b"\n") else b""
         append_bytes = separator + encoded_record
         original_size = os.fstat(fd).st_size
-        if original_size + len(append_bytes) > MAILBOX_MAX_BYTES:
+        effective_max_bytes = (
+            MAILBOX_MAX_BYTES
+            if kind == KIND_REPLY
+            else MAILBOX_MAX_BYTES - MAILBOX_REPLY_RESERVE_BYTES
+        )
+        if original_size + len(append_bytes) > effective_max_bytes:
             raise MailboxError(
                 ERROR_MAILBOX_FULL,
-                f"append would exceed {MAILBOX_MAX_BYTES} bytes",
+                f"append would exceed {effective_max_bytes} bytes",
                 path=mailbox_path,
             )
         try:

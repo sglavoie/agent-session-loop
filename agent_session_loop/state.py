@@ -709,6 +709,8 @@ def _mailbox_status_payload(
         "size_bytes": 0,
         "max_bytes": mailbox.MAILBOX_MAX_BYTES,
         "full": False,
+        "accepts_questions": True,
+        "accepts_replies": True,
         "last_seq": 0,
         "pending_guidance": 0,
         "unanswered_questions": 0,
@@ -729,6 +731,8 @@ def _mailbox_status_payload(
         payload["present"] = True
         payload["size_bytes"] = None
         payload["full"] = None
+        payload["accepts_questions"] = None
+        payload["accepts_replies"] = None
         payload["last_seq"] = None
         payload["pending_guidance"] = None
         payload["unanswered_questions"] = None
@@ -746,6 +750,8 @@ def _mailbox_status_payload(
                 ),
                 "size_bytes": view.size_bytes,
                 "full": view.full,
+                "accepts_questions": view.accepts_questions,
+                "accepts_replies": view.accepts_replies,
                 "last_seq": view.last_seq,
                 "pending_guidance": counts.pending_guidance,
                 "unanswered_questions": counts.unanswered_questions,
@@ -1067,6 +1073,17 @@ def _print_text_status(payload: dict[str, Any]) -> None:
             print(f"Mailbox: unreadable/malformed ({mailbox_error})")
         elif mailbox_status.get("active"):
             full_suffix = ", full" if mailbox_status.get("full") else ""
+            # Non-reply writes stop before the reply-only reserve. Claim that
+            # replies still fit only when a minimal valid reply actually does.
+            if not full_suffix and mailbox_status.get("accepts_questions") is False:
+                if mailbox_status.get("accepts_replies") is True:
+                    full_suffix = (
+                        ", non-reply writes refused (replies still accepted)"
+                    )
+                else:
+                    full_suffix = (
+                        ", non-reply writes refused (reply capacity exhausted)"
+                    )
             open_questions = mailbox_status.get("open_questions")
             unanswered = mailbox_status.get("unanswered_questions")
             # Disclose the historical total only when it exceeds what the live

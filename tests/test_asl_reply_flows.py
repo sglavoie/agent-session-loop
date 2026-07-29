@@ -8,7 +8,7 @@ import argparse
 import contextlib
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import dataclasses
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import errno
 import hashlib
 import importlib.util
@@ -1101,6 +1101,862 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             cleared_event["payload"]["reason"],
         )
 
+    def test_wait_cleared_names_the_lease_behind_a_failed_exit(self) -> None:
+        question_id = "00000000-0000-0000-0000-000000000031"
+        supervisor_id = "00000000-0000-0000-0000-000000000032"
+        lease_updated_at = "2026-07-24T12:00:00+00:00"
+        question = mailbox.MailboxMessage(
+            seq=1,
+            id=question_id,
+            kind=mailbox.KIND_QUESTION,
+            created_at="2026-07-24T12:00:00+00:00",
+            text="Which option?",
+        )
+        reply = mailbox.MailboxMessage(
+            seq=2,
+            id="00000000-0000-0000-0000-000000000033",
+            kind=mailbox.KIND_REPLY,
+            created_at="2026-07-24T12:00:01+00:00",
+            text="Option A",
+            to=question_id,
+        )
+        mailbox_path = Path("/tmp/mailbox.jsonl")
+        waiting_view = mailbox.MailboxView(
+            mailbox_path=mailbox_path,
+            messages=(question,),
+            last_seq=1,
+        )
+        replied_view = mailbox.MailboxView(
+            mailbox_path=mailbox_path,
+            messages=(question, reply),
+            last_seq=2,
+        )
+        lease_record = mailbox.MailboxLease(
+            supervisor_id=supervisor_id,
+            updated_at=lease_updated_at,
+        )
+        lease_path = Path("/tmp/mailbox-lease.json")
+        fresh_lease = mailbox.MailboxLeaseView(
+            lease_path=lease_path,
+            lease=lease_record,
+            fresh=True,
+        )
+        stale_lease = mailbox.MailboxLeaseView(
+            lease_path=lease_path,
+            lease=lease_record,
+            fresh=False,
+            reason=mailbox.LEASE_EXPIRED,
+        )
+        settings = runner._MailboxReplyWaitSettings(
+            base_seconds=4.0,
+            lease_extension_seconds=2.0,
+            hard_seconds=8.0,
+            poll_seconds=1.0,
+            io_grace_seconds=1.0,
+        )
+
+        def run_wait(
+            view: mailbox.MailboxView,
+            lease: mailbox.MailboxLeaseView,
+        ) -> runner._MailboxReplyWaitResult:
+            now = [0.0]
+
+            def sleep(seconds: float) -> None:
+                now[0] += seconds
+
+            with (
+                mock.patch.object(
+                    runner.mailbox,
+                    "mailbox_change_token",
+                    return_value=(1, 2, 3, 4),
+                ),
+                mock.patch.object(
+                    runner.mailbox,
+                    "read_mailbox",
+                    return_value=view,
+                ),
+                mock.patch.object(
+                    runner.mailbox,
+                    "read_lease",
+                    return_value=lease,
+                ),
+            ):
+                return runner._wait_for_mailbox_reply(
+                    plan_dir=Path("/tmp/plan"),
+                    state_dir_arg=None,
+                    payload={},
+                    question_id=question_id,
+                    run_id="RUN-TEST",
+                    settings=settings,
+                    persistence=runner._RunPersistence(
+                        write_state=False,
+                        append_events=False,
+                    ),
+                    started_monotonic=0.0,
+                    monotonic=lambda: now[0],
+                    sleep=sleep,
+                )
+
+        def clear(result: runner._MailboxReplyWaitResult) -> dict:
+            with tempfile.TemporaryDirectory() as tmp:
+                event_path = Path(tmp) / events.EVENTS_FILE_NAME
+                runner._clear_waiting_for_reply(
+                    event_path,
+                    {
+                        "run_id": "run-1",
+                        "waiting_for_reply": {
+                            "question_id": question_id,
+                            "session_id": "9",
+                            "turn_index": 3,
+                        },
+                    },
+                    reason=result.reason,
+                    pending_outbox=result.pending_outbox,
+                    lease_updated_at=result.lease_updated_at,
+                    lease_reason=result.lease_reason,
+                    lease_supervisor_id=result.lease_supervisor_id,
+                    persistence=runner._RunPersistence(write_state=False),
+                )
+                [event] = read_jsonl(event_path)
+            return event["payload"]
+
+        lost = run_wait(waiting_view, stale_lease)
+        self.assertEqual(
+            runner.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            lost.reason,
+        )
+        self.assertEqual(lease_updated_at, lost.lease_updated_at)
+        self.assertEqual(mailbox.LEASE_EXPIRED, lost.lease_reason)
+        self.assertEqual(supervisor_id, lost.lease_supervisor_id)
+        lost_payload = clear(lost)
+        self.assertEqual(lease_updated_at, lost_payload["lease_updated_at"])
+        self.assertEqual(
+            mailbox.LEASE_EXPIRED,
+            lost_payload["lease_reason"],
+        )
+        self.assertEqual(
+            supervisor_id,
+            lost_payload["lease_supervisor_id"],
+        )
+
+        timed_out = run_wait(waiting_view, fresh_lease)
+        self.assertEqual("timeout", timed_out.reason)
+        self.assertEqual(lease_updated_at, timed_out.lease_updated_at)
+        self.assertIsNone(timed_out.lease_reason)
+        self.assertEqual(supervisor_id, timed_out.lease_supervisor_id)
+        timed_out_payload = clear(timed_out)
+        self.assertEqual(
+            lease_updated_at,
+            timed_out_payload["lease_updated_at"],
+        )
+        self.assertEqual(
+            supervisor_id,
+            timed_out_payload["lease_supervisor_id"],
+        )
+        self.assertNotIn("lease_reason", timed_out_payload)
+
+        replied = run_wait(replied_view, fresh_lease)
+        self.assertEqual("reply", replied.reason)
+        self.assertIsNone(replied.lease_updated_at)
+        self.assertIsNone(replied.lease_reason)
+        self.assertIsNone(replied.lease_supervisor_id)
+        replied_payload = clear(replied)
+        for key in (
+            "lease_updated_at",
+            "lease_reason",
+            "lease_supervisor_id",
+        ):
+            self.assertNotIn(key, replied_payload)
+
+    def test_capacity_and_context_exits_carry_lease_evidence(self) -> None:
+        question_id = "00000000-0000-0000-0000-000000000034"
+        supervisor_id = "00000000-0000-0000-0000-000000000035"
+        lease_updated_at = "2026-07-24T12:00:00+00:00"
+        question = mailbox.MailboxMessage(
+            seq=1,
+            id=question_id,
+            kind=mailbox.KIND_QUESTION,
+            created_at="2026-07-24T12:00:00+00:00",
+            text="Which option?",
+        )
+        mailbox_path = Path("/tmp/mailbox.jsonl")
+        waiting_view = mailbox.MailboxView(
+            mailbox_path=mailbox_path,
+            messages=(question,),
+            last_seq=1,
+        )
+        full_view = mailbox.MailboxView(
+            mailbox_path=mailbox_path,
+            messages=(question,),
+            last_seq=1,
+            size_bytes=mailbox.MAILBOX_MAX_BYTES,
+        )
+        vanished_view = mailbox.MailboxView(
+            mailbox_path=mailbox_path,
+            messages=(),
+            last_seq=1,
+        )
+        fresh_lease = mailbox.MailboxLeaseView(
+            lease_path=Path("/tmp/mailbox-lease.json"),
+            lease=mailbox.MailboxLease(
+                supervisor_id=supervisor_id,
+                updated_at=lease_updated_at,
+            ),
+            fresh=True,
+        )
+        settings = runner._MailboxReplyWaitSettings(
+            base_seconds=4.0,
+            lease_extension_seconds=2.0,
+            hard_seconds=8.0,
+            poll_seconds=1.0,
+            io_grace_seconds=1.0,
+        )
+
+        def run_wait(
+            failing_view: mailbox.MailboxView,
+        ) -> runner._MailboxReplyWaitResult:
+            now = [0.0]
+            token = [0]
+
+            def next_token(_path: object) -> tuple[int, int, int, int]:
+                token[0] += 1
+                return (1, 2, 3, token[0])
+
+            def sleep(seconds: float) -> None:
+                now[0] += seconds
+
+            with (
+                mock.patch.object(
+                    runner.mailbox,
+                    "mailbox_change_token",
+                    side_effect=next_token,
+                ),
+                mock.patch.object(
+                    runner.mailbox,
+                    "read_mailbox",
+                    side_effect=lambda *_args, **_kwargs: (
+                        waiting_view if now[0] < 5.0 else failing_view
+                    ),
+                ),
+                mock.patch.object(
+                    runner.mailbox,
+                    "read_lease",
+                    return_value=fresh_lease,
+                ),
+            ):
+                return runner._wait_for_mailbox_reply(
+                    plan_dir=Path("/tmp/plan"),
+                    state_dir_arg=None,
+                    payload={},
+                    question_id=question_id,
+                    run_id="RUN-TEST",
+                    settings=settings,
+                    persistence=runner._RunPersistence(
+                        write_state=False,
+                        append_events=False,
+                    ),
+                    started_monotonic=0.0,
+                    monotonic=lambda: now[0],
+                    sleep=sleep,
+                )
+
+        for failing_view, expected_reason in (
+            (full_view, mailbox.ERROR_MAILBOX_FULL),
+            (vanished_view, qna.REASON_MISSING_QUESTION_CONTEXT),
+        ):
+            with self.subTest(reason=expected_reason):
+                result = run_wait(failing_view)
+                self.assertEqual(expected_reason, result.reason)
+                self.assertEqual(lease_updated_at, result.lease_updated_at)
+                self.assertEqual(supervisor_id, result.lease_supervisor_id)
+                self.assertIsNone(result.lease_reason)
+                self.assertIsNone(result.suspend_skew_seconds)
+                self.assertIsNone(result.suspend_lease_grace_seconds)
+
+    def test_suspend_mid_wait_reanchors_deadlines_and_keeps_wait_live(
+        self,
+    ) -> None:
+        question_id = "00000000-0000-0000-0000-000000000041"
+        question = mailbox.MailboxMessage(
+            seq=1,
+            id=question_id,
+            kind=mailbox.KIND_QUESTION,
+            created_at="2026-07-24T12:00:00+00:00",
+            text="Which option?",
+        )
+        view = mailbox.MailboxView(
+            mailbox_path=Path("/tmp/mailbox.jsonl"),
+            messages=(question,),
+            last_seq=1,
+        )
+        lease = mailbox.MailboxLeaseView(
+            lease_path=Path("/tmp/mailbox-lease.json"),
+            lease=mailbox.MailboxLease(
+                supervisor_id="00000000-0000-0000-0000-000000000042",
+                updated_at="2026-07-24T12:00:00+00:00",
+            ),
+            fresh=True,
+        )
+        settings = runner._MailboxReplyWaitSettings(
+            base_seconds=4.0,
+            lease_extension_seconds=2.0,
+            hard_seconds=20.0,
+            poll_seconds=1.0,
+            io_grace_seconds=1.0,
+        )
+        epoch = datetime(2026, 7, 24, 12, 0, 0, tzinfo=timezone.utc)
+        suspend_seconds = 8 * 3600.0
+        waiting = runner._waiting_for_reply_payload(
+            question_id=question_id,
+            session_id="9",
+            turn_index=3,
+            started_at=epoch,
+            base_deadline=epoch + timedelta(seconds=settings.base_seconds),
+            hard_deadline=epoch + timedelta(seconds=settings.hard_seconds),
+            last_lease_activity_at=None,
+        )
+        payload = {"run_id": "run-1", "waiting_for_reply": dict(waiting)}
+        now = [0.0]
+        wall_jump = [0.0]
+
+        def monotonic() -> float:
+            return now[0]
+
+        def wall_clock() -> datetime:
+            return epoch + timedelta(seconds=now[0] + wall_jump[0])
+
+        def sleep(seconds: float) -> None:
+            now[0] += seconds
+            # The lid closes during the first poll sleep: the wall clock
+            # jumps eight hours while the monotonic clock stays put.
+            if wall_jump[0] == 0.0:
+                wall_jump[0] = suspend_seconds
+
+        with (
+            mock.patch.object(
+                runner.mailbox,
+                "mailbox_change_token",
+                return_value=(1, 2, 3, 4),
+            ),
+            mock.patch.object(
+                runner.mailbox,
+                "read_mailbox",
+                return_value=view,
+            ),
+            mock.patch.object(
+                runner.mailbox,
+                "read_lease",
+                return_value=lease,
+            ),
+        ):
+            result = runner._wait_for_mailbox_reply(
+                plan_dir=Path("/tmp/plan"),
+                state_dir_arg=None,
+                payload=payload,
+                question_id=question_id,
+                run_id="RUN-TEST",
+                settings=settings,
+                persistence=runner._RunPersistence(
+                    write_state=False,
+                    append_events=False,
+                ),
+                started_monotonic=0.0,
+                monotonic=monotonic,
+                sleep=sleep,
+                wall_clock=wall_clock,
+            )
+
+        self.assertIsNone(result.reply)
+        self.assertEqual("timeout", result.reason)
+        self.assertEqual(suspend_seconds, result.suspend_skew_seconds)
+        # The monotonic budget is unchanged: the wait still consumed exactly
+        # the hard budget of frozen-clock time, not eight extra hours.
+        self.assertEqual(settings.hard_seconds, now[0])
+
+        # Detection fired on the iteration after the jump, at monotonic 1.0.
+        detection_wall = epoch + timedelta(seconds=1.0 + suspend_seconds)
+        rebased = payload["waiting_for_reply"]
+        base_after = datetime.fromisoformat(rebased["base_deadline"])
+        hard_after = datetime.fromisoformat(rebased["hard_deadline"])
+        self.assertEqual(
+            detection_wall + timedelta(seconds=settings.base_seconds - 1.0),
+            base_after,
+        )
+        self.assertEqual(
+            detection_wall + timedelta(seconds=settings.hard_seconds - 1.0),
+            hard_after,
+        )
+        self.assertGreater(base_after, detection_wall)
+        self.assertGreater(hard_after, detection_wall)
+        self.assertEqual(waiting["started_at"], rebased["started_at"])
+
+        lock_info = state.LockInfo(
+            path=Path("/tmp/plan-lock.json"),
+            pid=os.getpid(),
+            plan_dir="/tmp/plan",
+            created_at="2026-07-24T12:00:00+00:00",
+            stale=False,
+            reason="active",
+            raw={},
+        )
+        post_wake_now = detection_wall + timedelta(seconds=1.0)
+        self.assertEqual(
+            state.WAITING_FOR_REPLY_STATUS_EXPIRED,
+            state.waiting_for_reply_status(
+                waiting,
+                lock_info=lock_info,
+                now=post_wake_now,
+            ),
+        )
+        self.assertEqual(
+            state.WAITING_FOR_REPLY_STATUS_LIVE,
+            state.waiting_for_reply_status(
+                rebased,
+                lock_info=lock_info,
+                now=post_wake_now,
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            event_path = Path(tmp) / events.EVENTS_FILE_NAME
+            runner._clear_waiting_for_reply(
+                event_path,
+                payload,
+                reason=result.reason,
+                pending_outbox=result.pending_outbox,
+                lease_updated_at=result.lease_updated_at,
+                lease_reason=result.lease_reason,
+                lease_supervisor_id=result.lease_supervisor_id,
+                suspend_skew_seconds=result.suspend_skew_seconds,
+                persistence=runner._RunPersistence(write_state=False),
+            )
+            [cleared_event] = read_jsonl(event_path)
+        self.assertEqual(
+            suspend_seconds,
+            cleared_event["payload"]["suspend_skew_seconds"],
+        )
+
+    def _run_suspend_grace_wait(
+        self,
+        *,
+        settings: runner._MailboxReplyWaitSettings,
+        lease_fresh_from: float | None = None,
+        reply_from: float | None = None,
+        suspend_seconds: float = 3600.0,
+    ) -> tuple[
+        runner._MailboxReplyWaitResult, float, list[float], list[float]
+    ]:
+        """Run a wait whose first poll sleep hides a machine suspend.
+
+        The wall clock jumps ``suspend_seconds`` during the first sleep, so
+        detection fires at monotonic 1.0 and the lease grace covers awake
+        probes until ``1.0 + MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS``.
+        The lease reads stale until ``lease_fresh_from`` and the mailbox
+        gains a reply at ``reply_from``; ``None`` means never.
+        """
+        question_id = "00000000-0000-0000-0000-000000000044"
+        question = mailbox.MailboxMessage(
+            seq=1,
+            id=question_id,
+            kind=mailbox.KIND_QUESTION,
+            created_at="2026-07-24T12:00:00+00:00",
+            text="Which option?",
+        )
+        reply = mailbox.MailboxMessage(
+            seq=2,
+            id="00000000-0000-0000-0000-000000000045",
+            kind=mailbox.KIND_REPLY,
+            created_at="2026-07-24T12:00:01+00:00",
+            text="Option A",
+            to=question_id,
+        )
+        mailbox_path = Path("/tmp/mailbox.jsonl")
+        waiting_view = mailbox.MailboxView(
+            mailbox_path=mailbox_path,
+            messages=(question,),
+            last_seq=1,
+        )
+        replied_view = mailbox.MailboxView(
+            mailbox_path=mailbox_path,
+            messages=(question, reply),
+            last_seq=2,
+        )
+        lease_record = mailbox.MailboxLease(
+            supervisor_id="00000000-0000-0000-0000-000000000046",
+            updated_at="2026-07-24T12:00:00+00:00",
+        )
+        lease_path = Path("/tmp/mailbox-lease.json")
+        fresh_lease = mailbox.MailboxLeaseView(
+            lease_path=lease_path,
+            lease=lease_record,
+            fresh=True,
+        )
+        stale_lease = mailbox.MailboxLeaseView(
+            lease_path=lease_path,
+            lease=lease_record,
+            fresh=False,
+            reason=mailbox.LEASE_EXPIRED,
+        )
+        epoch = datetime(2026, 7, 24, 12, 0, 0, tzinfo=timezone.utc)
+        now = [0.0]
+        wall_jump = [0.0]
+        probe_times: list[float] = []
+        sleeps: list[float] = []
+
+        def monotonic() -> float:
+            return now[0]
+
+        def wall_clock() -> datetime:
+            return epoch + timedelta(seconds=now[0] + wall_jump[0])
+
+        def sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            now[0] += seconds
+            if wall_jump[0] == 0.0:
+                wall_jump[0] = suspend_seconds
+
+        def read_lease(*args: object, **kwargs: object) -> object:
+            probe_times.append(now[0])
+            if lease_fresh_from is not None and now[0] >= lease_fresh_from:
+                return fresh_lease
+            return stale_lease
+
+        def read_mailbox(*args: object, **kwargs: object) -> object:
+            if reply_from is not None and now[0] >= reply_from:
+                return replied_view
+            return waiting_view
+
+        with (
+            mock.patch.object(
+                runner.mailbox,
+                "mailbox_change_token",
+                side_effect=lambda path: (now[0],),
+            ),
+            mock.patch.object(
+                runner.mailbox,
+                "read_mailbox",
+                side_effect=read_mailbox,
+            ),
+            mock.patch.object(
+                runner.mailbox,
+                "read_lease",
+                side_effect=read_lease,
+            ),
+        ):
+            result = runner._wait_for_mailbox_reply(
+                plan_dir=Path("/tmp/plan"),
+                state_dir_arg=None,
+                payload={},
+                question_id=question_id,
+                run_id="RUN-TEST",
+                settings=settings,
+                persistence=runner._RunPersistence(
+                    write_state=False,
+                    append_events=False,
+                ),
+                started_monotonic=0.0,
+                monotonic=monotonic,
+                sleep=sleep,
+                wall_clock=wall_clock,
+            )
+        return result, now[0], probe_times, sleeps
+
+    def test_stale_lease_inside_suspend_grace_keeps_wait_alive(self) -> None:
+        settings = runner._MailboxReplyWaitSettings(
+            base_seconds=4.0,
+            lease_extension_seconds=2.0,
+            hard_seconds=200.0,
+            poll_seconds=1.0,
+            io_grace_seconds=1.0,
+        )
+
+        result, elapsed, probe_times, sleeps = self._run_suspend_grace_wait(
+            settings=settings,
+            reply_from=8.0,
+        )
+
+        self.assertEqual("reply", result.reason)
+        self.assertIsNotNone(result.reply)
+        assert result.reply is not None
+        self.assertEqual(
+            "00000000-0000-0000-0000-000000000045",
+            result.reply.id,
+        )
+        self.assertEqual(8.0, elapsed)
+        # Every stale probe landed inside the grace at poll cadence: none
+        # ended the wait and none ratcheted the active deadline.
+        self.assertEqual([4.0, 5.0, 6.0, 7.0], probe_times)
+        # The reply exit payload stays evidence-free even after a suspend.
+        self.assertIsNone(result.suspend_skew_seconds)
+        self.assertIsNone(result.suspend_lease_grace_seconds)
+        self.assertTrue(all(seconds > 0.0 for seconds in sleeps), sleeps)
+
+    def test_stale_lease_after_grace_lapse_exits_supervisor_lost(
+        self,
+    ) -> None:
+        settings = runner._MailboxReplyWaitSettings(
+            base_seconds=4.0,
+            lease_extension_seconds=2.0,
+            hard_seconds=200.0,
+            poll_seconds=1.0,
+            io_grace_seconds=1.0,
+        )
+
+        result, elapsed, probe_times, sleeps = self._run_suspend_grace_wait(
+            settings=settings,
+        )
+
+        self.assertEqual(
+            runner.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            result.reason,
+        )
+        # Detection fired at monotonic 1.0, so the grace covered probes up
+        # to 91.0; the first probe at that bound exits immediately — no
+        # ratchet ever delayed it, and the grace poll pacing never spun.
+        self.assertEqual(91.0, elapsed)
+        self.assertEqual(4.0, probe_times[0])
+        self.assertEqual(91.0, probe_times[-1])
+        self.assertEqual(mailbox.LEASE_EXPIRED, result.lease_reason)
+        self.assertEqual(
+            "00000000-0000-0000-0000-000000000046",
+            result.lease_supervisor_id,
+        )
+        self.assertEqual(3600.0, result.suspend_skew_seconds)
+        self.assertEqual(
+            runner.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
+            result.suspend_lease_grace_seconds,
+        )
+        self.assertTrue(all(seconds > 0.0 for seconds in sleeps), sleeps)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            event_path = Path(tmp) / events.EVENTS_FILE_NAME
+            runner._clear_waiting_for_reply(
+                event_path,
+                {
+                    "run_id": "run-1",
+                    "waiting_for_reply": {
+                        "question_id": (
+                            "00000000-0000-0000-0000-000000000044"
+                        ),
+                        "session_id": "9",
+                        "turn_index": 3,
+                    },
+                },
+                reason=result.reason,
+                pending_outbox=result.pending_outbox,
+                lease_updated_at=result.lease_updated_at,
+                lease_reason=result.lease_reason,
+                lease_supervisor_id=result.lease_supervisor_id,
+                suspend_skew_seconds=result.suspend_skew_seconds,
+                suspend_lease_grace_seconds=(
+                    result.suspend_lease_grace_seconds
+                ),
+                persistence=runner._RunPersistence(write_state=False),
+            )
+            [cleared_event] = read_jsonl(event_path)
+        self.assertEqual(
+            runner.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
+            cleared_event["payload"]["suspend_lease_grace_seconds"],
+        )
+        self.assertEqual(
+            3600.0,
+            cleared_event["payload"]["suspend_skew_seconds"],
+        )
+
+    def test_lease_turning_fresh_inside_grace_resumes_ratcheting(
+        self,
+    ) -> None:
+        settings = runner._MailboxReplyWaitSettings(
+            base_seconds=4.0,
+            lease_extension_seconds=2.0,
+            hard_seconds=20.0,
+            poll_seconds=1.0,
+            io_grace_seconds=1.0,
+        )
+
+        result, elapsed, probe_times, sleeps = self._run_suspend_grace_wait(
+            settings=settings,
+            lease_fresh_from=8.0,
+        )
+
+        self.assertEqual("timeout", result.reason)
+        self.assertEqual(settings.hard_seconds, elapsed)
+        # Stale probes inside the grace stay on the poll cadence; once the
+        # lease turns fresh the active-deadline ratchet resumes and spaces
+        # probes by the lease extension again, out to the hard deadline.
+        self.assertEqual(
+            [4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0],
+            probe_times,
+        )
+        # The last observed lease was fresh, so the timeout carries the
+        # lease identity with no rejection reason.
+        self.assertIsNone(result.lease_reason)
+        self.assertEqual(
+            "00000000-0000-0000-0000-000000000046",
+            result.lease_supervisor_id,
+        )
+        self.assertEqual(3600.0, result.suspend_skew_seconds)
+        self.assertEqual(
+            runner.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
+            result.suspend_lease_grace_seconds,
+        )
+        self.assertTrue(all(seconds > 0.0 for seconds in sleeps), sleeps)
+
+    def test_hard_deadline_fires_despite_active_grace(self) -> None:
+        settings = runner._MailboxReplyWaitSettings(
+            base_seconds=4.0,
+            lease_extension_seconds=2.0,
+            hard_seconds=20.0,
+            poll_seconds=1.0,
+            io_grace_seconds=1.0,
+        )
+
+        result, elapsed, probe_times, sleeps = self._run_suspend_grace_wait(
+            settings=settings,
+        )
+
+        # The grace ran to monotonic 91.0, far past the 20-second hard
+        # deadline, yet the wait still consumed exactly the hard budget:
+        # a suspend can never turn a bounded wait into an unbounded one.
+        self.assertEqual("timeout", result.reason)
+        self.assertEqual(settings.hard_seconds, elapsed)
+        self.assertEqual(4.0, probe_times[0])
+        self.assertEqual(19.0, probe_times[-1])
+        self.assertEqual(mailbox.LEASE_EXPIRED, result.lease_reason)
+        self.assertEqual(3600.0, result.suspend_skew_seconds)
+        self.assertEqual(
+            runner.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
+            result.suspend_lease_grace_seconds,
+        )
+        self.assertTrue(all(seconds > 0.0 for seconds in sleeps), sleeps)
+
+    def test_subthreshold_jitter_triggers_no_rebase_and_no_state_write(
+        self,
+    ) -> None:
+        question_id = "00000000-0000-0000-0000-000000000043"
+        question = mailbox.MailboxMessage(
+            seq=1,
+            id=question_id,
+            kind=mailbox.KIND_QUESTION,
+            created_at="2026-07-24T12:00:00+00:00",
+            text="Which option?",
+        )
+        view = mailbox.MailboxView(
+            mailbox_path=Path("/tmp/mailbox.jsonl"),
+            messages=(question,),
+            last_seq=1,
+        )
+        # Base equals hard so the loop never probes the lease: the only
+        # state write a rebase could cause is the one under test.
+        settings = runner._MailboxReplyWaitSettings(
+            base_seconds=4.0,
+            lease_extension_seconds=2.0,
+            hard_seconds=4.0,
+            poll_seconds=1.0,
+            io_grace_seconds=1.0,
+        )
+        epoch = datetime(2026, 7, 24, 12, 0, 0, tzinfo=timezone.utc)
+        waiting = runner._waiting_for_reply_payload(
+            question_id=question_id,
+            session_id="9",
+            turn_index=3,
+            started_at=epoch,
+            base_deadline=epoch + timedelta(seconds=settings.base_seconds),
+            hard_deadline=epoch + timedelta(seconds=settings.hard_seconds),
+            last_lease_activity_at=None,
+        )
+        payload = {"run_id": "run-1", "waiting_for_reply": dict(waiting)}
+        now = [0.0]
+        wall_jump = [0.0]
+
+        def monotonic() -> float:
+            return now[0]
+
+        def wall_clock() -> datetime:
+            return epoch + timedelta(seconds=now[0] + wall_jump[0])
+
+        def sleep(seconds: float) -> None:
+            now[0] += seconds
+            if wall_jump[0] == 0.0:
+                wall_jump[0] = 1.0
+
+        with (
+            mock.patch.object(
+                runner.mailbox,
+                "mailbox_change_token",
+                return_value=(1, 2, 3, 4),
+            ),
+            mock.patch.object(
+                runner.mailbox,
+                "read_mailbox",
+                return_value=view,
+            ),
+            mock.patch.object(
+                runner,
+                "_write_state_payload",
+            ) as write_state,
+        ):
+            result = runner._wait_for_mailbox_reply(
+                plan_dir=Path("/tmp/plan"),
+                state_dir_arg=None,
+                payload=payload,
+                question_id=question_id,
+                run_id="RUN-TEST",
+                settings=settings,
+                persistence=runner._RunPersistence(append_events=False),
+                started_monotonic=0.0,
+                monotonic=monotonic,
+                sleep=sleep,
+                wall_clock=wall_clock,
+            )
+
+        self.assertEqual("timeout", result.reason)
+        self.assertIsNone(result.suspend_skew_seconds)
+        self.assertEqual(waiting, payload["waiting_for_reply"])
+        write_state.assert_not_called()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            event_path = Path(tmp) / events.EVENTS_FILE_NAME
+            runner._clear_waiting_for_reply(
+                event_path,
+                payload,
+                reason=result.reason,
+                pending_outbox=result.pending_outbox,
+                suspend_skew_seconds=result.suspend_skew_seconds,
+                persistence=runner._RunPersistence(write_state=False),
+            )
+            [cleared_event] = read_jsonl(event_path)
+        self.assertNotIn(
+            "suspend_skew_seconds",
+            cleared_event["payload"],
+        )
+
+    def test_rebase_waiting_deadlines_skips_when_question_id_mismatches(
+        self,
+    ) -> None:
+        epoch = datetime(2026, 7, 24, 12, 0, 0, tzinfo=timezone.utc)
+        waiting = {
+            "question_id": "question-owned-by-another-wait",
+            "base_deadline": "2026-07-24T12:04:00+00:00",
+            "hard_deadline": "2026-07-24T12:20:00+00:00",
+        }
+        payload = {"waiting_for_reply": dict(waiting)}
+
+        with mock.patch.object(
+            runner,
+            "_write_state_payload",
+        ) as write_state:
+            runner._rebase_waiting_deadlines(
+                payload,
+                question_id="question-this-wait-expected",
+                base_deadline=epoch + timedelta(hours=8, minutes=4),
+                hard_deadline=epoch + timedelta(hours=8, minutes=20),
+                persistence=runner._RunPersistence(),
+            )
+
+        self.assertEqual(waiting, payload["waiting_for_reply"])
+        write_state.assert_not_called()
+
     def test_mailbox_reply_wait_reparses_only_after_change_token(self) -> None:
         question_id = "00000000-0000-0000-0000-000000000016"
         question = mailbox.MailboxMessage(
@@ -1275,8 +2131,6 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             created_at = "0001-01-01T00:00:00+00:00"
             question_id = "00000000-0000-4000-8000-000000000022"
             reply_id = "00000000-0000-4000-8000-000000000023"
-            filler_id = "00000000-0000-4000-8000-000000000024"
-            reply_text = "Use option B."
             mailbox.append_question(
                 plan_dir,
                 "Which option?",
@@ -1288,28 +2142,13 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 "created_at": created_at,
                 "id": reply_id,
                 "kind": mailbox.KIND_REPLY,
-                "text": reply_text,
+                "text": "",
                 "to": question_id,
                 "version": mailbox.MAILBOX_SCHEMA_VERSION,
             }
-            reply_size = len(
+            reply_overhead = len(
                 json.dumps(
                     reply_record,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ).encode("utf-8")
-                + b"\n"
-            )
-            empty_filler_record = {
-                "created_at": created_at,
-                "id": filler_id,
-                "kind": mailbox.KIND_GUIDANCE,
-                "text": "",
-                "version": mailbox.MAILBOX_SCHEMA_VERSION,
-            }
-            filler_overhead = len(
-                json.dumps(
-                    empty_filler_record,
                     separators=(",", ":"),
                     sort_keys=True,
                 ).encode("utf-8")
@@ -1320,18 +2159,11 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 state_dir=state_dir,
             ).size_bytes
             final_headroom = mailbox.MAILBOX_MIN_APPEND_BYTES - 1
-            filler_size = (
+            reply_text = "x" * (
                 mailbox.MAILBOX_MAX_BYTES
                 - final_headroom
-                - reply_size
                 - current_size
-            )
-            mailbox.append_guidance(
-                plan_dir,
-                "x" * (filler_size - filler_overhead),
-                state_dir=state_dir,
-                message_id=filler_id,
-                created_at=created_at,
+                - reply_overhead
             )
             appended_reply = mailbox.append_reply(
                 plan_dir,
@@ -1401,7 +2233,6 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 turn_index=2,
             )
             reply_id = "00000000-0000-4000-8000-000000000025"
-            filler_id = "00000000-0000-4000-8000-000000000026"
             published_question = mailbox.append_question(
                 plan_dir,
                 question_text,
@@ -1413,28 +2244,13 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 "created_at": created_at,
                 "id": reply_id,
                 "kind": mailbox.KIND_REPLY,
-                "text": "Use option B.",
+                "text": "",
                 "to": question_id,
                 "version": mailbox.MAILBOX_SCHEMA_VERSION,
             }
-            reply_size = len(
+            reply_overhead = len(
                 json.dumps(
                     reply_record,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ).encode("utf-8")
-                + b"\n"
-            )
-            empty_filler_record = {
-                "created_at": created_at,
-                "id": filler_id,
-                "kind": mailbox.KIND_GUIDANCE,
-                "text": "",
-                "version": mailbox.MAILBOX_SCHEMA_VERSION,
-            }
-            filler_overhead = len(
-                json.dumps(
-                    empty_filler_record,
                     separators=(",", ":"),
                     sort_keys=True,
                 ).encode("utf-8")
@@ -1444,23 +2260,16 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 plan_dir,
                 state_dir=state_dir,
             ).size_bytes
-            filler_size = (
+            reply_text = "x" * (
                 mailbox.MAILBOX_MAX_BYTES
                 - (mailbox.MAILBOX_MIN_APPEND_BYTES - 1)
-                - reply_size
                 - current_size
-            )
-            mailbox.append_guidance(
-                plan_dir,
-                "x" * (filler_size - filler_overhead),
-                state_dir=state_dir,
-                message_id=filler_id,
-                created_at=created_at,
+                - reply_overhead
             )
             mailbox.append_reply(
                 plan_dir,
                 question_id,
-                reply_record["text"],
+                reply_text,
                 state_dir=state_dir,
                 message_id=reply_id,
                 created_at=created_at,
@@ -1552,6 +2361,163 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
                 self.assertEqual(expected_reason, raised.exception.reason)
                 append_question.assert_not_called()
+
+    @staticmethod
+    def _question_context(
+        last_message: str, last_message_path: Path
+    ) -> qna.QnAContext:
+        return qna.QnAContext(
+            plan_dir=Path("/tmp/plan"),
+            state_dir=Path("/tmp/state"),
+            state_path=Path("/tmp/state/state.json"),
+            run_id="run-bounded",
+            run_dir=None,
+            pause_reason="blocked",
+            pause_message="Need a choice.",
+            pause_details={},
+            harness="codex",
+            model=None,
+            model_source=None,
+            effort=None,
+            effort_source=None,
+            session_id="1",
+            next_pending_id="1",
+            turn_index=2,
+            artifact_dir=None,
+            stdout_path=None,
+            stderr_path=None,
+            last_message_path=last_message_path,
+            result_path=None,
+            last_message=last_message,
+        )
+
+    def test_oversized_last_message_yields_bounded_retry_stable_question(
+        self,
+    ) -> None:
+        cap = runner.MAILBOX_QUESTION_TEXT_MAX_CHARS
+        oversized = "".join(
+            f"line {index}\n" for index in range(cap // 4)
+        )
+        self.assertGreater(len(oversized), cap)
+        artifact_path = Path("/tmp/artifacts/last-message.txt")
+
+        # Two independent preparations of the same turn read the same
+        # artifact; their bodies must be byte-identical or the reuse
+        # equality check in _ensure_mailbox_question degrades the retry.
+        first_text = runner._mailbox_question_text(
+            self._question_context(oversized, artifact_path)
+        )
+        retried_text = runner._mailbox_question_text(
+            self._question_context(oversized, artifact_path)
+        )
+        self.assertEqual(
+            first_text.encode("utf-8"), retried_text.encode("utf-8")
+        )
+        self.assertTrue(first_text.startswith(oversized[:cap]))
+        self.assertLess(len(first_text), cap + 200)
+        footer = first_text[cap:]
+        self.assertIn(str(artifact_path), footer)
+        self.assertIn(str(cap), footer)
+        self.assertIn(str(len(oversized)), footer)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("pending",))
+            question_id = runner._mailbox_question_id(
+                plan_dir=plan_dir,
+                run_id="run-bounded",
+                session_id="1",
+                turn_index=2,
+            )
+            published = runner._ensure_mailbox_question(
+                plan_dir=plan_dir,
+                state_dir_arg=str(state_dir),
+                question_id=question_id,
+                text=first_text,
+                run_id="run-bounded",
+            )
+            self.assertEqual(first_text, published.text)
+
+            with mock.patch.object(
+                runner.mailbox,
+                "append_question",
+                side_effect=AssertionError(
+                    "a retried preparation must reuse the bounded question"
+                ),
+            ) as append_question:
+                reused = runner._ensure_mailbox_question(
+                    plan_dir=plan_dir,
+                    state_dir_arg=str(state_dir),
+                    question_id=question_id,
+                    text=retried_text,
+                    run_id="run-bounded",
+                )
+
+            self.assertEqual(published, reused)
+            append_question.assert_not_called()
+
+    def test_last_message_at_exact_boundary_is_not_truncated(self) -> None:
+        cap = runner.MAILBOX_QUESTION_TEXT_MAX_CHARS
+        artifact_path = Path("/tmp/artifacts/last-message.txt")
+        at_boundary = "b" * cap
+        self.assertEqual(
+            at_boundary,
+            runner._mailbox_question_text(
+                self._question_context(at_boundary, artifact_path)
+            ),
+        )
+
+        over_boundary = "b" * (cap + 1)
+        bounded = runner._mailbox_question_text(
+            self._question_context(over_boundary, artifact_path)
+        )
+        self.assertNotEqual(over_boundary, bounded)
+        self.assertTrue(bounded.startswith(at_boundary))
+        self.assertIn(str(artifact_path), bounded[cap:])
+
+    def test_question_cap_degrades_to_mailbox_full_without_appending(
+        self,
+    ) -> None:
+        past_question_cap = mailbox.MailboxView(
+            mailbox_path=Path("/tmp/mailbox.jsonl"),
+            messages=(),
+            last_seq=0,
+            size_bytes=(
+                mailbox.MAILBOX_MAX_BYTES
+                - mailbox.MAILBOX_QUESTION_RESERVE_BYTES
+            ),
+        )
+        # The guard must fire on the reduced question cap even though the
+        # file cap still has the whole reply reserve to spare.
+        self.assertFalse(past_question_cap.full)
+        self.assertFalse(past_question_cap.accepts_questions)
+
+        with (
+            mock.patch.object(
+                runner.mailbox,
+                "read_mailbox",
+                return_value=past_question_cap,
+            ),
+            mock.patch.object(
+                runner.mailbox,
+                "append_question",
+            ) as append_question,
+            self.assertRaises(runner._MailboxReplyWaitUnavailable) as raised,
+        ):
+            runner._ensure_mailbox_question(
+                plan_dir=Path("/tmp/plan"),
+                state_dir_arg=None,
+                question_id="00000000-0000-4000-8000-000000000042",
+                text="Which option?",
+                run_id="RUN-TEST",
+            )
+
+        self.assertEqual(
+            mailbox.ERROR_MAILBOX_FULL, raised.exception.reason
+        )
+        append_question.assert_not_called()
 
     def test_abandoned_escalation_stops_counting_once_the_run_pauses(
         self,

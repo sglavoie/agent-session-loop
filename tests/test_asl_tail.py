@@ -215,6 +215,89 @@ class TailFollowerTests(unittest.TestCase):
         )
         self.assertNotIn("paused", message)
 
+    def test_mailbox_wait_cleared_event_renders_lease_evidence(self) -> None:
+        message = tail._event_message(
+            events.MAILBOX_EVENT,
+            {
+                "action": events.MAILBOX_ACTION_WAIT_CLEARED,
+                "question_id": "question-1",
+                "session_id": "9",
+                "turn_index": 3,
+                "reason": "supervisor-lost",
+                "pending_outbox": 2,
+                "lease_supervisor_id": "supervisor-1",
+                "lease_updated_at": "2026-07-24T12:01:00+00:00",
+                "lease_reason": "expired",
+            },
+        )
+
+        self.assertEqual(
+            "mailbox: reply wait cleared "
+            "(question question-1, session 9, turn 3, "
+            "reason supervisor-lost, pending outbox 2, "
+            "lease supervisor supervisor-1, "
+            "lease updated 2026-07-24T12:01:00+00:00, "
+            "lease reason expired)",
+            message,
+        )
+
+    def test_mailbox_wait_cleared_event_renders_suspend_evidence(self) -> None:
+        message = tail._event_message(
+            events.MAILBOX_EVENT,
+            {
+                "action": events.MAILBOX_ACTION_WAIT_CLEARED,
+                "question_id": "question-1",
+                "session_id": "9",
+                "turn_index": 3,
+                "reason": "supervisor-lost",
+                "pending_outbox": 2,
+                "lease_supervisor_id": "supervisor-1",
+                "lease_updated_at": "2026-07-24T12:01:00+00:00",
+                "lease_reason": "expired",
+                "suspend_skew_seconds": 3600.0,
+                "suspend_lease_grace_seconds": 90.0,
+            },
+        )
+
+        self.assertEqual(
+            "mailbox: reply wait cleared "
+            "(question question-1, session 9, turn 3, "
+            "reason supervisor-lost, pending outbox 2, "
+            "lease supervisor supervisor-1, "
+            "lease updated 2026-07-24T12:01:00+00:00, "
+            "lease reason expired, "
+            "suspend skew 3600.0s, "
+            "suspend lease grace 90.0s)",
+            message,
+        )
+
+    def test_mailbox_wait_cleared_event_renders_partial_lease_evidence(
+        self,
+    ) -> None:
+        message = tail._event_message(
+            events.MAILBOX_EVENT,
+            {
+                "action": events.MAILBOX_ACTION_WAIT_CLEARED,
+                "question_id": "question-1",
+                "session_id": "9",
+                "turn_index": 3,
+                "reason": "timeout",
+                "pending_outbox": 1,
+                "lease_supervisor_id": "supervisor-1",
+                "lease_updated_at": "2026-07-24T12:14:00+00:00",
+            },
+        )
+
+        self.assertEqual(
+            "mailbox: reply wait cleared "
+            "(question question-1, session 9, turn 3, "
+            "reason timeout, pending outbox 1, "
+            "lease supervisor supervisor-1, "
+            "lease updated 2026-07-24T12:14:00+00:00)",
+            message,
+        )
+        self.assertNotIn("lease reason", message)
+
     def test_mailbox_wait_preparation_failed_renders_reason_and_identity(
         self,
     ) -> None:

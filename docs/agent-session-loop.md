@@ -396,7 +396,20 @@ pause. It adds exactly two files below the canonical per-plan state directory:
   reports exhaustion rather than exact cap equality: it becomes true when
   fewer bytes remain than the smallest record produced with normal generated
   metadata. Individual larger appends can fail before that exhaustion
-  threshold.
+  threshold. The final 512 KiB below the cap is a reserve that only `reply`
+  records may consume: `guidance`, `question`, and `ack` appends fail
+  `mailbox-full` once they would cross into the reserve, so the reply that
+  unblocks a waiting run can still land after every other append kind reaches
+  its effective cap. The `accepts_questions` field in `asl status --json`
+  reports that shared non-reply cap with the same exhaustion probe `full`
+  applies to the file cap. `accepts_replies` separately reports whether
+  capacity remains for a minimal valid reply. `full` itself keeps its
+  file-faithful physical-cap meaning; it does not incorporate either the
+  per-kind reserve or the larger minimum reply size. The question body a
+  waiting runner publishes is itself bounded: at
+  most the first 16,000 characters of the last-message artifact, with longer
+  messages truncated deterministically and given a footer naming the on-disk
+  artifact path that holds the full text.
 - `mailbox-lease.json` is a separate, locked, fixed-size 512-byte supervisor
   lease. It is fresh for 90 seconds after its UTC `updated_at`. Supervisor
   long-polls and the Autopilot renew it every 30 seconds; stopping supervision
@@ -523,8 +536,15 @@ With `--json`, failures use the common error envelope and the following stable
 - Plan resolution shared by all five commands reports `ambiguous-plan`,
   `malformed-plan`, `state-error`, or `os-error`.
 
-Supervisor write and wait commands establish or renew a lease. The worker
-commands do not claim supervisor ownership.
+Supervisor write and wait commands first read the current lease and decide
+between a heartbeat and a takeover. A fresh, current-version lease carrying a
+`run_id` proves a live supervisor is projecting this plan, so the command
+re-emits the same `supervisor_id` and question projection with only
+`updated_at` refreshed. A missing, stale, v1, unprojected, or unreadable
+lease means no supervisor is alive, so the command takes over with a new
+random supervisor identity and no projection — a hand-answered run still
+survives past its base deadline. The worker commands do not claim supervisor
+ownership.
 
 ### Live reply wait and fallback
 
@@ -546,7 +566,16 @@ attribution carry no `run_id` and are never open.
 The runner waits five minutes initially. Lease freshness is checked only at an
 active deadline. At that checkpoint, a fresh supervisor lease extends the wait by 60 seconds,
 never beyond the absolute 30-minute limit; an absent or stale
-lease ends the live wait. The runner polls the mailbox every two seconds and
+lease ends the live wait unless a post-suspend lease grace is active. The wait
+paces itself on the monotonic clock, which freezes across system sleep, so a
+suspend never refunds wait budget. On wake the runner detects the suspend,
+re-anchors the persisted wall-clock deadlines around the surviving monotonic
+budget, and grants the supervisor a 90-second awake grace to re-prove
+liveness — the autopilot has not polled yet, so the on-disk lease is briefly
+wall-clock ancient even with a live supervisor. Inside that grace a non-fresh
+lease neither ends the wait nor extends the active deadline, and the grace
+never extends the hard deadline; once the grace lapses with the lease still
+stale, the wait ends exactly as before. The runner polls the mailbox every two seconds and
 tolerates sustained mailbox or checkpoint lease I/O failure for ten seconds
 before falling back. A first reply starts an explicit one-shot continuation of
 the same session; even a queued stop-after-current is consumed only after that
@@ -558,25 +587,36 @@ between `BEGIN ASL OPERATOR REPLY JSONL` and
 `END ASL OPERATOR REPLY JSONL`. The worker consumes only its `text` value;
 newlines, non-ASCII characters, prompt headings, and control-like text remain
 escaped inside that value and cannot create runner-owned lines. If no reply is
-available, timeout, a stale lease at an active deadline, a full/unavailable
+available, timeout, a stale lease at an active deadline that outlasts any
+post-suspend grace, a full/unavailable
 mailbox, or missing question context clears `waiting_for_reply` and records the
 same ordinary
 terminal pause the non-mailbox flow would have recorded.
 
-When `asl inbox reply` sees a fresh v2 supervisor projection proving that the
-target was the sole unanswered question, it captures that projection before
-renewing the lease. After the first reply append succeeds, a post-append
+When `asl inbox reply` sees a fresh v2 supervisor lease, it captures that
+evidence before renewing the lease. The lease supplies the owning `run_id` and
+supervisor liveness but need not already know the question: evidence is
+captured either when the projection names the target as its latest unanswered
+question, or when the lease demonstrably predates the question — its
+`projection_seq` is behind the question's mailbox sequence for the same run —
+which closes the short window before the supervisor's next poll learns of a
+just-asked question. After the first reply append succeeds, a post-append
 mailbox snapshot must show no open questions for the projected `run_id` before
-ASL emits the text-free `AgentSessionLoopMailboxReply` Agent Mux marker. A
+ASL emits the text-free `AgentSessionLoopMailboxReply` Agent Mux marker; that
+re-read stays the authoritative condition. A
 question an earlier run abandoned — or a legacy question with no `run_id` —
 therefore never suppresses the marker, while a genuinely open sibling question
 for the same run still does. Its public fields are
 `run_id`, `state_path`, `question_id`, reply `source_sequence`,
 `mailbox_projection_sequence`, `emitted_time`, and a stable
-`<run-id>:mailbox-reply:<reply-sequence>` source event ID. It never carries the
-question or reply body. Missing, stale, malformed, multi-question, or
-mismatched evidence skips the marker; Agent Mux discovery, delivery, timeout,
-or acknowledgement failure never changes the successful mailbox reply result.
+`<run-id>:mailbox-reply:<reply-sequence>` source event ID. When the lease
+predates the question, `mailbox_projection_sequence` is the reply's own
+mailbox sequence — strictly monotonic within the same file, so still a valid
+generation counter — otherwise it is the lease's `projection_seq`. It never
+carries the question or reply body. Missing, stale, malformed, or
+run-mismatched evidence skips the marker; Agent Mux discovery, delivery,
+timeout, or acknowledgement failure never changes the successful mailbox
+reply result.
 The supervisor lease's later zero-question projection remains the compatibility
 fallback.
 
@@ -597,10 +637,26 @@ capacity, and context reasons are
 The `mailbox`/`wait-cleared` event reports why the live wait ended. Its reason
 is `reply` when an answer arrived, `timeout` only when the absolute hard
 deadline was reached, and `supervisor-lost` when the active deadline found an
-absent, stale, or otherwise non-fresh supervisor lease. Other fallback paths
+absent, stale, or otherwise non-fresh supervisor lease with no post-suspend
+lease grace left to cover it. Other fallback paths
 preserve their specific error reason, such as `mailbox-full`,
 `mailbox-read-error`, `lease-read-error`, or `missing-question-context`;
 an unexpected wait failure reports `error`.
+
+A wait that ended without a reply also names the lease evidence behind that
+reason: `lease_supervisor_id` and `lease_updated_at` identify the last lease the
+wait actually read, and `lease_reason` carries the non-fresh reason that
+rejected it. Each key is omitted when the wait has no value for it, so a
+`timeout` that watched a fresh supervisor the whole time reports the lease
+without a rejection reason, and a wait that never probed a lease — including
+every `reply` exit — reports none of the three. This distinguishes a supervisor
+that was never there from one that watched a human run out of clock. A wait
+that detected a system suspend additionally reports `suspend_skew_seconds`,
+the wall-clock time the sleeping machine cost the wait, and
+`suspend_lease_grace_seconds`, the awake lease grace that suspend applied —
+so a `supervisor-lost` that fired only after a lapsed grace reads differently
+from one that never saw a suspend. Both keys are omitted when no suspend was
+detected, and every `reply` exit still reports none of these keys.
 
 ### Future implementation model control
 
@@ -631,8 +687,11 @@ counts, capacity, rejected-record count, lease freshness, and compact
 `waiting_for_reply` identity/deadlines without raw message bodies.
 `guidance-observed` carries message identity, physical sequence, character
 length, and SHA-256 digest. `wait-cleared` carries the wait identity and
-deadlines, the exit `reason`, and `pending_outbox`, the measured count of
-questions open for that run when a final mailbox snapshot is available.
+deadlines, the exit `reason`, `pending_outbox`, the measured count of
+questions open for that run when a final mailbox snapshot is available, and the
+`lease_supervisor_id`, `lease_updated_at`, and `lease_reason` evidence for the
+last lease a non-reply exit observed, plus `suspend_skew_seconds` and
+`suspend_lease_grace_seconds` when the wait detected a system suspend.
 `wait-preparation-failed` carries run/session/turn identity and the exact
 preparation `reason`, without creating live-wait state.
 `asl tail` renders that reason and identity explicitly rather than falling back
@@ -1620,7 +1679,15 @@ report `commit_mode: null` and `commits: []`.
 `status --json` adds a read-only `mailbox` projection. It reports the canonical
 mailbox and lease paths, presence/activation, byte size and 4 MiB limit,
 physical `last_seq`, pending-guidance and unanswered-question counts, rejected
-record count, full state, and best-effort errors. Alongside the file-faithful
+record count, full state, and best-effort errors. Beside `full` it reports
+`accepts_questions` and `accepts_replies`: the former says whether a question
+still fits under the reduced cap shared by every non-reply kind, while the
+latter is true only when capacity remains for a minimal valid reply. When the
+mailbox cannot be read, both fields are `null` alongside `full` rather than
+defaulting to `true`. The text `Mailbox:` line uses
+`non-reply writes refused (replies still accepted)` only when
+`accepts_replies` is true; otherwise it says `reply capacity exhausted` and
+never overclaims that a reply can land. Alongside the file-faithful
 `unanswered_questions` total it reports `open_questions`, the subset owned by a
 run that is still live; it is `0` when no live run holds the plan and `null`
 when the mailbox cannot be read. The text `Mailbox:` line leads with the open
