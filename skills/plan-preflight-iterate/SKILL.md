@@ -171,7 +171,7 @@ Open one `AskUserQuestion` call with all picked questions in the same batch.
 
 Apply edits one finding at a time:
 
-- **plan-edit**: Read the session file from `finding.path`. For missing/malformed `## Completion Contract` errors, build the contract scaffold using the parser shape (a `### Done when` bullet list and a fenced ```json``` Verify block whose `session` matches `session_id`). For ambiguity sentinels, jump to `finding.line` and use Edit to replace the sentinel with the user's wording. For path-reference findings, rewrite the contract `path` field to a repo-relative form. After every edit, re-read the file to confirm the change landed.
+- **plan-edit**: Read the session file from `finding.path`. For missing/malformed `## Completion Contract` errors, build the contract scaffold using the parser shape (a `### Done when` bullet list and a fenced ```json``` Verify block whose `session` matches `session_id`). For ambiguity sentinels, jump to `finding.line` and use Edit to replace the sentinel with the user's wording. For path-reference findings, remove `..` traversal from the relative contract `path` field or replace it with an explicit absolute path. After every edit, re-read the file to confirm the change landed.
 
 - **manifest-update**: When the user picked `Run mark-loop-ready`, defer it until Step 5. When they picked `Edit manifest.md`, open `manifest.md` and use Edit to fix the `**Readiness**`, `**Readiness SHA-256**`, or `**Readiness checked at**` line called out in the finding `message`/`detail`.
 

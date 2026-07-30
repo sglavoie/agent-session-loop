@@ -254,9 +254,10 @@ shapes. Required and optional fields:
   `file_exists`, `regex_in_file`), and type-specific fields.
 - `command`: `argv` (non-empty array of strings, no shell), optional
   `timeout_seconds` (defaults to 60, max 3600), optional `cwd`.
-- `file_exists`: `path` (string, repo-root-relative).
-- `regex_in_file`: `path` (string, repo-root-relative), `pattern` (regex
-  string).
+- `file_exists`: `path` (string; repo-root-relative or absolute).
+- `regex_in_file`: `path` (string; repo-root-relative or absolute), `pattern`
+  (regex string). Relative file and regex paths containing `..` are rejected
+  by preflight; use a path beneath `--cwd` or an explicit absolute path.
 - Every check also accepts an optional `baseline_expectation` (one of `skip`,
   `pass`, `fail`; defaults to `skip`). `pass`/`fail` declare how the check must
   behave on the *unmodified* repository; `asl baseline` records the evidence

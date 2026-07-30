@@ -69,7 +69,10 @@ class CommandCheck:
 
 @dataclass(frozen=True)
 class FileExistsCheck:
-    """A check that asserts a path exists relative to the repo root."""
+    """A check that asserts a path exists.
+
+    Relative paths resolve against the repo root; absolute paths are used as-is.
+    """
 
     name: str
     path: str
@@ -79,7 +82,10 @@ class FileExistsCheck:
 
 @dataclass(frozen=True)
 class RegexInFileCheck:
-    """A check that asserts a regex matches somewhere in a file."""
+    """A check that asserts a regex matches somewhere in a file.
+
+    Relative paths resolve against the repo root; absolute paths are used as-is.
+    """
 
     name: str
     path: str

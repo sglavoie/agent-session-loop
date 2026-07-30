@@ -268,6 +268,32 @@ class VerificationExecutorTests(unittest.TestCase):
             self.assertEqual("pass", result.status)
             self.assertIsNone(result.failure_reason)
 
+    def test_absolute_file_and_regex_paths_resolve_independently_of_repo_root(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_root = root / "repo"
+            repo_root.mkdir()
+            target = root / "outside.txt"
+            target.write_text("absolute target\n", encoding="utf-8")
+
+            file_result = verification.run_check(
+                contracts.FileExistsCheck(name="absolute-file", path=str(target)),
+                repo_root=repo_root,
+            )
+            regex_result = verification.run_check(
+                contracts.RegexInFileCheck(
+                    name="absolute-regex",
+                    path=str(target),
+                    pattern=r"^absolute target$",
+                ),
+                repo_root=repo_root,
+            )
+
+            self.assertEqual("pass", file_result.status)
+            self.assertEqual("pass", regex_result.status)
+
     def test_file_exists_check_fails_when_file_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)

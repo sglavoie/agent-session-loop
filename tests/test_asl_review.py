@@ -1621,7 +1621,7 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
         result_held = self._materialize(hold_lock=False)
         self.assertTrue(result_held.ok)
 
-    def test_cwd_gate_marks_plan_loop_ready(self) -> None:
+    def test_cwd_gate_marks_plan_loop_ready_with_absolute_repair_path(self) -> None:
         repo = self.tmp_path / "repo"
         init_git_repo(repo)
         (repo / "README.md").write_text("readme\n", encoding="utf-8")
@@ -1657,7 +1657,7 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
                 {
                     "type": "file_exists",
                     "name": "readme-present",
-                    "path": "README.md",
+                    "path": str(repo / "README.md"),
                 }
             ],
         )

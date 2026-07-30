@@ -292,12 +292,12 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
         check_id="path-reference.normalize",
         severity_hint="yellow",
         message=(
-            "Normalize the contract path to a repo-relative path that does not "
-            "use absolute paths or '..' traversal."
+            "Rewrite the relative contract path to remove '..' traversal, or "
+            "replace it with an explicit absolute path."
         ),
         question_template=(
-            "Session {session_id} contract path is not repo-relative ({detail}). "
-            "Rewrite it?"
+            "Session {session_id} relative contract path traverses outside "
+            "--cwd ({detail}). Rewrite it?"
         ),
         fix_category="plan-edit",
     ),
@@ -1264,18 +1264,6 @@ def _check_path_references(
 
             candidate = Path(path_value)
             if candidate.is_absolute():
-                findings.append(
-                    _finding(
-                        "yellow",
-                        "path-reference",
-                        (
-                            f"session {session_id} check {check.name!r} uses an "
-                            "absolute path"
-                        ),
-                        session_id=session_id,
-                        detail=f"path: {path_value}",
-                    )
-                )
                 continue
 
             normalized_parts = tuple(candidate.parts)

@@ -552,11 +552,31 @@ class PreflightCoreTests(unittest.TestCase):
                     ]
                     self.assertTrue(sentinels)
 
-    def test_path_reference_flags_absolute_paths_as_yellow(self) -> None:
+    def test_path_reference_accepts_absolute_file_and_regex_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            plan_dir = Path(tmp) / "plan"
+            root = Path(tmp)
+            plan_dir = root / "plan"
+            target = root / "target.txt"
             contract = _contract_block(
-                '{"type": "file_exists", "path": "/etc/hosts", "name": "abs"}',
+                ", ".join(
+                    (
+                        json.dumps(
+                            {
+                                "type": "file_exists",
+                                "path": str(target),
+                                "name": "abs-file",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "regex_in_file",
+                                "path": str(target),
+                                "pattern": "target",
+                                "name": "abs-regex",
+                            }
+                        ),
+                    )
+                ),
                 session="1",
             )
             write_plan(
@@ -578,10 +598,7 @@ class PreflightCoreTests(unittest.TestCase):
                 for finding in report.findings
                 if finding.category == "path-reference"
             ]
-            self.assertEqual(1, len(path_findings))
-            self.assertEqual("yellow", path_findings[0].severity)
-            self.assertIn("absolute", path_findings[0].message)
-            self.assertEqual("1", path_findings[0].session_id)
+            self.assertEqual([], path_findings)
 
     def test_path_reference_flags_parent_traversal_as_yellow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

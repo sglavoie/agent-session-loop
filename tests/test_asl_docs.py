@@ -77,6 +77,27 @@ from tests.support import (
 
 
 class SkillInstructionTests(unittest.TestCase):
+    def test_contract_paths_allow_absolute_but_reject_relative_traversal(
+        self,
+    ) -> None:
+        docs = (REPO_ROOT / "docs/agent-session-loop.md").read_text(
+            encoding="utf-8"
+        )
+        split_skill = (REPO_ROOT / "skills/session-split/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        repair_skill = (
+            REPO_ROOT / "skills/plan-preflight-iterate/SKILL.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("repo-root-relative or absolute", docs)
+        self.assertIn(
+            "Relative file and regex paths containing `..` are rejected", docs
+        )
+        self.assertIn("repo-relative or absolute paths", split_skill)
+        self.assertIn("Relative paths must not contain `..` traversal", split_skill)
+        self.assertIn("replace it with an explicit absolute path", repair_skill)
+
     def test_session_expand_auto_marks_loop_ready_before_session_run(self) -> None:
         text = (REPO_ROOT / "skills/session-expand/SKILL.md").read_text(
             encoding="utf-8"
