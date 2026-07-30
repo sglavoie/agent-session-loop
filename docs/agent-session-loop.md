@@ -238,18 +238,16 @@ shapes. Required and optional fields:
   signal the whole process group, so a check that fans out into helper
   processes leaves no descendant *in that group* behind to write output or
   repository side effects — nor to hold the captured pipes open and stall the
-  cancellation. The guarantee stops at the process group, and that boundary is
-  deliberate: a descendant that starts a session of its own (`setsid`,
-  `start_new_session=True`) leaves the group, is **not** stopped by either
-  path, and can still write repository side effects after verification has
-  published its terminal state. Reaching it would mean walking the process
-  table, which cannot close the hole either — a descendant can detach or fork
-  between the scan and the signal — so the runner does not try. What stays
-  bounded is the cost: the pipe readers of a killed check are joined under a
-  five-second limit, so an escapee holding those pipes open delays cancellation
-  by at most that long rather than indefinitely, and the abandoned check still
-  publishes no result, artifact, or event. A check that backgrounds work which
-  must not outlive it therefore must not detach that work into a new session.
+  cancellation. Every command check is then swept (see **Process sweep** under
+  Safety Modes), which also reaches a descendant that left the group with
+  `setsid` on the timeout, cancellation, and interrupt paths — including a
+  Ctrl-C under a sequential recipe — because each snapshots the check's
+  descendants before the group kill. What stays bounded either way is
+  the cost: the pipe readers of a killed check are joined under a five-second
+  limit and those of a check that exited on its own under thirty seconds, so an
+  escapee holding those pipes open delays the recipe by at most that long
+  rather than indefinitely, and an abandoned check still publishes no result,
+  artifact, or event.
 - Each check object has `name` (string), `type` (one of `command`,
   `file_exists`, `regex_in_file`), and type-specific fields.
 - `command`: `argv` (non-empty array of strings, no shell), optional
@@ -1003,6 +1001,28 @@ Cycle and continuation state are reconstructed from append-only events plus
 generated sessions, so caps, idempotency, and rereview scheduling survive
 pauses, crashes, and later processes.
 
+A review turn that produces artifacts failing verdict validation is not a
+human's problem on the first try. The runner reverts the review session to
+pending with the exact validation error as a handoff note, appends a
+`review_verdict_retry` event (run id, session, attempt, max attempts,
+fingerprint, failure reason, error), and re-runs the same review session in the
+same run — the retry packet carries the prior error as repair references, so
+the reviewer sees precisely what to fix. The budget is two retries, counted
+only from records appended after the latest `review_cycle` event, so every
+reopened cycle starts fresh. An error that repeats (same reason and error text,
+same fingerprint) is treated as exhausted immediately rather than burning the
+remaining attempt. Exhaustion keeps the existing `verify-failed` pause — no new
+pause reason — and adds `review_verdict_fingerprint`,
+`review_verdict_repair_attempt`, `review_verdict_repair_max_attempts`, and
+`review_verdict_repair_exhausted: true` to the pause details; the autopilot
+treats that key like `verification_repair_exhausted` and stops relaunching. A
+pending stop-after-current request wins over a retry: the run pauses instead,
+recording `review_verdict_repair_declined: "stop-after-current"` with
+`review_verdict_repair_exhausted: false` so the record does not claim a budget
+was spent. The mutation guard runs on every retry turn against a fresh
+pre-turn fingerprint, and scope refresh rewrites only the
+`## Delta Review Scope` section, so the rejection notes survive.
+
 `preflight` inspects the plan without invoking a harness and reports every
 finding needed to clear the loop-ready gate: missing readiness lines, contract
 schema problems, manifest/session drift, environment prerequisites, and
@@ -1486,6 +1506,71 @@ plan files. After a successful turn, the runner may update recognized status
 tables in `manifest.md` and `context.md`, but those tables are derived
 bookkeeping; handoff statuses remain authoritative.
 
+### Process sweep
+
+Every harness turn and every verification command check runs in a session of
+its own (`start_new_session=True`), so each owns a process group. However that
+turn or check ends, the runner then sweeps it: one read of the process table,
+then `SIGKILL` for every process still in the group and for every process
+recorded in a snapshot of the root's descendants taken while the root was still
+alive, provided it is still running under an identical command string *and* an
+identical start time. That re-verification is what makes a snapshot safe to act
+on after the fact: a pid reused by an unrelated process no longer matches on
+command, and one reused by a process running the same command is rejected on
+its start time (reported as `snapshot_pid_reused`). The start time comes from
+`ps -o lstart=`; where a platform's `ps` does not report one, entries carry no
+start time and command re-verification stands alone. Pid reuse also decides the
+other route: the caller reaps the root before sweeping, so a root pid that is
+still in the table now belongs to something else and the group under that number
+is not the turn's — enumeration is skipped (`pgid_skipped: root_pid_reused`)
+rather than aimed at a stranger's children. The root pid, the
+runner itself, and pids <= 1 are never signalled. The sweep is best-effort
+cleanup of something already finished, so an unreadable process table or a kill
+that raced a reap degrades to a report rather than an error and can never fail
+a turn or a check. It exists for two observed failures: a leftover dev server
+from an earlier check failing a later one, and a descendant that called `setsid`
+while holding the captured pipes open, which stalled a run for over two hours.
+
+The sweep is **on by default**. Set `ASL_PROCESS_SWEEP_DISABLED=1` (or `true`,
+`yes`, `on`) to turn it off; any other value, including a typo, leaves it
+enabled, so a mistyped opt-out never silently disables cleanup. With the sweep
+off, no process table is read and no report is produced.
+
+The two identification routes cover different escapes, and the paths differ in
+which routes they have:
+
+- **Process group members.** Positive identification, since a group is only
+  entered by inheritance from the root. This is the only route available after
+  a turn or check that exited on its own, because there is no kill to snapshot
+  before.
+- **A pre-kill descendant snapshot.** A group kill reparents a `setsid`
+  descendant to pid 1, after which no descendant walk can reach it, so the
+  snapshot only works if it was taken while the root was still alive. The
+  verification timeout, cancellation, and interrupt paths (the last covering a
+  Ctrl-C that lands on the thread running a sequential recipe) and the harness
+  turn timeout each take one; for a silent harness turn, the process tree the
+  hang sentinel samples while diagnosing it serves as the same evidence, and
+  that turn's sweep consumes it so a later turn handed the same root pid cannot
+  reuse a sample of a tree that is gone.
+
+The honest limit: a descendant that left the process group **and** whose parent
+chain died before any snapshot was taken is identified by neither route and
+survives the sweep. In practice that is a `setsid` descendant of a turn or check
+that exited normally while nothing had sampled its tree. It can no longer stall
+the run — the pipes it holds are no longer waited on, under the reader-join
+bounds above — but it is not killed. Work that must not outlive the turn or
+check that started it therefore must not be detached into a session of its own.
+
+A sweep that killed something, or failed to, appends one `process_sweep` event
+per turn and per swept check. Its payload carries `phase` (`turn` or
+`verification`), the run/turn/session identity, the `check` name for a
+verification sweep, and the report: `killed`, `kill_failed`, `survivors_after`,
+and an `enumeration` block with `expected_pgid`, `table_size`, `pgid_members`,
+`snapshot_size`, `snapshot_pid_reused`, `snapshot_verified`, `already_gone`, and
+`resampled`. A sweep
+that found nothing is the normal case and is not recorded, so a `process_sweep`
+event always means real cleanup happened.
+
 ## State Files
 
 By default, runtime metadata is stored under:
@@ -1579,8 +1664,11 @@ last observed lease activity. `events.jsonl` records
 `verification_check_finished`, `verification_finished`, `commit_started`,
 `commit_finished`, `run_control`, `review_scope_selected`,
 `review_session_created`, `review_cycle`,
-`review_repair_reopened`, `mailbox`, `reply_provided`, `run_paused`, and
-`run_finished` events as they happen. The `mailbox` name uses
+`review_repair_reopened`, `mailbox`, `reply_provided`, `process_sweep`,
+`run_paused`, and
+`run_finished` events as they happen. `process_sweep` is conditional: it is
+appended only when a post-turn or post-check sweep actually signalled a
+surviving process (see **Process sweep** above). The `mailbox` name uses
 `guidance-observed`, `wait-preparation-failed`, `wait-started`, and
 `wait-cleared` action variants; it does not add event names for raw mailbox
 records. Verification heartbeats
@@ -1865,7 +1953,12 @@ block with `stale_unfinished` (boolean) and `stale_reason` (string or `null`).
 `run_finished_at` and no active lock guards it (no lock file, or a stale lock);
 `stale_reason` carries a short human-readable explanation. Text output prints
 `Run state: stale/orphaned (<reason>)` immediately under the regular
-`Run state:` line whenever the runner state is orphaned. `status --json` error
+`Run state:` line whenever the runner state is orphaned. When that orphan is
+*provably* dead the same call also marks it abandoned (see [Stale unfinished
+`state.json` with no lock](#stale-unfinished-statejson-with-no-lock)), adding an
+`abandoned` block to `runner_state` and printing
+`Run state: abandoned (<detected_at> by <trigger>: <lock reason>)`.
+`status --json` error
 payloads echo the original argument in `plan_reference`: an uninspectable plan
 (or an unresolved label) reports `reason: malformed-plan`, an unreadable state
 root reports `reason: state-error`, and a bare label matching more than one
@@ -2253,6 +2346,13 @@ runner you still need:
 asl unlock ~/.local/share/agent-plans/example-plan/ --force --json
 ```
 
+A lock whose recorded `hostname` is not this host reports
+`lock was recorded on host <name>` and is the one stale lock `asl run` will not
+take over: the local process table holds no entry for a remote pid, so liveness
+there is unknowable rather than dead. Acquisition fails with a lock-contention
+error naming that host; clear it with `asl unlock` (no `--force` — the lock is
+stale) once you have confirmed the other runner is gone.
+
 If a plan has no pending sessions but is not complete, inspect every final
 `session-<id>.md` handoff and normalize statuses to exactly `pending` or
 `complete`. Ignore older status templates preserved above the final handoff.
@@ -2296,6 +2396,27 @@ acquire a fresh lock, recompute readiness, and resume normally. If the orphan
 appears alongside a `Lock: stale (...)` entry, clear the lock with
 `asl unlock ... --force --json` only after confirming no other runner is
 genuinely active.
+
+Left alone, such a run never gets a terminal record, so `asl tail --follow` and
+anything else waiting on `run_finished` waits forever. Both `asl status` and a
+stale-lock takeover inside `asl run` therefore reconstruct that ending once
+death is *proven*: the lock's pid is gone and its recorded `hostname` matches
+this host (or predates the field), or no lock has existed for the 120s
+`ABANDONED_NO_LOCK_GRACE_SECONDS` window past `run_started_at`. Marking rewrites
+`state.json` with `ok: false`, `reason: abandoned`, a `run_finished_at`, null
+`active_turn`/`active_verification`, and an `abandoned` block (`detected_at`,
+`trigger`, `lock_reason`, `detected_by_pid`), then appends one synthetic
+`run_finished` event carrying `synthetic: true` and `outcome: abandoned`. The
+recheck and both writes run under an exclusive `flock` on an `abandon.lock`
+sidecar in the plan's state directory, so concurrent `asl status` probes and a
+takeover racing them leave exactly one terminal record: the caller that cannot
+take that claim declines rather than waiting. It is idempotent, and never fires
+on an active lock, a lock recorded on another host,
+a fresh no-lock start, or a stale lock with no usable pid. Taking a stale lock
+over is not itself proof: the takeover path proves the *previous* owner's death
+from the lock it removed, so reclaiming an unparseable or pid-less lock clears
+the lock and leaves `state.json` and `events.jsonl` untouched. Any
+`waiting_for_reply` record survives as evidence of what the run died holding.
 
 ### Missing progress journal entry for the final session after a killed runner
 

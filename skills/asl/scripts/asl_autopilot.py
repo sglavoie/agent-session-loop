@@ -23,7 +23,7 @@ same-plan continuation guidance reported by the runner.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -34,6 +34,7 @@ import sys
 import time
 from typing import Any, Optional, Sequence
 import uuid
+from zoneinfo import ZoneInfo
 
 # Review verdict parsing is shared with the runner through
 # ``agent_session_loop.review`` (the same thin-wrapper pattern the
@@ -149,6 +150,40 @@ DEFAULT_STALL_IDLE_THRESHOLD = 90.0
 # surfaced the suspicion.
 DEFAULT_HANG_ESCALATION_PROBES = 2
 DEFAULT_HANG_IDLE_CEILING = 900.0
+
+# Quota auto-resume bounds, in play only under `--wait-quota-reset`. Quota
+# stays fail-closed at the policy layer (`pause_policy` still classifies
+# `quota-exhausted` as `requires_user`); the supervisor opts in above it and
+# these bound how far that opt-in may go. Overridable via kwargs only —
+# deliberately not CLI flags, matching the tuning constants above.
+#
+# `DEFAULT_QUOTA_RESET_BUFFER_SECONDS`: slack added past the parsed reset
+# instant. The hint is advisory free text a provider rounded, and clock skew
+# plus reset propagation both push the real availability later, so relaunching
+# exactly on it risks an immediate second rejection — which costs a whole
+# resume. Five minutes is negligible against a multi-hour quota window.
+#
+# `DEFAULT_QUOTA_WAIT_CEILING_SECONDS`: refuse to sleep longer than this for a
+# single reset. Eight days clears every real weekly quota window with room to
+# spare; the bound exists to reject a nonsense hint (a timestamp a year out),
+# not to second-guess a plausible one. Sized generously because stopping early
+# costs a supervision gap where nobody is watching the plan, which is the
+# expensive failure — the same reason `DEFAULT_ATTACH_MAX_SECONDS` is high.
+#
+# `DEFAULT_MAX_QUOTA_RESUMES`: how many resets one supervision may sleep
+# through. A provider that keeps rejecting right after each reset burns one
+# resume per attempt, so this is what converges a stuck provider to
+# `user_required` instead of looping forever. Eight covers a plan that spans
+# several days of quota windows.
+#
+# `QUOTA_WAIT_SLICE_SECONDS`: sleep granularity. The remaining time is
+# recomputed from wall clock every slice rather than accumulated, so a machine
+# suspend that jumps past the reset costs at most one slice of lateness instead
+# of the whole suspended duration.
+DEFAULT_QUOTA_RESET_BUFFER_SECONDS = 300.0
+DEFAULT_QUOTA_WAIT_CEILING_SECONDS = 691200.0
+DEFAULT_MAX_QUOTA_RESUMES = 8
+QUOTA_WAIT_SLICE_SECONDS = 30.0
 
 # Escalation classes carried in the `worker_hung` result's `hang.class`. The
 # first two mirror the runner's `hang_suspected.reason` values
@@ -2320,6 +2355,7 @@ def _run_result(
     pending: Optional[int] = None,
     outbox: Optional[dict] = None,
     hang: Optional[dict] = None,
+    quota_wait: Optional[dict] = None,
 ) -> dict:
     """Build a stable ``stage: run`` supervision result payload."""
     result: dict = {"ok": ok, "stage": RUN_STAGE, "reason": reason, "chunks": chunks}
@@ -2337,6 +2373,8 @@ def _run_result(
         result["run"] = run
     if retries is not None:
         result["retries"] = retries
+    if quota_wait is not None:
+        result["quota_wait"] = quota_wait
     if outbox is not None:
         result["outbox"] = outbox
     # Runner JSON is the freshest projection after a chunk; status is the
@@ -2403,17 +2441,233 @@ def _verification_repair_exhausted(run_payload: dict) -> bool:
     Session 10's runner fingerprints each verification failure and records
     ``verification_repair_exhausted`` in the paused ``details`` /
     ``pause_details`` when the failure fingerprint repeats a prior attempt or
-    the per-session attempt cap is exceeded. The supervisor honors that verdict
-    to stop an identical verification failure from looping, while a changed
-    failure (flag clear) stays eligible for another bounded retry.
+    the per-session attempt cap is exceeded. The runner's review-verdict repair
+    loop pauses under the same ``verify-failed`` reason and records
+    ``review_verdict_repair_exhausted`` on the same terms, so both keys are
+    honored. The supervisor stops relaunching on either verdict, while a
+    changed failure (flags clear) stays eligible for another bounded retry.
     """
     for key in ("pause_details", "details"):
         details = run_payload.get(key)
-        if isinstance(details, dict) and details.get(
-            "verification_repair_exhausted"
-        ):
+        if not isinstance(details, dict):
+            continue
+        if details.get("verification_repair_exhausted"):
+            return True
+        if details.get("review_verdict_repair_exhausted"):
             return True
     return False
+
+
+# Shapes a provider's reset hint actually takes once `runner._parse_retry_at`
+# has trimmed it to <=60 characters of free text: an ISO 8601 timestamp (only
+# tried when it opens with a date, so a bare `10:30` is not mistaken for one), a
+# relative `N hours` / `N minutes`, or a wall-clock time of day with an optional
+# `(Area/City)` zone. A bare digit string (`Retry-After`) is handled directly.
+_QUOTA_RESET_ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+_QUOTA_RESET_DURATION_RE = re.compile(
+    r"^(\d+)\s*(hours?|minutes?)$", re.IGNORECASE
+)
+_QUOTA_RESET_CLOCK_RE = re.compile(
+    r"^(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?"
+    r"(?:\s*\(([A-Za-z_]+(?:/[A-Za-z0-9_+-]+)+)\))?$",
+    re.IGNORECASE,
+)
+
+
+def _utc_now() -> datetime:
+    """Wall-clock now, timezone-aware. The quota wait's default clock seam.
+
+    Deliberately wall clock rather than the supervision loop's ``clock``
+    (``time.monotonic``): a reset hint names an absolute instant, and on macOS
+    the monotonic clock does not advance while the machine is suspended, so
+    only wall clock makes a suspend visible to the wait below.
+    """
+    return datetime.now(timezone.utc)
+
+
+def _shift_datetime(base: datetime, seconds: float) -> Optional[datetime]:
+    """``base`` plus ``seconds``, or ``None`` when that lands off the calendar.
+
+    A reset hint is bounded to 60 characters but not in magnitude, so a
+    provider printing a 60-digit ``Retry-After`` names a span no ``timedelta``
+    can hold, and a merely large one names an instant no ``datetime`` can
+    reach. Both raise ``OverflowError``; declining is the same fail-closed
+    answer the caller already gives an unparseable hint.
+    """
+    try:
+        return base + timedelta(seconds=seconds)
+    except OverflowError:
+        return None
+
+
+def _parse_quota_reset_at(
+    retry_at: object, *, now: datetime
+) -> Optional[datetime]:
+    """Resolve a runner ``retry_at`` hint to the absolute instant quota resets.
+
+    ``retry_at`` is the advisory free text ``runner._parse_retry_at`` extracted
+    from harness output (bounded to 60 characters); ``now`` is a
+    timezone-aware wall-clock instant. Recognizes a bare ``Retry-After`` second
+    count, an ISO 8601 timestamp (a trailing ``Z`` is tolerated; a naive one is
+    read as local time), a relative ``N hours`` / ``N minutes``, and a time of
+    day with an optional ``(Area/City)`` zone resolved to its next occurrence.
+    Anything else — including a zone name this host cannot resolve, or a value
+    naming an instant outside the representable calendar — returns ``None`` so
+    the caller keeps today's ``user_required`` stop instead of sleeping on a
+    guess.
+    """
+    if not isinstance(retry_at, str):
+        return None
+    value = retry_at.strip()
+    if not value:
+        return None
+
+    if value.isdigit():
+        return _shift_datetime(now, int(value))
+
+    duration = _QUOTA_RESET_DURATION_RE.match(value)
+    if duration is not None:
+        unit_seconds = 3600 if duration.group(2).lower().startswith("hour") else 60
+        return _shift_datetime(now, int(duration.group(1)) * unit_seconds)
+
+    if _QUOTA_RESET_ISO_RE.match(value):
+        text = value[:-1] + "+00:00" if value[-1] in "Zz" else value
+        try:
+            parsed = datetime.fromisoformat(text)
+            # Reading a naive timestamp as local time is itself a conversion
+            # that can leave the calendar (the last day of year 9999 does, in
+            # every zone), and the platform's `localtime` may fail with OSError.
+            return parsed.astimezone() if parsed.tzinfo is None else parsed
+        except (ValueError, OverflowError, OSError):
+            return None
+
+    return _parse_quota_reset_clock(value, now=now)
+
+
+def _parse_quota_reset_clock(value: str, *, now: datetime) -> Optional[datetime]:
+    """Resolve a ``10:30pm (America/New_York)`` style hint to the next such instant."""
+    match = _QUOTA_RESET_CLOCK_RE.match(value)
+    if match is None:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2) or 0)
+    meridiem = (match.group(3) or "").replace(".", "").lower()
+    zone_name = match.group(4)
+    if minute > 59:
+        return None
+    if meridiem:
+        if not 1 <= hour <= 12:
+            return None
+        hour = hour % 12 + (12 if meridiem == "pm" else 0)
+    elif hour > 23:
+        return None
+    if zone_name:
+        try:
+            local_now = now.astimezone(ZoneInfo(zone_name))
+        except (KeyError, ValueError, OSError):
+            return None
+    else:
+        local_now = now.astimezone()
+    target = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= local_now:
+        target += timedelta(days=1)
+    return target
+
+
+def _quota_wait_decision(
+    *,
+    enabled: bool,
+    pause_reason: str,
+    classification: Optional[dict],
+    resumes: int,
+    max_resumes: int,
+    now: datetime,
+    buffer_seconds: float,
+    ceiling_seconds: float,
+) -> tuple[Optional[datetime], Optional[dict]]:
+    """Decide whether a ``requires_user`` pause may be slept through.
+
+    Returns ``(deadline, block)``. ``deadline`` is the absolute instant to wait
+    until — the parsed reset plus ``buffer_seconds`` — or ``None`` when a guard
+    declined. ``block`` is the ``quota_wait`` report; it reaches a result only
+    on the declined path, where its ``skipped`` names the guard so a stop that
+    *could* have waited always says why it did not. With the feature off both
+    are ``None``: the default-off result stays byte-identical to the behavior
+    that predates the flag.
+
+    ``auth-failed`` and ``invalid-model`` reach this with the feature on and
+    are declined by the reason guard, so they are never slept through.
+    """
+    if not enabled:
+        return None, None
+
+    retry_at = (
+        classification.get("retry_at") if isinstance(classification, dict) else None
+    )
+    block: dict = {
+        "resumes": resumes,
+        "max_resumes": max_resumes,
+        "retry_at": retry_at if isinstance(retry_at, str) else None,
+        "ceiling_seconds": ceiling_seconds,
+    }
+
+    def declined(skipped: str) -> tuple[None, dict]:
+        return None, {**block, "skipped": skipped}
+
+    if pause_reason != _events.PAUSE_REASON_QUOTA_EXHAUSTED:
+        return declined("reason-not-quota")
+    if resumes >= max_resumes:
+        return declined("max-resumes-spent")
+    if block["retry_at"] is None:
+        return declined("no-reset-hint")
+    reset_at = _parse_quota_reset_at(block["retry_at"], now=now)
+    if reset_at is None:
+        return declined("unparseable-reset-hint")
+
+    # A reset already past (or moments away) still waits the buffer: the hint
+    # said quota is back, the harness said otherwise, so relaunching instantly
+    # would just re-fail. Each such attempt spends a resume, which is what
+    # makes a permanently stuck provider converge to `user_required`.
+    #
+    # The span is measured by subtracting two instants rather than by adding
+    # the buffer to the reset, so a hint at the end of the calendar is declined
+    # by the ceiling instead of overflowing on its way there. A deadline the
+    # calendar cannot hold is a wait no workable ceiling admits, so it declines
+    # by the same guard.
+    wait_seconds = max((reset_at - now).total_seconds(), 0.0) + buffer_seconds
+    block["wait_seconds"] = wait_seconds
+    block["reset_at"] = reset_at.isoformat()
+    deadline = _shift_datetime(now, wait_seconds)
+    if wait_seconds > ceiling_seconds or deadline is None:
+        return declined("wait-exceeds-ceiling")
+    return deadline, block
+
+
+def _wait_for_quota_reset(
+    deadline: datetime,
+    *,
+    now_fn=_utc_now,
+    sleep=time.sleep,
+    heartbeat=_emit_heartbeat,
+    slice_seconds: float = QUOTA_WAIT_SLICE_SECONDS,
+) -> float:
+    """Sleep until ``deadline``, in short slices, and return the seconds slept.
+
+    Every slice recomputes the remaining time from the wall clock instead of
+    accumulating slept durations, which makes the wait suspend-safe by
+    construction: a machine that sleeps through the reset wakes to a slice that
+    observes a past deadline and returns at once, rather than serving out the
+    remainder of a span that already elapsed.
+    """
+    slept = 0.0
+    while True:
+        remaining = (deadline - now_fn()).total_seconds()
+        if remaining <= 0:
+            return slept
+        heartbeat(f"quota reset wait: {int(remaining)}s remaining")
+        duration = min(slice_seconds, remaining)
+        sleep(duration)
+        slept += duration
 
 
 def _events_size(path: Optional[str]) -> Optional[int]:
@@ -2501,6 +2755,12 @@ def supervise_run(
     mailbox_watcher_factory=_MailboxWatcher.from_status,
     hang_escalation_probes: int = DEFAULT_HANG_ESCALATION_PROBES,
     hang_idle_ceiling: float = DEFAULT_HANG_IDLE_CEILING,
+    wait_quota_reset: bool = False,
+    wall_clock=_utc_now,
+    quota_reset_buffer_seconds: float = DEFAULT_QUOTA_RESET_BUFFER_SECONDS,
+    quota_wait_ceiling_seconds: float = DEFAULT_QUOTA_WAIT_CEILING_SECONDS,
+    max_quota_resumes: int = DEFAULT_MAX_QUOTA_RESUMES,
+    quota_wait_slice_seconds: float = QUOTA_WAIT_SLICE_SECONDS,
 ) -> dict:
     """Drive an ``asl run`` to completion within a global session budget.
 
@@ -2550,8 +2810,14 @@ def supervise_run(
       non-retryable harness failure that needs a human and has no useful Q&A
       context (``quota-exhausted``/``auth-failed``/``invalid-model``) stops
       immediately with ``user_required`` — carrying any reset (``retry_at``)
-      information — and is never retried. Any other pause stops with ``paused``
-      for agent/user reply handling. A non-paused failure stops with
+      information — and is never retried. Under ``wait_quota_reset`` a
+      ``quota-exhausted`` pause whose ``retry_at`` resolves to a reset within
+      ``quota_wait_ceiling_seconds`` is the one exception: the supervisor sleeps
+      to that reset plus ``quota_reset_buffer_seconds`` and relaunches through
+      the normal chunk machinery, up to ``max_quota_resumes`` times. Any
+      declined guard falls through to the same ``user_required`` stop, carrying
+      a ``quota_wait`` block that names the guard. Any other pause stops with
+      ``paused`` for agent/user reply handling. A non-paused failure stops with
       ``blocked``. A clean stop re-polls: the runner drives every pending session
       in one chunk, so relaunching normally only recurs for review continuations
       (or recoverable pause retries), never to chunk through pending sessions.
@@ -2652,6 +2918,10 @@ def supervise_run(
     attached_run_id: Optional[str] = None
     attached_lock_created_at: Optional[str] = None
     attached_pending: Optional[int] = None
+    # Quota resets slept through so far under `wait_quota_reset`. Bounds a
+    # provider that keeps rejecting immediately after each reset: every such
+    # attempt spends one resume, so the loop converges to `user_required`.
+    quota_resumes = 0
     # Hard hang bars for the attach path: each full status probe is one
     # observation, mirroring the per-tick observations a self-launched chunk
     # feeds from its events tailer.
@@ -2940,6 +3210,36 @@ def supervise_run(
             # surface immediately as `user_required` with any reset info, never
             # retry, and let run_autopilot skip `asl questions` for them.
             if policy.get("requires_user"):
+                # Opt-in quota auto-resume sits here rather than in
+                # `pause_policy`, which keeps quota fail-closed for every other
+                # consumer. Waiting reuses the main loop's relaunch machinery
+                # (chunk budget, mailbox lease re-prepare, reply-free
+                # relaunch), so only the sleep itself is new.
+                deadline, quota_wait = _quota_wait_decision(
+                    enabled=wait_quota_reset,
+                    pause_reason=pause_reason,
+                    classification=classification,
+                    resumes=quota_resumes,
+                    max_resumes=max_quota_resumes,
+                    now=wall_clock(),
+                    buffer_seconds=quota_reset_buffer_seconds,
+                    ceiling_seconds=quota_wait_ceiling_seconds,
+                )
+                if deadline is not None:
+                    quota_resumes += 1
+                    heartbeat(
+                        f"chunk {chunks}: quota exhausted; waiting "
+                        f"{int(quota_wait['wait_seconds'])}s for reset "
+                        f"(resume {quota_resumes}/{max_quota_resumes})"
+                    )
+                    _wait_for_quota_reset(
+                        deadline,
+                        now_fn=wall_clock,
+                        sleep=sleep,
+                        heartbeat=heartbeat,
+                        slice_seconds=quota_wait_slice_seconds,
+                    )
+                    continue
                 return run_result(
                     False,
                     "user_required",
@@ -2955,6 +3255,7 @@ def supervise_run(
                         "delayed_seconds": retry_delays.get(retry_key, 0.0),
                         "classification": classification,
                     },
+                    quota_wait=quota_wait,
                 )
 
             used = retry_counts.get(retry_key, 0)
@@ -3039,6 +3340,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     - ``--command`` carries the exact ``asl run ...`` command to supervise.
     - ``--json`` requests machine-readable output on stdout.
     - ``--reply-stdin`` resumes a paused run using reply text streamed on stdin.
+    - ``--wait-quota-reset`` opts in to sleeping through a quota reset instead
+      of stopping ``user_required``.
     """
     parser = argparse.ArgumentParser(
         prog=HELPER_NAME,
@@ -3058,6 +3361,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--reply-stdin",
         action="store_true",
         help="Resume a paused run using inferred reply text streamed on stdin.",
+    )
+    parser.add_argument(
+        "--wait-quota-reset",
+        action="store_true",
+        help=(
+            "On a quota-exhausted pause carrying a parsed reset time, sleep "
+            "until that reset (plus a buffer) and relaunch instead of stopping "
+            "for a human."
+        ),
     )
     return parser
 
@@ -3148,7 +3460,9 @@ def run_autopilot(
     context and re-tagged ``needs_agent_reply`` so the caller knows a reply is
     required. A run that stops ``user_required`` (a quota/auth/invalid-model
     harness failure) is passed through untouched — no ``asl questions`` fetch,
-    since no reply can clear it — so the caller can surface the reset info. A
+    since no reply can clear it — so the caller can surface the reset info.
+    ``args.wait_quota_reset`` forwards the opt-in that lets a quota pause sleep
+    to its reset and relaunch rather than stopping there. A
     run that stops ``worker_hung`` (a hard hang bar fired) is likewise passed
     through untouched — no ``asl questions`` fetch and no review read — carrying
     its ``hang`` payload so the operator can inspect the still-alive ``asl run``
@@ -3178,10 +3492,14 @@ def run_autopilot(
                 "command": parsed,
             }
 
+    # Both optional supervision knobs are passed only when in play, so a
+    # supervisor seam that predates either keyword still resolves.
+    supervisor_kwargs: dict[str, Any] = {}
     if reply_text is not None:
-        result = supervisor(parsed, reply_text=reply_text)
-    else:
-        result = supervisor(parsed)
+        supervisor_kwargs["reply_text"] = reply_text
+    if getattr(args, "wait_quota_reset", False):
+        supervisor_kwargs["wait_quota_reset"] = True
+    result = supervisor(parsed, **supervisor_kwargs)
 
     if not isinstance(result, dict):
         return result

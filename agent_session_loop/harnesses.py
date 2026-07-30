@@ -15,9 +15,17 @@ import signal
 import subprocess
 import threading
 import time
-from typing import IO, Literal
+from typing import IO, Any, Literal
 
 from . import config
+from .process_tree import (
+    clear_process_tree,
+    descendant_pids,
+    last_process_tree,
+    sample_process_table,
+    sweep_enabled,
+    sweep_survivors,
+)
 
 
 HarnessName = Literal["codex", "claude", "copilot"]
@@ -28,10 +36,80 @@ StreamCallback = Callable[[StreamName, str], None]
 
 # A dead harness process closes its pipes, so the reader threads see EOF at
 # once. This bound only exists for a descendant that outlives the harness and
-# keeps the inherited pipes open: such a process is never stopped, so this
-# caps what an abandoned turn pays to walk away from it (mirrors
-# verification._ABANDONED_READER_JOIN_SECONDS).
+# keeps the inherited pipes open. The post-turn sweep runs after this join and
+# kills such a descendant if it is still in the turn's process group, but one
+# that started a session of its own outlives both, so this caps what a turn
+# pays to walk away from it (mirrors verification._ABANDONED_READER_JOIN_SECONDS).
 _ABANDONED_READER_JOIN_SECONDS = 5.0
+
+
+def _sweep_process_table() -> dict[int, dict[str, Any]] | None:
+    """The table to snapshot descendants from, or ``None`` when sweeping is off."""
+    if not sweep_enabled():
+        return None
+    return sample_process_table()
+
+
+def _snapshot_descendants(
+    root_pid: int, table: Mapping[int, Mapping[str, Any]] | None
+) -> tuple[Mapping[str, Any], ...]:
+    """Record ``root_pid``'s descendants while it is still alive.
+
+    Killing the group reparents an escapee to pid 1, after which no descendant
+    walk can reach it. A snapshot taken beforehand is the sweep's only route to
+    one, so this must run before the kill, not after it.
+    """
+    if table is None:
+        return ()
+    return tuple(table[pid] for pid in descendant_pids(root_pid, table))
+
+
+def _kill_process_group(process: subprocess.Popen) -> None:
+    """Kill ``process`` and every descendant still in its process group.
+
+    Harness turns spawn with ``start_new_session=True``, so the child's process
+    group ID is its PID and every descendant inherits that group unless it
+    starts a session of its own. Killing only the direct child leaves a harness
+    that fanned out into helper processes running, still holding the captured
+    pipes open (mirrors :func:`verification._kill_process_group`).
+    """
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
+        # The group is already empty, or the child left it for one of its own.
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def _sweep_turn_descendants(
+    process: subprocess.Popen,
+    prior_snapshot: tuple[Mapping[str, Any], ...] = (),
+) -> dict[str, Any] | None:
+    """Kill whatever outlived the turn, or ``None`` when the sweep is off.
+
+    ``expected_pgid`` is the child's PID because turns spawn with
+    ``start_new_session=True``. ``root_pid`` is already reaped by the caller, so
+    the sweep excludes it rather than signalling a PID that may be reused.
+
+    Any tree the hang sentinel sampled for this same root is unioned into the
+    snapshot: on the paths that take no pre-kill snapshot of their own it is
+    the sweep's only route to a descendant that left the process group, and it
+    exists exactly for the silent turns where such a descendant is suspected.
+    It is consumed here, so a later turn that reuses this pid starts with no
+    sample rather than one describing a tree that is gone.
+    """
+    try:
+        if not sweep_enabled():
+            return None
+        return sweep_survivors(
+            root_pid=process.pid,
+            expected_pgid=process.pid,
+            prior_snapshot=(*prior_snapshot, *last_process_tree(process.pid)),
+        )
+    finally:
+        clear_process_tree(process.pid)
 
 
 def _join_readers(
@@ -75,6 +153,7 @@ class HarnessResult:
     name: HarnessName | None = None
     timed_out: bool = False
     interrupted: bool = False
+    process_sweep: dict[str, Any] | None = None
 
 
 class _OutputProcessor:
@@ -377,6 +456,11 @@ class HarnessAdapter:
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
+                # Its own session, so every descendant that inherits the turn's
+                # process group can be killed at once on timeout and enumerated
+                # by the post-turn sweep. Descendants that start a session of
+                # their own are out of reach: see :func:`_kill_process_group`.
+                start_new_session=True,
             )
         except FileNotFoundError as error:
             raise HarnessError(
@@ -466,12 +550,17 @@ class HarnessAdapter:
         stderr_thread.start()
 
         timed_out = False
+        prior_snapshot: tuple[Mapping[str, Any], ...] = ()
+        process_sweep: dict[str, Any] | None = None
         try:
             try:
                 process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 timed_out = True
-                process.kill()
+                prior_snapshot = _snapshot_descendants(
+                    process.pid, _sweep_process_table()
+                )
+                _kill_process_group(process)
                 process.wait()
 
             _join_readers(
@@ -479,6 +568,9 @@ class HarnessAdapter:
                 timeout=_ABANDONED_READER_JOIN_SECONDS,
             )
             abandon_readers()
+            # After the join, so an in-group straggler gets to flush what it
+            # was writing before the sweep takes it down.
+            process_sweep = _sweep_turn_descendants(process, prior_snapshot)
         except KeyboardInterrupt:
             if process.poll() is None:
                 process.terminate()
@@ -490,6 +582,10 @@ class HarnessAdapter:
             stdout_thread.join(timeout=1)
             stderr_thread.join(timeout=1)
             abandon_readers()
+            # This branch returns early, so it needs its own sweep: the one on
+            # the normal path is never reached from here. Explicit signalling
+            # above is unchanged; the sweep only reaches what it left behind.
+            interrupt_sweep = _sweep_turn_descendants(process)
             return HarnessResult(
                 name=self.name,
                 argv=invocation.argv,
@@ -502,6 +598,7 @@ class HarnessAdapter:
                     last_message_path=invocation.last_message_path,
                 ),
                 interrupted=True,
+                process_sweep=interrupt_sweep,
             )
 
         if reader_errors:
@@ -522,6 +619,7 @@ class HarnessAdapter:
                     last_message_path=invocation.last_message_path,
                 ),
                 timed_out=True,
+                process_sweep=process_sweep,
             )
 
         interrupted = process.returncode == -signal.SIGINT
@@ -537,6 +635,7 @@ class HarnessAdapter:
                 last_message_path=invocation.last_message_path,
             ),
             interrupted=interrupted,
+            process_sweep=process_sweep,
         )
 
 

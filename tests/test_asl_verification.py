@@ -47,6 +47,7 @@ from agent_session_loop import (
     plans,
     preflight,
     prepare,
+    process_tree,
     progress_cli,
     progress_repair,
     qna,
@@ -70,11 +71,45 @@ from tests.support import (
     assert_marked_pids_alive,
     assert_marked_pids_exited,
     kill_marked_pids,
-    wait_until,
     write_plan,
     write_process_tree_scripts,
     _contract_block,
 )
+
+
+#: A descendant that leaves the check's process group and keeps the inherited
+#: stdout/stderr open, so the reader threads draining them never see EOF while
+#: it lives.
+_DETACHED_ESCAPEE_SOURCE = (
+    "import os, pathlib, sys, time\n"
+    "root = pathlib.Path(sys.argv[1])\n"
+    "pending = root / 'pending' / 'escapee'\n"
+    "pending.write_text(str(os.getpid()))\n"
+    "os.replace(pending, root / 'escapees' / 'escapee')\n"
+    "time.sleep(120)\n"
+)
+
+#: The command a check runs: start the escapee, wait until it is live, exit 0.
+_DETACHED_SPAWNER_SOURCE = (
+    "import pathlib, subprocess, sys, time\n"
+    "root = pathlib.Path(sys.argv[1])\n"
+    "subprocess.Popen(\n"
+    "    [sys.executable, str(root / 'escapee.py'), str(root)],\n"
+    "    start_new_session=True,\n"
+    ")\n"
+    "while not (root / 'escapees' / 'escapee').exists():\n"
+    "    time.sleep(0.01)\n"
+)
+
+
+def write_detached_spawner_script(root: Path) -> Path:
+    """Lay out a command that exits 0 leaving one `setsid` escapee behind."""
+    for name in ("pending", "escapees"):
+        (root / name).mkdir(parents=True, exist_ok=True)
+    (root / "escapee.py").write_text(_DETACHED_ESCAPEE_SOURCE, encoding="utf-8")
+    spawner = root / "spawn_detached.py"
+    spawner.write_text(_DETACHED_SPAWNER_SOURCE, encoding="utf-8")
+    return spawner
 
 
 class VerificationExecutorTests(unittest.TestCase):
@@ -168,11 +203,18 @@ class VerificationExecutorTests(unittest.TestCase):
             assert_marked_pids_exited(root / "grandchildren", label="grandchild")
             self.assertEqual([], list((root / "late").iterdir()))
 
-    def test_command_timeout_leaves_detached_descendants_running(self) -> None:
-        """The timeout path shares the process-group limit with cancellation."""
+    def test_command_timeout_sweeps_detached_descendants(self) -> None:
+        """`killpg` cannot reach a `setsid` escapee; the pre-kill snapshot can.
+
+        The escapee leaves the check's process group, so the group kill misses
+        it and it survives long enough to write its orphaned side effect. What
+        finds it afterwards is the descendant snapshot taken while the check's
+        root was still alive -- once the root is dead the escapee is reparented
+        to pid 1 and no walk can reach it.
+        """
         # The tempdir is torn down through addCleanup rather than a `with`
-        # block so the escapee is killed while its PID marker still exists:
-        # cleanups run last-registered-first.
+        # block so a surviving escapee is killed while its PID marker still
+        # exists: cleanups run last-registered-first.
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
@@ -198,11 +240,241 @@ class VerificationExecutorTests(unittest.TestCase):
         self.assertEqual(["tree"], [p.name for p in (root / "started").iterdir()])
         self.assertEqual(["tree"], [p.name for p in (root / "grandchildren").iterdir()])
         assert_marked_pids_exited(root / "started", label="command process")
-        assert_marked_pids_alive(root / "grandchildren", label="detached grandchild")
-        wait_until(
-            lambda: [p.name for p in (root / "late").iterdir()] == ["tree"],
-            timeout=30.0,
+        escapee = int((root / "grandchildren" / "tree").read_text(encoding="utf-8"))
+        # The late marker is the proof the escapee outlived the group kill: it
+        # is only written once being orphaned changes its parent PID.
+        self.assertEqual(["tree"], [p.name for p in (root / "late").iterdir()])
+        self.assertEqual([escapee], result.sweep["killed"])
+        self.assertEqual([], result.sweep["survivors_after"])
+        # The group kill had already emptied the group, so the snapshot -- not
+        # the pgid enumeration -- is what identified the escapee.
+        self.assertEqual([], result.sweep["enumeration"]["pgid_members"])
+        self.assertEqual([escapee], result.sweep["enumeration"]["snapshot_verified"])
+        assert_marked_pids_exited(root / "grandchildren", label="detached grandchild")
+
+    def test_command_timeout_reports_a_sweep_for_a_group_that_died_with_it(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent_script, grandchild_script = write_process_tree_scripts(root)
+            check = contracts.CommandCheck(
+                name="tree",
+                argv=(
+                    "python3",
+                    str(parent_script),
+                    "tree",
+                    str(root),
+                    str(grandchild_script),
+                ),
+                timeout_seconds=2.0,
+            )
+
+            result = verification.run_check(check, repo_root=root)
+
+            self.assertEqual("command-timeout", result.failure_reason)
+            assert_marked_pids_exited(root / "grandchildren", label="grandchild")
+            # Nothing outlived the group kill, so the sweep still reports --
+            # it just has nothing left to do.
+            self.assertEqual([], result.sweep["survivors_after"])
+            self.assertEqual([], result.sweep["enumeration"]["pgid_members"])
+
+    #: Leave one background process behind in the check's own process group and
+    #: exit 0. Its output is redirected so it does not also hold the captured
+    #: pipes -- that is the separate escapee case.
+    LEFTOVER_COMMAND = (
+        "mkdir -p sleepers; sleep 300 >/dev/null 2>&1 & "
+        "echo $! > sleepers/leftover; exit 0"
+    )
+
+    def test_exited_check_sweeps_a_leftover_same_group_process(self) -> None:
+        """The port-4173 shape: a background process the check never reaped."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            check = contracts.CommandCheck(
+                name="leftover",
+                argv=("sh", "-c", self.LEFTOVER_COMMAND),
+                timeout_seconds=30.0,
+            )
+
+            result = verification.run_check(check, repo_root=root)
+
+            self.assertEqual("pass", result.status)
+            sleeper = int(
+                (root / "sleepers" / "leftover").read_text(encoding="utf-8")
+            )
+            # It never left the group, so the pgid enumeration alone finds it.
+            self.assertEqual([sleeper], result.sweep["enumeration"]["pgid_members"])
+            self.assertEqual([sleeper], result.sweep["killed"])
+            self.assertEqual([], result.sweep["survivors_after"])
+            assert_marked_pids_exited(root / "sleepers", label="leftover sleeper")
+
+    def test_exited_check_does_not_hang_on_a_detached_descendant(self) -> None:
+        """The 2h20m hang shape, bounded.
+
+        An escapee that inherited the captured pipes keeps the reader threads
+        from ever seeing EOF. A check that exits 0 is never killed, so nothing
+        else closes those pipes: without a bound on the join the check waits
+        for the escapee's whole lifetime. The bound is the fix here -- the
+        sweep that follows is pgid-only on this path and does not reach it.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        script = write_detached_spawner_script(root)
+        self.addCleanup(kill_marked_pids, root / "escapees")
+        check = contracts.CommandCheck(
+            name="escapee",
+            argv=("python3", str(script), str(root)),
+            timeout_seconds=120.0,
         )
+
+        # Real bound is 30s; the assertion is that the join ends at the bound
+        # rather than at the escapee's 120s sleep.
+        with mock.patch.object(verification, "_EXITED_READER_JOIN_SECONDS", 1.0):
+            start = time.monotonic()
+            result = verification.run_check(check, repo_root=root)
+            elapsed = time.monotonic() - start
+
+        self.assertEqual("pass", result.status)
+        self.assertLess(elapsed, 30.0)
+        self.assertEqual(["escapee"], [p.name for p in (root / "escapees").iterdir()])
+        assert_marked_pids_alive(root / "escapees", label="detached descendant")
+        self.assertEqual([], result.sweep["enumeration"]["pgid_members"])
+        self.assertEqual([], result.sweep["killed"])
+
+    def test_sweep_opt_out_leaves_a_leftover_process_alone(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        self.addCleanup(kill_marked_pids, root / "sleepers")
+        check = contracts.CommandCheck(
+            name="leftover",
+            argv=("sh", "-c", self.LEFTOVER_COMMAND),
+            timeout_seconds=30.0,
+        )
+
+        with mock.patch.dict(os.environ, {process_tree.SWEEP_DISABLED_ENV_VAR: "1"}):
+            result = verification.run_check(check, repo_root=root)
+
+        self.assertEqual("pass", result.status)
+        # No report at all, and the leftover is exactly where it was.
+        self.assertIsNone(result.sweep)
+        assert_marked_pids_alive(root / "sleepers", label="leftover sleeper")
+
+    def _detached_tree_contract(self, root: Path) -> contracts.CompletionContract:
+        """A one-check sequential recipe whose tree leaves a `setsid` escapee."""
+        parent_script, grandchild_script = write_process_tree_scripts(root)
+        self.addCleanup(kill_marked_pids, root / "grandchildren")
+        return self._contract(
+            (
+                contracts.CommandCheck(
+                    name="tree",
+                    argv=(
+                        "python3",
+                        str(parent_script),
+                        "tree",
+                        str(root),
+                        str(grandchild_script),
+                        "detached",
+                    ),
+                    # Far above the interrupt window, so an interrupt rather
+                    # than the timeout is what ends the check; still bounded so
+                    # a fixture that never starts fails instead of hanging.
+                    timeout_seconds=30.0,
+                ),
+            )
+        )
+
+    def _interrupt_when_marker_appears(self, marker: Path) -> None:
+        """Ctrl-C the calling thread once ``marker`` exists.
+
+        The check runs in a session of its own, so a SIGINT aimed at this
+        process reaches the test runner alone -- everything the check spawned
+        is left for the code under test to clean up. Nothing is signalled if
+        the marker never appears: the check's own timeout bounds that instead.
+        """
+
+        def interrupt() -> None:
+            deadline = time.monotonic() + 20
+            while not marker.exists():
+                if time.monotonic() > deadline:
+                    return
+                time.sleep(0.01)
+            os.kill(os.getpid(), signal.SIGINT)
+
+        thread = threading.Thread(target=interrupt, daemon=True)
+        self.addCleanup(thread.join, 5.0)
+        thread.start()
+
+    def test_sequential_interrupt_sweeps_detached_descendant(self) -> None:
+        """A Ctrl-C during a sequential recipe still reaches a `setsid` escapee.
+
+        The interrupt lands on the thread running the check, so that branch
+        owns both halves of the cleanup: the snapshot has to be taken while the
+        root is still alive -- the group kill cannot reach a descendant that
+        left the group, and once the root is reaped no walk can either.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        contract = self._detached_tree_contract(root)
+        self._interrupt_when_marker_appears(root / "started" / "tree")
+
+        start = time.monotonic()
+        with self.assertRaises(KeyboardInterrupt):
+            verification.run_verification(contract, repo_root=root)
+        elapsed = time.monotonic() - start
+
+        # The interrupt is what returned control, not the check's own timeout.
+        self.assertLess(elapsed, 25.0)
+        self.assertEqual(["tree"], [p.name for p in (root / "grandchildren").iterdir()])
+        assert_marked_pids_exited(root / "started", label="command process")
+        assert_marked_pids_exited(root / "grandchildren", label="detached grandchild")
+
+    def test_sequential_interrupt_sweep_opt_out_skips_the_process_table(self) -> None:
+        """Opted out, the interrupt path samples nothing and kills nothing.
+
+        The escapee surviving here is also what proves the group kill never
+        reaches it: in the sibling test above it dies because of the sweep.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        contract = self._detached_tree_contract(root)
+        self._interrupt_when_marker_appears(root / "started" / "tree")
+
+        with (
+            mock.patch.dict(os.environ, {process_tree.SWEEP_DISABLED_ENV_VAR: "1"}),
+            mock.patch.object(verification, "sample_process_table") as snapshot_sampler,
+            mock.patch.object(process_tree, "sample_process_table") as sweep_sampler,
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            verification.run_verification(contract, repo_root=root)
+
+        snapshot_sampler.assert_not_called()
+        sweep_sampler.assert_not_called()
+        assert_marked_pids_exited(root / "started", label="command process")
+        assert_marked_pids_alive(root / "grandchildren", label="detached grandchild")
+
+    def test_sweep_report_reaches_the_serialized_check_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            check = contracts.CommandCheck(
+                name="ok",
+                argv=("python3", "-c", "pass"),
+                timeout_seconds=30.0,
+            )
+
+            result = verification.run_check(check, repo_root=root)
+            payload = verification._check_result_payload(result)
+
+            self.assertIn("sweep", payload)
+            self.assertEqual(result.sweep, payload["sweep"])
+            # The compaction that strips raw output keeps the report.
+            self.assertEqual(
+                result.sweep, runner._strip_check_output(payload)["sweep"]
+            )
 
     def test_command_check_reports_command_not_found(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1412,6 +1684,9 @@ class ParallelVerificationTests(unittest.TestCase):
             )
             for row in [*payload["checks"], *payload["failures"]]:
                 row.pop("duration_seconds")
+                # Per-execution evidence like timings: the sweep report names
+                # the PIDs of *this* run, so it can never match across two.
+                self.assertIsNotNone(row.pop("sweep"))
             return payload
 
         sequential_details = details(sequential, False)
@@ -1606,15 +1881,14 @@ class ParallelVerificationTests(unittest.TestCase):
         self.assertEqual([], finished)
         self.assertFalse(artifact_dir.exists())
 
-    def test_interrupt_leaves_detached_descendants_running(self) -> None:
-        """Pin the documented limit: `setsid` descendants outlive cancellation.
+    def test_interrupt_sweeps_detached_descendants(self) -> None:
+        """Cancellation reaches `setsid` escapees through the pre-kill snapshot.
 
-        Cancellation kills the check's process group, so a descendant that left
-        that group by starting a session of its own is out of reach and does go
-        on to write a repository side effect. What survives the escape is the
-        rest of the guarantee: the direct command processes die, control returns
-        bounded rather than waiting out the escapee's inherited pipe, and the
-        abandoned checks still publish no result, artifact, or event.
+        The kill runs on the interrupted thread rather than in the workers, so
+        the snapshot has to be taken there too -- once the group kill lands the
+        escapee is reparented to pid 1 and its owning worker can no longer walk
+        to it. Everything else about cancellation is unchanged: control returns
+        bounded, and the abandoned checks publish no result, artifact, or event.
         """
         root = self.repo_root / "trees"
         parent_script, grandchild_script = write_process_tree_scripts(root)
@@ -1665,12 +1939,10 @@ class ParallelVerificationTests(unittest.TestCase):
         self.assertEqual(total, len(list((root / "started").iterdir())))
         self.assertEqual(total, len(list((root / "grandchildren").iterdir())))
         assert_marked_pids_exited(root / "started", label="command process")
-        # The escapees are still running, and being orphaned is exactly what
-        # lets them write after verification published its terminal state.
-        assert_marked_pids_alive(root / "grandchildren", label="detached grandchild")
-        wait_until(
-            lambda: len(list((root / "late").iterdir())) == total, timeout=30.0
-        )
+        # Every escapee outlived the group kill -- the late marker is written
+        # only once being orphaned changes its parent PID -- and was then swept.
+        self.assertEqual(total, len(list((root / "late").iterdir())))
+        assert_marked_pids_exited(root / "grandchildren", label="detached grandchild")
         # An escaped descendant holds the captured pipes open, so cancellation
         # pays the bounded reader join instead of returning immediately -- but
         # it is still bounded, not the escapee's full 60s lifetime.

@@ -21,6 +21,11 @@ EVENT_SCHEMA_VERSION = 2
 RUNNER_STATUS_PREFIX = "Runner status:"
 RUNNER_PAUSE_PREFIX = "RUNNER_PAUSE:"
 RUN_PAUSED_EVENT = "run_paused"
+RUN_FINISHED_EVENT = "run_finished"
+# ``run_finished.outcome`` for a run reconstructed from proof of death rather
+# than finished by its own runner. Reusing the ``run_finished`` name keeps
+# every terminal-event consumer (tail, compaction, autopilot) working unchanged.
+RUN_OUTCOME_ABANDONED = "abandoned"
 TURN_HEARTBEAT_EVENT = "turn_heartbeat"
 TURN_HANG_SUSPECTED_EVENT = "turn_hang_suspected"
 TURN_HANG_CLEARED_EVENT = "turn_hang_cleared"
@@ -33,6 +38,11 @@ REVIEW_SESSION_CREATED_EVENT = "review_session_created"
 REVIEW_SCOPE_EVENT = "review_scope_selected"
 REVIEW_CYCLE_EVENT = "review_cycle"
 REVIEW_REPAIR_REOPENED_EVENT = "review_repair_reopened"
+# Appended when a review turn produced a verdict that failed validation and the
+# runner re-ran the same review session in-run instead of pausing. The
+# exhausted case keeps the ``verify-failed`` pause and carries a
+# ``review_verdict_repair_exhausted`` detail instead of a new pause reason.
+REVIEW_VERDICT_RETRY_EVENT = "review_verdict_retry"
 REPLY_PROVIDED_EVENT = "reply_provided"
 VERIFICATION_STARTED_EVENT = "verification_started"
 VERIFICATION_CHECK_STARTED_EVENT = "verification_check_started"
@@ -42,6 +52,10 @@ VERIFICATION_FINISHED_EVENT = "verification_finished"
 PREFLIGHT_AUTO_REPAIRED_EVENT = "preflight_auto_repaired"
 PREFLIGHT_SKIPPED_EVENT = "preflight_skipped"
 AGENT_MUX_DELIVERY_EVENT = "agent_mux_delivery"
+# Appended after a harness turn or a verification check whose post-run process
+# sweep actually killed something (or failed to). A sweep that found nothing is
+# the normal case and is not recorded.
+PROCESS_SWEEP_EVENT = "process_sweep"
 STATE_FILE_NAME = "state.json"
 EVENTS_FILE_NAME = "events.jsonl"
 RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED = "stop-after-current-requested"

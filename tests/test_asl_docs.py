@@ -52,6 +52,7 @@ from agent_session_loop import (
     plans,
     preflight,
     prepare,
+    process_tree,
     progress_cli,
     progress_repair,
     qna,
@@ -2014,6 +2015,74 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
             self.assertIn("just test-fast", text)
             self.assertIn("just test-all", text)
         self.assertIn("tests/run_suite.py", self.docs)
+
+    def sweep_section(self) -> str:
+        return self.docs.split("### Process sweep", 1)[1].split("\n## ", 1)[0]
+
+    def test_process_sweep_docs_match_the_authoritative_definitions(self) -> None:
+        section = self.sweep_section()
+        self.assertIn(f"`{events.PROCESS_SWEEP_EVENT}` event", section)
+        # The opt-out is documented value by value; each documented value has
+        # to actually disable the sweep.
+        self.assertIn(f"`{process_tree.SWEEP_DISABLED_ENV_VAR}=1`", section)
+        for value in ("true", "yes", "on"):
+            self.assertIn(f"`{value}`", section)
+        for value in ("1", "true", "yes", "on"):
+            self.assertFalse(
+                process_tree.sweep_enabled(
+                    {process_tree.SWEEP_DISABLED_ENV_VAR: value}
+                ),
+                f"docs claim {value!r} disables the sweep",
+            )
+        self.assertIn("The sweep is **on by default**.", section)
+        self.assertTrue(process_tree.sweep_enabled({}))
+        self.assertIn("including a typo, leaves it\nenabled", section)
+        self.assertTrue(
+            process_tree.sweep_enabled(
+                {process_tree.SWEEP_DISABLED_ENV_VAR: "disbaled"}
+            )
+        )
+
+    def test_process_sweep_docs_list_every_report_key(self) -> None:
+        section = self.sweep_section()
+        # No group to enumerate and nothing snapshotted, so this reads the
+        # process table and signals nothing.
+        report = process_tree.sweep_survivors(
+            root_pid=os.getpid(), expected_pgid=None
+        )
+        self.assertEqual([], report["killed"])
+        for key in report:
+            self.assertIn(
+                f"`{key}`", section, f"docs never mention report key {key!r}"
+            )
+        for key in report["enumeration"]:
+            self.assertIn(
+                f"`{key}`",
+                section,
+                f"docs never mention enumeration key {key!r}",
+            )
+
+    def test_process_sweep_docs_state_the_limit_and_drop_the_stale_claims(
+        self,
+    ) -> None:
+        section = self.sweep_section()
+        self.assertIn(
+            "is identified by neither route and\nsurvives the sweep.", section
+        )
+        # Superseded by the sweep: the parallel-verification contract used to
+        # present an escaped descendant as something the runner never chases.
+        self.assertNotIn("so the runner does not try", self.docs)
+        self.assertNotIn("is **not** stopped by either", self.docs)
+
+    def test_reader_join_bounds_match_the_documented_numbers(self) -> None:
+        self.assertEqual(5.0, verification._ABANDONED_READER_JOIN_SECONDS)
+        self.assertEqual(30.0, verification._EXITED_READER_JOIN_SECONDS)
+        self.assertIn(
+            "the pipe readers of a killed check are joined under a five-second\n"
+            "  limit and those of a check that exited on its own under thirty "
+            "seconds",
+            self.docs,
+        )
 
 
 if __name__ == "__main__":

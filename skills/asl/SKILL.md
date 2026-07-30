@@ -186,6 +186,33 @@ paused run may also cite a `command-not-runnable` readiness finding (an
 unresolved `argv[0]`, or a non-importable `python -m <module>`); surface it
 rather than resuming.
 
+#### Optional: sleep through a quota reset
+
+A `quota-exhausted` pause is fail-closed by default — the helper stops
+`user_required` and waits for a human. Pass `--wait-quota-reset` to the
+**helper** (not inside the `--command` string) to let it sleep to the
+provider's reset instead:
+
+```text
+<skill-dir>/scripts/asl-autopilot.py --command '<exact asl run command>' --json --wait-quota-reset
+```
+
+It waits only when every guard passes: the pause is `quota-exhausted`, the
+runner parsed a reset hint (`retry_at` — a `Retry-After` second count, an ISO
+timestamp, `N hours` / `N minutes`, or a time of day with an optional
+`(Area/City)` zone; one naming an instant off the end of the calendar counts as
+unparsed), the resulting wait fits an eight-day ceiling, and fewer than eight
+resets have already been slept through in this supervision. It then
+sleeps to that reset plus a five-minute buffer — in short slices measured
+against the wall clock, so a machine suspend is noticed rather than slept out —
+and relaunches the same plan through the ordinary chunk machinery. A reset
+already in the past waits just the buffer, and each attempt spends one of the
+eight resumes, so a provider that keeps rejecting converges to `user_required`
+rather than looping. `auth-failed` and `invalid-model` never wait. Any declined
+guard keeps today's `user_required` stop and names the guard under
+`quota_wait.skipped`, so a run that could have waited always says why it did
+not.
+
 #### reason: worker_hung
 
 Two hard hang bars sit above the soft `WARN possibly stalled` line: the

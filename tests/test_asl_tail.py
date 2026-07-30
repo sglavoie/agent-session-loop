@@ -555,6 +555,62 @@ class TailFollowerTests(unittest.TestCase):
             self.assertIn("run finished: run run-1", text)
             self.assertIn("stdout session=1 turn=1 | final stdout", text)
 
+    def test_tail_follower_stops_on_synthetic_abandoned_run_finished(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path, events_path = self.setup_tail_files(
+                tmp_dir
+            )
+            turn_payload = {
+                "run_id": "run-1",
+                "session": 1,
+                "session_id": "1",
+                "total_sessions": 1,
+                "turn_index": 1,
+            }
+            # The state file still looks in-flight: only the synthetic event
+            # can terminate the follower here, which is the whole reason the
+            # abandoned record reuses the `run_finished` name.
+            self.write_state_payload(
+                state_path,
+                {
+                    "run_id": "run-1",
+                    "active_turn": turn_payload,
+                    "turns": [],
+                    "run_finished_at": None,
+                },
+            )
+            out = io.StringIO()
+            follower = tail.TailFollower(
+                plan_dir,
+                state_dir=state_dir,
+                out=out,
+                poll_interval=0.01,
+            )
+            self.addCleanup(self.cleanup_follower, follower)
+
+            follower.start()
+            events.append_event(
+                events_path,
+                events.Event(
+                    name=events.RUN_FINISHED_EVENT,
+                    payload={
+                        "run_id": "run-1",
+                        "ok": False,
+                        "paused": False,
+                        "reason": "abandoned",
+                        "duration_seconds": None,
+                        "synthetic": True,
+                        "outcome": events.RUN_OUTCOME_ABANDONED,
+                    },
+                    created_at="2026-06-11T12:00:02+00:00",
+                ),
+            )
+
+            wait_until(lambda: follower.done)
+            self.assertTrue(follower.join(1.0))
+            self.assertIn("run paused: run run-1, reason abandoned", out.getvalue())
+
     def test_tail_follower_suppresses_event_lines_when_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)

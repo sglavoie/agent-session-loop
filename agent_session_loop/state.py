@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import fcntl
 import json
 import os
 from pathlib import Path
 import shlex
+import socket
 import sys
 from typing import Any
 
@@ -31,10 +34,21 @@ from .formatting import format_duration_seconds
 
 
 LOCK_FILE_NAME = "lock.json"
+# Sidecar `flock` target that serializes abandonment. Deliberately not the
+# plan lock: abandonment runs *while* another process holds or is taking that
+# lock, so the two claims have to be independent.
+ABANDON_CLAIM_FILE_NAME = "abandon.lock"
 RUNS_DIR_NAME = "runs"
 RESULT_FILE_NAME = "result.json"
 TURN_DIR_PREFIX = "turn-"
 STATE_MIGRATED_EVENT = "state_migrated"
+# How long an unfinished run may go without any lock file before its absence
+# counts as proof of death. A booting runner writes `state.json` before its
+# lock, so the window has to outlast that gap by a wide margin.
+ABANDONED_NO_LOCK_GRACE_SECONDS = 120.0
+ABANDONED_REASON = "abandoned"
+ABANDONED_TRIGGER_LOCK_TAKEOVER = "lock-takeover"
+ABANDONED_TRIGGER_STATUS = "status"
 WAITING_FOR_REPLY_STATUS_LIVE = "live"
 WAITING_FOR_REPLY_STATUS_EXPIRED = "expired"
 WAITING_FOR_REPLY_STATUS_INVALID = "invalid"
@@ -102,6 +116,21 @@ class LockInfo:
     @property
     def active(self) -> bool:
         return not self.stale
+
+    @property
+    def owner_hostname(self) -> str | None:
+        """Host that recorded ``pid``, or ``None`` for legacy locks."""
+        return _nonempty_str(self.raw.get("hostname"))
+
+    @property
+    def foreign_host(self) -> bool:
+        """Whether ``pid`` belongs to another host's process table.
+
+        Nothing this host can observe says anything about such a lock's owner,
+        so it is never proof of death and never safe to steal.
+        """
+        hostname = self.owner_hostname
+        return hostname is not None and hostname != socket.gethostname()
 
 
 @dataclass(frozen=True)
@@ -371,6 +400,7 @@ def _read_lock_path(lock_path: Path, expected_plan_dir: Path) -> LockInfo | None
     pid = _coerce_pid(raw.get("pid"))
     plan_dir = str(raw.get("plan_dir", ""))
     created_at = str(raw.get("created_at", ""))
+    hostname = _nonempty_str(raw.get("hostname"))
     stale = False
     reason = "active"
 
@@ -380,6 +410,12 @@ def _read_lock_path(lock_path: Path, expected_plan_dir: Path) -> LockInfo | None
     elif pid is None:
         stale = True
         reason = "lock has no valid pid"
+    elif hostname is not None and hostname != socket.gethostname():
+        # The local process table describes local pids only, so it can neither
+        # confirm nor refute this owner. Stale here means "not usable by this
+        # host", never "dead".
+        stale = True
+        reason = f"lock was recorded on host {hostname}"
     elif not is_pid_running(pid):
         stale = True
         reason = f"pid {pid} is not running"
@@ -406,7 +442,11 @@ def acquire_lock(
     *,
     owner: str = "agent-session-loop",
 ) -> LockInfo:
-    """Create a lock for a plan, removing stale locks first."""
+    """Create a lock for a plan, removing stale locks this host can judge.
+
+    A lock recorded on another host is refused rather than removed: nothing
+    here can tell a dead remote runner from a live one.
+    """
     snapshot = plans.inspect_plan(plan_dir)
     lock_path = lock_path_for_plan(snapshot.plan_dir, state_dir)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -414,18 +454,23 @@ def acquire_lock(
         "version": 1,
         "owner": owner,
         "pid": os.getpid(),
+        # A pid only identifies a process on the host that recorded it, so
+        # readers that reason about liveness need to know which host that was.
+        "hostname": socket.gethostname(),
         "plan_dir": str(snapshot.plan_dir),
         "plan_path_hash": snapshot.path_hash,
         "plan_hash": snapshot.plan_hash,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
+    stolen_lock: LockInfo | None = None
     for _attempt in range(2):
         try:
             fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
         except FileExistsError as error:
             existing = read_lock_info(snapshot.plan_dir, state_dir)
-            if existing is not None and existing.stale:
+            if existing is not None and existing.stale and not existing.foreign_host:
+                stolen_lock = existing
                 try:
                     lock_path.unlink()
                 except FileNotFoundError:
@@ -433,6 +478,13 @@ def acquire_lock(
                 continue
             if existing is None:
                 continue
+            if existing.foreign_host:
+                raise StateError(
+                    f"plan is locked by pid {existing.pid} on host "
+                    f"{existing.owner_hostname} at {lock_path}; this host cannot "
+                    "tell whether that runner is alive — clear it with "
+                    "'asl unlock' once you have confirmed it is gone"
+                ) from error
             raise StateError(
                 f"plan is locked by pid {existing.pid} at {lock_path}"
             ) from error
@@ -443,6 +495,12 @@ def acquire_lock(
         lock_info = read_lock_info(snapshot.plan_dir, state_dir)
         if lock_info is None:
             raise StateError(f"created lock disappeared: {lock_path}")
+        if stolen_lock is not None:
+            mark_run_abandoned(
+                lock_path.parent,
+                lock_info=stolen_lock,
+                trigger=ABANDONED_TRIGGER_LOCK_TAKEOVER,
+            )
         return lock_info
 
     raise StateError(f"could not acquire lock at {lock_path}")
@@ -601,6 +659,7 @@ def _runner_state_payload(
             "active_verification": None,
             "waiting_for_reply": None,
             "waiting_for_reply_status": None,
+            "abandoned": None,
         }
 
     try:
@@ -617,6 +676,7 @@ def _runner_state_payload(
             "active_verification": None,
             "waiting_for_reply": None,
             "waiting_for_reply_status": None,
+            "abandoned": None,
         }
     except (OSError, json.JSONDecodeError) as error:
         return {
@@ -627,6 +687,7 @@ def _runner_state_payload(
             "active_verification": None,
             "waiting_for_reply": None,
             "waiting_for_reply_status": None,
+            "abandoned": None,
         }
 
     if not isinstance(raw, dict):
@@ -638,6 +699,7 @@ def _runner_state_payload(
             "active_verification": None,
             "waiting_for_reply": None,
             "waiting_for_reply_status": None,
+            "abandoned": None,
         }
 
     active_turn = raw.get("active_turn")
@@ -647,6 +709,10 @@ def _runner_state_payload(
     active_verification = raw.get("active_verification")
     if not isinstance(active_verification, dict):
         active_verification = None
+
+    abandoned = raw.get("abandoned")
+    if not isinstance(abandoned, dict):
+        abandoned = None
 
     waiting_for_reply = raw.get("waiting_for_reply")
     if not isinstance(waiting_for_reply, dict):
@@ -683,6 +749,7 @@ def _runner_state_payload(
         "active_verification": active_verification,
         "waiting_for_reply": waiting_for_reply,
         "waiting_for_reply_status": waiting_status,
+        "abandoned": abandoned,
     }
 
 
@@ -857,6 +924,232 @@ def _stale_runner_state(
     )
 
 
+def _parse_timestamp(value: Any) -> datetime | None:
+    """Parse an ISO-8601 timestamp, tolerating a ``Z`` suffix and naive input."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _unfinished_run_id(state_obj: dict[str, Any] | None) -> str | None:
+    """Return the run id of a state that recorded a start but never a finish."""
+    if not isinstance(state_obj, dict):
+        return None
+    if state_obj.get("run_finished_at") is not None:
+        return None
+    return _nonempty_str(state_obj.get("run_id"))
+
+
+def _abandonment_is_proven(
+    state_obj: dict[str, Any],
+    *,
+    lock_path: Path,
+    lock_info: LockInfo | None,
+) -> bool:
+    """Decide whether the run that wrote ``state_obj`` is provably dead.
+
+    Deliberately narrow, because the write it authorizes is irreversible: a
+    stale lock with no usable pid (wrong plan directory, unparseable payload)
+    proves nothing, and a pid recorded on another host says nothing about this
+    host's process table. Holding the lock is not itself proof either — the
+    caller that just took a stale lock over still has to prove the previous
+    owner is dead.
+    """
+    if lock_info is None:
+        started_at = _parse_timestamp(state_obj.get("run_started_at"))
+        if started_at is None:
+            return False
+        age_seconds = (datetime.now(timezone.utc) - started_at).total_seconds()
+        if age_seconds < ABANDONED_NO_LOCK_GRACE_SECONDS:
+            return False
+        # A booting runner writes state.json before its lock, so re-read the
+        # lock rather than trusting a snapshot taken before that gap closed.
+        return not lock_path.exists()
+    if lock_info.active or lock_info.pid is None or lock_info.foreign_host:
+        return False
+    return not is_pid_running(lock_info.pid)
+
+
+def _abandoned_event_payload(
+    payload: dict[str, Any],
+    *,
+    state_path: Path,
+    events_path: Path,
+) -> dict[str, Any]:
+    """Build the synthetic ``run_finished`` payload for an abandoned run.
+
+    A strict subset of :func:`runner._run_finished_event_payload` so existing
+    consumers keep reading the same field names, plus the two keys that mark
+    the record as reconstructed rather than observed.
+    """
+    counts: dict[str, Any] | None = None
+    final_snapshot = payload.get("final_snapshot")
+    if isinstance(final_snapshot, dict):
+        snapshot_counts = final_snapshot.get("counts")
+        if isinstance(snapshot_counts, dict):
+            counts = snapshot_counts
+    return {
+        "run_id": payload.get("run_id"),
+        "run_dir": payload.get("run_dir"),
+        "ok": payload.get("ok"),
+        "paused": payload.get("paused"),
+        "reason": payload.get("reason"),
+        "run_started_at": payload.get("run_started_at"),
+        "run_finished_at": payload.get("run_finished_at"),
+        "duration_seconds": payload.get("duration_seconds"),
+        "counts": counts,
+        "completed_sessions": payload.get("completed_sessions"),
+        "completed_session_ids": payload.get("completed_session_ids"),
+        "state_path": str(state_path),
+        "events_path": str(events_path),
+        "abandoned": payload.get("abandoned"),
+        "synthetic": True,
+        "outcome": events.RUN_OUTCOME_ABANDONED,
+    }
+
+
+@contextmanager
+def _abandonment_claim(plan_state_dir_path: Path) -> Iterator[bool]:
+    """Hold the per-plan exclusive claim on terminalizing an abandoned run.
+
+    ``flock`` is held by the open file description rather than the process, so
+    this excludes concurrent threads as well as concurrent processes, and the
+    kernel drops it if the holder dies mid-write. Failing to take it yields
+    ``False`` instead of waiting: the claim is only ever held for the two writes
+    below, so contention means another caller is already publishing the terminal
+    record, and blocking would put an unbounded wait inside ``asl status`` and
+    lock acquisition for no gain.
+    """
+    claim_path = plan_state_dir_path / ABANDON_CLAIM_FILE_NAME
+    fd: int | None = None
+    held = False
+    try:
+        fd = os.open(claim_path, os.O_RDWR | os.O_CREAT, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        held = True
+    except OSError:
+        pass
+    try:
+        yield held
+    finally:
+        if fd is not None:
+            if held:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            os.close(fd)
+
+
+def mark_run_abandoned(
+    plan_state: str | Path,
+    *,
+    lock_info: LockInfo | None,
+    trigger: str,
+) -> bool:
+    """Give a run that died mid-turn the terminal record it never wrote.
+
+    A killed runner leaves ``run_finished_at`` null forever, so every consumer
+    that waits for a terminal event — ``asl tail --follow``, the supervisor,
+    state-based readiness — waits forever. This reconstructs that ending, but
+    only once death is proven; see :func:`_abandonment_is_proven`.
+
+    Returns whether the terminal state was written — exactly one caller ever
+    gets ``True`` for a given run, including under concurrency, because the
+    recheck and both writes run under :func:`_abandonment_claim`. Best-effort
+    throughout and never raises: hygiene must not be able to break lock
+    acquisition or ``asl status``, both of which call it on paths that must
+    keep working.
+    """
+    try:
+        plan_state_dir_path = Path(plan_state)
+        state_path = plan_state_dir_path / events.STATE_FILE_NAME
+        state_obj = _read_json_object_safe(state_path)
+        run_id = _unfinished_run_id(state_obj)
+        if run_id is None or state_obj is None:
+            return False
+        if not _abandonment_is_proven(
+            state_obj,
+            lock_path=plan_state_dir_path / LOCK_FILE_NAME,
+            lock_info=lock_info,
+        ):
+            return False
+
+        # Everything from the final recheck through the event append runs under
+        # one claim. Without it two callers can both pass the recheck and each
+        # publish a terminal record; a caller that cannot take the claim is by
+        # definition racing one that already holds it, so it declines.
+        with _abandonment_claim(plan_state_dir_path) as claimed:
+            if not claimed:
+                return False
+
+            # Re-read immediately before writing. A runner that finished
+            # between the first read and now owns the terminal record, and
+            # idempotence depends on losing that race instead of overwriting
+            # the winner.
+            current = _read_json_object_safe(state_path)
+            if current is None or _unfinished_run_id(current) != run_id:
+                return False
+
+            detected_at = datetime.now(timezone.utc).isoformat()
+            payload = dict(current)
+            payload.update(
+                {
+                    "ok": False,
+                    "reason": ABANDONED_REASON,
+                    "run_finished_at": detected_at,
+                    # The same two fields ``runner._finish_run`` clears. A wait
+                    # record is deliberately left behind: it is the only
+                    # evidence of what the run died holding, and it already
+                    # reads as expired once no active lock backs it.
+                    "active_turn": None,
+                    "active_verification": None,
+                    "abandoned": {
+                        "detected_at": detected_at,
+                        "trigger": trigger,
+                        "lock_reason": (
+                            lock_info.reason if lock_info is not None else None
+                        ),
+                        "detected_by_pid": os.getpid(),
+                    },
+                }
+            )
+            events_path = plan_state_dir_path / events.EVENTS_FILE_NAME
+            artifacts.atomic_write_bytes(state_path, _dump_state_bytes(payload))
+            try:
+                events.append_event(
+                    events_path,
+                    events.Event(
+                        name=events.RUN_FINISHED_EVENT,
+                        payload=_abandoned_event_payload(
+                            payload,
+                            state_path=state_path,
+                            events_path=events_path,
+                        ),
+                    ),
+                )
+            except OSError:
+                # The terminal state is already durable; an unwritable events
+                # file must not downgrade that to a failure the caller retries.
+                pass
+            return True
+    except Exception:
+        # Death has already cost the caller its run; refusing to record that
+        # is strictly better than raising into a lock acquire or a status read.
+        return False
+
+
 def _live_run_id(
     runner_state: dict[str, Any],
     lock_info: LockInfo | None,
@@ -993,6 +1286,18 @@ def status_payload(
     next_pending = snapshot.next_pending
     runner_state = _runner_state_payload(state_path, lock_info=lock_info)
     stale_unfinished, stale_reason = _stale_runner_state(runner_state, lock_info)
+    if stale_unfinished and mark_run_abandoned(
+        plan_state,
+        lock_info=lock_info,
+        trigger=ABANDONED_TRIGGER_STATUS,
+    ):
+        # Recompute so this same call reports the terminal state it just wrote
+        # instead of the orphan it found; this is also the only backfill path
+        # for runs that died before abandonment tracking existed.
+        runner_state = _runner_state_payload(state_path, lock_info=lock_info)
+        stale_unfinished, stale_reason = _stale_runner_state(
+            runner_state, lock_info
+        )
     runner_state["stale_unfinished"] = stale_unfinished
     runner_state["stale_reason"] = stale_reason
     mailbox_status = _mailbox_status_payload(
@@ -1065,6 +1370,15 @@ def _print_text_status(payload: dict[str, Any]) -> None:
         if runner_state.get("stale_unfinished"):
             stale_reason = runner_state.get("stale_reason") or "stale unfinished"
             print(f"Run state: stale/orphaned ({stale_reason})")
+        abandoned = runner_state.get("abandoned")
+        if isinstance(abandoned, dict):
+            detected_at = abandoned.get("detected_at") or "unknown"
+            trigger = abandoned.get("trigger") or "unknown"
+            lock_reason = abandoned.get("lock_reason") or "no lock file"
+            print(
+                f"Run state: abandoned (detected {detected_at} "
+                f"by {trigger}: {lock_reason})"
+            )
 
     mailbox_status = payload.get("mailbox")
     if isinstance(mailbox_status, dict):

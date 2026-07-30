@@ -294,6 +294,17 @@ _MAILBOX_TOKEN_UNSEEN = object()
 MAX_VERIFICATION_REPAIR_ATTEMPTS = 2
 VERIFICATION_FINGERPRINT_PREFIX = "verify-failed"
 
+# Review-verdict repair loop control. A review turn whose ``final-review``
+# artifacts fail validation is reverted to ``pending`` and re-run *in the same
+# run*, with the exact validation error fed back through the task packet, so a
+# malformed artifact costs one extra turn instead of a human relaunch. Bounded
+# exactly like the verification-repair loop above: an identical error (repeated
+# fingerprint) or more than :data:`MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS` retries
+# within the current review cycle falls back to the ``verify-failed`` pause and
+# records ``review_verdict_repair_exhausted``.
+MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS = 2
+REVIEW_VERDICT_FINGERPRINT_PREFIX = "review-verdict"
+
 # Review repair/rereview cycle control. After a generated review session
 # completes with structured findings, the runner materializes same-plan repair
 # children (``agent_session_loop.review_repair``), executes them serially, and
@@ -4547,6 +4558,40 @@ class _RunPersistence:
             _write_state_payload(payload)
 
 
+def _append_process_sweep_event(
+    *,
+    event_path: Path,
+    persistence: _RunPersistence,
+    report: dict[str, Any] | None,
+    phase: str,
+    identity: dict[str, Any],
+) -> None:
+    """Record a sweep that reaped (or failed to reap) something it outlived.
+
+    Most sweeps find nothing, and a report is also absent whenever the sweep
+    was opted out of or could not read the process table, so only the reports
+    naming a signalled pid are worth an event.
+    """
+    if not isinstance(report, dict):
+        return
+    killed = report.get("killed") or []
+    kill_failed = report.get("kill_failed") or []
+    if not killed and not kill_failed:
+        return
+    persistence.append_event(
+        event_path,
+        events.PROCESS_SWEEP_EVENT,
+        {
+            "phase": phase,
+            **identity,
+            "killed": list(killed),
+            "kill_failed": list(kill_failed),
+            "survivors_after": list(report.get("survivors_after") or []),
+            "enumeration": report.get("enumeration") or {},
+        },
+    )
+
+
 def _waiting_for_reply_payload(
     *,
     question_id: str,
@@ -6252,6 +6297,11 @@ class _HangSentinel:
             tree = self._sample_tree(pid)
             if tree is None:
                 tree_error = "process tree sample failed"
+            else:
+                # Sampling only happens while the turn is silent or suspected
+                # hung, which is exactly when the post-turn sweep needs a view
+                # of descendants that may since have left the process group.
+                process_tree.record_process_tree(pid, tree)
 
         with self._lock:
             if generation != self._activity_generation:
@@ -7192,7 +7242,9 @@ def _finish_run(
         payload["active_verification"] = None
         _finalize_readiness_lifecycle(payload)
         persistence.append_event(
-            event_path, "run_finished", _run_finished_event_payload(payload)
+            event_path,
+            events.RUN_FINISHED_EVENT,
+            _run_finished_event_payload(payload),
         )
         persistence.write_state(payload)
     # A paused run already notified AgentSessionLoopPaused from _pause_run;
@@ -8105,6 +8157,117 @@ def _is_verification_repair_exhausted(
     return attempt > MAX_VERIFICATION_REPAIR_ATTEMPTS
 
 
+def _review_verdict_fingerprint(verdict: Mapping[str, Any]) -> str | None:
+    """Normalize a rejected review verdict into a repeat-detection slug.
+
+    Folds the classification ``reason`` and the exact validation ``error`` into
+    one digest, so a re-run that reproduces the same malformed artifact is
+    caught as a repeat while a *different* validation error stays eligible for
+    another bounded retry. Returns ``None`` when the verdict carries neither.
+    """
+    if not isinstance(verdict, Mapping):
+        return None
+    reason = verdict.get("reason")
+    error = verdict.get("error")
+    if not reason and not error:
+        return None
+    normalized = f"{reason or ''}|{error or ''}"
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    return f"{REVIEW_VERDICT_FINGERPRINT_PREFIX}:{digest}"
+
+
+def _read_prior_review_verdict_retries(
+    event_path: str | Path, session_id: str
+) -> list[dict[str, Any]]:
+    """Return this cycle's prior ``review_verdict_retry`` payloads for a session.
+
+    Reads the persistent ``events.jsonl`` log in chronological order and keeps
+    only the records appended after the most recent ``review_cycle`` event: a
+    reopened cycle re-reviews a repaired tree and must get a fresh retry budget
+    rather than inheriting the previous cycle's exhaustion.
+    """
+    try:
+        text = Path(event_path).read_text(encoding="utf-8")
+    except OSError:
+        return []
+    priors: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        name = record.get("name")
+        if name == events.REVIEW_CYCLE_EVENT:
+            priors.clear()
+            continue
+        if name != events.REVIEW_VERDICT_RETRY_EVENT:
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("session")) != str(session_id):
+            continue
+        priors.append(payload)
+    return priors
+
+
+def _is_review_verdict_repair_exhausted(
+    fingerprint: str | None,
+    prior_fingerprints: Sequence[str],
+    attempt: int,
+) -> bool:
+    """Decide whether a review-verdict repair loop must stop.
+
+    Exhausted when the current validation-failure fingerprint repeats a prior
+    failure for the same session in this cycle (an identical failure cannot
+    loop), or when ``attempt`` (the 1-indexed count of rejected verdicts for
+    the session) exceeds :data:`MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS`. A new
+    fingerprint under the cap is not exhausted, so a *changed* validation
+    failure stays eligible to retry.
+    """
+    if fingerprint is not None and fingerprint in prior_fingerprints:
+        return True
+    return attempt > MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS
+
+
+def _review_verdict_repair_references(
+    event_path: str | Path, session_id: str
+) -> tuple[str, ...]:
+    """Render packet repair references from the latest rejected verdict.
+
+    Hands the retrying review turn the exact validation error that rejected its
+    previous artifacts, so the harness repairs the named defect instead of
+    re-deriving it from the Handoff note alone. Empty when the session has no
+    rejected verdict in the current review cycle.
+    """
+    priors = _read_prior_review_verdict_retries(event_path, session_id)
+    if not priors:
+        return ()
+    latest = priors[-1]
+    fingerprint = latest.get("fingerprint")
+    references = [
+        f"Prior review verdict attempt {len(priors)} was rejected"
+        + (f" (fingerprint {fingerprint})." if fingerprint else ".")
+    ]
+    failure_reason = latest.get("failure_reason")
+    if failure_reason:
+        references.append(f"Rejection reason: {failure_reason}.")
+    error = latest.get("error")
+    if error:
+        references.append(f"Validation error: {error}")
+    references.append(
+        f"Rewrite {review.FINAL_REVIEW_FILENAME} and "
+        f"{review.FINAL_REVIEW_ARTIFACT_FILENAME} so they are valid and "
+        "mutually consistent; do not re-submit the same artifacts unchanged."
+    )
+    return tuple(references)
+
+
 def _read_prior_review_cycles(event_path: str | Path) -> list[dict[str, Any]]:
     """Compatibility wrapper for the shared read-only history reader."""
     return review_continuation.read_prior_review_cycles(event_path)
@@ -8980,74 +9143,129 @@ def _enforce_review_verdict(
     paths: dict[str, Path],
     plan_cache: plans.PlanSnapshotCache,
     require_artifact: bool = False,
-) -> bool:
+    stop_after_current_pending: bool = False,
+) -> tuple[str, plans.PlanSnapshot | None]:
     """Validate and persist the final review verdict.
 
     ``require_artifact=True`` (review sessions at or above
     :data:`STRUCTURED_REVIEW_MIN_VERSION`) additionally requires a valid,
     consistent ``final-review.json``; v1 review sessions stay
-    Markdown-compatible. Returns ``True`` when the run should pause
-    (the caller must ``break``).
+    Markdown-compatible.
+
+    Returns ``("pass", None)`` for a valid verdict. An invalid verdict always
+    reverts the review session to ``pending`` with the exact validation error
+    as a Handoff note, then either returns ``("retry", snapshot)`` — the caller
+    adopts the snapshot and ``continue``s, so the main loop re-selects and
+    re-runs the same review session — or ``("pause", snapshot)`` once the
+    repair is exhausted or ``stop_after_current_pending`` says an operator
+    stop must win over another turn (the caller must ``break``).
     """
     review_path = final_review_output_path(before.plan_dir)
     verdict = _read_review_verdict(
         before.plan_dir, require_artifact=require_artifact
     )
-    if not verdict.get("ok"):
-        error = verdict.get("error", "invalid review verdict")
-        failure_note = f"review verdict validation failed: {error}"
-        reverted = _revert_session_status_to_pending(
-            after, session_id, failure_note=failure_note
-        )
-        snapshot_after = _reinspect_after_revert(
-            before.plan_dir, after, reverted, plan_cache
-        )
-        details = {
-            **session_details,
-            "review_output_path": str(review_path),
-            "error": str(error),
-            "failure_reason": verdict.get("reason"),
-        }
-        if "review_artifact_path" in verdict:
-            details["review_artifact_path"] = verdict["review_artifact_path"]
+    if verdict.get("ok"):
         with persistence.lock:
-            payload["final_snapshot"] = _snapshot_payload(snapshot_after)
-            payload["review_verdict"] = None
             turn_payload["review_verdict"] = {
-                "passed": False,
-                "reason": "invalid-review-verdict",
+                "passed": True,
                 **{
                     key: value
                     for key, value in verdict.items()
-                    if key not in ("ok", "reason")
+                    if key != "ok"
                 },
-                "failure_reason": verdict.get("reason"),
             }
             _write_json_file(paths["result"], turn_payload)
-        _pause_run(
-            event_path,
-            payload,
-            reason="verify-failed",
-            message=(
-                f"review verdict validation failed for {session_label}: "
-                f"{error}"
-            ),
-            details=details,
-            persistence=persistence,
-        )
-        return True
+        return ("pass", None)
 
+    error = verdict.get("error", "invalid review verdict")
+    failure_note = f"review verdict validation failed: {error}"
+    reverted = _revert_session_status_to_pending(
+        after, session_id, failure_note=failure_note
+    )
+    snapshot_after = _reinspect_after_revert(
+        before.plan_dir, after, reverted, plan_cache
+    )
+
+    # Fingerprint this rejection and compare against the retries already
+    # recorded for this session in the current review cycle (read before the
+    # new retry event is appended). An identical rejection cannot loop, and the
+    # attempt cap bounds a reviewer that keeps producing *different* malformed
+    # artifacts.
+    fingerprint = _review_verdict_fingerprint(verdict)
+    priors = _read_prior_review_verdict_retries(event_path, session_id)
+    prior_fingerprints = tuple(
+        str(prior["fingerprint"])
+        for prior in priors
+        if prior.get("fingerprint")
+    )
+    attempt = len(priors) + 1
+    exhausted = _is_review_verdict_repair_exhausted(
+        fingerprint, prior_fingerprints, attempt
+    )
+    repair_payload: dict[str, Any] = {
+        "review_verdict_fingerprint": fingerprint,
+        "review_verdict_repair_attempt": attempt,
+        "review_verdict_repair_exhausted": exhausted,
+        "review_verdict_repair_max_attempts": (
+            MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS
+        ),
+    }
+    if not exhausted and stop_after_current_pending:
+        repair_payload["review_verdict_repair_declined"] = (
+            "stop-after-current"
+        )
     with persistence.lock:
+        payload["final_snapshot"] = _snapshot_payload(snapshot_after)
+        payload["review_verdict"] = None
         turn_payload["review_verdict"] = {
-            "passed": True,
+            "passed": False,
+            "reason": "invalid-review-verdict",
             **{
                 key: value
                 for key, value in verdict.items()
-                if key != "ok"
+                if key not in ("ok", "reason")
             },
+            "failure_reason": verdict.get("reason"),
+            **repair_payload,
         }
         _write_json_file(paths["result"], turn_payload)
-    return False
+
+    if not exhausted and not stop_after_current_pending:
+        persistence.append_event(
+            event_path,
+            events.REVIEW_VERDICT_RETRY_EVENT,
+            {
+                "run_id": payload.get("run_id"),
+                **_session_identity_payload(session_id),
+                "attempt": attempt,
+                "max_attempts": MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS,
+                "fingerprint": fingerprint,
+                "failure_reason": verdict.get("reason"),
+                "error": str(error),
+            },
+        )
+        return ("retry", snapshot_after)
+
+    details = {
+        **session_details,
+        "review_output_path": str(review_path),
+        "error": str(error),
+        "failure_reason": verdict.get("reason"),
+        **repair_payload,
+    }
+    if "review_artifact_path" in verdict:
+        details["review_artifact_path"] = verdict["review_artifact_path"]
+    _pause_run(
+        event_path,
+        payload,
+        reason="verify-failed",
+        message=(
+            f"review verdict validation failed for {session_label}: {error}"
+        ),
+        details=details,
+        persistence=persistence,
+    )
+    return ("pause", snapshot_after)
 
 
 def _enforce_session_verification(
@@ -9304,6 +9522,19 @@ def _enforce_session_verification(
             "checks": details["checks"],
         }
         _write_json_file(paths["result"], turn_payload)
+        for check in result.checks:
+            _append_process_sweep_event(
+                event_path=event_path,
+                persistence=persistence,
+                report=check.sweep,
+                phase="verification",
+                identity={
+                    "run_id": run_id,
+                    "turn_index": turn_index,
+                    **_session_identity_payload(session_id),
+                    "check": check.name,
+                },
+            )
 
     if result.passed:
         return False
@@ -10719,6 +10950,10 @@ def _run_locked(
             repair_references = _verification_repair_state(
                 event_path, session_id
             )["references"]
+            if is_review_session:
+                repair_references = repair_references + (
+                    _review_verdict_repair_references(event_path, session_id)
+                )
             pending_guidance = _pending_guidance_snapshot(
                 enabled=mailbox_enabled,
                 plan_dir=before.plan_dir,
@@ -11014,6 +11249,17 @@ def _run_locked(
             with persistence.lock:
                 payload["turns"].append(turn_payload)
                 persistence.append_event(event_path, "turn_finished", turn_payload)
+                _append_process_sweep_event(
+                    event_path=event_path,
+                    persistence=persistence,
+                    report=result.process_sweep,
+                    phase="turn",
+                    identity={
+                        "run_id": run_id,
+                        "turn_index": turn_index,
+                        **_session_identity_payload(session_id),
+                    },
+                )
                 persistence.write_state(payload)
             progress.turn_finished(turn_payload)
             _notify_agent_mux_loop_turn_finished(
@@ -11355,25 +11601,54 @@ def _run_locked(
             ):
                 break
 
-            if is_review_session and _enforce_review_verdict(
-                event_path=event_path,
-                payload=payload,
-                persistence=persistence,
-                before=before,
-                after=after,
-                session_id=session_id,
-                session_label=session_label,
-                session_details=session_details,
-                turn_payload=turn_payload,
-                paths=paths,
-                plan_cache=plan_cache,
-                require_artifact=(
-                    review_session_version is not None
-                    and review_session_version
-                    >= STRUCTURED_REVIEW_MIN_VERSION
-                ),
-            ):
-                break
+            if is_review_session:
+                # A retry short-circuits the loop tail, so the operator's stop
+                # request has to be visible *here* or it would be honored a
+                # whole review turn late. The queue drain is what makes an
+                # `asl control stop` observable at all on a review turn; the
+                # read below is deliberately non-consuming so the tail's
+                # consume-and-record stays the single stop-consumption site.
+                _drain_external_control_queue(
+                    plan_dir=before.plan_dir,
+                    state_dir_arg=args.state_dir,
+                    control_state=run_controls.state,
+                    seen_ids=seen_external_command_ids,
+                    payload=payload,
+                    event_path=event_path,
+                    control_payload=control_payload,
+                    context=turn_payload,
+                    persistence=persistence,
+                    run_control_lock=run_control_lock,
+                )
+                with run_control_lock:
+                    stop_after_current_pending = (
+                        run_controls.state.stop_after_current
+                    )
+                verdict_action, verdict_snapshot = _enforce_review_verdict(
+                    event_path=event_path,
+                    payload=payload,
+                    persistence=persistence,
+                    before=before,
+                    after=after,
+                    session_id=session_id,
+                    session_label=session_label,
+                    session_details=session_details,
+                    turn_payload=turn_payload,
+                    paths=paths,
+                    plan_cache=plan_cache,
+                    require_artifact=(
+                        review_session_version is not None
+                        and review_session_version
+                        >= STRUCTURED_REVIEW_MIN_VERSION
+                    ),
+                    stop_after_current_pending=stop_after_current_pending,
+                )
+                if verdict_action == "pause":
+                    break
+                if verdict_action == "retry":
+                    assert verdict_snapshot is not None
+                    snapshot = verdict_snapshot
+                    continue
 
             completed_at = _utc_iso_now()
             progress_error: str | None = None

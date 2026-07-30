@@ -279,7 +279,10 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         return completed, payload
 
     def _install_mutating_fake_claude(
-        self, mutate_paths: tuple[str, ...] = ("README.md",)
+        self,
+        mutate_paths: tuple[str, ...] = ("README.md",),
+        *,
+        invalid_first_attempt: bool = False,
     ) -> Path:
         """Replace the claude fake harness with one that mutates the cwd repo.
 
@@ -288,7 +291,27 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         ``mutated by review\\n`` to every path in ``mutate_paths`` (relative to
         the cwd). The mutation guard should detect those changes and pause the
         run unless every path is excluded.
+
+        ``invalid_first_attempt`` leaves the worktree alone on the first review
+        turn and emits an artifact that fails deep validation, so the mutation
+        only lands on the in-run retry turn.
         """
+        invalid_artifact = (
+            json.dumps(
+                {
+                    "version": 2,
+                    "outcome": "findings",
+                    "findings": [
+                        _structured_review_finding(
+                            verification_checks=[
+                                {"type": "bogus", "name": "not-a-check"}
+                            ]
+                        )
+                    ],
+                }
+            )
+            + "\n"
+        )
         script = self.fake_claude
         script.write_text(
             "\n".join(
@@ -309,11 +332,21 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                     "    print('missing --add-dir', file=sys.stderr)",
                     "    sys.exit(2)",
                     "",
+                    "retry_notes = sum(",
+                    "    path.read_text(encoding='utf-8').count(",
+                    "        'review verdict validation failed'",
+                    "    )",
+                    "    for path in plan_dir.glob('session-*.md')",
+                    ")",
+                    f"emit_invalid = {invalid_first_attempt!r} "
+                    "and retry_notes == 0",
+                    "",
                     "# Mutate files inside cwd to trigger the guard.",
-                    f"for rel in {tuple(mutate_paths)!r}:",
-                    "    mutated = Path.cwd() / rel",
-                    "    mutated.parent.mkdir(parents=True, exist_ok=True)",
-                    "    mutated.write_text('mutated by review\\n', encoding='utf-8')",
+                    "if not emit_invalid:",
+                    f"    for rel in {tuple(mutate_paths)!r}:",
+                    "        mutated = Path.cwd() / rel",
+                    "        mutated.parent.mkdir(parents=True, exist_ok=True)",
+                    "        mutated.write_text('mutated by review\\n', encoding='utf-8')",
                     "",
                     "session_re = re.compile(",
                     "    r'^session-([1-9][0-9]*(?:\\.[1-9][0-9]*)*)\\.md$'",
@@ -340,20 +373,32 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                     "    )",
                     "    target.write_text(text, encoding='utf-8')",
                     "",
-                    "(plan_dir / 'final-review.md').write_text(",
-                    "    (",
+                    "if emit_invalid:",
+                    "    review_body = (",
+                    "        '## Findings\\n'",
+                    "        '- High issue in agent_session_loop/runner.py.\\n'",
+                    "        '- Context in tests/test_agent_session_loop.py.\\n'",
+                    "        '- Context in docs/agent-session-loop.md.\\n'",
+                    "        'Status: 1 Findings (1 high, 0 med, 0 low)\\n'",
+                    "    )",
+                    f"    review_json = {invalid_artifact!r}",
+                    "else:",
+                    "    review_body = (",
                     "        '## Findings\\n'",
                     "        '- Reviewed agent_session_loop/runner.py for mutation guard behavior.\\n'",
                     "        '- Checked tests/test_agent_session_loop.py for review lifecycle coverage.\\n'",
                     "        '- Compared docs/agent-session-loop.md for operator documentation impact.\\n'",
                     "        'Status: All clear, no findings\\n'",
-                    "    ),",
-                    "    encoding='utf-8',",
+                    "    )",
+                    "    review_json = (",
+                    "        '{\"version\": 2, \"outcome\": \"all-clear\", "
+                    "\"findings\": []}\\n'",
+                    "    )",
+                    "(plan_dir / 'final-review.md').write_text(",
+                    "    review_body, encoding='utf-8',",
                     ")",
                     "(plan_dir / 'final-review.json').write_text(",
-                    "    '{\"version\": 2, \"outcome\": \"all-clear\", "
-                    "\"findings\": []}\\n',",
-                    "    encoding='utf-8',",
+                    "    review_json, encoding='utf-8',",
                     ")",
                     "",
                     "if last_message is not None:",
@@ -1615,6 +1660,238 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertIn("- **Status**: pending", review_text)
         self.assertIn("review verdict validation failed", review_text)
 
+    def _review_verdict_retries(self) -> list[dict[str, object]]:
+        return [
+            record["payload"]
+            for record in self._read_events()
+            if record.get("name") == events.REVIEW_VERDICT_RETRY_EVENT
+        ]
+
+    def test_invalid_review_verdict_retries_in_run_then_completes(self) -> None:
+        review_session = self._setup_complete_plan_with_pending_review()
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            extra_env={
+                "FAKE_CODEX_REVIEW_OUTCOMES": "invalid-artifact,all-clear"
+            },
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+        self.assertTrue(payload["review_completed"])
+        self.assertEqual(
+            "all-clear", payload["review_verdict"]["outcome"]
+        )
+        retries = self._review_verdict_retries()
+        self.assertEqual(1, len(retries))
+        self.assertEqual(1, retries[0]["attempt"])
+        self.assertEqual(
+            runner.MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS,
+            retries[0]["max_attempts"],
+        )
+        self.assertEqual(
+            "malformed-review-artifact", retries[0]["failure_reason"]
+        )
+        self.assertTrue(
+            str(retries[0]["fingerprint"]).startswith("review-verdict:")
+        )
+        self.assertIn("bogus", retries[0]["error"])
+        # The retry costs a turn, not a human relaunch.
+        self.assertEqual(2, len(payload["turns"]))
+        review_text = review_session.path.read_text(encoding="utf-8")
+        self.assertIn("- **Status**: complete", review_text)
+        self.assertIn("review verdict validation failed", review_text)
+
+    def test_persistently_invalid_review_verdict_pauses_when_exhausted(
+        self,
+    ) -> None:
+        review_session = self._setup_complete_plan_with_pending_review()
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            extra_env={
+                "FAKE_CODEX_REVIEW_OUTCOMES": (
+                    "invalid-artifact,invalid-artifact-2,invalid-artifact-3"
+                )
+            },
+        )
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("verify-failed", payload["pause_reason"])
+        details = payload["pause_details"]
+        self.assertTrue(details["review_verdict_repair_exhausted"])
+        self.assertEqual(3, details["review_verdict_repair_attempt"])
+        self.assertEqual(
+            runner.MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS,
+            details["review_verdict_repair_max_attempts"],
+        )
+        self.assertEqual(
+            "malformed-review-artifact", details["failure_reason"]
+        )
+        retries = self._review_verdict_retries()
+        self.assertEqual([1, 2], [record["attempt"] for record in retries])
+        # Distinct validation errors must not collapse into one fingerprint.
+        self.assertEqual(
+            2, len({record["fingerprint"] for record in retries})
+        )
+        self.assertEqual(3, len(payload["turns"]))
+        review_text = review_session.path.read_text(encoding="utf-8")
+        self.assertIn("- **Status**: pending", review_text)
+
+    def test_repeated_review_verdict_error_pauses_on_second_failure(
+        self,
+    ) -> None:
+        # A clamped outcome list replays the same defect, so the second
+        # rejection carries a fingerprint the runner has already seen.
+        self._setup_complete_plan_with_pending_review()
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            extra_env={"FAKE_CODEX_REVIEW_OUTCOMES": "invalid-artifact"},
+        )
+
+        self.assertEqual(1, completed.returncode)
+        self.assertEqual("verify-failed", payload["pause_reason"])
+        details = payload["pause_details"]
+        self.assertTrue(details["review_verdict_repair_exhausted"])
+        self.assertEqual(2, details["review_verdict_repair_attempt"])
+        retries = self._review_verdict_retries()
+        self.assertEqual(1, len(retries))
+        self.assertEqual(
+            retries[0]["fingerprint"], details["review_verdict_fingerprint"]
+        )
+        self.assertEqual(2, len(payload["turns"]))
+
+    def test_review_verdict_retry_still_trips_mutation_guard(self) -> None:
+        self._write_plan(("complete",), readiness=None)
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        review_session = self._write_pending_review_session()
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        self._install_mutating_fake_claude(invalid_first_attempt=True)
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("review-mutated-worktree", payload["pause_reason"])
+        self.assertFalse(payload["review_completed"])
+        self.assertEqual(1, len(self._review_verdict_retries()))
+        guard = payload["turns"][1]["review_mutation_guard"]
+        self.assertFalse(guard["passed"])
+        self.assertEqual(["README.md"], guard["changed_paths"]["tracked"])
+        self.assertEqual(
+            "pending", plans.read_session_status(review_session).status
+        )
+
+    def test_stop_after_current_converts_review_verdict_retry_to_pause(
+        self,
+    ) -> None:
+        self._setup_complete_plan_with_pending_review()
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+            state_dir=self.state_dir,
+        )
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            extra_env={
+                "FAKE_CODEX_REVIEW_OUTCOMES": "invalid-artifact,all-clear"
+            },
+        )
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("verify-failed", payload["pause_reason"])
+        details = payload["pause_details"]
+        self.assertFalse(details["review_verdict_repair_exhausted"])
+        self.assertEqual(
+            "stop-after-current", details["review_verdict_repair_declined"]
+        )
+        self.assertEqual([], self._review_verdict_retries())
+        self.assertEqual(1, len(payload["turns"]))
+
+    def test_review_verdict_retry_preserves_note_across_rescope(self) -> None:
+        finding = _structured_review_finding()
+        write_completed_review_plan(
+            self.plan_dir,
+            [finding],
+            contracts_by_id={
+                "1": _contract_block(
+                    '{"type": "file_exists", "path": "README.md", '
+                    '"name": "readme-1"}'
+                )
+            },
+        )
+        base = git_stdout(self.repo_root, "rev-parse", "HEAD")
+        events.append_event(
+            self._events_path(),
+            events.Event(
+                events.REVIEW_CYCLE_EVENT,
+                {
+                    "cycle": 1,
+                    "disposition": runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+                    "review_session_id": "2",
+                    "repair_session_ids": ["2.1"],
+                    "fingerprints": [f"finding:{finding['id']}"],
+                    "repo_head": base,
+                    "worktree_dirty": False,
+                    "dirty_paths": [],
+                },
+            ),
+        )
+        delta, fallback_reason = runner._compute_review_delta_context(
+            event_path=self._events_path(),
+            plan_dir=self.plan_dir,
+            cwd=self.repo_root,
+        )
+        self.assertIsNone(fallback_reason)
+        review_session, created = runner.ensure_generated_review_session(
+            self.plan_dir, review_harness="claude", delta=delta
+        )
+        self.assertTrue(created)
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            # Cycle 1's review already completed, so it consumes the first
+            # scripted outcome; this delta review starts at the second.
+            extra_env={
+                "FAKE_CODEX_REVIEW_OUTCOMES": (
+                    "all-clear,invalid-artifact,all-clear"
+                )
+            },
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["review_completed"])
+        self.assertEqual(1, len(self._review_verdict_retries()))
+        resumed_body = review_session.path.read_text(encoding="utf-8")
+        self.assertIn("## Delta Review Scope", resumed_body)
+        self.assertIn("review verdict validation failed", resumed_body)
+
     def test_v1_review_session_markdown_only_still_completes(self) -> None:
         # Existing pending v1 review sessions (base marker, no version marker)
         # must stay Markdown-compatible: no final-review.json required.
@@ -1687,11 +1964,15 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
-        (self.plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
-            self._valid_final_review_body(), encoding="utf-8"
+        # The first attempt writes a status line whose severity counts do not
+        # add up: a markdown-only rejection, with no artifact in play.
+        completed, payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            extra_env={
+                "FAKE_CODEX_REVIEW_OUTCOMES": "invalid-markdown,all-clear"
+            },
         )
-
-        completed, payload = self._run(review_harness="claude")
 
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertTrue(payload["ok"])
@@ -1706,6 +1987,9 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             },
             payload["review_verdict"],
         )
+        retries = self._review_verdict_retries()
+        self.assertEqual(1, len(retries))
+        self.assertEqual("malformed-review", retries[0]["failure_reason"])
         self.assertFalse(
             (self.plan_dir / runner.FINAL_REVIEW_ARTIFACT_FILENAME).is_file()
         )

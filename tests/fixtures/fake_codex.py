@@ -200,9 +200,97 @@ def _findings_review_artifacts(variant: str) -> tuple[str, str]:
     return review_body, _json.dumps(artifact) + "\n"
 
 
-def _write_review_outcome(plan_dir: Path, outcome: str) -> None:
-    """Write review artifacts for one scripted review outcome."""
-    if outcome == "all-clear":
+REVIEW_VERDICT_RETRY_NOTE = "review verdict validation failed"
+
+
+def _rejected_verdict_count(body: str) -> int:
+    """Count the runner's rejected-verdict Handoff notes in a session body.
+
+    An in-run review-verdict retry reverts the review session to ``pending``
+    and appends one such note per rejection, so the count is how many times
+    *this* review session has already been re-run. Completed-review counting
+    alone cannot see those attempts: the session never stays complete.
+    """
+    return body.count(REVIEW_VERDICT_RETRY_NOTE)
+
+
+def _invalid_review_artifacts(variant: str) -> tuple[str, str]:
+    """Return artifacts that pass the contract check but fail deep validation.
+
+    The generated review contract only checks that every finding carries a
+    truthy ``verification_checks``/``done_criteria``; ``review.load_review_verdict``
+    validates their contents. Each variant injects a *different* deep defect so
+    its validation error — and therefore its retry fingerprint — differs.
+    """
+    import json as _json
+
+    finding: dict[str, object] = {
+        "id": "invalid-finding-1",
+        "severity": "high",
+        "title": "Review artifact fails deep validation",
+        "evidence": [
+            {
+                "path": "agent_session_loop/runner.py",
+                "symbol": "supervise_run",
+            }
+        ],
+        "explanation": "Canned invalid finding from the fake harness.",
+        "repair_group": "invalid-artifact",
+        "done_criteria": ["The reviewed defect is resolved."],
+        "verification_checks": [
+            {
+                "type": "command",
+                "name": "invalid-check",
+                "argv": ["python3", "-c", "pass"],
+            }
+        ],
+    }
+    if variant == "invalid-artifact-2":
+        # A command check with no argv.
+        finding["verification_checks"] = [
+            {"type": "command", "name": "no-argv"}
+        ]
+    elif variant == "invalid-artifact-3":
+        # A structurally present but blank done_criteria entry.
+        finding["done_criteria"] = ["   "]
+    else:
+        # An unsupported check type.
+        finding["verification_checks"] = [
+            {"type": "bogus", "name": "not-a-check"}
+        ]
+
+    review_body = (
+        "## Findings\n"
+        "- agent_session_loop/runner.py — review artifact fails deep "
+        "validation.\n"
+        "- Checked tests/test_agent_session_loop.py for regression coverage.\n"
+        "- Compared docs/agent-session-loop.md for documented behavior.\n"
+        "Status: 1 Findings (1 high, 0 med, 0 low)\n"
+    )
+    artifact = {"version": 2, "outcome": "findings", "findings": [finding]}
+    return review_body, _json.dumps(artifact) + "\n"
+
+
+def _write_review_outcome(
+    plan_dir: Path, outcome: str, *, write_artifact: bool = True
+) -> None:
+    """Write review artifacts for one scripted review outcome.
+
+    ``write_artifact=False`` models a v1 (markdown-only) review session, where
+    a stray ``final-review.json`` would change what the runner validates.
+    """
+    if outcome == "invalid-markdown":
+        # Severity counts that do not add up: passes a v1 contract that only
+        # checks the file is non-empty, fails the shared status-line grammar.
+        review_body = (
+            "## Findings\n"
+            "- agent_session_loop/runner.py — miscounted review status line.\n"
+            "Status: 2 Findings (1 high, 0 med, 0 low)\n"
+        )
+        review_json = ""
+    elif outcome.startswith("invalid-artifact"):
+        review_body, review_json = _invalid_review_artifacts(outcome)
+    elif outcome == "all-clear":
         review_body = (
             "## Findings\n"
             "- Reviewed agent_session_loop/runner.py for repair-cycle "
@@ -217,7 +305,10 @@ def _write_review_outcome(plan_dir: Path, outcome: str) -> None:
     else:
         review_body, review_json = _findings_review_artifacts(outcome)
     (plan_dir / "final-review.md").write_text(review_body, encoding="utf-8")
-    (plan_dir / "final-review.json").write_text(review_json, encoding="utf-8")
+    if write_artifact and review_json:
+        (plan_dir / "final-review.json").write_text(
+            review_json, encoding="utf-8"
+        )
 
 
 def _blocked_last_message() -> str:
@@ -411,8 +502,19 @@ def main() -> int:
                         for token in outcomes_env.split(",")
                         if token.strip()
                     ]
-                    outcome = outcomes[min(review_index, len(outcomes) - 1)]
-                    _write_review_outcome(plan_dir, outcome)
+                    attempt_index = review_index + _rejected_verdict_count(
+                        body
+                    )
+                    outcome = outcomes[
+                        min(attempt_index, len(outcomes) - 1)
+                    ]
+                    _write_review_outcome(
+                        plan_dir,
+                        outcome,
+                        write_artifact=(
+                            "asl:generated-review-session version=" in body
+                        ),
+                    )
                 else:
                     review_body = os.environ.get(
                         "FAKE_CODEX_REVIEW_BODY",

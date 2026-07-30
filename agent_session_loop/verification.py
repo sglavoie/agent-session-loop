@@ -26,7 +26,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Mapping
 
 from . import plans, responses
 from .artifacts import ArtifactError, StreamCapture
@@ -39,6 +39,12 @@ from .contracts import (
     read_completion_contract,
 )
 from .plans import SessionId, canonicalize_path
+from .process_tree import (
+    descendant_pids,
+    sample_process_table,
+    sweep_enabled,
+    sweep_survivors,
+)
 
 
 CheckStatus = Literal["pass", "fail"]
@@ -65,6 +71,11 @@ class CheckResult:
     full stream was retained under an artifact directory — the gzip artifact
     path for byte-for-byte recovery. File and regex checks leave the streaming
     fields at their defaults.
+
+    ``sweep`` is the post-check process-sweep report
+    (:func:`agent_session_loop.process_tree.sweep_survivors`) for a command
+    check. It stays ``None`` for file and regex checks, and also whenever the
+    sweep was opted out of or could not read the process table.
     """
 
     name: str
@@ -84,6 +95,7 @@ class CheckResult:
     stderr_sha256: str = ""
     stderr_truncated: bool = False
     stderr_artifact_path: str | None = None
+    sweep: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -225,6 +237,53 @@ class _VerificationCancelled(BaseException):
 # what an abandoned check pays to walk away from it.
 _ABANDONED_READER_JOIN_SECONDS = 5.0
 
+# A check that exited on its own is not killed, so nothing closes the pipes an
+# escaped descendant inherited and the join for it would otherwise never
+# return — the 2h20m hang class. The bound is generous because the common case
+# is a same-group straggler still flushing legitimate output, and truncating
+# that would lose the evidence the check was run for.
+_EXITED_READER_JOIN_SECONDS = 30.0
+
+
+def _sweep_process_table() -> dict[int, dict[str, Any]] | None:
+    """The table to snapshot descendants from, or ``None`` when sweeping is off."""
+    if not sweep_enabled():
+        return None
+    return sample_process_table()
+
+
+def _snapshot_descendants(
+    root_pid: int, table: Mapping[int, Mapping[str, Any]] | None
+) -> tuple[Mapping[str, Any], ...]:
+    """Record ``root_pid``'s descendants while it is still alive.
+
+    Killing the group reparents an escapee to pid 1, after which no descendant
+    walk can reach it. A snapshot taken beforehand is the sweep's only route to
+    one, so this must run before the kill, not after it.
+    """
+    if table is None:
+        return ()
+    return tuple(table[pid] for pid in descendant_pids(root_pid, table))
+
+
+def _sweep_check_descendants(
+    process: subprocess.Popen,
+    prior_snapshot: tuple[Mapping[str, Any], ...],
+) -> dict[str, Any] | None:
+    """Kill whatever outlived the check, or ``None`` when the sweep is off.
+
+    ``expected_pgid`` is the child's PID because command checks spawn with
+    ``start_new_session=True``. ``root_pid`` is already reaped by the caller, so
+    the sweep excludes it rather than signalling a PID that may be reused.
+    """
+    if not sweep_enabled():
+        return None
+    return sweep_survivors(
+        root_pid=process.pid,
+        expected_pgid=process.pid,
+        prior_snapshot=prior_snapshot,
+    )
+
 
 def _kill_process_group(process: subprocess.Popen) -> None:
     """Kill ``process`` and every descendant still in its process group.
@@ -236,13 +295,13 @@ def _kill_process_group(process: subprocess.Popen) -> None:
     its children keep running, hold the captured pipes open, and can still
     write to the repository.
 
-    The group is the whole guarantee. A descendant that calls ``setsid`` leaves
-    it and survives this call, so it can still write repository side effects
-    after verification returns — a documented limit, not an oversight. Closing
-    it would mean walking the process table, which stays racy regardless (a
-    descendant can detach or fork between the scan and the signal), so callers
-    bound the *cost* of an escapee instead: see
-    :data:`_ABANDONED_READER_JOIN_SECONDS`.
+    A descendant that calls ``setsid`` leaves the group and survives this call.
+    :func:`_sweep_check_descendants` is what reaches it afterwards, by matching
+    the descendants :func:`_snapshot_descendants` recorded before the kill
+    against the live process table. That stays racy regardless — a descendant
+    can detach or fork between the snapshot and the signal — so callers still
+    bound the *cost* of an escapee: see :data:`_ABANDONED_READER_JOIN_SECONDS`
+    and :data:`_EXITED_READER_JOIN_SECONDS`.
     """
     try:
         os.killpg(process.pid, signal.SIGKILL)
@@ -281,12 +340,17 @@ class _ParallelCancellation:
     and :func:`run_verification` can join them before the exception escapes.
     Killing is what makes that join bounded — without it, waiting would stall
     behind the longest check and not waiting would leave it running.
+
+    Because the kill happens here rather than in the owning worker, the
+    pre-kill descendant snapshot each worker needs for its sweep can only be
+    taken here too; :meth:`snapshot_for` hands it back.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._cancelled = False
         self._processes: set[subprocess.Popen] = set()
+        self._snapshots: dict[int, tuple[Mapping[str, Any], ...]] = {}
 
     @property
     def cancelled(self) -> bool:
@@ -305,11 +369,27 @@ class _ParallelCancellation:
         with self._lock:
             self._processes.discard(process)
 
+    def snapshot_for(
+        self, process: subprocess.Popen
+    ) -> tuple[Mapping[str, Any], ...]:
+        """The descendants recorded for ``process`` just before it was killed."""
+        with self._lock:
+            return self._snapshots.get(process.pid, ())
+
     def cancel(self) -> None:
         with self._lock:
             self._cancelled = True
             in_flight = tuple(self._processes)
             self._processes.clear()
+        # One process table for the whole dispatch, read before any kill lands
+        # so every root is still alive and its descendants still reachable.
+        table = _sweep_process_table()
+        snapshots = {
+            process.pid: _snapshot_descendants(process.pid, table)
+            for process in in_flight
+        }
+        with self._lock:
+            self._snapshots.update(snapshots)
         for process in in_flight:
             # The owning worker is inside `process.wait()` and reaps it there.
             _kill_process_group(process)
@@ -427,6 +507,8 @@ def _run_command_check(
     stdout_capture = StreamCapture(spool=spool)
     stderr_capture = StreamCapture(spool=spool)
     timed_out = False
+    prior_snapshot: tuple[Mapping[str, Any], ...] = ()
+    sweep: dict[str, Any] | None = None
     try:
         readers = (
             threading.Thread(
@@ -446,16 +528,39 @@ def _run_command_check(
             process.wait(timeout=check.timeout_seconds)
         except subprocess.TimeoutExpired:
             timed_out = True
+            prior_snapshot = _snapshot_descendants(
+                process.pid, _sweep_process_table()
+            )
             _kill_and_reap(process)
-        killed = timed_out or (
-            cancellation is not None and cancellation.cancelled
-        )
+        cancelled = cancellation is not None and cancellation.cancelled
+        if cancelled and not timed_out:
+            # The kill came from another thread, so the snapshot did too.
+            prior_snapshot = cancellation.snapshot_for(process)
+        killed = timed_out or cancelled
         _join_readers(
             readers,
-            timeout=_ABANDONED_READER_JOIN_SECONDS if killed else None,
+            timeout=(
+                _ABANDONED_READER_JOIN_SECONDS
+                if killed
+                else _EXITED_READER_JOIN_SECONDS
+            ),
         )
+        # After the join, so an in-group straggler gets to flush what it was
+        # writing before the sweep takes it down.
+        sweep = _sweep_check_descendants(process, prior_snapshot)
     except BaseException:
+        # An interrupt under a sequential recipe lands on this thread while the
+        # check is still running, so this branch owns its own snapshot: taken
+        # here the root is still alive, and after the group kill an escapee is
+        # reparented to pid 1 and no walk can reach it. A snapshot the timeout
+        # or cancel path already recorded is carried through rather than
+        # replaced -- it predates a kill that has already landed.
+        prior_snapshot = (
+            *prior_snapshot,
+            *_snapshot_descendants(process.pid, _sweep_process_table()),
+        )
         _kill_and_reap(process)
+        _sweep_check_descendants(process, prior_snapshot)
         stdout_capture.discard()
         stderr_capture.discard()
         raise
@@ -491,6 +596,7 @@ def _run_command_check(
                 f"{' '.join(check.argv)}"
             ),
             duration_seconds=duration,
+            sweep=sweep,
             **stream_fields,
         )
     if process.returncode == 0:
@@ -508,6 +614,7 @@ def _run_command_check(
             detail=f"command exited 0: {' '.join(check.argv)}",
             returncode=0,
             duration_seconds=duration,
+            sweep=sweep,
             **stream_fields,
         )
     stream_fields = _command_stream_fields(
@@ -527,6 +634,7 @@ def _run_command_check(
         ),
         returncode=process.returncode,
         duration_seconds=duration,
+        sweep=sweep,
         **stream_fields,
     )
 
