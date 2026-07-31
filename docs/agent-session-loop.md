@@ -1440,7 +1440,7 @@ codex exec -C <cwd> --add-dir <plan-dir> --dangerously-bypass-approvals-and-sand
 Claude:
 
 ```text
-claude --print --output-format stream-json --include-partial-messages --add-dir <plan-dir> --permission-mode bypassPermissions [--model <model>] [--effort <effort>] <prompt>
+claude --print --verbose --output-format stream-json --include-partial-messages --add-dir <plan-dir> --permission-mode bypassPermissions [--model <model>] [--effort <effort>] <prompt>
 ```
 
 Copilot:
@@ -1480,7 +1480,7 @@ harness. For Codex, Claude, and Copilot this means:
 
 ```text
 codex exec -C <cwd> --add-dir <plan-dir> --dangerously-bypass-approvals-and-sandbox -o <last-message-file> <prompt>
-claude --print --output-format stream-json --include-partial-messages --add-dir <plan-dir> --permission-mode bypassPermissions <prompt>
+claude --print --verbose --output-format stream-json --include-partial-messages --add-dir <plan-dir> --permission-mode bypassPermissions <prompt>
 copilot -C <cwd> --add-dir <plan-dir> --allow-all-tools --allow-all-paths --no-ask-user --silent -p <prompt>
 ```
 
@@ -1490,7 +1490,7 @@ where supported by that harness:
 
 ```text
 codex exec -C <cwd> --add-dir <plan-dir> -s workspace-write -o <last-message-file> <prompt>
-claude --print --output-format stream-json --include-partial-messages --add-dir <plan-dir> --permission-mode dontAsk <prompt>
+claude --print --verbose --output-format stream-json --include-partial-messages --add-dir <plan-dir> --permission-mode dontAsk <prompt>
 copilot -C <cwd> --add-dir <plan-dir> --no-ask-user --silent -p <prompt>
 ```
 

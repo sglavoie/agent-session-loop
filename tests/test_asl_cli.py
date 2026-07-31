@@ -143,6 +143,7 @@ class CommandAndConfigTests(unittest.TestCase):
             "stream-json",
             claude[claude.index("--output-format") + 1],
         )
+        self.assertIn("--verbose", claude)
         self.assertIn("--include-partial-messages", claude)
         self.assertIn("--add-dir", claude)
 
@@ -308,6 +309,7 @@ class CommandAndConfigTests(unittest.TestCase):
             )
 
         self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("--verbose", result.argv)
         self.assertIn("--output-format", result.argv)
         self.assertIn("--include-partial-messages", result.argv)
         self.assertIn(

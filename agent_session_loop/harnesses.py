@@ -700,6 +700,7 @@ class ClaudeAdapter(HarnessAdapter):
         argv = [
             self.executable,
             "--print",
+            "--verbose",
             "--output-format",
             "stream-json",
             "--include-partial-messages",
