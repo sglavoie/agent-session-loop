@@ -574,8 +574,10 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         for command in (
             "asl inbox guidance",
             "asl inbox reply",
+            "asl inbox resolve",
             "asl inbox read",
             "asl ask",
+            "asl notify",
             "asl outbox wait",
         ):
             self.assertIn(command, commands)
@@ -626,12 +628,12 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         normalized = " ".join(mailbox_docs.split())
 
         self.assertIn(
-            "An already-committed reply takes precedence over mailbox "
+            "An already-committed closure takes precedence over mailbox "
             "exhaustion and is delivered even when the mailbox is full.",
             normalized,
         )
         self.assertIn(
-            "If no reply is available, timeout, a stale lease at an active "
+            "If no closure is available, timeout, a stale lease at an active "
             "deadline that outlasts any post-suspend grace, a full/unavailable "
             "mailbox",
             normalized,
@@ -659,38 +661,43 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         )
         self.assertIn("`suspend_skew_seconds`", normalized)
 
-    def test_docs_describe_exclusive_reply_reserve_and_availability(self) -> None:
+    def test_docs_describe_shared_closure_reserve_and_availability(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
         mailbox_docs = docs.split(
             "## Live Mailbox and Future-Turn Model Control", 1
         )[1]
         normalized = " ".join(mailbox_docs.split())
 
-        # Pin the documented reserve and minimum-reply sizes to their constants.
-        self.assertEqual(512 * 1024, mailbox.MAILBOX_REPLY_RESERVE_BYTES)
+        # Pin the documented reserve and minimum-closure sizes to their constants.
+        self.assertEqual(512 * 1024, mailbox.MAILBOX_CLOSURE_RESERVE_BYTES)
         self.assertEqual(
+            mailbox.MAILBOX_CLOSURE_RESERVE_BYTES,
             mailbox.MAILBOX_REPLY_RESERVE_BYTES,
+        )
+        self.assertEqual(
+            mailbox.MAILBOX_CLOSURE_RESERVE_BYTES,
             mailbox.MAILBOX_QUESTION_RESERVE_BYTES,
         )
         self.assertEqual(176, mailbox.MAILBOX_MIN_REPLY_BYTES)
+        self.assertEqual(200, mailbox.MAILBOX_MIN_RESOLUTION_BYTES)
         self.assertIn(
-            "The final 512 KiB below the cap is a reserve that only `reply` "
-            "records may consume",
+            "The final 512 KiB below the cap is a shared closure reserve that "
+            "only `reply` and `resolution` records may consume",
             normalized,
         )
         self.assertIn(
-            "`guidance`, `question`, and `ack` appends fail `mailbox-full` "
-            "once they would cross into the reserve",
+            "`guidance`, `question`, `notice`, and `ack` appends fail "
+            "`mailbox-full` once they would cross into the reserve",
             normalized,
         )
         self.assertIn(
-            "the reply that unblocks a waiting run can still land after "
-            "every other append kind reaches its effective cap",
+            "the closure that unblocks a waiting run can still land after "
+            "every non-closure append kind reaches its effective cap",
             normalized,
         )
         self.assertIn(
-            "`accepts_replies` separately reports whether capacity remains "
-            "for a minimal valid reply",
+            "`accepts_replies` and `accepts_resolutions` separately report "
+            "whether capacity remains for each minimal valid closure",
             normalized,
         )
         self.assertIn(
@@ -703,28 +710,27 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         )[0]
         status_normalized = " ".join(status_docs.split())
         self.assertIn(
-            "Beside `full` it reports `accepts_questions` and "
-            "`accepts_replies`",
+            "Beside `full` it reports `accepts_questions`, `accepts_replies`, "
+            "and `accepts_resolutions`",
             status_normalized,
         )
         self.assertIn(
-            "the latter is true only when capacity remains for a minimal "
-            "valid reply",
+            "the latter two independently report capacity for their "
+            "differently sized minimal valid closures",
             status_normalized,
         )
         self.assertIn(
-            "both fields are `null` alongside `full` rather than defaulting "
-            "to `true`",
+            "all three fields and the resolution/notice totals are `null` "
+            "alongside `full` rather than defaulting to writable or empty",
             status_normalized,
         )
         self.assertIn(
-            "`non-reply writes refused (replies still accepted)` only when "
-            "`accepts_replies` is true",
+            "`replies and resolutions still accepted`, `only replies still "
+            "accepted`, or `reply and resolution capacity exhausted`",
             status_normalized,
         )
         self.assertIn(
-            "`reply capacity exhausted` and never overclaims that a reply "
-            "can land",
+            "never overclaims that a closure can land",
             status_normalized,
         )
 
@@ -745,6 +751,41 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         self.assertIn(
             "truncated deterministically and given a footer naming the "
             "on-disk artifact path that holds the full text",
+            normalized,
+        )
+
+    def test_docs_describe_resolution_marker_choices_and_notice_replay(
+        self,
+    ) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        normalized = " ".join(docs.split())
+
+        for marker in (
+            "`AgentSessionLoopMailboxResolution` with `run_id`, `state_path`, "
+            "`question_id`",
+            "`<run-id>:mailbox-resolution:<resolution-sequence>` source "
+            "event ID",
+            "The marker contains no question, reply, resolution-note, or "
+            "notice body",
+            "offers three explicit outcomes: submit a factual answer with "
+            "`asl inbox reply`",
+            "`continue_command`, and `pause_command`",
+            "notices from the exact live run are emitted as bounded escaped "
+            "`NOTICE` progress and replayed at least once on attach within "
+            "each supervisor process",
+            "final structured outbox declares `include: all` and preserves "
+            "complete separate `questions` and `notices` arrays",
+        ):
+            self.assertIn(marker, normalized)
+
+        self.assertIn(
+            "A question is closed logically by its first accepted reply or "
+            "resolution",
+            normalized,
+        )
+        self.assertIn(
+            "ASL does not rotate, compact, or physically delete mailbox "
+            "records",
             normalized,
         )
 
@@ -848,7 +889,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         )
         self.assertIn("`BEGIN ASL MAILBOX MESSAGE JSONL`", normalized)
         self.assertIn(
-            "Every continuation source—mailbox, `--reply`, or "
+            "Every reply continuation source—mailbox, `--reply`, or "
             "`--reply-stdin`—uses the same safe prompt representation",
             normalized,
         )
@@ -883,6 +924,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "`asl inbox reply`",
             "`asl inbox read`",
             "`asl ask`",
+            "`asl notify`",
             "`asl outbox wait`",
         ):
             self.assertIn(command, status_docs)
@@ -1071,15 +1113,17 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
 
         for marker in (
             "two mailbox state files",
-            "five mailbox commands",
+            "seven mailbox commands",
             "one\nmodel-control command",
             "one `mailbox` event name",
             "adds no runner or\nsupervisor threads",
             "no terminal statuses",
             "`guidance-observed` carries",
+            "`notice-published` carries",
             "`reply_provided` carries",
             "do not increment pause metrics",
-            "no mailbox-authoring, mailbox-reply, or live\nmodel-control endpoint",
+            "no mailbox-authoring, mailbox-reply,\nmailbox-resolution, "
+            "mailbox-notice, or live model-control endpoint",
         ):
             self.assertIn(
                 marker,
@@ -1102,7 +1146,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "the exit `reason`, `pending_outbox`, the measured count "
             "of questions open for that run when a final mailbox snapshot "
             "is available, and the `lease_supervisor_id`, `lease_updated_at`, "
-            "and `lease_reason` evidence for the last lease a non-reply exit "
+            "and `lease_reason` evidence for the last lease a non-closure exit "
             "observed, plus `suspend_skew_seconds` and "
             "`suspend_lease_grace_seconds` when the wait detected a system "
             "suspend",
@@ -1133,9 +1177,9 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         for marker in (
             "### Live ASL supervision",
             "`asl run --no-mailbox`",
-            "The five mailbox commands",
+            "The seven mailbox commands",
             "Lease freshness is checked only at an active\ndeadline",
-            "30-minute\nabsolute maximum",
+            "30-minute absolute maximum",
             "`asl control set-model",
             "no runner/supervisor thread",
             "no Workbench",
@@ -1143,15 +1187,16 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             self.assertIn(marker, readme)
         for marker in (
             "`--no-mailbox` is accepted",
-            "polls questions every five seconds",
-            "renews the\nlease every 30 seconds",
+            "polls questions and notices every five seconds",
+            "renews the lease every 30 seconds",
             "`QUESTION id=... preview=...`",
             "asl inbox reply <plan-dir> --to <question-id>",
-            "continue the same\nsession",
+            "resumes the same session",
             "Lease freshness is checked only at an active deadline",
             "awake grace to re-prove liveness before a stale lease ends the",
             "never waits beyond 30 minutes",
-            "already-committed reply takes precedence over\nmailbox exhaustion",
+            "already-committed reply or resolution takes\nprecedence over "
+            "mailbox exhaustion",
             "affect only the next implementation invocation",
         ):
             self.assertIn(marker, skill)

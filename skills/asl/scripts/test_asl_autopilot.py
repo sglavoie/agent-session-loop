@@ -3208,6 +3208,24 @@ class MailboxWatcherTest(unittest.TestCase):
             run_id=run_id,
         )
 
+    def _notice(
+        self,
+        *,
+        seq=2,
+        text="Informational update",
+        run_id="run-current",
+    ):
+        return autopilot._mailbox.MailboxMessage(
+            seq=seq,
+            id=f"00000000-0000-0000-0000-{seq:012d}",
+            kind=autopilot._mailbox.KIND_NOTICE,
+            created_at="2026-07-24T19:00:00+00:00",
+            text=text,
+            run_id=run_id,
+            session_id="6",
+            turn_index=1,
+        )
+
     def test_resolves_paths_renews_lease_and_returns_questions_once(self) -> None:
         writes = []
         reads = []
@@ -3261,6 +3279,90 @@ class MailboxWatcherTest(unittest.TestCase):
         self.assertEqual(outbox["next_since"], 3)
         self.assertEqual(len(outbox["questions"]), 1)
         self.assertEqual(outbox["questions"][0]["text"], question.text)
+        self.assertEqual(outbox["notices"], [])
+
+    def test_notices_are_run_scoped_deduplicated_and_not_leased(self) -> None:
+        writes: list[dict] = []
+        full_text = 'notice line one\n"quoted" ' + ("x" * 500)
+        current = self._notice(seq=2, text=full_text)
+        stale = self._notice(seq=1, text="stale run notice", run_id="run-old")
+        view = autopilot._mailbox.MailboxView(
+            mailbox_path=autopilot.Path(self.mailbox_path),
+            messages=(stale, current),
+            last_seq=2,
+        )
+
+        watcher = autopilot._MailboxWatcher.from_status(
+            self._status(last_seq=0),
+            clock=lambda: 0.0,
+            read_mailbox=lambda *_args, **_kwargs: view,
+            write_lease=(
+                lambda *_args, state_dir=None, **projection: writes.append(
+                    projection
+                )
+            ),
+            supervisor_id="00000000-0000-0000-0000-000000000099",
+        )
+        self.assertIsNotNone(watcher)
+        assert watcher is not None
+        watcher.set_run_id("run-current")
+        watcher.establish(now=0.0)
+        progress: list[str] = []
+
+        self.assertEqual(
+            autopilot._poll_mailbox_watcher(
+                watcher,
+                now=5.0,
+                heartbeat=progress.append,
+            ),
+            (),
+        )
+        self.assertEqual(
+            autopilot._poll_mailbox_watcher(
+                watcher,
+                now=10.0,
+                heartbeat=progress.append,
+            ),
+            (),
+        )
+
+        notice_records = [
+            record for record in progress if record.startswith("NOTICE ")
+        ]
+        self.assertEqual(len(notice_records), 1)
+        self.assertIn(current.id, notice_records[0])
+        self.assertNotIn("\n", notice_records[0])
+        preview = notice_records[0].split("preview=", 1)[1]
+        self.assertLessEqual(len(preview), autopilot.QUESTION_PREVIEW_MAX_CHARS)
+        outbox = watcher.outbox_payload()
+        self.assertEqual(outbox["include"], "all")
+        self.assertEqual(outbox["questions"], [])
+        self.assertEqual(
+            [notice["id"] for notice in outbox["notices"]],
+            [current.id],
+        )
+        self.assertEqual(outbox["notices"][0]["text"], full_text)
+        self.assertTrue(writes)
+        self.assertTrue(
+            all(
+                set(projection).issubset(
+                    {
+                        "run_id",
+                        "projection_seq",
+                        "unanswered_questions",
+                        "latest_unanswered_question_id",
+                        "latest_unanswered_question_created_at",
+                    }
+                )
+                for projection in writes
+            )
+        )
+        self.assertTrue(
+            all(
+                projection.get("unanswered_questions", 0) == 0
+                for projection in writes
+            )
+        )
 
     def test_lease_transient_failure_recovers_and_delivers_question(self) -> None:
         writes = []
@@ -3729,6 +3831,10 @@ class MailboxWatcherTest(unittest.TestCase):
             seq=1,
             text="question appended immediately before child exit",
         )
+        notice = self._notice(
+            seq=2,
+            text="notice appended immediately before child exit",
+        )
         empty_view = autopilot._mailbox.MailboxView(
             mailbox_path=autopilot.Path(self.mailbox_path),
             messages=(),
@@ -3736,8 +3842,8 @@ class MailboxWatcherTest(unittest.TestCase):
         )
         final_view = autopilot._mailbox.MailboxView(
             mailbox_path=autopilot.Path(self.mailbox_path),
-            messages=(question,),
-            last_seq=1,
+            messages=(question, notice),
+            last_seq=2,
         )
         child_exited = False
         reads = []
@@ -3758,7 +3864,8 @@ class MailboxWatcherTest(unittest.TestCase):
                 nonlocal child_exited
                 child_exited = True
                 return (
-                    '{"ok": true, "paused": false, "reason": "all-complete"}',
+                    '{"ok": true, "paused": false, "reason": "all-complete", '
+                    '"run_id": "run-current"}',
                     "",
                 )
 
@@ -3799,6 +3906,32 @@ class MailboxWatcherTest(unittest.TestCase):
         ]
         self.assertEqual(len(question_records), 1)
         self.assertIn(question.id, question_records[0])
+        self.assertEqual(
+            [item["id"] for item in payload["outbox"]["notices"]],
+            [notice.id],
+        )
+        notice_records = [
+            record for record in progress if record.startswith("NOTICE ")
+        ]
+        self.assertEqual(len(notice_records), 1)
+        self.assertIn(notice.id, notice_records[0])
+
+
+class AutopilotMailboxPolicyTest(unittest.TestCase):
+    def test_skill_distinguishes_notices_replies_and_resolutions(self) -> None:
+        skill_path = os.path.realpath(
+            os.path.join(os.path.dirname(MODULE_PATH), "..", "SKILL.md")
+        )
+        with open(skill_path, encoding="utf-8") as handle:
+            text = handle.read()
+
+        self.assertIn("NOTICE id=... preview=...", text)
+        self.assertIn("notices` array", text)
+        self.assertIn("Resolve `continue` autonomously only", text)
+        self.assertIn("Send a factual reply only", text)
+        self.assertIn("Relay ambiguous decisions to the user", text)
+        self.assertIn("Resolve `pause` only", text)
+        self.assertIn("Do not use a fake", text)
 
 
 class AttachedMailboxWatcherTest(unittest.TestCase):
@@ -3996,6 +4129,16 @@ class AttachedMailboxWatcherTest(unittest.TestCase):
 
     def test_attach_adopts_the_backlog_once_run_id_binds_late(self) -> None:
         clock = _ManualClock()
+        notice = autopilot._mailbox.MailboxMessage(
+            seq=2,
+            id="00000000-0000-0000-0000-000000000011",
+            kind=autopilot._mailbox.KIND_NOTICE,
+            created_at="2026-07-24T18:59:00+00:00",
+            text="notice emitted before this supervisor attached",
+            run_id=ATTACHED_RUN_ID,
+            session_id="6",
+            turn_index=1,
+        )
         question = autopilot._mailbox.MailboxMessage(
             seq=3,
             id="00000000-0000-0000-0000-000000000012",
@@ -4006,7 +4149,7 @@ class AttachedMailboxWatcherTest(unittest.TestCase):
         )
         view = autopilot._mailbox.MailboxView(
             mailbox_path=autopilot.Path(self.mailbox_path),
-            messages=(question,),
+            messages=(notice, question),
             last_seq=3,
         )
         created = []
@@ -4054,6 +4197,82 @@ class AttachedMailboxWatcherTest(unittest.TestCase):
         self.assertEqual(
             1, len([beat for beat in beats if beat.startswith("QUESTION ")])
         )
+        notice_beats = [beat for beat in beats if beat.startswith("NOTICE ")]
+        self.assertEqual(1, len(notice_beats))
+        self.assertIn(notice.id, notice_beats[0])
+        self.assertEqual(
+            [item["id"] for item in result["outbox"]["notices"]],
+            [notice.id],
+        )
+
+    def test_attach_notice_replays_once_per_supervisor_process(self) -> None:
+        live = autopilot._mailbox.MailboxMessage(
+            seq=2,
+            id="00000000-0000-0000-0000-000000000012",
+            kind=autopilot._mailbox.KIND_NOTICE,
+            created_at="2026-07-24T19:00:00+00:00",
+            text="live run notice",
+            run_id=ATTACHED_RUN_ID,
+            session_id="6",
+            turn_index=1,
+        )
+        stale = autopilot._mailbox.MailboxMessage(
+            seq=1,
+            id="00000000-0000-0000-0000-000000000011",
+            kind=autopilot._mailbox.KIND_NOTICE,
+            created_at="2026-07-24T18:00:00+00:00",
+            text="stale run notice",
+            run_id="old-run",
+            session_id="5",
+            turn_index=2,
+        )
+        view = autopilot._mailbox.MailboxView(
+            mailbox_path=autopilot.Path(self.mailbox_path),
+            messages=(stale, live),
+            last_seq=3,
+        )
+
+        def supervise_once() -> tuple[list[str], dict]:
+            watcher = autopilot._MailboxWatcher.from_status(
+                self._attach_status(),
+                clock=lambda: 0.0,
+                read_mailbox=lambda *_args, **_kwargs: view,
+                write_lease=lambda *_args, **_kwargs: None,
+                include_unanswered_backlog=True,
+            )
+            self.assertIsNotNone(watcher)
+            assert watcher is not None
+            watcher.establish(now=0.0)
+            watcher.set_run_id(ATTACHED_RUN_ID, now=0.0)
+            progress: list[str] = []
+            autopilot._poll_mailbox_watcher(
+                watcher,
+                now=0.0,
+                heartbeat=progress.append,
+            )
+            autopilot._poll_mailbox_watcher(
+                watcher,
+                now=5.0,
+                heartbeat=progress.append,
+            )
+            return progress, watcher.outbox_payload()
+
+        first_progress, first_outbox = supervise_once()
+        second_progress, second_outbox = supervise_once()
+
+        for progress, outbox in (
+            (first_progress, first_outbox),
+            (second_progress, second_outbox),
+        ):
+            notice_records = [
+                record for record in progress if record.startswith("NOTICE ")
+            ]
+            self.assertEqual(len(notice_records), 1)
+            self.assertIn(live.id, notice_records[0])
+            self.assertEqual(
+                [item["id"] for item in outbox["notices"]],
+                [live.id],
+            )
 
     def test_no_mailbox_attach_never_constructs_a_watcher(self) -> None:
         def fail_factory(*_args, **_kwargs):  # pragma: no cover - guard

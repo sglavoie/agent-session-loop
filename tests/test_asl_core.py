@@ -2439,9 +2439,12 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertFalse(status["full"])
             self.assertTrue(status["accepts_questions"])
             self.assertTrue(status["accepts_replies"])
+            self.assertTrue(status["accepts_resolutions"])
             self.assertEqual(0, status["last_seq"])
             self.assertEqual(0, status["pending_guidance"])
             self.assertEqual(0, status["unanswered_questions"])
+            self.assertEqual(0, status["resolutions"])
+            self.assertEqual(0, status["notices"])
             self.assertEqual(0, status["rejected_records"])
             self.assertIsNone(status["error"])
             self.assertIsNone(status["lease_updated_at"])
@@ -2479,9 +2482,12 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertFalse(status["full"])
             self.assertTrue(status["accepts_questions"])
             self.assertTrue(status["accepts_replies"])
+            self.assertTrue(status["accepts_resolutions"])
             self.assertEqual(2, status["last_seq"])
             self.assertEqual(1, status["pending_guidance"])
             self.assertEqual(1, status["unanswered_questions"])
+            self.assertEqual(0, status["resolutions"])
+            self.assertEqual(0, status["notices"])
             # No live run guards this plan, so the question is history.
             self.assertEqual(0, status["open_questions"])
             self.assertEqual(0, status["rejected_records"])
@@ -2525,6 +2531,27 @@ class ParserAndStateTests(unittest.TestCase):
                 state_dir=state_dir,
                 run_id="RUN-LIVE",
             )
+            resolved = mailbox.append_question(
+                plan_dir,
+                "the live run already closed this",
+                state_dir=state_dir,
+                run_id="RUN-LIVE",
+            )
+            mailbox.append_resolution(
+                plan_dir,
+                resolved.id,
+                mailbox.RESOLUTION_ACTION_CONTINUE,
+                expected_run_id="RUN-LIVE",
+                state_dir=state_dir,
+            )
+            mailbox.append_notice(
+                plan_dir,
+                "checkpoint",
+                run_id="RUN-LIVE",
+                session_id="1",
+                turn_index=1,
+                state_dir=state_dir,
+            )
             _write_state_payload(
                 plan_dir,
                 state_dir,
@@ -2537,11 +2564,14 @@ class ParserAndStateTests(unittest.TestCase):
             status = payload["mailbox"]
             self.assertEqual(3, status["unanswered_questions"])
             self.assertEqual(1, status["open_questions"])
+            self.assertEqual(1, status["resolutions"])
+            self.assertEqual(1, status["notices"])
             buffer = io.StringIO()
             with redirect_stdout(buffer):
                 state._print_text_status(payload)
             output = buffer.getvalue()
-            self.assertIn("1 open questions (3 unanswered historical)", output)
+            self.assertIn("1 open questions (2 unanswered historical)", output)
+            self.assertIn("1 resolutions, 1 notices", output)
 
     def test_status_payload_retires_open_questions_once_the_run_ends(
         self,
@@ -2679,6 +2709,95 @@ class ParserAndStateTests(unittest.TestCase):
                 mailbox_path.stat().st_size - size_before,
             )
 
+    def test_min_resolution_bytes_matches_generated_minimal_resolution(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            question_id = "00000000-0000-4000-8000-000000000001"
+            resolution_id = "00000000-0000-4000-8000-000000000002"
+            now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+            question = mailbox.append_question(
+                plan_dir,
+                "x",
+                state_dir=state_dir,
+                message_id=question_id,
+                created_at="2026-07-25T12:00:00.000000+00:00",
+                run_id="x",
+            )
+            mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
+            size_before = mailbox_path.stat().st_size
+
+            with (
+                mock.patch.object(mailbox, "_new_id", return_value=resolution_id),
+                mock.patch.object(mailbox, "_utc_now", return_value=now),
+            ):
+                appended = mailbox.append_resolution(
+                    plan_dir,
+                    question.id,
+                    mailbox.RESOLUTION_ACTION_PAUSE,
+                    expected_run_id="x",
+                    state_dir=state_dir,
+                )
+
+            self.assertEqual(resolution_id, appended.id)
+            self.assertEqual(
+                mailbox.MAILBOX_MIN_RESOLUTION_BYTES,
+                mailbox_path.stat().st_size - size_before,
+            )
+
+    def test_resolution_empty_note_and_omitted_note_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            empty_note_question = mailbox.append_question(
+                plan_dir,
+                "Continue with an empty note?",
+                state_dir=state_dir,
+                run_id="RUN-LIVE",
+            )
+            omitted_note_question = mailbox.append_question(
+                plan_dir,
+                "Pause without a note?",
+                state_dir=state_dir,
+                run_id="RUN-LIVE",
+            )
+            mailbox.append_resolution(
+                plan_dir,
+                empty_note_question.id,
+                mailbox.RESOLUTION_ACTION_CONTINUE,
+                expected_run_id="RUN-LIVE",
+                note="",
+                state_dir=state_dir,
+            )
+            mailbox.append_resolution(
+                plan_dir,
+                omitted_note_question.id,
+                mailbox.RESOLUTION_ACTION_PAUSE,
+                expected_run_id="RUN-LIVE",
+                state_dir=state_dir,
+            )
+
+            view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+            empty_note_closure = view.closure_for(empty_note_question.id)
+            empty_note_resolution = view.resolution_for(empty_note_question.id)
+            omitted_note_closure = view.closure_for(omitted_note_question.id)
+            omitted_note_resolution = view.resolution_for(
+                omitted_note_question.id
+            )
+
+            self.assertIsNotNone(empty_note_closure)
+            self.assertIsNotNone(empty_note_resolution)
+            self.assertEqual("", empty_note_closure.note)
+            self.assertEqual("", empty_note_resolution.note)
+            self.assertIsNotNone(omitted_note_closure)
+            self.assertIsNotNone(omitted_note_resolution)
+            self.assertIsNone(omitted_note_closure.note)
+            self.assertIsNone(omitted_note_resolution.note)
+
     def test_status_payload_surfaces_exhausted_and_malformed_mailboxes(
         self,
     ) -> None:
@@ -2753,6 +2872,7 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertTrue(full_status["full"])
             self.assertFalse(full_status["accepts_questions"])
             self.assertFalse(full_status["accepts_replies"])
+            self.assertFalse(full_status["accepts_resolutions"])
             self.assertEqual(target_size, full_status["size_bytes"])
             self.assertEqual(
                 mailbox.MAILBOX_MAX_BYTES,
@@ -2778,7 +2898,82 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertEqual(mailbox.LEASE_INVALID_SIZE, malformed["lease_reason"])
             self.assertEqual(mailbox.LEASE_INVALID_SIZE, malformed["lease_error"])
 
-    def test_reply_reserve_cannot_be_consumed_by_guidance_or_acknowledgements(
+    def test_oversized_integer_line_is_rejected_and_append_continues(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
+            mailbox_path.parent.mkdir(parents=True, exist_ok=True)
+            hostile_line = '{"upto": ' + "1" * 5000 + "}\n"
+            mailbox_path.write_text(hostile_line, encoding="utf-8")
+
+            view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+
+            self.assertEqual(1, view.last_seq)
+            self.assertEqual((), view.messages)
+            self.assertEqual(1, len(view.rejected))
+            self.assertEqual(mailbox.REJECT_INVALID_JSON, view.rejected[0].reason)
+            question = mailbox.append_question(
+                plan_dir,
+                "post-hostile append",
+                state_dir=state_dir,
+                run_id="run-check",
+            )
+            updated = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+            self.assertEqual(2, updated.last_seq)
+            self.assertEqual((question,), updated.messages)
+            self.assertEqual(1, len(updated.rejected))
+
+    def test_oversized_turn_index_raises_mailbox_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+
+            with self.assertRaises(mailbox.MailboxError) as raised:
+                mailbox.append_question(
+                    plan_dir,
+                    "question",
+                    state_dir=state_dir,
+                    run_id="run-check",
+                    session_id="1",
+                    turn_index=10**5000,
+                    waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
+                )
+
+            self.assertEqual(
+                mailbox.REJECT_INVALID_TURN_INDEX,
+                raised.exception.reason,
+            )
+            self.assertFalse(
+                mailbox.mailbox_path_for_plan(plan_dir, state_dir).exists()
+            )
+
+    def test_oversized_acknowledgement_raises_mailbox_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+
+            with self.assertRaises(mailbox.MailboxError) as raised:
+                mailbox.append_acknowledgement(
+                    plan_dir,
+                    10**5000,
+                    state_dir=state_dir,
+                )
+
+            self.assertEqual(
+                mailbox.REJECT_INVALID_ACKNOWLEDGEMENT,
+                raised.exception.reason,
+            )
+            self.assertFalse(
+                mailbox.mailbox_path_for_plan(plan_dir, state_dir).exists()
+            )
+
+    def test_closure_reserve_cannot_be_consumed_by_non_closure_records(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2790,6 +2985,14 @@ class ParserAndStateTests(unittest.TestCase):
                 "Which mode?",
                 state_dir=state_dir,
                 message_id="00000000-0000-4000-8000-000000000001",
+                created_at="0001-01-01T00:00:00+00:00",
+            )
+            resolution_question = mailbox.append_question(
+                plan_dir,
+                "Continue?",
+                state_dir=state_dir,
+                run_id="run-A",
+                message_id="00000000-0000-4000-8000-000000000003",
                 created_at="0001-01-01T00:00:00+00:00",
             )
             created_at = "0001-01-01T00:00:00+00:00"
@@ -2831,10 +3034,16 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertFalse(view.full)
             self.assertFalse(view.accepts_questions)
             self.assertTrue(view.accepts_replies)
+            self.assertTrue(view.accepts_resolutions)
             view_payload = view.to_payload()
             self.assertFalse(view_payload["full"])
             self.assertFalse(view_payload["accepts_questions"])
             self.assertTrue(view_payload["accepts_replies"])
+            self.assertTrue(view_payload["accepts_resolutions"])
+            self.assertEqual(
+                mailbox.MAILBOX_CLOSURE_RESERVE_BYTES,
+                mailbox.MAILBOX_REPLY_RESERVE_BYTES,
+            )
 
             for append in (mailbox.append_guidance, mailbox.append_question):
                 with self.assertRaises(mailbox.MailboxError) as raised:
@@ -2847,11 +3056,29 @@ class ParserAndStateTests(unittest.TestCase):
                     plan_dir, view.last_seq, state_dir=state_dir
                 )
             self.assertEqual(mailbox.ERROR_MAILBOX_FULL, raised.exception.reason)
+            with self.assertRaises(mailbox.MailboxError) as raised:
+                mailbox.append_notice(
+                    plan_dir,
+                    "one more notice",
+                    run_id="run-A",
+                    session_id="1",
+                    turn_index=1,
+                    state_dir=state_dir,
+                )
+            self.assertEqual(mailbox.ERROR_MAILBOX_FULL, raised.exception.reason)
 
             reply = mailbox.append_reply(
                 plan_dir, question.id, "x", state_dir=state_dir
             )
             self.assertEqual(question.id, reply.to)
+            resolution = mailbox.append_resolution(
+                plan_dir,
+                resolution_question.id,
+                mailbox.RESOLUTION_ACTION_CONTINUE,
+                expected_run_id="run-A",
+                state_dir=state_dir,
+            )
+            self.assertEqual(resolution_question.id, resolution.to)
 
             payload = state.status_payload(
                 plans.inspect_plan(plan_dir), state_dir
@@ -2860,14 +3087,15 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertFalse(status["full"])
             self.assertFalse(status["accepts_questions"])
             self.assertTrue(status["accepts_replies"])
+            self.assertTrue(status["accepts_resolutions"])
 
             buffer = io.StringIO()
             with redirect_stdout(buffer):
                 state._print_text_status(payload)
             output = buffer.getvalue()
             self.assertIn(
-                "Mailbox: active, non-reply writes refused "
-                "(replies still accepted)",
+                "Mailbox: active, non-closure writes refused "
+                "(replies and resolutions still accepted)",
                 output,
             )
             self.assertNotIn("Mailbox: active, full", output)
@@ -2940,12 +3168,13 @@ class ParserAndStateTests(unittest.TestCase):
             status = payload["mailbox"]
             self.assertFalse(status["full"])
             self.assertFalse(status["accepts_replies"])
+            self.assertFalse(status["accepts_resolutions"])
             buffer = io.StringIO()
             with redirect_stdout(buffer):
                 state._print_text_status(payload)
             output = buffer.getvalue()
-            self.assertIn("reply capacity exhausted", output)
-            self.assertNotIn("replies still accepted", output)
+            self.assertIn("reply and resolution capacity exhausted", output)
+            self.assertNotIn("still accepted", output)
 
     def test_status_payload_surfaces_mailbox_read_error_and_stale_lease(
         self,
@@ -2982,6 +3211,9 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertIsNone(status["full"])
             self.assertIsNone(status["accepts_questions"])
             self.assertIsNone(status["accepts_replies"])
+            self.assertIsNone(status["accepts_resolutions"])
+            self.assertIsNone(status["resolutions"])
+            self.assertIsNone(status["notices"])
             self.assertIn(mailbox.ERROR_MAILBOX_READ, status["error"])
             self.assertTrue(status["lease_present"])
             self.assertFalse(status["lease_fresh"])

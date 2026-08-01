@@ -22,7 +22,7 @@ import shlex
 import sys
 from typing import Any
 
-from . import events, pause_policy, plans, responses, state
+from . import events, mailbox, pause_policy, plans, responses, state
 
 
 REASON_NO_PAUSED_RUN = "no-paused-run"
@@ -740,10 +740,10 @@ def _render_waiting_resolver_prompt(context: QnAContext) -> str:
     lines.append("# Live Agent Session - Resolver Prompt")
     lines.append("")
     lines.append(
-        "An agent harness is waiting in-process for a clarifying answer. "
-        "Read the context below, ask the user the question(s) the agent "
-        "needed answered, then return a concise reply suitable for "
-        "`asl inbox reply`."
+        "An agent harness is waiting in-process on a mailbox question. "
+        "Read the context below and choose whether to submit a factual reply, "
+        "continue without an answer, or end the live wait for ordinary "
+        "paused-run recovery."
     )
     lines.append("")
 
@@ -788,6 +788,24 @@ def _render_waiting_resolver_prompt(context: QnAContext) -> str:
     lines.append(f"- Result: {_display(artifacts['result_path'])}")
     lines.append("")
 
+    lines.append("## Resolution Choices")
+    lines.append("")
+    lines.append(
+        "- Reply when the worker needs a factual operator answer: "
+        f"`{mailbox_reply_command_text(context)}`"
+    )
+    lines.append(
+        "- Continue without an answer only when the message is plainly "
+        "nonblocking: "
+        f"`{mailbox_continue_command_text(context)}`"
+    )
+    lines.append(
+        "- Pause when the live wait should become ordinary paused-run "
+        "recovery: "
+        f"`{mailbox_pause_command_text(context)}`"
+    )
+    lines.append("")
+
     lines.append("## Previous Agent Message")
     lines.append("")
     lines.append(context.last_message.rstrip("\n"))
@@ -796,20 +814,24 @@ def _render_waiting_resolver_prompt(context: QnAContext) -> str:
     lines.append("## Instructions")
     lines.append("")
     lines.append(
-        "1. Ask the user the question(s) the previous agent needed answered. "
-        "If the message contains multiple questions, ask each in order."
+        "1. Choose reply, continue, or pause from the three outcomes above. "
+        "Do not fabricate an answer merely to clear the live wait."
     )
     lines.append(
-        "2. Keep the reply concise. One short answer per question is best "
-        "(e.g., `1a, 2a, 3a`)."
+        "2. For reply, ask the user the question(s) the previous agent needed "
+        "answered. If the message contains multiple questions, ask each in "
+        "order. Keep the answer concise; one short answer per question is "
+        "best (e.g., `1a, 2a, 3a`)."
     )
     lines.append(
-        "3. Return ONLY the user's answer text. Do not add commentary, "
-        "headings, or quoted context."
+        "3. For continue, proceed only when no factual answer or implementation "
+        "choice is required. For pause, preserve the question for ordinary "
+        "paused-run recovery."
     )
     lines.append(
-        "4. Submit the answer with the live mailbox reply command before the "
-        "hard deadline; the active runner will continue the same session."
+        "4. Submit the selected command before the hard deadline. A reply "
+        "continues with the operator's answer; continue supplies no answer; "
+        "pause ends the live wait without inventing one."
     )
     lines.append("")
 
@@ -868,6 +890,47 @@ def mailbox_reply_stdin_command_text(context: QnAContext) -> str:
     return shlex.join([*_mailbox_reply_command_base(context), "--text-stdin"])
 
 
+def _mailbox_resolution_command_base(
+    context: QnAContext,
+    action: mailbox.ResolutionAction,
+) -> list[str]:
+    if context.question_id is None:
+        raise ValueError("live Q&A context does not record a question id")
+    parts = [
+        "asl",
+        "inbox",
+        "resolve",
+        str(context.plan_dir),
+        "--to",
+        context.question_id,
+        "--action",
+        action,
+    ]
+    if context.state_dir_override:
+        parts.extend(["--state-dir", context.state_dir_override])
+    return parts
+
+
+def mailbox_continue_command_text(context: QnAContext) -> str:
+    """Return a ready-to-run answerless continue command."""
+    return shlex.join(
+        _mailbox_resolution_command_base(
+            context,
+            mailbox.RESOLUTION_ACTION_CONTINUE,
+        )
+    )
+
+
+def mailbox_pause_command_text(context: QnAContext) -> str:
+    """Return a ready-to-run answerless pause command."""
+    return shlex.join(
+        _mailbox_resolution_command_base(
+            context,
+            mailbox.RESOLUTION_ACTION_PAUSE,
+        )
+    )
+
+
 def questions_payload(context: QnAContext) -> dict[str, Any]:
     """Render a paused or live-wait context as ``asl questions`` JSON."""
     if context.context_kind == "waiting":
@@ -876,6 +939,8 @@ def questions_payload(context: QnAContext) -> dict[str, Any]:
             context_kind="waiting",
             reply_command=mailbox_reply_command_text(context),
             reply_stdin_command=mailbox_reply_stdin_command_text(context),
+            continue_command=mailbox_continue_command_text(context),
+            pause_command=mailbox_pause_command_text(context),
             plan_dir=str(context.plan_dir),
             state_dir=str(context.state_dir),
             state_path=str(context.state_path),

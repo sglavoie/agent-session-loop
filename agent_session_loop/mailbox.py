@@ -1,10 +1,10 @@
 """Locked, non-destructive mailbox storage for supervised ASL runs.
 
-The mailbox is a per-plan JSONL log. Supervisors append ``guidance`` and
-``reply`` records; workers append ``question`` and ``ack`` records. Reads never
-truncate the log, and the physical one-based line number is the durable
-sequence number. Invalid lines therefore consume sequence numbers without
-preventing later valid records from being read.
+The mailbox is a per-plan JSONL log. Supervisors append ``guidance``, ``reply``,
+and ``resolution`` records; workers append ``question``, ``notice``, and
+``ack`` records. Reads never truncate the log, and the physical one-based line
+number is the durable sequence number. Invalid lines therefore consume
+sequence numbers without preventing later valid records from being read.
 
 The adjacent lease is deliberately separate from the append-only log. It is a
 small, fixed-size record renewed by the supervisor so readers can distinguish
@@ -28,7 +28,12 @@ from . import state
 
 MAILBOX_FILE_NAME = "mailbox.jsonl"
 MAILBOX_LEASE_FILE_NAME = "mailbox-lease.json"
-MAILBOX_SCHEMA_VERSION = 1
+MAILBOX_LEGACY_SCHEMA_VERSION = 1
+MAILBOX_SCHEMA_VERSION = 2
+MAILBOX_SUPPORTED_SCHEMA_VERSIONS = (
+    MAILBOX_LEGACY_SCHEMA_VERSION,
+    MAILBOX_SCHEMA_VERSION,
+)
 MAILBOX_LEASE_VERSION = 2
 MAILBOX_LEASE_SUPPORTED_VERSIONS = (1, MAILBOX_LEASE_VERSION)
 MAILBOX_MAX_BYTES = 4 * 1024 * 1024
@@ -40,30 +45,72 @@ MAILBOX_MIN_APPEND_BYTES = 128
 # The smallest compact reply produced with normal generated metadata uses a
 # one-character body plus canonical UUIDs for both its id and target.
 MAILBOX_MIN_REPLY_BYTES = 176
-# Headroom below the cap that only replies may consume. Guidance, questions,
-# and acknowledgements stop at the reduced cap so they cannot strand a waiting
-# run by consuming the capacity its reply needs.
-MAILBOX_REPLY_RESERVE_BYTES = 512 * 1024
-# Backward-compatible name for callers that compute the reduced question cap.
-MAILBOX_QUESTION_RESERVE_BYTES = MAILBOX_REPLY_RESERVE_BYTES
+# The smallest compact resolution uses ``pause``, a one-character run id, and
+# canonical UUIDs for both its id and target.
+MAILBOX_MIN_RESOLUTION_BYTES = 200
+# Headroom below the cap that only question-closing records may consume.
+# Guidance, questions, notices, and acknowledgements stop at the reduced cap
+# so they cannot strand a waiting run by consuming its closure capacity.
+MAILBOX_CLOSURE_RESERVE_BYTES = 512 * 1024
+# Backward-compatible names for callers that compute the old reply/question
+# reserve. Both aliases intentionally name the shared closure reserve.
+MAILBOX_REPLY_RESERVE_BYTES = MAILBOX_CLOSURE_RESERVE_BYTES
+MAILBOX_QUESTION_RESERVE_BYTES = MAILBOX_CLOSURE_RESERVE_BYTES
 # Questions record the run that owns them. A runner id is
 # ``<timestamp>-<pid>`` (~30 characters); the bound only keeps a hostile or
 # corrupt value from consuming the mailbox capacity budget.
 MAILBOX_MAX_RUN_ID_CHARS = 128
+MAILBOX_MAX_SESSION_ID_CHARS = 128
+# Mailbox sequence and turn fields are operational counters, not arbitrary
+# precision values. A signed 64-bit ceiling keeps every accepted value safely
+# serializable even when Python's integer-string conversion guard is enabled.
+MAILBOX_MAX_INTEGER = (1 << 63) - 1
 MAILBOX_LEASE_BYTES = 512
 MAILBOX_LEASE_FRESH_SECONDS = 90.0
 MAILBOX_CHANGE_TOKEN_UNAVAILABLE = object()
 
-MessageKind = Literal["guidance", "question", "reply", "ack"]
+MessageKind = Literal[
+    "guidance",
+    "question",
+    "reply",
+    "resolution",
+    "notice",
+    "ack",
+]
+ResolutionAction = Literal["continue", "pause"]
+WaiterOrigin = Literal["worker", "runner"]
 KIND_GUIDANCE: MessageKind = "guidance"
 KIND_QUESTION: MessageKind = "question"
 KIND_REPLY: MessageKind = "reply"
+KIND_RESOLUTION: MessageKind = "resolution"
+KIND_NOTICE: MessageKind = "notice"
 KIND_ACK: MessageKind = "ack"
 MESSAGE_KINDS: tuple[MessageKind, ...] = (
     KIND_GUIDANCE,
     KIND_QUESTION,
     KIND_REPLY,
+    KIND_RESOLUTION,
+    KIND_NOTICE,
     KIND_ACK,
+)
+LEGACY_MESSAGE_KINDS: tuple[MessageKind, ...] = (
+    KIND_GUIDANCE,
+    KIND_QUESTION,
+    KIND_REPLY,
+    KIND_ACK,
+)
+CLOSURE_KINDS: tuple[MessageKind, ...] = (KIND_REPLY, KIND_RESOLUTION)
+RESOLUTION_ACTION_CONTINUE: ResolutionAction = "continue"
+RESOLUTION_ACTION_PAUSE: ResolutionAction = "pause"
+RESOLUTION_ACTIONS: tuple[ResolutionAction, ...] = (
+    RESOLUTION_ACTION_CONTINUE,
+    RESOLUTION_ACTION_PAUSE,
+)
+WAITER_ORIGIN_WORKER: WaiterOrigin = "worker"
+WAITER_ORIGIN_RUNNER: WaiterOrigin = "runner"
+WAITER_ORIGINS: tuple[WaiterOrigin, ...] = (
+    WAITER_ORIGIN_WORKER,
+    WAITER_ORIGIN_RUNNER,
 )
 
 # Stable record-rejection reasons. These are intentionally data, not prose:
@@ -79,7 +126,15 @@ REJECT_INVALID_CREATED_AT = "invalid-created-at"
 REJECT_MISSING_TEXT = "missing-text"
 REJECT_INVALID_TARGET = "invalid-target"
 REJECT_QUESTION_NOT_FOUND = "question-not-found"
+REJECT_QUESTION_NOT_OPEN = "question-not-open"
 REJECT_QUESTION_ALREADY_ANSWERED = "question-already-answered"
+REJECT_QUESTION_ALREADY_RESOLVED = "question-already-resolved"
+REJECT_INVALID_RUN_ID = "invalid-run-id"
+REJECT_INVALID_SESSION_ID = "invalid-session-id"
+REJECT_INVALID_TURN_INDEX = "invalid-turn-index"
+REJECT_INVALID_WAITER_ORIGIN = "invalid-waiter-origin"
+REJECT_INVALID_ACTION = "invalid-action"
+REJECT_INVALID_NOTE = "invalid-note"
 REJECT_INVALID_ACKNOWLEDGEMENT = "invalid-acknowledgement"
 
 # Stable operation errors. Validation failures use the corresponding rejection
@@ -138,6 +193,11 @@ class MailboxMessage:
     to: str | None = None
     upto: int | None = None
     run_id: str | None = None
+    session_id: str | None = None
+    turn_index: int | None = None
+    waiter_origin: WaiterOrigin | None = None
+    action: ResolutionAction | None = None
+    note: str | None = None
     version: int = MAILBOX_SCHEMA_VERSION
 
     def to_record(self) -> dict[str, Any]:
@@ -156,6 +216,16 @@ class MailboxMessage:
             payload["upto"] = self.upto
         if self.run_id is not None:
             payload["run_id"] = self.run_id
+        if self.session_id is not None:
+            payload["session_id"] = self.session_id
+        if self.turn_index is not None:
+            payload["turn_index"] = self.turn_index
+        if self.waiter_origin is not None:
+            payload["waiter_origin"] = self.waiter_origin
+        if self.action is not None:
+            payload["action"] = self.action
+        if self.note is not None:
+            payload["note"] = self.note
         return payload
 
     def to_payload(self) -> dict[str, Any]:
@@ -194,6 +264,8 @@ class MailboxCounts:
     guidance: int
     questions: int
     replies: int
+    resolutions: int
+    notices: int
     acknowledgements: int
     pending_guidance: int
     unanswered_questions: int
@@ -207,6 +279,8 @@ class MailboxCounts:
             "questions": self.questions,
             "rejected": self.rejected,
             "replies": self.replies,
+            "resolutions": self.resolutions,
+            "notices": self.notices,
             "unanswered_questions": self.unanswered_questions,
         }
 
@@ -243,15 +317,15 @@ class MailboxView:
 
     @property
     def unanswered_questions(self) -> tuple[MailboxMessage, ...]:
-        answered = {
+        closed = {
             message.to
             for message in self.messages
-            if message.kind == KIND_REPLY and message.to is not None
+            if message.kind in CLOSURE_KINDS and message.to is not None
         }
         return tuple(
             message
             for message in self.messages
-            if message.kind == KIND_QUESTION and message.id not in answered
+            if message.kind == KIND_QUESTION and message.id not in closed
         )
 
     def open_questions(
@@ -283,6 +357,10 @@ class MailboxView:
                 message.kind == KIND_QUESTION for message in self.messages
             ),
             replies=sum(message.kind == KIND_REPLY for message in self.messages),
+            resolutions=sum(
+                message.kind == KIND_RESOLUTION for message in self.messages
+            ),
+            notices=sum(message.kind == KIND_NOTICE for message in self.messages),
             acknowledgements=sum(
                 message.kind == KIND_ACK for message in self.messages
             ),
@@ -300,13 +378,20 @@ class MailboxView:
         return self.size_bytes + MAILBOX_MIN_REPLY_BYTES <= MAILBOX_MAX_BYTES
 
     @property
+    def accepts_resolutions(self) -> bool:
+        return (
+            self.size_bytes + MAILBOX_MIN_RESOLUTION_BYTES
+            <= MAILBOX_MAX_BYTES
+        )
+
+    @property
     def accepts_questions(self) -> bool:
-        # Questions share the reduced non-reply cap with guidance and
-        # acknowledgements. Mirror ``full``'s exhaustion probe so the status
-        # key agrees with the append-site refusal boundary.
+        # Questions share the reduced non-closure cap with guidance, notices,
+        # and acknowledgements. Mirror ``full``'s exhaustion probe so the
+        # status key agrees with the append-site refusal boundary.
         return (
             self.size_bytes + MAILBOX_MIN_APPEND_BYTES
-            <= MAILBOX_MAX_BYTES - MAILBOX_REPLY_RESERVE_BYTES
+            <= MAILBOX_MAX_BYTES - MAILBOX_CLOSURE_RESERVE_BYTES
         )
 
     def messages_since(
@@ -334,10 +419,25 @@ class MailboxView:
                 return message
         return None
 
+    def resolution_for(self, question_id: str) -> MailboxMessage | None:
+        """Return the first valid resolution targeting ``question_id``."""
+        for message in self.messages:
+            if message.kind == KIND_RESOLUTION and message.to == question_id:
+                return message
+        return None
+
+    def closure_for(self, question_id: str) -> MailboxMessage | None:
+        """Return the first valid reply or resolution for ``question_id``."""
+        for message in self.messages:
+            if message.kind in CLOSURE_KINDS and message.to == question_id:
+                return message
+        return None
+
     def to_payload(self) -> dict[str, Any]:
         return {
             "accepts_questions": self.accepts_questions,
             "accepts_replies": self.accepts_replies,
+            "accepts_resolutions": self.accepts_resolutions,
             "counts": self.counts.to_payload(),
             "full": self.full,
             "last_seq": self.last_seq,
@@ -466,11 +566,34 @@ def _is_uuid(value: object) -> bool:
 
 
 def _valid_run_id(value: object) -> bool:
-    """Accept a run identifier, treating anything malformed as unattributed."""
+    """Return whether ``value`` is a bounded, nonblank run identifier."""
     return (
         isinstance(value, str)
         and value.strip() != ""
         and len(value) <= MAILBOX_MAX_RUN_ID_CHARS
+    )
+
+
+def _valid_session_id(value: object) -> bool:
+    if (
+        not isinstance(value, str)
+        or len(value) > MAILBOX_MAX_SESSION_ID_CHARS
+    ):
+        return False
+    components = value.split(".")
+    return bool(components) and all(
+        component.isascii()
+        and component.isdigit()
+        and component[0] != "0"
+        for component in components
+    )
+
+
+def _valid_turn_index(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, int)
+        and 0 < value <= MAILBOX_MAX_INTEGER
     )
 
 
@@ -490,8 +613,16 @@ def _parse_timestamp(value: object, *, require_utc: bool = False) -> datetime | 
 
 
 def _validate_sequence(value: object, *, field_name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"{field_name} must be a non-negative integer")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or value > MAILBOX_MAX_INTEGER
+    ):
+        raise ValueError(
+            f"{field_name} must be a non-negative integer no greater than "
+            f"{MAILBOX_MAX_INTEGER}"
+        )
     return value
 
 
@@ -526,8 +657,8 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
     messages: list[MailboxMessage] = []
     rejected: list[RejectedMailboxRecord] = []
     seen_ids: set[str] = set()
-    questions: set[str] = set()
-    answered_questions: set[str] = set()
+    questions: dict[str, MailboxMessage] = {}
+    closures: dict[str, MessageKind] = {}
     physical_lines = _physical_lines(data)
 
     for seq, raw_bytes in enumerate(physical_lines, start=1):
@@ -542,7 +673,7 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
             continue
         try:
             payload = json.loads(raw)
-        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        except (ValueError, UnicodeDecodeError) as error:
             _reject(
                 rejected,
                 seq=seq,
@@ -560,11 +691,13 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
             )
             continue
 
-        version = payload.get("version", MAILBOX_SCHEMA_VERSION)
+        # Versionless records predate the v2 writer and therefore retain the
+        # legacy v1 interpretation even after the current write version moves.
+        version = payload.get("version", MAILBOX_LEGACY_SCHEMA_VERSION)
         if (
             isinstance(version, bool)
             or not isinstance(version, int)
-            or version != MAILBOX_SCHEMA_VERSION
+            or version not in MAILBOX_SUPPORTED_SCHEMA_VERSIONS
         ):
             _reject(
                 rejected,
@@ -576,7 +709,12 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
             continue
 
         kind = payload.get("kind")
-        if kind not in MESSAGE_KINDS:
+        allowed_kinds = (
+            LEGACY_MESSAGE_KINDS
+            if version == MAILBOX_LEGACY_SCHEMA_VERSION
+            else MESSAGE_KINDS
+        )
+        if kind not in allowed_kinds:
             _reject(
                 rejected,
                 seq=seq,
@@ -620,15 +758,14 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
         text: str | None = None
         target: str | None = None
         upto: int | None = None
-        # A malformed or absent owner degrades the question to unattributed
-        # rather than rejecting the line: history written before run
-        # attribution must keep parsing.
-        run_id: str | None = (
-            payload.get("run_id")
-            if kind == KIND_QUESTION and _valid_run_id(payload.get("run_id"))
-            else None
-        )
-        if kind in (KIND_GUIDANCE, KIND_QUESTION, KIND_REPLY):
+        run_id: str | None = None
+        session_id: str | None = None
+        turn_index: int | None = None
+        waiter_origin: WaiterOrigin | None = None
+        action: ResolutionAction | None = None
+        note: str | None = None
+
+        if kind in (KIND_GUIDANCE, KIND_QUESTION, KIND_REPLY, KIND_NOTICE):
             text_value = payload.get("text")
             if not isinstance(text_value, str) or text_value.strip() == "":
                 _reject(
@@ -640,7 +777,89 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
                 continue
             text = text_value
 
-        if kind == KIND_REPLY:
+        if kind == KIND_QUESTION:
+            if version == MAILBOX_LEGACY_SCHEMA_VERSION:
+                # v1 accepted ownership before it was part of the schema and
+                # deliberately degraded malformed owners to unattributed.
+                if _valid_run_id(payload.get("run_id")):
+                    run_id = payload["run_id"]
+            else:
+                if "run_id" in payload:
+                    if not _valid_run_id(payload.get("run_id")):
+                        _reject(
+                            rejected,
+                            seq=seq,
+                            reason=REJECT_INVALID_RUN_ID,
+                            raw=raw,
+                        )
+                        continue
+                    run_id = payload["run_id"]
+                if "session_id" in payload:
+                    if not _valid_session_id(payload.get("session_id")):
+                        _reject(
+                            rejected,
+                            seq=seq,
+                            reason=REJECT_INVALID_SESSION_ID,
+                            raw=raw,
+                        )
+                        continue
+                    session_id = payload["session_id"]
+                if "turn_index" in payload:
+                    if not _valid_turn_index(payload.get("turn_index")):
+                        _reject(
+                            rejected,
+                            seq=seq,
+                            reason=REJECT_INVALID_TURN_INDEX,
+                            raw=raw,
+                        )
+                        continue
+                    turn_index = payload["turn_index"]
+                if "waiter_origin" in payload:
+                    waiter_value = payload.get("waiter_origin")
+                    if waiter_value not in WAITER_ORIGINS:
+                        _reject(
+                            rejected,
+                            seq=seq,
+                            reason=REJECT_INVALID_WAITER_ORIGIN,
+                            raw=raw,
+                            detail=str(waiter_value),
+                        )
+                        continue
+                    waiter_origin = waiter_value
+
+        if kind == KIND_NOTICE:
+            run_value = payload.get("run_id")
+            session_value = payload.get("session_id")
+            turn_value = payload.get("turn_index")
+            if not _valid_run_id(run_value):
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_INVALID_RUN_ID,
+                    raw=raw,
+                )
+                continue
+            if not _valid_session_id(session_value):
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_INVALID_SESSION_ID,
+                    raw=raw,
+                )
+                continue
+            if not _valid_turn_index(turn_value):
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_INVALID_TURN_INDEX,
+                    raw=raw,
+                )
+                continue
+            run_id = run_value
+            session_id = session_value
+            turn_index = turn_value
+
+        if kind in CLOSURE_KINDS:
             target_value = payload.get("to")
             if not _is_uuid(target_value):
                 _reject(
@@ -661,15 +880,62 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
                     detail=target,
                 )
                 continue
-            if target in answered_questions:
+            prior_closure = closures.get(target)
+            if prior_closure is not None:
                 _reject(
                     rejected,
                     seq=seq,
-                    reason=REJECT_QUESTION_ALREADY_ANSWERED,
+                    reason=(
+                        REJECT_QUESTION_ALREADY_ANSWERED
+                        if prior_closure == KIND_REPLY
+                        else REJECT_QUESTION_ALREADY_RESOLVED
+                    ),
                     raw=raw,
                     detail=target,
                 )
                 continue
+
+        if kind == KIND_RESOLUTION:
+            run_value = payload.get("run_id")
+            if not _valid_run_id(run_value):
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_INVALID_RUN_ID,
+                    raw=raw,
+                )
+                continue
+            assert target is not None
+            if questions[target].run_id != run_value:
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_QUESTION_NOT_OPEN,
+                    raw=raw,
+                    detail=target,
+                )
+                continue
+            action_value = payload.get("action")
+            if action_value not in RESOLUTION_ACTIONS:
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_INVALID_ACTION,
+                    raw=raw,
+                    detail=str(action_value),
+                )
+                continue
+            if "note" in payload and not isinstance(payload.get("note"), str):
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_INVALID_NOTE,
+                    raw=raw,
+                )
+                continue
+            run_id = run_value
+            action = action_value
+            note = payload.get("note")
 
         if kind == KIND_ACK:
             upto_value = payload.get("upto")
@@ -698,14 +964,19 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
             to=target,
             upto=upto,
             run_id=run_id,
+            session_id=session_id,
+            turn_index=turn_index,
+            waiter_origin=waiter_origin,
+            action=action,
+            note=note,
             version=version,
         )
         messages.append(message)
         seen_ids.add(message_id)
         if kind == KIND_QUESTION:
-            questions.add(message_id)
-        elif kind == KIND_REPLY and target is not None:
-            answered_questions.add(target)
+            questions[message_id] = message
+        elif kind in CLOSURE_KINDS and target is not None:
+            closures[target] = kind
 
     return MailboxView(
         mailbox_path=mailbox_path,
@@ -819,6 +1090,24 @@ def find_reply(
     return read_mailbox(plan_dir, state_dir=state_dir).reply_for(question_id)
 
 
+def find_resolution(
+    plan_dir: str | Path,
+    question_id: str,
+    *,
+    state_dir: str | Path | None = None,
+) -> MailboxMessage | None:
+    return read_mailbox(plan_dir, state_dir=state_dir).resolution_for(question_id)
+
+
+def find_closure(
+    plan_dir: str | Path,
+    question_id: str,
+    *,
+    state_dir: str | Path | None = None,
+) -> MailboxMessage | None:
+    return read_mailbox(plan_dir, state_dir=state_dir).closure_for(question_id)
+
+
 def _normalize_append_record(
     *,
     kind: MessageKind,
@@ -828,6 +1117,11 @@ def _normalize_append_record(
     message_id: str | None,
     created_at: str | None,
     run_id: str | None = None,
+    session_id: str | None = None,
+    turn_index: int | None = None,
+    waiter_origin: WaiterOrigin | None = None,
+    action: ResolutionAction | str | None = None,
+    note: str | None = None,
 ) -> dict[str, Any]:
     if kind not in MESSAGE_KINDS:
         raise MailboxError(REJECT_UNKNOWN_KIND, str(kind))
@@ -844,16 +1138,60 @@ def _normalize_append_record(
         "kind": kind,
         "version": MAILBOX_SCHEMA_VERSION,
     }
-    if kind in (KIND_GUIDANCE, KIND_QUESTION, KIND_REPLY):
+    if kind in (KIND_GUIDANCE, KIND_QUESTION, KIND_REPLY, KIND_NOTICE):
         if not isinstance(text, str) or text.strip() == "":
             raise MailboxError(REJECT_MISSING_TEXT)
         record["text"] = text
-    if kind == KIND_QUESTION and _valid_run_id(run_id):
+
+    if kind == KIND_QUESTION:
+        if run_id is not None:
+            if not _valid_run_id(run_id):
+                raise MailboxError(REJECT_INVALID_RUN_ID)
+            record["run_id"] = run_id
+        if session_id is not None:
+            if not _valid_session_id(session_id):
+                raise MailboxError(REJECT_INVALID_SESSION_ID)
+            record["session_id"] = session_id
+        if turn_index is not None:
+            if not _valid_turn_index(turn_index):
+                raise MailboxError(REJECT_INVALID_TURN_INDEX)
+            record["turn_index"] = turn_index
+        if waiter_origin is not None:
+            if waiter_origin not in WAITER_ORIGINS:
+                raise MailboxError(
+                    REJECT_INVALID_WAITER_ORIGIN,
+                    str(waiter_origin),
+                )
+            record["waiter_origin"] = waiter_origin
+
+    if kind == KIND_NOTICE:
+        if not _valid_run_id(run_id):
+            raise MailboxError(REJECT_INVALID_RUN_ID)
+        if not _valid_session_id(session_id):
+            raise MailboxError(REJECT_INVALID_SESSION_ID)
+        if not _valid_turn_index(turn_index):
+            raise MailboxError(REJECT_INVALID_TURN_INDEX)
         record["run_id"] = run_id
-    if kind == KIND_REPLY:
+        record["session_id"] = session_id
+        record["turn_index"] = turn_index
+
+    if kind in CLOSURE_KINDS:
         if not _is_uuid(target):
             raise MailboxError(REJECT_INVALID_TARGET)
         record["to"] = target
+
+    if kind == KIND_RESOLUTION:
+        if not _valid_run_id(run_id):
+            raise MailboxError(REJECT_INVALID_RUN_ID)
+        if action not in RESOLUTION_ACTIONS:
+            raise MailboxError(REJECT_INVALID_ACTION, str(action))
+        if note is not None and not isinstance(note, str):
+            raise MailboxError(REJECT_INVALID_NOTE)
+        record["run_id"] = run_id
+        record["action"] = action
+        if note is not None:
+            record["note"] = note
+
     if kind == KIND_ACK:
         try:
             record["upto"] = _validate_sequence(
@@ -879,6 +1217,11 @@ def _append_record(
     message_id: str | None = None,
     created_at: str | None = None,
     run_id: str | None = None,
+    session_id: str | None = None,
+    turn_index: int | None = None,
+    waiter_origin: WaiterOrigin | None = None,
+    action: ResolutionAction | str | None = None,
+    note: str | None = None,
 ) -> MailboxMessage:
     record = _normalize_append_record(
         kind=kind,
@@ -888,6 +1231,11 @@ def _append_record(
         message_id=message_id,
         created_at=created_at,
         run_id=run_id,
+        session_id=session_id,
+        turn_index=turn_index,
+        waiter_origin=waiter_origin,
+        action=action,
+        note=note,
     )
     encoded_record = (
         json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -929,7 +1277,7 @@ def _append_record(
                     f"upto {ack_upto} must be less than append sequence {seq}",
                     path=mailbox_path,
                 )
-        elif kind == KIND_REPLY:
+        elif kind in CLOSURE_KINDS:
             question_id = record["to"]
             question = next(
                 (
@@ -946,9 +1294,23 @@ def _append_record(
                     question_id,
                     path=mailbox_path,
                 )
-            if current_view.reply_for(question_id) is not None:
+            closure = current_view.closure_for(question_id)
+            if closure is not None:
                 raise MailboxError(
-                    REJECT_QUESTION_ALREADY_ANSWERED,
+                    (
+                        REJECT_QUESTION_ALREADY_ANSWERED
+                        if closure.kind == KIND_REPLY
+                        else REJECT_QUESTION_ALREADY_RESOLVED
+                    ),
+                    question_id,
+                    path=mailbox_path,
+                )
+            if (
+                kind == KIND_RESOLUTION
+                and question.run_id != record["run_id"]
+            ):
+                raise MailboxError(
+                    REJECT_QUESTION_NOT_OPEN,
                     question_id,
                     path=mailbox_path,
                 )
@@ -958,8 +1320,8 @@ def _append_record(
         original_size = os.fstat(fd).st_size
         effective_max_bytes = (
             MAILBOX_MAX_BYTES
-            if kind == KIND_REPLY
-            else MAILBOX_MAX_BYTES - MAILBOX_REPLY_RESERVE_BYTES
+            if kind in CLOSURE_KINDS
+            else MAILBOX_MAX_BYTES - MAILBOX_CLOSURE_RESERVE_BYTES
         )
         if original_size + len(append_bytes) > effective_max_bytes:
             raise MailboxError(
@@ -1007,6 +1369,12 @@ def _append_record(
         to=record.get("to"),
         upto=record.get("upto"),
         run_id=record.get("run_id"),
+        session_id=record.get("session_id"),
+        turn_index=record.get("turn_index"),
+        waiter_origin=record.get("waiter_origin"),
+        action=record.get("action"),
+        note=record.get("note"),
+        version=record["version"],
     )
 
 
@@ -1036,6 +1404,9 @@ def append_question(
     message_id: str | None = None,
     created_at: str | None = None,
     run_id: str | None = None,
+    session_id: str | None = None,
+    turn_index: int | None = None,
+    waiter_origin: WaiterOrigin | None = None,
 ) -> MailboxMessage:
     return _append_record(
         plan_dir,
@@ -1045,6 +1416,9 @@ def append_question(
         message_id=message_id,
         created_at=created_at,
         run_id=run_id,
+        session_id=session_id,
+        turn_index=turn_index,
+        waiter_origin=waiter_origin,
     )
 
 
@@ -1064,6 +1438,56 @@ def append_reply(
         state_dir=state_dir,
         text=text,
         target=question_id,
+        message_id=message_id,
+        created_at=created_at,
+    )
+
+
+def append_resolution(
+    plan_dir: str | Path,
+    question_id: str,
+    action: ResolutionAction | str,
+    *,
+    expected_run_id: str,
+    note: str | None = None,
+    state_dir: str | Path | None = None,
+    message_id: str | None = None,
+    created_at: str | None = None,
+) -> MailboxMessage:
+    """Atomically append the first answerless closure for an owned question."""
+    return _append_record(
+        plan_dir,
+        kind=KIND_RESOLUTION,
+        state_dir=state_dir,
+        target=question_id,
+        run_id=expected_run_id,
+        action=action,
+        note=note,
+        message_id=message_id,
+        created_at=created_at,
+    )
+
+
+def append_notice(
+    plan_dir: str | Path,
+    text: str,
+    *,
+    run_id: str,
+    session_id: str,
+    turn_index: int,
+    state_dir: str | Path | None = None,
+    message_id: str | None = None,
+    created_at: str | None = None,
+) -> MailboxMessage:
+    """Append a nonblocking worker notice with exact turn ownership."""
+    return _append_record(
+        plan_dir,
+        kind=KIND_NOTICE,
+        state_dir=state_dir,
+        text=text,
+        run_id=run_id,
+        session_id=session_id,
+        turn_index=turn_index,
         message_id=message_id,
         created_at=created_at,
     )

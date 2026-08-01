@@ -44,6 +44,7 @@ REVIEW_REPAIR_REOPENED_EVENT = "review_repair_reopened"
 # ``review_verdict_repair_exhausted`` detail instead of a new pause reason.
 REVIEW_VERDICT_RETRY_EVENT = "review_verdict_retry"
 REPLY_PROVIDED_EVENT = "reply_provided"
+RESOLUTION_CONSUMED_EVENT = "resolution_consumed"
 VERIFICATION_STARTED_EVENT = "verification_started"
 VERIFICATION_CHECK_STARTED_EVENT = "verification_check_started"
 VERIFICATION_HEARTBEAT_EVENT = "verification_heartbeat"
@@ -75,11 +76,13 @@ RUN_CONTROL_ACTIONS: tuple[str, ...] = (
     RUN_CONTROL_ACTION_IMPLEMENTATION_MODEL_UPDATED,
 )
 MAILBOX_ACTION_GUIDANCE_OBSERVED = "guidance-observed"
+MAILBOX_ACTION_NOTICE_PUBLISHED = "notice-published"
 MAILBOX_ACTION_WAIT_PREPARATION_FAILED = "wait-preparation-failed"
 MAILBOX_ACTION_WAIT_STARTED = "wait-started"
 MAILBOX_ACTION_WAIT_CLEARED = "wait-cleared"
 MAILBOX_ACTIONS: tuple[str, ...] = (
     MAILBOX_ACTION_GUIDANCE_OBSERVED,
+    MAILBOX_ACTION_NOTICE_PUBLISHED,
     MAILBOX_ACTION_WAIT_PREPARATION_FAILED,
     MAILBOX_ACTION_WAIT_STARTED,
     MAILBOX_ACTION_WAIT_CLEARED,

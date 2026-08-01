@@ -217,10 +217,26 @@ class QnAContextLoaderTests(unittest.TestCase):
                 f"--state-dir {state_dir} --text-stdin",
                 payload["reply_stdin_command"],
             )
+            self.assertEqual(
+                f"asl inbox resolve {plan} --to question-1 "
+                f"--action continue --state-dir {state_dir}",
+                payload["continue_command"],
+            )
+            self.assertEqual(
+                f"asl inbox resolve {plan} --to question-1 "
+                f"--action pause --state-dir {state_dir}",
+                payload["pause_command"],
+            )
             self.assertIn(
                 "# Live Agent Session - Resolver Prompt",
                 payload["rendered_prompt"],
             )
+            self.assertIn("## Resolution Choices", payload["rendered_prompt"])
+            self.assertIn(payload["reply_command"], payload["rendered_prompt"])
+            self.assertIn(
+                payload["continue_command"], payload["rendered_prompt"]
+            )
+            self.assertIn(payload["pause_command"], payload["rendered_prompt"])
             self.assertIn("Choose blue or green?", payload["rendered_prompt"])
 
     def test_rebased_wait_after_suspend_still_offers_waiting_path(self) -> None:

@@ -168,6 +168,29 @@ class TailFollowerTests(unittest.TestCase):
             message,
         )
 
+    def test_mailbox_notice_event_renders_metadata_without_body(self) -> None:
+        message = tail._event_message(
+            events.MAILBOX_EVENT,
+            {
+                "action": events.MAILBOX_ACTION_NOTICE_PUBLISHED,
+                "message_id": "notice-1",
+                "seq": 8,
+                "length": 23,
+                "digest": "def456",
+                "run_id": "run-1",
+                "session_id": "7",
+                "turn_index": 2,
+            },
+        )
+
+        self.assertEqual(
+            "mailbox: notice published "
+            "(id notice-1, sequence 8, length 23, digest def456, "
+            "run run-1, session 7, turn 2)",
+            message,
+        )
+        self.assertNotIn("notice body", message)
+
     def test_mailbox_wait_started_event_renders_as_nonterminal_wait(self) -> None:
         message = tail._event_message(
             events.MAILBOX_EVENT,
@@ -214,6 +237,32 @@ class TailFollowerTests(unittest.TestCase):
             message,
         )
         self.assertNotIn("paused", message)
+
+    def test_mailbox_wait_cleared_event_renders_resolution_metadata(self) -> None:
+        message = tail._event_message(
+            events.MAILBOX_EVENT,
+            {
+                "action": events.MAILBOX_ACTION_WAIT_CLEARED,
+                "question_id": "question-1",
+                "session_id": "9",
+                "turn_index": 3,
+                "reason": "resolution",
+                "pending_outbox": 0,
+                "resolution_message_id": "resolution-1",
+                "resolution_seq": 12,
+                "resolution_action": "continue",
+            },
+        )
+
+        self.assertEqual(
+            "mailbox: reply wait cleared "
+            "(question question-1, session 9, turn 3, reason resolution, "
+            "pending outbox 0, resolution resolution-1, "
+            "resolution sequence 12, resolution action continue)",
+            message,
+        )
+        self.assertNotIn("question body", message)
+        self.assertNotIn("resolution note", message)
 
     def test_mailbox_wait_cleared_event_renders_lease_evidence(self) -> None:
         message = tail._event_message(
@@ -332,6 +381,9 @@ class TailFollowerTests(unittest.TestCase):
             "hard_deadline": "hard",
             "reason": "expired",
             "run_id": "run-abc",
+            "resolution_message_id": "resolution-1",
+            "resolution_seq": 2,
+            "resolution_action": "continue",
         }
 
         for action in events.MAILBOX_ACTIONS:

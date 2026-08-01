@@ -115,10 +115,10 @@ DEFAULT_MAX_CHUNKS = 50
 DEFAULT_ATTACH_MAX_SECONDS = 43200.0
 
 # Self-launched children share their process wait with mailbox supervision:
-# check for new questions every five seconds and renew the supervisor lease on
-# the same 30-second cadence as progress heartbeats. Question bodies stay in
-# the structured outbox payload; stderr receives only a one-line escaped
-# preview bounded to this many encoded characters.
+# check for new questions and notices every five seconds and renew the
+# supervisor lease on the same 30-second cadence as progress heartbeats.
+# Message bodies stay in the structured outbox payload; stderr receives only a
+# one-line escaped preview bounded to this many encoded characters.
 MAILBOX_POLL_INTERVAL = 5.0
 MAILBOX_LEASE_RENEW_INTERVAL = 30.0
 QUESTION_PREVIEW_MAX_CHARS = 240
@@ -640,17 +640,23 @@ def _question_progress_record(question: _mailbox.MailboxMessage) -> str:
     return f"QUESTION id={question.id} preview={preview}"
 
 
+def _notice_progress_record(notice: _mailbox.MailboxMessage) -> str:
+    """Render one notice as a single bounded ``NOTICE`` progress record."""
+    preview = _escaped_question_preview(notice.text or "")
+    return f"NOTICE id={notice.id} preview={preview}"
+
+
 class _MailboxWatcher:
     """Poll one plan mailbox with a durable cursor and renewable lease.
 
     The authoritative ``asl status`` payload supplies the canonical plan path,
     per-plan state directory, mailbox paths, and initial physical sequence.
-    The watcher advances its cursor through every physical line, even when only
-    question records are returned, so non-question or malformed lines cannot
+    The watcher advances its cursor through every physical line while tracking
+    questions and notices independently, so filtered or malformed lines cannot
     make a later poll repeat work. Initial and renewal lease failures keep
-    observation armed, schedule a later retry, and emit bounded progress without
-    affecting child process ownership. Mailbox read failures defer that poll so
-    the runner can still fall back to ordinary terminal pause/resume.
+    observation armed, schedule a later retry, and emit bounded progress
+    without affecting child process ownership. Mailbox read failures defer that
+    poll so the runner can still fall back to ordinary terminal pause/resume.
     """
 
     def __init__(
@@ -687,7 +693,9 @@ class _MailboxWatcher:
         self._next_poll_at: Optional[float] = None
         self._next_lease_at: Optional[float] = None
         self._questions: list[dict[str, Any]] = []
+        self._notices: list[dict[str, Any]] = []
         self._observed_question_ids: set[str] = set()
+        self._observed_notice_ids: set[str] = set()
         self._pending_questions: tuple[_mailbox.MailboxMessage, ...] = ()
         self._projection_seq = since
         self.run_id: Optional[str] = None
@@ -945,7 +953,10 @@ class _MailboxWatcher:
 
         Attach-mode watchers use one initial immutable unanswered-question view
         so questions that predate the status cursor survive supervisor
-        reconnects without replaying already-answered history. ``force_read``
+        reconnects without replaying already-answered history. Notices are
+        independently selected from the bound live run and deduplicated for the
+        lifetime of this watcher, which replays that run's backlog on attach but
+        permits at-least-once replay after a supervisor restart. ``force_read``
         supports the final drain after a supervised child exits, even when the
         regular poll deadline has not arrived yet.
         """
@@ -978,9 +989,19 @@ class _MailboxWatcher:
                         self.last_seq,
                         kinds=(_mailbox.KIND_QUESTION,),
                     )
+                notices = tuple(
+                    message
+                    for message in view.messages
+                    if message.kind == _mailbox.KIND_NOTICE
+                    and message.run_id == self.run_id
+                    and message.id not in self._observed_notice_ids
+                )
                 self.last_seq = max(self.last_seq, view.last_seq)
                 self._observed_question_ids.update(
                     question.id for question in questions
+                )
+                self._observed_notice_ids.update(
+                    notice.id for notice in notices
                 )
                 pending_questions = tuple(
                     question
@@ -1005,6 +1026,12 @@ class _MailboxWatcher:
                 self._questions.extend(
                     question.to_payload() for question in questions
                 )
+                self._notices.extend(
+                    notice.to_payload() for notice in notices
+                )
+                self._progress_records.extend(
+                    _notice_progress_record(notice) for notice in notices
+                )
         if read_succeeded or resolved_now >= self._next_lease_at:
             # Every successful mailbox read republishes the projection. This
             # both bounds detection latency and repairs a lease temporarily
@@ -1022,6 +1049,7 @@ class _MailboxWatcher:
         """Return the full-text structured response accumulated so far."""
         return {
             "command": "outbox-wait",
+            "include": "all",
             "plan_dir": self.plan_dir,
             "mailbox_path": self.mailbox_path,
             "lease_path": self.lease_path,
@@ -1029,6 +1057,7 @@ class _MailboxWatcher:
             "since": self.initial_seq,
             "next_since": self.last_seq,
             "questions": list(self._questions),
+            "notices": list(self._notices),
             "lease_supervision": {
                 "degraded": self._lease_degraded,
                 "renewal_failures": self._lease_renewal_failures,
@@ -1044,7 +1073,7 @@ def _poll_mailbox_watcher(
     heartbeat,
     force_read: bool = False,
 ) -> tuple[_mailbox.MailboxMessage, ...]:
-    """Poll one watcher and emit its health records and question previews."""
+    """Poll one watcher and emit health plus bounded message previews."""
     if force_read:
         questions = watcher.poll(now=now, force_read=True)
     else:
@@ -1960,15 +1989,6 @@ def _invoke_run(
             )
             heartbeat_deadline += steps * heartbeat_interval
 
-    if mailbox_watcher is not None:
-        refresh_unbound_mailbox_run()
-        _poll_mailbox_watcher(
-            mailbox_watcher,
-            now=clock(),
-            heartbeat=heartbeat,
-            force_read=True,
-        )
-
     stdout = "".join(stdout_parts).strip()
     stderr = "".join(stderr_parts).strip()
     payload: object = None
@@ -1977,6 +1997,20 @@ def _invoke_run(
             payload = json.loads(stdout)
         except json.JSONDecodeError:
             payload = None
+    if mailbox_watcher is not None:
+        refresh_unbound_mailbox_run()
+        if isinstance(payload, dict) and mailbox_watcher.run_id is None:
+            # A fast child can finish before the first status-backed watcher
+            # bind. Its direct result is authoritative for this subprocess, so
+            # use that identity for the final notice drain without accepting a
+            # potentially stale unlocked status identity.
+            mailbox_watcher.set_run_id(payload.get("run_id"), now=clock())
+        _poll_mailbox_watcher(
+            mailbox_watcher,
+            now=clock(),
+            heartbeat=heartbeat,
+            force_read=True,
+        )
     if not isinstance(payload, dict):
         result = {
             "ok": False,

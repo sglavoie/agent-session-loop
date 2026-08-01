@@ -778,10 +778,13 @@ def _mailbox_status_payload(
         "full": False,
         "accepts_questions": True,
         "accepts_replies": True,
+        "accepts_resolutions": True,
         "last_seq": 0,
         "pending_guidance": 0,
         "unanswered_questions": 0,
         "open_questions": 0,
+        "resolutions": 0,
+        "notices": 0,
         "rejected_records": 0,
         "error": None,
         "lease_updated_at": None,
@@ -800,10 +803,13 @@ def _mailbox_status_payload(
         payload["full"] = None
         payload["accepts_questions"] = None
         payload["accepts_replies"] = None
+        payload["accepts_resolutions"] = None
         payload["last_seq"] = None
         payload["pending_guidance"] = None
         payload["unanswered_questions"] = None
         payload["open_questions"] = None
+        payload["resolutions"] = None
+        payload["notices"] = None
         payload["rejected_records"] = None
         payload["error"] = str(error)
     else:
@@ -819,10 +825,13 @@ def _mailbox_status_payload(
                 "full": view.full,
                 "accepts_questions": view.accepts_questions,
                 "accepts_replies": view.accepts_replies,
+                "accepts_resolutions": view.accepts_resolutions,
                 "last_seq": view.last_seq,
                 "pending_guidance": counts.pending_guidance,
                 "unanswered_questions": counts.unanswered_questions,
                 "open_questions": len(view.open_questions(active_run_id)),
+                "resolutions": counts.resolutions,
+                "notices": counts.notices,
                 "rejected_records": counts.rejected,
             }
         )
@@ -1387,23 +1396,35 @@ def _print_text_status(payload: dict[str, Any]) -> None:
             print(f"Mailbox: unreadable/malformed ({mailbox_error})")
         elif mailbox_status.get("active"):
             full_suffix = ", full" if mailbox_status.get("full") else ""
-            # Non-reply writes stop before the reply-only reserve. Claim that
-            # replies still fit only when a minimal valid reply actually does.
+            # Non-closure writes stop before the shared closure reserve. Report
+            # reply and resolution capacity independently because their minimum
+            # valid record sizes differ.
             if not full_suffix and mailbox_status.get("accepts_questions") is False:
-                if mailbox_status.get("accepts_replies") is True:
+                accepts_replies = mailbox_status.get("accepts_replies") is True
+                accepts_resolutions = (
+                    mailbox_status.get("accepts_resolutions") is True
+                )
+                if accepts_replies and accepts_resolutions:
                     full_suffix = (
-                        ", non-reply writes refused (replies still accepted)"
+                        ", non-closure writes refused "
+                        "(replies and resolutions still accepted)"
+                    )
+                elif accepts_replies:
+                    full_suffix = (
+                        ", non-closure writes refused "
+                        "(only replies still accepted)"
                     )
                 else:
                     full_suffix = (
-                        ", non-reply writes refused (reply capacity exhausted)"
+                        ", non-closure writes refused "
+                        "(reply and resolution capacity exhausted)"
                     )
             open_questions = mailbox_status.get("open_questions")
             unanswered = mailbox_status.get("unanswered_questions")
-            # Disclose the historical total only when it exceeds what the live
-            # run can act on, so a stale record reads as history at a glance.
+            # Disclose only the historical remainder beyond what the live run
+            # can act on, so stale records read as history at a glance.
             history_suffix = (
-                f" ({unanswered} unanswered historical)"
+                f" ({unanswered - open_questions} unanswered historical)"
                 if isinstance(open_questions, int)
                 and isinstance(unanswered, int)
                 and unanswered > open_questions
@@ -1414,6 +1435,8 @@ def _print_text_status(payload: dict[str, Any]) -> None:
                 f"{full_suffix}, seq {mailbox_status.get('last_seq')}, "
                 f"{mailbox_status.get('pending_guidance')} pending guidance, "
                 f"{open_questions} open questions{history_suffix}, "
+                f"{mailbox_status.get('resolutions')} resolutions, "
+                f"{mailbox_status.get('notices')} notices, "
                 f"{mailbox_status.get('size_bytes')}/"
                 f"{mailbox_status.get('max_bytes')} bytes"
             )

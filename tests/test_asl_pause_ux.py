@@ -239,6 +239,96 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             self.assertEqual(1, records[1]["payload"]["pending_outbox"])
             self.assertEqual("question-1", records[1]["payload"]["question_id"])
 
+    def test_resolution_clears_wait_with_body_free_identity_metadata(self) -> None:
+        question_id = "00000000-0000-4000-8000-000000000101"
+        resolution_id = "00000000-0000-4000-8000-000000000102"
+        question = mailbox.MailboxMessage(
+            seq=1,
+            id=question_id,
+            kind=mailbox.KIND_QUESTION,
+            created_at="2026-07-24T12:00:00+00:00",
+            text="Continue without an answer?",
+            run_id="run-1",
+            session_id="9",
+            turn_index=3,
+            waiter_origin=mailbox.WAITER_ORIGIN_RUNNER,
+        )
+        resolution = mailbox.MailboxMessage(
+            seq=2,
+            id=resolution_id,
+            kind=mailbox.KIND_RESOLUTION,
+            created_at="2026-07-24T12:00:01+00:00",
+            to=question_id,
+            run_id="run-1",
+            action=mailbox.RESOLUTION_ACTION_CONTINUE,
+            note="sensitive supervisor note",
+        )
+        # A committed closure wins even when no further mailbox append can fit.
+        view = mailbox.MailboxView(
+            mailbox_path=Path("/tmp/mailbox.jsonl"),
+            messages=(question, resolution),
+            last_seq=2,
+            size_bytes=mailbox.MAILBOX_MAX_BYTES,
+        )
+        settings = runner._MailboxReplyWaitSettings(
+            base_seconds=2.0,
+            lease_extension_seconds=1.0,
+            hard_seconds=5.0,
+            poll_seconds=0.5,
+            io_grace_seconds=1.0,
+        )
+
+        with mock.patch.object(
+            runner.mailbox, "read_mailbox", return_value=view
+        ):
+            result = runner._wait_for_mailbox_reply(
+                plan_dir=Path("/tmp/plan"),
+                state_dir_arg=None,
+                payload={},
+                question_id=question_id,
+                run_id="run-1",
+                settings=settings,
+                persistence=runner._RunPersistence(
+                    write_state=False,
+                    append_events=False,
+                ),
+            )
+
+        self.assertEqual("resolution", result.reason)
+        self.assertIsNone(result.reply)
+        self.assertEqual(resolution, result.resolution)
+        self.assertEqual(0, result.pending_outbox)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            event_path = Path(tmp) / events.EVENTS_FILE_NAME
+            payload = {
+                "run_id": "run-1",
+                "waiting_for_reply": {
+                    "question_id": question_id,
+                    "session_id": "9",
+                    "turn_index": 3,
+                },
+            }
+            runner._clear_waiting_for_reply(
+                event_path,
+                payload,
+                reason=result.reason,
+                pending_outbox=result.pending_outbox,
+                resolution_action=resolution.action,
+                resolution_message_id=resolution.id,
+                resolution_seq=resolution.seq,
+                persistence=runner._RunPersistence(write_state=False),
+            )
+            [record] = read_jsonl(event_path)
+
+        event_payload = record["payload"]
+        self.assertEqual("resolution", event_payload["reason"])
+        self.assertEqual("continue", event_payload["resolution_action"])
+        self.assertEqual(resolution_id, event_payload["resolution_message_id"])
+        self.assertEqual(2, event_payload["resolution_seq"])
+        self.assertNotIn("note", event_payload)
+        self.assertNotIn("sensitive supervisor note", json.dumps(record))
+
     def test_rebase_waiting_deadlines_rewrites_state_without_events(
         self,
     ) -> None:

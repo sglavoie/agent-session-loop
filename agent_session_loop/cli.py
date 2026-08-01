@@ -1048,6 +1048,37 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         handler_ref="mailbox_cli:inbox_reply_from_args",
     )
 
+    inbox_resolve_parser = inbox_sub.add_parser(
+        "resolve",
+        help="Resolve a live worker question without supplying reply text.",
+    )
+    _add_plan_reference_args(inbox_resolve_parser)
+    inbox_resolve_parser.add_argument(
+        "--to",
+        required=True,
+        metavar="QUESTION_ID",
+        help="Question UUID to resolve",
+    )
+    inbox_resolve_parser.add_argument(
+        "--action",
+        required=True,
+        metavar="continue|pause",
+        help="Resolve the question by continuing or pausing the worker",
+    )
+    resolution_note = inbox_resolve_parser.add_mutually_exclusive_group()
+    resolution_note.add_argument(
+        "--note",
+        help="Optional resolution note (not an operator reply)",
+    )
+    resolution_note.add_argument(
+        "--note-stdin",
+        action="store_true",
+        help="Read the optional resolution note from standard input",
+    )
+    inbox_resolve_parser.set_defaults(
+        handler_ref="mailbox_cli:inbox_resolve_from_args",
+    )
+
     inbox_read_parser = inbox_sub.add_parser(
         "read",
         help="Read pending guidance and acknowledge it unless peeking.",
@@ -1064,7 +1095,10 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
 
     ask_parser = subparsers.add_parser(
         "ask",
-        help="Append or resume a worker question and optionally wait for a reply.",
+        help=(
+            "Append or resume a worker question and optionally wait for its "
+            "first reply or resolution."
+        ),
     )
     _add_plan_reference_args(ask_parser)
     ask_parser.add_argument(
@@ -1080,7 +1114,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     ask_parser.add_argument(
         "--wait",
         action="store_true",
-        help="Wait for the first reply",
+        help="Wait for the first reply or resolution",
     )
     ask_parser.add_argument(
         "--wait-timeout",
@@ -1088,15 +1122,32 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         default=None,
         metavar="SECONDS",
         help=(
-            "Reply wait timeout in seconds; requires --wait "
+            "Closure wait timeout in seconds; requires --wait "
             "(default: 90; maximum: 1800)"
         ),
     )
     ask_parser.set_defaults(handler_ref="mailbox_cli:ask_from_args")
 
+    notify_parser = subparsers.add_parser(
+        "notify",
+        help="Publish a nonblocking notice from the active worker turn.",
+    )
+    _add_plan_reference_args(notify_parser)
+    notify_parser.add_argument(
+        "text",
+        nargs="?",
+        help="Notice body",
+    )
+    notify_parser.add_argument(
+        "--text-stdin",
+        action="store_true",
+        help="Read the notice body from standard input",
+    )
+    notify_parser.set_defaults(handler_ref="mailbox_cli:notify_from_args")
+
     outbox_parser = subparsers.add_parser(
         "outbox",
-        help="Read worker questions from the supervisor side.",
+        help="Read worker questions or notices from the supervisor side.",
     )
     outbox_sub = outbox_parser.add_subparsers(
         dest="outbox_command",
@@ -1104,15 +1155,21 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     )
     outbox_wait_parser = outbox_sub.add_parser(
         "wait",
-        help="Wait for questions after a physical mailbox sequence.",
+        help="Wait for selected records after a physical mailbox sequence.",
     )
     _add_plan_reference_args(outbox_wait_parser)
+    outbox_wait_parser.add_argument(
+        "--include",
+        choices=("questions", "notices", "all"),
+        default="questions",
+        help="Record kinds that wake and populate the wait (default: questions)",
+    )
     outbox_wait_parser.add_argument(
         "--since",
         type=int,
         default=0,
         metavar="SEQ",
-        help="Return questions after this physical sequence (default: 0)",
+        help="Return selected records after this physical sequence (default: 0)",
     )
     outbox_wait_parser.add_argument(
         "--timeout",
