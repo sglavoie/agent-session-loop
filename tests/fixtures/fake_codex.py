@@ -62,6 +62,13 @@ def _prompt_contains_reply_context() -> bool:
     return False
 
 
+def _prompt_contains_resolution_context() -> bool:
+    for value in sys.argv[1:]:
+        if "## ASL resolution context" in value:
+            return True
+    return False
+
+
 def _session_label(path: Path) -> str:
     session_id = _session_id(path)
     if session_id is None:
@@ -453,6 +460,14 @@ def main() -> int:
                 "Runner status: complete\nNext command: $session-run plan/\n"
             )
             print("completed one session after consuming operator reply")
+            return 0
+        if _prompt_contains_resolution_context():
+            if pending:
+                _mark_complete(pending[0])
+            _write_last_message(
+                "Runner status: complete\nNext command: $session-run plan/\n"
+            )
+            print("completed one session after consuming supervisor resolution")
             return 0
         _write_last_message(_blocked_last_message())
         print("runner pause: blocked on operator answers")

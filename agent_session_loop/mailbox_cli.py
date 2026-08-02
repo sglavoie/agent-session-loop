@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import math
 import os
 from pathlib import Path
@@ -18,6 +19,7 @@ import uuid
 from . import (
     agent_mux_delivery,
     cli_common,
+    events,
     mailbox,
     mailbox_rendering,
     responses,
@@ -26,9 +28,20 @@ from . import (
 
 COMMAND_INBOX_GUIDANCE = "inbox-guidance"
 COMMAND_INBOX_REPLY = "inbox-reply"
+COMMAND_INBOX_RESOLVE = "inbox-resolve"
 COMMAND_INBOX_READ = "inbox-read"
 COMMAND_ASK = "ask"
+COMMAND_NOTIFY = "notify"
 COMMAND_OUTBOX_WAIT = "outbox-wait"
+
+OUTBOX_INCLUDE_QUESTIONS = "questions"
+OUTBOX_INCLUDE_NOTICES = "notices"
+OUTBOX_INCLUDE_ALL = "all"
+OUTBOX_INCLUDE_MODES = (
+    OUTBOX_INCLUDE_QUESTIONS,
+    OUTBOX_INCLUDE_NOTICES,
+    OUTBOX_INCLUDE_ALL,
+)
 
 DEFAULT_ASK_WAIT_TIMEOUT_SECONDS = 90.0
 DEFAULT_OUTBOX_WAIT_TIMEOUT_SECONDS = 300.0
@@ -38,6 +51,8 @@ ASK_WAIT_POLL_INTERVAL_SECONDS = 2.0
 OUTBOX_WAIT_POLL_INTERVAL_SECONDS = 5.0
 ERROR_STDIN_READ = "stdin-read-error"
 ERROR_INVALID_TEXT_SOURCE = "invalid-text-source"
+ERROR_INVALID_NOTE_SOURCE = "invalid-note-source"
+ERROR_NO_ACTIVE_RUN = "no-active-run"
 MAILBOX_MESSAGE_BEGIN = mailbox_rendering.MAILBOX_MESSAGE_BEGIN
 MAILBOX_MESSAGE_END = mailbox_rendering.MAILBOX_MESSAGE_END
 
@@ -61,6 +76,9 @@ class _LeaseSupervision:
 @dataclass(frozen=True)
 class _OutboxWaitResult:
     questions: tuple[mailbox.MailboxMessage, ...]
+    notices: tuple[mailbox.MailboxMessage, ...]
+    include: str
+    supervisor_id: str
     next_since: int
     timed_out: bool
     lease_supervision: _LeaseSupervision
@@ -196,6 +214,148 @@ def _inbox_read_text_lines(
     return list(bounded.lines)
 
 
+def _outbox_question_text_lines(
+    questions: tuple[mailbox.MailboxMessage, ...],
+) -> list[str]:
+    """Render question bodies under the notice count and byte bounds."""
+
+    def question_section(
+        records: Sequence[mailbox_rendering.RenderedMessage],
+        record_cap_omitted: Sequence[mailbox.MailboxMessage],
+        individually_oversized: Sequence[mailbox.MailboxMessage],
+        aggregate_budget_omitted: Sequence[mailbox.MailboxMessage],
+    ) -> list[str]:
+        lines: list[str] = []
+        if records:
+            for message, record_json in records:
+                lines.extend(
+                    (
+                        f"Question {message.id} (seq {message.seq}):",
+                        MAILBOX_MESSAGE_BEGIN,
+                        record_json,
+                        MAILBOX_MESSAGE_END,
+                    )
+                )
+        else:
+            lines.append(
+                "No selected question records fit within the "
+                f"{mailbox_rendering.MAX_RENDERED_NOTICE_BYTES:,}-byte "
+                "text rendering budget."
+            )
+
+        omission_notices: list[str] = []
+        if record_cap_omitted:
+            omission_notices.append(
+                f"{len(record_cap_omitted)} older selected question records "
+                f"were omitted by the "
+                f"{mailbox_rendering.MAX_RENDERED_NOTICES}-record cap: "
+                f"{_message_references(record_cap_omitted)}."
+            )
+        if individually_oversized:
+            omission_notices.append(
+                f"{len(individually_oversized)} selected question record(s) "
+                "exceeded the text byte budget individually and were omitted "
+                f"in full: {_message_references(individually_oversized)}."
+            )
+        if aggregate_budget_omitted:
+            omission_notices.append(
+                f"{len(aggregate_budget_omitted)} oldest remaining selected "
+                "question record(s) were omitted in full to keep the rendered "
+                "section within the text byte budget: "
+                f"{_message_references(aggregate_budget_omitted)}."
+            )
+        if omission_notices:
+            lines.extend(
+                (
+                    "",
+                    " ".join(omission_notices),
+                    "The physical cursor advances through every mailbox "
+                    "record, including records filtered out or omitted from "
+                    "text rendering.",
+                )
+            )
+        return lines
+
+    bounded = mailbox_rendering.render_bounded_messages(
+        questions,
+        question_section,
+        max_rendered=mailbox_rendering.MAX_RENDERED_NOTICES,
+        max_bytes=mailbox_rendering.MAX_RENDERED_NOTICE_BYTES,
+    )
+    return list(bounded.lines)
+
+
+def _outbox_notice_text_lines(
+    notices: tuple[mailbox.MailboxMessage, ...],
+) -> list[str]:
+    """Render notice bodies under explicit count and complete-byte bounds."""
+
+    def notice_section(
+        records: Sequence[mailbox_rendering.RenderedMessage],
+        record_cap_omitted: Sequence[mailbox.MailboxMessage],
+        individually_oversized: Sequence[mailbox.MailboxMessage],
+        aggregate_budget_omitted: Sequence[mailbox.MailboxMessage],
+    ) -> list[str]:
+        lines: list[str] = []
+        if records:
+            for message, record_json in records:
+                lines.extend(
+                    (
+                        f"Notice {message.id} (seq {message.seq}):",
+                        MAILBOX_MESSAGE_BEGIN,
+                        record_json,
+                        MAILBOX_MESSAGE_END,
+                    )
+                )
+        else:
+            lines.append(
+                "No selected notice records fit within the "
+                f"{mailbox_rendering.MAX_RENDERED_NOTICE_BYTES:,}-byte "
+                "text rendering budget."
+            )
+
+        omission_notices: list[str] = []
+        if record_cap_omitted:
+            omission_notices.append(
+                f"{len(record_cap_omitted)} older selected notice records "
+                f"were omitted by the "
+                f"{mailbox_rendering.MAX_RENDERED_NOTICES}-record cap: "
+                f"{_message_references(record_cap_omitted)}."
+            )
+        if individually_oversized:
+            omission_notices.append(
+                f"{len(individually_oversized)} selected notice record(s) "
+                "exceeded the text byte budget individually and were omitted "
+                f"in full: {_message_references(individually_oversized)}."
+            )
+        if aggregate_budget_omitted:
+            omission_notices.append(
+                f"{len(aggregate_budget_omitted)} oldest remaining selected "
+                "notice record(s) were omitted in full to keep the rendered "
+                "section within the text byte budget: "
+                f"{_message_references(aggregate_budget_omitted)}."
+            )
+        if omission_notices:
+            lines.extend(
+                (
+                    "",
+                    " ".join(omission_notices),
+                    "The physical cursor advances through every mailbox "
+                    "record, including records filtered out or omitted from "
+                    "text rendering.",
+                )
+            )
+        return lines
+
+    bounded = mailbox_rendering.render_bounded_messages(
+        notices,
+        notice_section,
+        max_rendered=mailbox_rendering.MAX_RENDERED_NOTICES,
+        max_bytes=mailbox_rendering.MAX_RENDERED_NOTICE_BYTES,
+    )
+    return list(bounded.lines)
+
+
 def _mailbox_error_details(error: mailbox.MailboxError) -> dict[str, Any]:
     return {} if error.path is None else {"path": str(error.path)}
 
@@ -239,6 +399,7 @@ def _body_from_args(
     *,
     command_name: str,
     text_label: str,
+    inline_source: str = "--text",
 ) -> str | None:
     inline = getattr(args, "text", None)
     from_stdin = bool(getattr(args, "text_stdin", False))
@@ -248,7 +409,9 @@ def _body_from_args(
             command_name=command_name,
             text_label=text_label,
             reason=mailbox.REJECT_MISSING_TEXT,
-            error="exactly one of --text and --text-stdin is required",
+            error=(
+                f"exactly one of {inline_source} and --text-stdin is required"
+            ),
         )
         return None
     if inline is not None and from_stdin:
@@ -257,7 +420,9 @@ def _body_from_args(
             command_name=command_name,
             text_label=text_label,
             reason=ERROR_INVALID_TEXT_SOURCE,
-            error="exactly one of --text and --text-stdin is required",
+            error=(
+                f"exactly one of {inline_source} and --text-stdin is required"
+            ),
         )
         return None
     if from_stdin:
@@ -297,6 +462,56 @@ def _body_from_args(
         )
         return None
     return body
+
+
+def _optional_note_from_args(
+    args: argparse.Namespace,
+) -> tuple[bool, str | None]:
+    """Return an optional resolution note while preserving an empty note."""
+    inline = getattr(args, "note", None)
+    from_stdin = bool(getattr(args, "note_stdin", False))
+    if inline is not None and from_stdin:
+        _print_input_error(
+            args,
+            command_name=COMMAND_INBOX_RESOLVE,
+            text_label="inbox resolve",
+            reason=ERROR_INVALID_NOTE_SOURCE,
+            error="at most one of --note and --note-stdin may be supplied",
+        )
+        return False, None
+    if not from_stdin:
+        if inline is not None and not isinstance(inline, str):
+            _print_input_error(
+                args,
+                command_name=COMMAND_INBOX_RESOLVE,
+                text_label="inbox resolve",
+                reason=mailbox.REJECT_INVALID_NOTE,
+                error="resolution note must be text",
+            )
+            return False, None
+        return True, inline
+    try:
+        if sys.stdin is None:
+            raise ValueError("standard input is unavailable")
+        stdin_stream = getattr(sys.stdin, "buffer", sys.stdin)
+        raw_note = stdin_stream.read()
+        if isinstance(raw_note, bytes):
+            note = raw_note.decode("utf-8", errors="strict")
+        elif isinstance(raw_note, str):
+            raw_note.encode("utf-8", errors="strict")
+            note = raw_note
+        else:
+            raise TypeError("standard input did not return text or bytes")
+    except (OSError, TypeError, UnicodeError, ValueError) as error:
+        cli_common.print_error(
+            args,
+            command_name=COMMAND_INBOX_RESOLVE,
+            text_label="inbox resolve",
+            reason=ERROR_STDIN_READ,
+            error=f"cannot read resolution note from stdin: {error}",
+        )
+        return False, None
+    return True, note
 
 
 def _validated_timeout(
@@ -344,6 +559,25 @@ def _validated_since(
             text_label=text_label,
             reason="invalid-since",
             error="--since must be a non-negative integer",
+        )
+        return None
+    return value
+
+
+def _validated_include(
+    args: argparse.Namespace,
+    *,
+    command_name: str,
+    text_label: str,
+) -> str | None:
+    value = getattr(args, "include", OUTBOX_INCLUDE_QUESTIONS)
+    if value not in OUTBOX_INCLUDE_MODES:
+        _print_input_error(
+            args,
+            command_name=command_name,
+            text_label=text_label,
+            reason="invalid-include",
+            error="--include must be one of questions, notices, or all",
         )
         return None
     return value
@@ -465,6 +699,95 @@ def _status_run_id(context: cli_common.PlanCommandContext) -> str | None:
         return None
     run_id = runner_state.get("run_id")
     return run_id if isinstance(run_id, str) and run_id else None
+
+
+def _status_question_ownership(
+    context: cli_common.PlanCommandContext,
+) -> tuple[
+    str | None,
+    str | None,
+    int | None,
+    mailbox.WaiterOrigin | None,
+]:
+    """Return exact live-turn ownership when a worker ask can prove it.
+
+    Historical callers could append a question with only the best-effort run
+    identity. Preserve that compatibility fallback, but stamp the complete
+    ownership tuple whenever the status snapshot exposes the active harness
+    turn. The runner relies on the complete tuple to correlate a worker's
+    answerless pause with the turn that subsequently emits ``RUNNER_PAUSE``.
+    """
+    run_id = _status_run_id(context)
+    runner_state = context.status.get("runner_state")
+    if run_id is None or not isinstance(runner_state, dict):
+        return run_id, None, None, None
+    active_turn = runner_state.get("active_turn")
+    if not isinstance(active_turn, dict):
+        return run_id, None, None, None
+    session_id = active_turn.get("session_id")
+    turn_index = active_turn.get("turn_index")
+    if (
+        active_turn.get("run_id") != run_id
+        or not isinstance(session_id, str)
+        or not session_id
+        or isinstance(turn_index, bool)
+        or not isinstance(turn_index, int)
+        or turn_index < 1
+    ):
+        return run_id, None, None, None
+    return (
+        run_id,
+        session_id,
+        turn_index,
+        mailbox.WAITER_ORIGIN_WORKER,
+    )
+
+
+def _active_status_run_id(
+    context: cli_common.PlanCommandContext,
+) -> str | None:
+    """Return the authoritative live run id from one status projection."""
+    runner_state = context.status.get("runner_state")
+    lock = context.status.get("lock")
+    if not isinstance(runner_state, dict) or not isinstance(lock, dict):
+        return None
+    run_id = runner_state.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return None
+    if (
+        not runner_state.get("present")
+        or runner_state.get("error")
+        or runner_state.get("paused")
+        or runner_state.get("run_finished_at")
+        or not lock.get("active")
+    ):
+        return None
+    return run_id
+
+
+def _active_turn_ownership(
+    context: cli_common.PlanCommandContext,
+) -> tuple[str, str, int] | None:
+    """Return exact ownership for the active worker turn, if authoritative."""
+    run_id = _active_status_run_id(context)
+    runner_state = context.status.get("runner_state")
+    if run_id is None or not isinstance(runner_state, dict):
+        return None
+    active_turn = runner_state.get("active_turn")
+    if not isinstance(active_turn, dict):
+        return None
+    session_id = active_turn.get("session_id")
+    turn_index = active_turn.get("turn_index")
+    if (
+        active_turn.get("run_id") != run_id
+        or not isinstance(session_id, str)
+        or not session_id
+        or isinstance(turn_index, bool)
+        or not isinstance(turn_index, int)
+        or turn_index < 1
+    ):
+        return None
+    return run_id, session_id, turn_index
 
 
 def _mailbox_reply_projection(
@@ -614,6 +937,112 @@ def _notify_agent_mux_mailbox_reply(
         return None
 
 
+def _notify_agent_mux_mailbox_resolution(
+    context: cli_common.PlanCommandContext,
+    args: argparse.Namespace,
+    message: mailbox.MailboxMessage,
+    projection: _MailboxReplyProjection | None,
+    *,
+    active_run_id: str,
+) -> dict[str, Any] | None:
+    """Best-effort fast clear after an authoritative answerless closure."""
+    if (
+        projection is None
+        or projection.run_id != active_run_id
+        or message.to != projection.question_id
+        or message.kind != mailbox.KIND_RESOLUTION
+        or message.action not in mailbox.RESOLUTION_ACTIONS
+    ):
+        return None
+    try:
+        post_resolution = mailbox.read_mailbox(
+            context.snapshot.plan_dir,
+            state_dir=args.state_dir,
+        )
+        if (
+            post_resolution.last_seq < message.seq
+            or post_resolution.open_questions(projection.run_id)
+        ):
+            return None
+
+        runner_state = context.status.get("runner_state")
+        harness = (
+            runner_state.get("harness")
+            if isinstance(runner_state, dict)
+            and isinstance(runner_state.get("harness"), str)
+            else None
+        )
+        payload: dict[str, Any] = {
+            "run_id": projection.run_id,
+            "plan_dir": str(context.snapshot.plan_dir),
+            "cwd": os.getcwd(),
+            "state_path": context.status.get("state_path"),
+            "harness": harness,
+        }
+        kitty_window_id = _kitty_window_id()
+        if kitty_window_id is not None:
+            payload["kitty_window_id"] = kitty_window_id
+        return agent_mux_delivery.notify(
+            agent_mux_delivery.MAILBOX_RESOLUTION_EVENT,
+            payload,
+            reason=agent_mux_delivery.MAILBOX_RESOLUTION_REASON,
+            active_turn=None,
+            extra={
+                "question_id": projection.question_id,
+                "resolution_action": message.action,
+                "mailbox_projection_sequence": str(
+                    message.seq
+                    if projection.lease_predates_question
+                    else projection.projection_seq
+                ),
+                "source_event_id": (
+                    f"{projection.run_id}:mailbox-resolution:{message.seq}"
+                ),
+            },
+            enabled=agent_mux_delivery.notify_enabled(),
+            timeout=agent_mux_delivery.notify_timeout(),
+            allocate_sequence=lambda: message.seq,
+            record_outcome=lambda _outcome: None,
+            resolve_binary=shutil.which,
+            run_command=subprocess.run,
+            emitted_at=lambda: datetime.now(timezone.utc),
+        )
+    except Exception:  # noqa: BLE001 - resolutions never depend on AgentMux
+        return None
+
+
+def _record_notice_published_event(
+    context: cli_common.PlanCommandContext,
+    message: mailbox.MailboxMessage,
+) -> None:
+    """Best-effort body-free tail evidence for a published worker notice."""
+    events_path = context.status.get("events_path")
+    if not isinstance(events_path, str) or not events_path:
+        return
+    text = message.text
+    if not isinstance(text, str):
+        return
+    try:
+        events.append_event(
+            events_path,
+            events.Event(
+                name=events.MAILBOX_EVENT,
+                payload={
+                    "action": events.MAILBOX_ACTION_NOTICE_PUBLISHED,
+                    "run_id": message.run_id,
+                    "session_id": message.session_id,
+                    "turn_index": message.turn_index,
+                    "message_id": message.id,
+                    "seq": message.seq,
+                    "length": len(text),
+                    "digest": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                },
+            ),
+        )
+    except Exception:  # noqa: BLE001 - notice publication stays authoritative
+        pass
+
+
 def inbox_guidance_from_args(args: argparse.Namespace) -> int:
     """Append supervisor guidance and renew the plan's supervisor lease."""
     text = _body_from_args(
@@ -717,6 +1146,93 @@ def inbox_reply_from_args(args: argparse.Namespace) -> int:
     return 0
 
 
+def inbox_resolve_from_args(args: argparse.Namespace) -> int:
+    """Atomically append the first answerless closure for a live question."""
+    action = getattr(args, "action", None)
+    if action not in mailbox.RESOLUTION_ACTIONS:
+        _print_input_error(
+            args,
+            command_name=COMMAND_INBOX_RESOLVE,
+            text_label="inbox resolve",
+            reason=mailbox.REJECT_INVALID_ACTION,
+            error="--action must be either continue or pause",
+        )
+        return 1
+    note_ok, note = _optional_note_from_args(args)
+    if not note_ok:
+        return 1
+    context = _resolve(
+        args,
+        command_name=COMMAND_INBOX_RESOLVE,
+        text_label="inbox resolve",
+    )
+    if context is None:
+        return 1
+    run_id = _active_status_run_id(context)
+    if run_id is None:
+        _print_input_error(
+            args,
+            command_name=COMMAND_INBOX_RESOLVE,
+            text_label="inbox resolve",
+            reason=ERROR_NO_ACTIVE_RUN,
+            error="no active run can consume a question resolution",
+        )
+        return 1
+    projection = _mailbox_reply_projection(context, args, args.to)
+    try:
+        lease = _write_supervisor_lease(
+            context.snapshot.plan_dir,
+            args.state_dir,
+        )
+        message = mailbox.append_resolution(
+            context.snapshot.plan_dir,
+            args.to,
+            action,
+            expected_run_id=run_id,
+            note=note,
+            state_dir=args.state_dir,
+        )
+    except mailbox.MailboxError as error:
+        _print_mailbox_error(
+            args,
+            command_name=COMMAND_INBOX_RESOLVE,
+            text_label="inbox resolve",
+            error=error,
+        )
+        return 1
+
+    _notify_agent_mux_mailbox_resolution(
+        context,
+        args,
+        message,
+        projection,
+        active_run_id=run_id,
+    )
+
+    payload = responses.success_payload(
+        COMMAND_INBOX_RESOLVE,
+        plan_dir=str(context.snapshot.plan_dir),
+        mailbox_path=str(_mailbox_path(context, args)),
+        lease_path=str(
+            mailbox.lease_path_for_plan(
+                context.snapshot.plan_dir,
+                args.state_dir,
+            )
+        ),
+        supervisor_id=lease.supervisor_id,
+        run_id=run_id,
+        message=_message_payload(message),
+    )
+    if args.json:
+        responses.print_json(payload)
+    else:
+        print(
+            f"Resolved question {args.to} with action {action} "
+            f"(resolution {message.id}, seq {message.seq})"
+        )
+    return 0
+
+
 def inbox_read_from_args(args: argparse.Namespace) -> int:
     """Read pending guidance and optionally acknowledge exactly that snapshot."""
     context = _resolve(
@@ -797,6 +1313,73 @@ def inbox_read_from_args(args: argparse.Namespace) -> int:
     return 0
 
 
+def notify_from_args(args: argparse.Namespace) -> int:
+    """Publish a nonblocking notice owned by the exact active worker turn."""
+    text = _body_from_args(
+        args,
+        command_name=COMMAND_NOTIFY,
+        text_label="notify",
+        inline_source="TEXT",
+    )
+    if text is None:
+        return 1
+    context = _resolve(
+        args,
+        command_name=COMMAND_NOTIFY,
+        text_label="notify",
+    )
+    if context is None:
+        return 1
+    ownership = _active_turn_ownership(context)
+    if ownership is None:
+        _print_input_error(
+            args,
+            command_name=COMMAND_NOTIFY,
+            text_label="notify",
+            reason=ERROR_NO_ACTIVE_RUN,
+            error="no active worker turn can publish a notice",
+        )
+        return 1
+    run_id, session_id, turn_index = ownership
+    try:
+        message = mailbox.append_notice(
+            context.snapshot.plan_dir,
+            text,
+            run_id=run_id,
+            session_id=session_id,
+            turn_index=turn_index,
+            state_dir=args.state_dir,
+        )
+    except mailbox.MailboxError as error:
+        _print_mailbox_error(
+            args,
+            command_name=COMMAND_NOTIFY,
+            text_label="notify",
+            error=error,
+        )
+        return 1
+
+    _record_notice_published_event(context, message)
+
+    payload = responses.success_payload(
+        COMMAND_NOTIFY,
+        plan_dir=str(context.snapshot.plan_dir),
+        mailbox_path=str(_mailbox_path(context, args)),
+        run_id=run_id,
+        session_id=session_id,
+        turn_index=turn_index,
+        message=_message_payload(message),
+    )
+    if args.json:
+        responses.print_json(payload)
+    else:
+        print(
+            f"Published notice {message.id} for session {session_id} "
+            f"turn {turn_index} (seq {message.seq})."
+        )
+    return 0
+
+
 def _question_from_view(
     view: mailbox.MailboxView,
     question_id: str,
@@ -819,7 +1402,7 @@ def _question_from_view(
     return question
 
 
-def _wait_for_reply(
+def _wait_for_closure(
     plan_dir: str | Path,
     question_id: str,
     *,
@@ -855,9 +1438,9 @@ def _wait_for_reply(
                 # races the read, the next metadata probe conservatively
                 # triggers one extra parse instead of missing the append.
                 last_read_token = current_token
-                reply = view.reply_for(question_id)
-                if reply is not None:
-                    return reply, False
+                closure = view.closure_for(question_id)
+                if closure is not None:
+                    return closure, False
 
         now = time.monotonic()
         if now >= deadline:
@@ -867,8 +1450,26 @@ def _wait_for_reply(
         time.sleep(min(ASK_WAIT_POLL_INTERVAL_SECONDS, deadline - now))
 
 
+def _wait_for_reply(
+    plan_dir: str | Path,
+    question_id: str,
+    *,
+    state_dir: str | Path | None,
+    timeout: float,
+    initial_view: mailbox.MailboxView | None = None,
+) -> tuple[mailbox.MailboxMessage | None, bool]:
+    """Compatibility wrapper for callers of the former reply-only wait."""
+    return _wait_for_closure(
+        plan_dir,
+        question_id,
+        state_dir=state_dir,
+        timeout=timeout,
+        initial_view=initial_view,
+    )
+
+
 def ask_from_args(args: argparse.Namespace) -> int:
-    """Append or resume a worker question, optionally waiting for its reply."""
+    """Append or resume a worker question, optionally waiting for closure."""
     text = getattr(args, "text", None)
     question_id = getattr(args, "question_id", None)
     if (text is None) == (question_id is None):
@@ -926,11 +1527,20 @@ def ask_from_args(args: argparse.Namespace) -> int:
     created = text is not None
     try:
         if text is not None:
+            (
+                run_id,
+                session_id,
+                turn_index,
+                waiter_origin,
+            ) = _status_question_ownership(context)
             question = mailbox.append_question(
                 context.snapshot.plan_dir,
                 text,
                 state_dir=args.state_dir,
-                run_id=_status_run_id(context),
+                run_id=run_id,
+                session_id=session_id,
+                turn_index=turn_index,
+                waiter_origin=waiter_origin,
             )
         else:
             initial_view = mailbox.read_mailbox(
@@ -939,14 +1549,14 @@ def ask_from_args(args: argparse.Namespace) -> int:
             )
             question = _question_from_view(initial_view, question_id)
 
-        reply = (
-            initial_view.reply_for(question.id)
+        closure = (
+            initial_view.closure_for(question.id)
             if initial_view is not None
             else None
         )
         timed_out = False
-        if args.wait and reply is None:
-            reply, timed_out = _wait_for_reply(
+        if args.wait and closure is None:
+            closure, timed_out = _wait_for_closure(
                 context.snapshot.plan_dir,
                 question.id,
                 state_dir=args.state_dir,
@@ -962,6 +1572,20 @@ def ask_from_args(args: argparse.Namespace) -> int:
         )
         return 1
 
+    reply = (
+        closure if closure is not None and closure.kind == mailbox.KIND_REPLY
+        else None
+    )
+    resolution = (
+        closure
+        if closure is not None and closure.kind == mailbox.KIND_RESOLUTION
+        else None
+    )
+    pause_required = bool(
+        resolution is not None
+        and resolution.action == mailbox.RESOLUTION_ACTION_PAUSE
+    )
+
     payload = responses.success_payload(
         COMMAND_ASK,
         plan_dir=str(context.snapshot.plan_dir),
@@ -972,16 +1596,35 @@ def ask_from_args(args: argparse.Namespace) -> int:
         waited=bool(args.wait),
         wait_timeout=wait_timeout,
         answered=reply is not None,
+        resolved=resolution is not None,
+        pause_required=pause_required,
         timed_out=timed_out,
         reply=None if reply is None else _message_payload(reply),
+        resolution=(
+            None if resolution is None else _message_payload(resolution)
+        ),
     )
     if args.json:
         responses.print_json(payload)
     elif reply is not None:
         print(f"Reply to question {question.id}:")
         _print_framed_message(reply)
+    elif resolution is not None:
+        print(f"Resolution for question {question.id}:")
+        _print_framed_message(resolution)
+        if pause_required:
+            print(
+                "Directive: Stop work and emit RUNNER_PAUSE: blocked - "
+                "supervisor requested a pause."
+            )
+        else:
+            print(
+                "Directive: Continue work. No operator reply was supplied; "
+                "do not treat the optional resolution note as an operator "
+                "reply."
+            )
     elif timed_out:
-        print(f"Timed out waiting for a reply to question {question.id}.")
+        print(f"Timed out waiting for a closure to question {question.id}.")
     else:
         action = "Queued" if created else "Resumed"
         print(f"{action} question {question.id} (seq {question.seq}).")
@@ -995,6 +1638,7 @@ def _wait_for_questions(
     since: int,
     timeout: float,
     supervisor_id: str,
+    include: str = OUTBOX_INCLUDE_QUESTIONS,
 ) -> _OutboxWaitResult:
     started = time.monotonic()
     deadline = started + timeout
@@ -1006,10 +1650,20 @@ def _wait_for_questions(
     lease_degraded = False
     lease_renewal_failures = 0
     lease_renewal_recoveries = 0
+    kinds = {
+        OUTBOX_INCLUDE_QUESTIONS: (mailbox.KIND_QUESTION,),
+        OUTBOX_INCLUDE_NOTICES: (mailbox.KIND_NOTICE,),
+        OUTBOX_INCLUDE_ALL: (mailbox.KIND_QUESTION, mailbox.KIND_NOTICE),
+    }[include]
 
     # Initial establishment remains fail-closed: without it the caller has no
     # signal that supervision ever started. Only later renewals may degrade.
-    _write_supervisor_lease(plan_dir, state_dir, supervisor_id)
+    landed_lease = _write_supervisor_lease(
+        plan_dir,
+        state_dir,
+        supervisor_id,
+    )
+    landed_supervisor_id = landed_lease.supervisor_id
     while True:
         current_token = mailbox.mailbox_change_token(mailbox_path)
         if (
@@ -1030,13 +1684,21 @@ def _wait_for_questions(
                 last_successful_view = view
                 last_read_error = None
                 last_read_token = current_token
-                questions = view.messages_since(
-                    since,
-                    kinds=(mailbox.KIND_QUESTION,),
-                )
-                if questions:
+                selected = view.messages_since(since, kinds=kinds)
+                if selected:
                     return _OutboxWaitResult(
-                        questions=questions,
+                        questions=tuple(
+                            message
+                            for message in selected
+                            if message.kind == mailbox.KIND_QUESTION
+                        ),
+                        notices=tuple(
+                            message
+                            for message in selected
+                            if message.kind == mailbox.KIND_NOTICE
+                        ),
+                        include=include,
+                        supervisor_id=landed_supervisor_id,
                         next_since=max(since, view.last_seq),
                         timed_out=False,
                         lease_supervision=_LeaseSupervision(
@@ -1058,6 +1720,9 @@ def _wait_for_questions(
             )
             return _OutboxWaitResult(
                 questions=(),
+                notices=(),
+                include=include,
+                supervisor_id=landed_supervisor_id,
                 next_since=next_since,
                 timed_out=True,
                 lease_supervision=_LeaseSupervision(
@@ -1069,7 +1734,7 @@ def _wait_for_questions(
 
         if now >= next_lease_at:
             try:
-                _write_supervisor_lease(
+                landed_lease = _write_supervisor_lease(
                     plan_dir,
                     state_dir,
                     supervisor_id,
@@ -1081,6 +1746,7 @@ def _wait_for_questions(
                 if lease_degraded:
                     lease_renewal_recoveries += 1
                 lease_degraded = False
+                landed_supervisor_id = landed_lease.supervisor_id
             next_lease_at = now + LEASE_RENEW_INTERVAL_SECONDS
         sleep_for = min(
             OUTBOX_WAIT_POLL_INTERVAL_SECONDS,
@@ -1092,13 +1758,20 @@ def _wait_for_questions(
 
 
 def outbox_wait_from_args(args: argparse.Namespace) -> int:
-    """Long-poll worker questions after a stateless physical cursor."""
+    """Long-poll selected worker records after a stateless physical cursor."""
     since = _validated_since(
         args,
         command_name=COMMAND_OUTBOX_WAIT,
         text_label="outbox wait",
     )
     if since is None:
+        return 1
+    include = _validated_include(
+        args,
+        command_name=COMMAND_OUTBOX_WAIT,
+        text_label="outbox wait",
+    )
+    if include is None:
         return 1
     timeout = _validated_timeout(
         args,
@@ -1124,6 +1797,7 @@ def outbox_wait_from_args(args: argparse.Namespace) -> int:
             since=since,
             timeout=timeout,
             supervisor_id=supervisor_id,
+            include=include,
         )
     except mailbox.MailboxError as error:
         _print_mailbox_error(
@@ -1141,14 +1815,19 @@ def outbox_wait_from_args(args: argparse.Namespace) -> int:
         lease_path=str(
             mailbox.lease_path_for_plan(context.snapshot.plan_dir, args.state_dir)
         ),
-        supervisor_id=supervisor_id,
+        supervisor_id=wait_result.supervisor_id,
         since=since,
         next_since=wait_result.next_since,
         timeout=timeout,
         timed_out=wait_result.timed_out,
+        include=wait_result.include,
         questions=[
             _message_payload(question)
             for question in wait_result.questions
+        ],
+        notices=[
+            _message_payload(notice)
+            for notice in wait_result.notices
         ],
         lease_supervision=wait_result.lease_supervision.to_payload(),
     )
@@ -1167,11 +1846,21 @@ def outbox_wait_from_args(args: argparse.Namespace) -> int:
                 f"{failures} time(s); {health}.",
                 file=sys.stderr,
             )
-        if not wait_result.questions:
-            print(f"No questions after seq {since}; timed out.")
+        if not wait_result.questions and not wait_result.notices:
+            selected_label = {
+                OUTBOX_INCLUDE_QUESTIONS: "questions",
+                OUTBOX_INCLUDE_NOTICES: "notices",
+                OUTBOX_INCLUDE_ALL: "questions or notices",
+            }[wait_result.include]
+            print(f"No {selected_label} after seq {since}; timed out.")
         else:
-            for question in wait_result.questions:
-                print(f"Question {question.id} (seq {question.seq}):")
-                _print_framed_message(question)
+            if wait_result.questions:
+                print(
+                    "\n".join(
+                        _outbox_question_text_lines(wait_result.questions)
+                    )
+                )
+            if wait_result.notices:
+                print("\n".join(_outbox_notice_text_lines(wait_result.notices)))
             print(f"Next cursor: {wait_result.next_since}")
     return 0

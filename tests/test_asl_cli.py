@@ -44,6 +44,7 @@ from agent_session_loop import (
     harnesses,
     install_verify,
     mailbox,
+    mailbox_cli,
     metrics,
     plans,
     preflight,
@@ -659,6 +660,51 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertFalse(default_args.no_mailbox)
         self.assertTrue(disabled_args.no_mailbox)
         self.assertIn("no_mailbox", runner._RESUME_OVERLAY_DESTS)
+
+    def test_notify_and_outbox_include_parser_contract(self) -> None:
+        parser = cli.build_parser()
+
+        notify_args = parser.parse_args(
+            [
+                "notify",
+                "/tmp/plan",
+                "checkpoint",
+                "--state-dir",
+                "/tmp/state",
+                "--json",
+            ]
+        )
+        self.assertEqual("checkpoint", notify_args.text)
+        self.assertFalse(notify_args.text_stdin)
+        self.assertEqual(
+            "mailbox_cli:notify_from_args",
+            notify_args.handler_ref,
+        )
+        self.assertIs(
+            mailbox_cli.notify_from_args,
+            cli.resolve_handler(notify_args),
+        )
+
+        stdin_args = parser.parse_args(
+            ["notify", "/tmp/plan", "--text-stdin"]
+        )
+        self.assertIsNone(stdin_args.text)
+        self.assertTrue(stdin_args.text_stdin)
+
+        default_wait = parser.parse_args(["outbox", "wait", "/tmp/plan"])
+        self.assertEqual("questions", default_wait.include)
+        for include in ("questions", "notices", "all"):
+            with self.subTest(include=include):
+                wait_args = parser.parse_args(
+                    [
+                        "outbox",
+                        "wait",
+                        "/tmp/plan",
+                        "--include",
+                        include,
+                    ]
+                )
+                self.assertEqual(include, wait_args.include)
 
     def test_mailbox_activation_accepts_fresh_lease_and_honors_opt_out(
         self,

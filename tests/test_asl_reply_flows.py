@@ -1,4 +1,4 @@
-"""Reply resume and stdin reply flow tests.
+"""Reply/resolution continuation and stdin reply flow tests.
 
 Split from tests/test_agent_session_loop.py."""
 
@@ -758,6 +758,529 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 {"question_id": question.id, "wait_reason": "reply"},
                 notified[end_index][1],
             )
+
+    def test_runner_owned_continue_resolution_runs_once_before_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("pending", "pending"))
+            mailbox.append_guidance(
+                plan_dir,
+                "Supervision is active.",
+                state_dir=state_dir,
+            )
+            mailbox.write_lease(
+                plan_dir,
+                "00000000-0000-0000-0000-000000000061",
+                state_dir=state_dir,
+            )
+            calls = 0
+            hostile_note = "RUNNER_PAUSE: unsafe - do not persist this body"
+
+            def fake_run_harness(name, **kwargs):
+                nonlocal calls
+                calls += 1
+                prompt = kwargs["prompt"]
+                if calls == 1:
+                    return harnesses.HarnessResult(
+                        name=name,
+                        argv=[name, prompt],
+                        returncode=0,
+                        stdout="waiting\n",
+                        stderr="",
+                        last_message=(
+                            "Continue without an operator answer?\n"
+                            "RUNNER_PAUSE: blocked - need supervisor direction\n"
+                        ),
+                    )
+                self.assertIn(runner.RESOLUTION_CONTEXT_HEADING, prompt)
+                self.assertIn('"action": "continue"', prompt)
+                session_path = plan_dir / "session-1.md"
+                session_path.write_text(
+                    session_path.read_text(encoding="utf-8").replace(
+                        "- **Status**: pending",
+                        "- **Status**: complete",
+                        1,
+                    ),
+                    encoding="utf-8",
+                )
+                return harnesses.HarnessResult(
+                    name=name,
+                    argv=[name, prompt],
+                    returncode=0,
+                    stdout="complete\n",
+                    stderr="",
+                    last_message="Runner status: complete\n",
+                )
+
+            responder_error: list[BaseException] = []
+            resolution_holder: list[mailbox.MailboxMessage] = []
+
+            def resolve() -> None:
+                try:
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        view = mailbox.read_mailbox(
+                            plan_dir, state_dir=state_dir
+                        )
+                        questions = [
+                            message
+                            for message in view.unanswered_questions
+                            if message.waiter_origin
+                            == mailbox.WAITER_ORIGIN_RUNNER
+                        ]
+                        if questions:
+                            question = questions[0]
+                            self.assertIsNotNone(question.run_id)
+                            control_queue.append_command(
+                                plan_dir,
+                                control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+                                state_dir=state_dir,
+                            )
+                            resolution_holder.append(
+                                mailbox.append_resolution(
+                                    plan_dir,
+                                    question.id,
+                                    mailbox.RESOLUTION_ACTION_CONTINUE,
+                                    expected_run_id=question.run_id,
+                                    note=hostile_note,
+                                    state_dir=state_dir,
+                                )
+                            )
+                            return
+                        time.sleep(0.01)
+                    raise AssertionError("runner did not publish a question")
+                except BaseException as error:
+                    responder_error.append(error)
+
+            responder = threading.Thread(target=resolve, daemon=True)
+            responder.start()
+            args = self._build_args(
+                plan_dir,
+                state_dir,
+                reply=None,
+                cwd=tmp_dir,
+            )
+            env = {
+                runner.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "1",
+                runner.MAILBOX_REPLY_WAIT_HARD_ENV_VAR: "2",
+                runner.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
+                runner.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
+            }
+            with (
+                mock.patch.dict(os.environ, env),
+                mock.patch.object(
+                    runner.harnesses,
+                    "run_harness",
+                    side_effect=fake_run_harness,
+                ),
+            ):
+                code, out, _err = self._run_capture(args)
+            responder.join(timeout=5)
+
+            self.assertEqual([], responder_error)
+            self.assertFalse(responder.is_alive())
+            self.assertEqual(0, code, out)
+            self.assertEqual(2, calls)
+            payload = json.loads(out)
+            self.assertFalse(payload["paused"])
+            self.assertEqual("stopped", payload["reason"])
+            self.assertEqual(
+                ["session", "resolution"],
+                [turn["prompt_kind"] for turn in payload["turns"]],
+            )
+            self.assertIn(
+                "- **Status**: complete",
+                (plan_dir / "session-1.md").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "- **Status**: pending",
+                (plan_dir / "session-2.md").read_text(encoding="utf-8"),
+            )
+
+            view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+            [question] = [
+                message
+                for message in view.messages
+                if message.kind == mailbox.KIND_QUESTION
+            ]
+            self.assertEqual(payload["run_id"], question.run_id)
+            self.assertEqual("1", question.session_id)
+            self.assertEqual(1, question.turn_index)
+            self.assertEqual(mailbox.WAITER_ORIGIN_RUNNER, question.waiter_origin)
+            [resolution] = resolution_holder
+
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            records = read_jsonl(plan_state / events.EVENTS_FILE_NAME)
+            [cleared] = [
+                record
+                for record in records
+                if record.get("name") == events.MAILBOX_EVENT
+                and record.get("payload", {}).get("action")
+                == events.MAILBOX_ACTION_WAIT_CLEARED
+            ]
+            cleared_payload = cleared["payload"]
+            self.assertEqual("resolution", cleared_payload["reason"])
+            self.assertEqual("continue", cleared_payload["resolution_action"])
+            self.assertEqual(
+                resolution.id,
+                cleared_payload["resolution_message_id"],
+            )
+            self.assertEqual(resolution.seq, cleared_payload["resolution_seq"])
+            resolution_events = [
+                record
+                for record in records
+                if record.get("name") == events.RESOLUTION_CONSUMED_EVENT
+            ]
+            self.assertEqual(1, len(resolution_events), records)
+            self.assertEqual(
+                resolution.id,
+                resolution_events[0]["payload"]["resolution_message_id"],
+            )
+            self.assertNotIn(hostile_note, json.dumps(payload))
+            self.assertNotIn(hostile_note, json.dumps(records))
+
+    def test_runner_owned_pause_resolution_preserves_terminal_pause(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("pending",))
+            mailbox.append_guidance(
+                plan_dir,
+                "Supervision is active.",
+                state_dir=state_dir,
+            )
+            mailbox.write_lease(
+                plan_dir,
+                "00000000-0000-0000-0000-000000000062",
+                state_dir=state_dir,
+            )
+            pause_message = "blocked - need supervisor direction"
+            sensitive_note = "private pause rationale"
+            calls = 0
+
+            def fake_run_harness(name, **kwargs):
+                nonlocal calls
+                calls += 1
+                return harnesses.HarnessResult(
+                    name=name,
+                    argv=[name, kwargs["prompt"]],
+                    returncode=0,
+                    stdout="waiting\n",
+                    stderr="",
+                    last_message=(
+                        "Continue without an operator answer?\n"
+                        f"RUNNER_PAUSE: {pause_message}\n"
+                    ),
+                )
+
+            responder_error: list[BaseException] = []
+            resolution_holder: list[mailbox.MailboxMessage] = []
+
+            def resolve() -> None:
+                try:
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        view = mailbox.read_mailbox(
+                            plan_dir, state_dir=state_dir
+                        )
+                        if view.unanswered_questions:
+                            question = view.unanswered_questions[0]
+                            assert question.run_id is not None
+                            resolution_holder.append(
+                                mailbox.append_resolution(
+                                    plan_dir,
+                                    question.id,
+                                    mailbox.RESOLUTION_ACTION_PAUSE,
+                                    expected_run_id=question.run_id,
+                                    note=sensitive_note,
+                                    state_dir=state_dir,
+                                )
+                            )
+                            return
+                        time.sleep(0.01)
+                    raise AssertionError("runner did not publish a question")
+                except BaseException as error:
+                    responder_error.append(error)
+
+            responder = threading.Thread(target=resolve, daemon=True)
+            responder.start()
+            args = self._build_args(
+                plan_dir,
+                state_dir,
+                reply=None,
+                cwd=tmp_dir,
+            )
+            env = {
+                runner.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "1",
+                runner.MAILBOX_REPLY_WAIT_HARD_ENV_VAR: "2",
+                runner.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
+                runner.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
+            }
+            with (
+                mock.patch.dict(os.environ, env),
+                mock.patch.object(
+                    runner.harnesses,
+                    "run_harness",
+                    side_effect=fake_run_harness,
+                ),
+            ):
+                code, out, _err = self._run_capture(args)
+            responder.join(timeout=5)
+
+            self.assertEqual([], responder_error)
+            self.assertEqual(1, calls)
+            self.assertEqual(1, code, out)
+            payload = json.loads(out)
+            self.assertTrue(payload["paused"])
+            self.assertEqual("blocked", payload["pause_reason"])
+            self.assertEqual(pause_message, payload["pause_message"])
+            self.assertEqual("last_message", payload["pause_details"]["source"])
+            self.assertNotIn("waiting_for_reply", payload)
+
+            context = qna.load_qna_context(plan_dir, state_dir=state_dir)
+            self.assertEqual("pause", context.context_kind)
+            self.assertEqual("blocked", context.pause_reason)
+            self.assertEqual(pause_message, context.pause_message)
+            self.assertEqual(
+                payload["turns"][0]["last_message_path"],
+                str(context.last_message_path),
+            )
+
+            [resolution] = resolution_holder
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            records = read_jsonl(plan_state / events.EVENTS_FILE_NAME)
+            [cleared] = [
+                record
+                for record in records
+                if record.get("name") == events.MAILBOX_EVENT
+                and record.get("payload", {}).get("action")
+                == events.MAILBOX_ACTION_WAIT_CLEARED
+            ]
+            [paused] = [
+                record
+                for record in records
+                if record.get("name") == events.RUN_PAUSED_EVENT
+            ]
+            self.assertLess(records.index(cleared), records.index(paused))
+            self.assertEqual("resolution", cleared["payload"]["reason"])
+            self.assertEqual("pause", cleared["payload"]["resolution_action"])
+            self.assertEqual(
+                resolution.id,
+                cleared["payload"]["resolution_message_id"],
+            )
+            self.assertEqual(pause_message, paused["payload"]["message"])
+            self.assertNotIn(sensitive_note, json.dumps(payload))
+            self.assertNotIn(sensitive_note, json.dumps(records))
+
+    def test_worker_pause_resolution_bypasses_duplicate_runner_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("pending",))
+            mailbox.append_guidance(
+                plan_dir,
+                "Supervision is active.",
+                state_dir=state_dir,
+            )
+            mailbox.write_lease(
+                plan_dir,
+                "00000000-0000-0000-0000-000000000063",
+                state_dir=state_dir,
+            )
+            sensitive_note = "worker pause note must remain in the mailbox"
+            calls = 0
+
+            def fake_run_harness(name, **kwargs):
+                nonlocal calls
+                calls += 1
+                plan_state = state.plan_state_dir(plan_dir, state_dir)
+                state_payload = json.loads(
+                    (plan_state / events.STATE_FILE_NAME).read_text(
+                        encoding="utf-8"
+                    )
+                )
+                active_turn = state_payload["active_turn"]
+                question = mailbox.append_question(
+                    plan_dir,
+                    "Pause this worker ask?",
+                    state_dir=state_dir,
+                    run_id=active_turn["run_id"],
+                    session_id=active_turn["session_id"],
+                    turn_index=active_turn["turn_index"],
+                    waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
+                )
+                mailbox.append_resolution(
+                    plan_dir,
+                    question.id,
+                    mailbox.RESOLUTION_ACTION_PAUSE,
+                    expected_run_id=active_turn["run_id"],
+                    note=sensitive_note,
+                    state_dir=state_dir,
+                )
+                return harnesses.HarnessResult(
+                    name=name,
+                    argv=[name, kwargs["prompt"]],
+                    returncode=0,
+                    stdout="worker ask was paused\n",
+                    stderr="",
+                    last_message=(
+                        "Runner status: paused\n"
+                        "RUNNER_PAUSE: blocked - supervisor requested a pause\n"
+                    ),
+                )
+
+            args = self._build_args(
+                plan_dir,
+                state_dir,
+                reply=None,
+                cwd=tmp_dir,
+            )
+            with (
+                mock.patch.object(
+                    runner.harnesses,
+                    "run_harness",
+                    side_effect=fake_run_harness,
+                ),
+                mock.patch.object(
+                    runner,
+                    "_prepare_mailbox_reply_wait",
+                    side_effect=AssertionError(
+                        "a correlated worker pause must not publish a second question"
+                    ),
+                ) as prepare_wait,
+            ):
+                code, out, _err = self._run_capture(args)
+
+            self.assertEqual(1, calls)
+            self.assertEqual(1, code, out)
+            prepare_wait.assert_not_called()
+            payload = json.loads(out)
+            self.assertTrue(payload["paused"])
+            self.assertEqual("blocked", payload["pause_reason"])
+            self.assertEqual(
+                "blocked - supervisor requested a pause",
+                payload["pause_message"],
+            )
+            correlation = payload["pause_details"]["mailbox_resolution"]
+            self.assertEqual(mailbox.WAITER_ORIGIN_WORKER, correlation["waiter_origin"])
+            self.assertEqual("pause", correlation["action"])
+            self.assertEqual(len(sensitive_note), correlation["note_length"])
+            self.assertNotIn("waiting_for_reply", payload)
+
+            view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+            questions = [
+                message
+                for message in view.messages
+                if message.kind == mailbox.KIND_QUESTION
+            ]
+            self.assertEqual(1, len(questions))
+            self.assertEqual(mailbox.WAITER_ORIGIN_WORKER, questions[0].waiter_origin)
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            records = read_jsonl(plan_state / events.EVENTS_FILE_NAME)
+            wait_events = [
+                record
+                for record in records
+                if record.get("name") == events.MAILBOX_EVENT
+                and record.get("payload", {}).get("action")
+                in {
+                    events.MAILBOX_ACTION_WAIT_STARTED,
+                    events.MAILBOX_ACTION_WAIT_CLEARED,
+                }
+            ]
+            self.assertEqual([], wait_events, records)
+            self.assertNotIn(sensitive_note, json.dumps(payload))
+            self.assertNotIn(sensitive_note, json.dumps(records))
+
+    def test_worker_pause_correlation_rejects_stale_ownership(self) -> None:
+        cases = (
+            (
+                "exact",
+                "run-current",
+                "1",
+                3,
+                mailbox.WAITER_ORIGIN_WORKER,
+                True,
+            ),
+            (
+                "other-run",
+                "run-old",
+                "1",
+                3,
+                mailbox.WAITER_ORIGIN_WORKER,
+                False,
+            ),
+            (
+                "other-session",
+                "run-current",
+                "2",
+                3,
+                mailbox.WAITER_ORIGIN_WORKER,
+                False,
+            ),
+            (
+                "other-turn",
+                "run-current",
+                "1",
+                2,
+                mailbox.WAITER_ORIGIN_WORKER,
+                False,
+            ),
+            (
+                "runner-origin",
+                "run-current",
+                "1",
+                3,
+                mailbox.WAITER_ORIGIN_RUNNER,
+                False,
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            for (
+                name,
+                question_run_id,
+                question_session_id,
+                question_turn_index,
+                waiter_origin,
+                should_match,
+            ) in cases:
+                with self.subTest(name=name):
+                    plan_dir = tmp_dir / name / "plan"
+                    state_dir = tmp_dir / name / "state"
+                    plan_dir.mkdir(parents=True)
+                    question = mailbox.append_question(
+                        plan_dir,
+                        "Pause?",
+                        state_dir=state_dir,
+                        run_id=question_run_id,
+                        session_id=question_session_id,
+                        turn_index=question_turn_index,
+                        waiter_origin=waiter_origin,
+                    )
+                    resolution = mailbox.append_resolution(
+                        plan_dir,
+                        question.id,
+                        mailbox.RESOLUTION_ACTION_PAUSE,
+                        expected_run_id=question_run_id,
+                        state_dir=state_dir,
+                    )
+
+                    matched = runner._worker_pause_resolution_for_turn(
+                        plan_dir=plan_dir,
+                        state_dir_arg=str(state_dir),
+                        run_id="run-current",
+                        session_id="1",
+                        turn_index=3,
+                    )
+
+                    if should_match:
+                        self.assertEqual(resolution, matched)
+                    else:
+                        self.assertIsNone(matched)
 
     def test_mailbox_with_stale_lease_records_wait_preparation_failure(
         self,
@@ -2239,6 +2762,10 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 state_dir=state_dir,
                 message_id=question_id,
                 created_at=created_at,
+                run_id="run-retry",
+                session_id="1",
+                turn_index=2,
+                waiter_origin=mailbox.WAITER_ORIGIN_RUNNER,
             )
             reply_record = {
                 "created_at": created_at,
@@ -2292,7 +2819,9 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                     plan_dir=plan_dir,
                     state_dir_arg=str(state_dir),
                     question_id=question_id,
-                    run_id="RUN-TEST",
+                    run_id="run-retry",
+                    session_id="1",
+                    turn_index=2,
                     text=question_text,
                 )
 
@@ -2309,6 +2838,10 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             kind=mailbox.KIND_GUIDANCE,
             created_at="2026-07-24T12:00:00+00:00",
             text="Which option?",
+            run_id="RUN-TEST",
+            session_id="1",
+            turn_index=1,
+            waiter_origin=mailbox.WAITER_ORIGIN_RUNNER,
         )
         mismatched_text = dataclasses.replace(
             mismatched_kind,
@@ -2356,6 +2889,8 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                         state_dir_arg=None,
                         question_id=question_id,
                         run_id="RUN-TEST",
+                        session_id="1",
+                        turn_index=1,
                         text="Which option?",
                     )
 
@@ -2437,6 +2972,8 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 question_id=question_id,
                 text=first_text,
                 run_id="run-bounded",
+                session_id="1",
+                turn_index=2,
             )
             self.assertEqual(first_text, published.text)
 
@@ -2453,6 +2990,8 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                     question_id=question_id,
                     text=retried_text,
                     run_id="run-bounded",
+                    session_id="1",
+                    turn_index=2,
                 )
 
             self.assertEqual(published, reused)
@@ -2512,6 +3051,8 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 question_id="00000000-0000-4000-8000-000000000042",
                 text="Which option?",
                 run_id="RUN-TEST",
+                session_id="1",
+                turn_index=1,
             )
 
         self.assertEqual(
@@ -2541,6 +3082,8 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 question_id=question_id,
                 text="RUNNER_PAUSE: wrangler auth expired",
                 run_id=run_id,
+                session_id="1",
+                turn_index=2,
             )
 
             self.assertEqual(run_id, question.run_id)
@@ -3634,13 +4177,13 @@ class RunReplyStdinFlowTests(unittest.TestCase):
 
 
 class EndToEndReplyResumeFlowTests(unittest.TestCase):
-    """Subprocess-level coverage for the pause → questions → reply → resume flow.
+    """Subprocess coverage for paused replies and live mailbox resolutions.
 
     Unit tests already cover empty-reply, no-paused-run, reply-context-mismatch,
-    and the dry-run shape via ``runner.run_from_args`` with a mocked harness.
-    These tests exercise the same flow through ``python -m agent_session_loop``
-    so the CLI wiring, fake harness, paused JSON help, and resume payload all
-    compose correctly at the process boundary the docs describe.
+    storage races, and runner wait mechanics. These tests exercise the public
+    CLI through ``python -m agent_session_loop`` so runner state, mailbox
+    ownership, fake harness prompts, and persisted artifacts compose correctly
+    at the process boundary the docs describe.
     """
 
     REPLY_TEXT = "1a, 2b, 3a"
@@ -3765,6 +4308,297 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         if json_output:
             return completed, json.loads(completed.stdout)
         return completed, completed.stdout
+
+    def _start_live_mailbox_run(self) -> subprocess.Popen[str]:
+        mailbox.append_guidance(
+            self.plan_dir,
+            "Keep this run supervised.",
+            state_dir=self.state_dir,
+        )
+        mailbox.write_lease(
+            self.plan_dir,
+            "00000000-0000-0000-0000-000000000081",
+            state_dir=self.state_dir,
+        )
+        env = self._base_env("reply-aware")
+        env.update(
+            {
+                runner.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "3",
+                runner.MAILBOX_REPLY_WAIT_HARD_ENV_VAR: "5",
+                runner.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.02",
+                runner.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.1",
+            }
+        )
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "agent_session_loop",
+                "run",
+                str(self.plan_dir),
+                "--cwd",
+                str(self.repo_root),
+                "--harness",
+                "codex",
+                "--state-dir",
+                str(self.state_dir),
+                "--allow-not-loop-ready",
+                "--json",
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.addCleanup(
+            lambda: process.kill() if process.poll() is None else None
+        )
+        return process
+
+    def _wait_for_runner_question(self) -> str:
+        state_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir)
+            / events.STATE_FILE_NAME
+        )
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if state_path.exists():
+                try:
+                    state_payload = json.loads(
+                        state_path.read_text(encoding="utf-8")
+                    )
+                except (OSError, json.JSONDecodeError):
+                    state_payload = {}
+                waiting = state_payload.get("waiting_for_reply")
+                if isinstance(waiting, dict):
+                    question_id = waiting.get("question_id")
+                    if isinstance(question_id, str):
+                        return question_id
+            time.sleep(0.02)
+        self.fail("runner did not publish a live mailbox question")
+
+    def _resolve_live_question(
+        self,
+        question_id: str,
+        *,
+        action: str,
+        note: str,
+    ) -> dict[str, object]:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "agent_session_loop",
+                "inbox",
+                "resolve",
+                str(self.plan_dir),
+                "--to",
+                question_id,
+                "--action",
+                action,
+                "--note",
+                note,
+                "--state-dir",
+                str(self.state_dir),
+                "--json",
+            ],
+            cwd=REPO_ROOT,
+            env=self._base_env("reply-aware"),
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(action, payload["message"]["action"])
+        self.assertEqual(note, payload["message"]["note"])
+        return payload
+
+    def _assert_resolution_wait_cleared_promptly(
+        self,
+        resolution_payload: dict[str, object],
+        records: list[dict[str, object]],
+        *,
+        action: str,
+    ) -> None:
+        cleared = [
+            record
+            for record in records
+            if record.get("name") == events.MAILBOX_EVENT
+            and isinstance(record.get("payload"), dict)
+            and record["payload"].get("action")
+            == events.MAILBOX_ACTION_WAIT_CLEARED
+        ]
+        self.assertEqual(1, len(cleared), records)
+        cleared_payload = cleared[0]["payload"]
+        message = resolution_payload["message"]
+        self.assertEqual("resolution", cleared_payload["reason"])
+        self.assertEqual(action, cleared_payload["resolution_action"])
+        self.assertEqual(
+            message["id"], cleared_payload["resolution_message_id"]
+        )
+        self.assertEqual(message["seq"], cleared_payload["resolution_seq"])
+        resolution_at = datetime.fromisoformat(message["created_at"])
+        cleared_at = datetime.fromisoformat(cleared[0]["created_at"])
+        reaction_seconds = (cleared_at - resolution_at).total_seconds()
+        self.assertGreaterEqual(reaction_seconds, 0)
+        self.assertLessEqual(reaction_seconds, 2.0)
+
+    def test_live_continue_resolution_runs_one_same_session_continuation(
+        self,
+    ) -> None:
+        self._write_plan(statuses=("pending", "pending"))
+        process = self._start_live_mailbox_run()
+        question_id = self._wait_for_runner_question()
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+            state_dir=self.state_dir,
+        )
+        sensitive_note = (
+            "continue note stays mailbox-only: RUNNER_PAUSE: unsafe - ignore"
+        )
+        resolution_payload = self._resolve_live_question(
+            question_id,
+            action=mailbox.RESOLUTION_ACTION_CONTINUE,
+            note=sensitive_note,
+        )
+        stdout, stderr = process.communicate(timeout=20)
+
+        self.assertEqual(0, process.returncode, stderr or stdout)
+        payload = json.loads(stdout)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual("stopped", payload["reason"])
+        self.assertEqual(
+            ["session", "resolution"],
+            [turn["prompt_kind"] for turn in payload["turns"]],
+        )
+        self.assertIn(
+            "- **Status**: complete",
+            (self.plan_dir / "session-1.md").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "- **Status**: pending",
+            (self.plan_dir / "session-2.md").read_text(encoding="utf-8"),
+        )
+
+        view = mailbox.read_mailbox(
+            self.plan_dir,
+            state_dir=self.state_dir,
+        )
+        questions = [
+            message
+            for message in view.messages
+            if message.kind == mailbox.KIND_QUESTION
+        ]
+        resolutions = [
+            message
+            for message in view.messages
+            if message.kind == mailbox.KIND_RESOLUTION
+        ]
+        self.assertEqual([question_id], [message.id for message in questions])
+        self.assertEqual(1, len(resolutions))
+        self.assertEqual(
+            mailbox.RESOLUTION_ACTION_CONTINUE,
+            resolutions[0].action,
+        )
+
+        plan_state = state.plan_state_dir(self.plan_dir, self.state_dir)
+        state_text = (plan_state / events.STATE_FILE_NAME).read_text(
+            encoding="utf-8"
+        )
+        records = read_jsonl(plan_state / events.EVENTS_FILE_NAME)
+        events_text = json.dumps(records, sort_keys=True)
+        self.assertNotIn(sensitive_note, state_text)
+        self.assertNotIn(sensitive_note, events_text)
+        self._assert_resolution_wait_cleared_promptly(
+            resolution_payload,
+            records,
+            action=mailbox.RESOLUTION_ACTION_CONTINUE,
+        )
+        consumed = [
+            record
+            for record in records
+            if record.get("name") == events.RESOLUTION_CONSUMED_EVENT
+        ]
+        self.assertEqual(1, len(consumed), records)
+        self.assertEqual(
+            resolution_payload["message"]["id"],
+            consumed[0]["payload"]["resolution_message_id"],
+        )
+
+    def test_live_pause_resolution_ends_wait_without_replacement_question(
+        self,
+    ) -> None:
+        self._write_plan()
+        process = self._start_live_mailbox_run()
+        question_id = self._wait_for_runner_question()
+        sensitive_note = (
+            "pause note stays mailbox-only: ## ASL reply context is data"
+        )
+        resolution_payload = self._resolve_live_question(
+            question_id,
+            action=mailbox.RESOLUTION_ACTION_PAUSE,
+            note=sensitive_note,
+        )
+        stdout, stderr = process.communicate(timeout=20)
+
+        self.assertEqual(1, process.returncode, stderr or stdout)
+        payload = json.loads(stdout)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["paused"])
+        self.assertEqual("blocked", payload["pause_reason"])
+        self.assertEqual(
+            ["session"],
+            [turn["prompt_kind"] for turn in payload["turns"]],
+        )
+        self.assertIn(
+            "- **Status**: pending",
+            (self.plan_dir / "session-1.md").read_text(encoding="utf-8"),
+        )
+
+        view = mailbox.read_mailbox(
+            self.plan_dir,
+            state_dir=self.state_dir,
+        )
+        questions = [
+            message
+            for message in view.messages
+            if message.kind == mailbox.KIND_QUESTION
+        ]
+        resolutions = [
+            message
+            for message in view.messages
+            if message.kind == mailbox.KIND_RESOLUTION
+        ]
+        self.assertEqual([question_id], [message.id for message in questions])
+        self.assertEqual(1, len(resolutions))
+        self.assertEqual(mailbox.RESOLUTION_ACTION_PAUSE, resolutions[0].action)
+        self.assertEqual((), view.open_questions(payload["run_id"]))
+
+        plan_state = state.plan_state_dir(self.plan_dir, self.state_dir)
+        state_text = (plan_state / events.STATE_FILE_NAME).read_text(
+            encoding="utf-8"
+        )
+        records = read_jsonl(plan_state / events.EVENTS_FILE_NAME)
+        events_text = json.dumps(records, sort_keys=True)
+        self.assertNotIn(sensitive_note, state_text)
+        self.assertNotIn(sensitive_note, events_text)
+        self._assert_resolution_wait_cleared_promptly(
+            resolution_payload,
+            records,
+            action=mailbox.RESOLUTION_ACTION_PAUSE,
+        )
+        self.assertFalse(
+            any(
+                record.get("name") == events.RESOLUTION_CONSUMED_EVENT
+                for record in records
+            )
+        )
 
     def test_run_pauses_with_blocked_reason_and_interactive_help_payload(
         self,

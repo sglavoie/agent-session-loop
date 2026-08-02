@@ -225,6 +225,17 @@ def _mailbox_message(payload: dict[str, Any]) -> str:
         if turn_index is not None:
             details.append(f"turn {turn_index}")
         return f"mailbox: guidance observed ({', '.join(details)})"
+    if action == events.MAILBOX_ACTION_NOTICE_PUBLISHED:
+        details = [
+            f"id {payload.get('message_id', 'unknown')}",
+            f"sequence {payload.get('seq', 'unknown')}",
+            f"length {payload.get('length', 'unknown')}",
+            f"digest {payload.get('digest', 'unknown')}",
+            f"run {payload.get('run_id', 'unknown')}",
+            f"session {_format_session_label(payload)}",
+            f"turn {payload.get('turn_index', 'unknown')}",
+        ]
+        return f"mailbox: notice published ({', '.join(details)})"
     if action == events.MAILBOX_ACTION_WAIT_STARTED:
         details = [
             f"question {payload.get('question_id', 'unknown')}",
@@ -261,6 +272,14 @@ def _mailbox_message(payload: dict[str, Any]) -> str:
         suspend_grace = payload.get("suspend_lease_grace_seconds")
         if suspend_grace is not None:
             details.append(f"suspend lease grace {suspend_grace}s")
+        if payload.get("reason") == "resolution":
+            details.extend(
+                (
+                    f"resolution {payload.get('resolution_message_id', 'unknown')}",
+                    f"resolution sequence {payload.get('resolution_seq', 'unknown')}",
+                    f"resolution action {payload.get('resolution_action', 'unknown')}",
+                )
+            )
         return f"mailbox: reply wait cleared ({', '.join(details)})"
     if action == events.MAILBOX_ACTION_WAIT_PREPARATION_FAILED:
         details = [
