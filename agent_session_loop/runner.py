@@ -1525,8 +1525,8 @@ class SessionTaskPacket:
         lines.append(
             "You are an autonomous ASL worker. Implement exactly this one "
             "session, then stop. The Python runner owns readiness, locking, "
-            "session selection, and verification — do not run or reason about "
-            "any of those."
+            "and session selection. The runner owns authoritative final "
+            "verification; you own focused validation during implementation."
         )
         lines.append("")
 
@@ -1580,8 +1580,12 @@ class SessionTaskPacket:
         lines.append("## Implement")
         lines.append(
             "Execute the instructions above the `## Handoff` section of "
-            f"{self.session_path}. Make real changes and run any tests the "
-            "session names."
+            f"{self.session_path}. Make real changes. During implementation, "
+            "run focused checks that help you iterate. Do not rerun the full "
+            "Completion Contract solely as a final gate: after you signal "
+            "completion, the runner executes it authoritatively. If it fails, "
+            "the runner restores this session to pending and supplies the "
+            "failed-check evidence for repair."
         )
         lines.append("")
 
@@ -6168,11 +6172,26 @@ class _ProgressReporter:
             f"duration {format_duration_seconds(payload['duration_seconds'])}"
         )
 
+    def verification_check_skipped(self, payload: dict[str, Any]) -> None:
+        dependencies = ", ".join(payload.get("on_failure_of") or [])
+        self._emit(
+            f"verification check {payload['check_index'] + 1}/"
+            f"{payload['check_count']} skipped: "
+            f"{payload['name']} ({payload['kind']}), "
+            f"condition {payload['reason']}, on failure of {dependencies}"
+        )
+
     def verification_finished(self, payload: dict[str, Any]) -> None:
         outcome = "passed" if payload.get("passed") else "failed"
+        skipped = int(payload.get("skipped_count", 0) or 0)
+        skipped_suffix = f", {skipped} skipped" if skipped else ""
+        gate_count = int(payload.get("gate_count", payload["check_count"]))
+        gate_plural = "" if gate_count == 1 else "s"
         self._emit(
             f"verification {outcome} for session {_format_session_label(payload)} "
             f"({payload['passed_count']}/{payload['check_count']} checks passed, "
+            f"{gate_count} gate{gate_plural}"
+            f"{skipped_suffix}, "
             f"duration {format_duration_seconds(payload['duration_seconds'])})"
         )
 
@@ -7440,12 +7459,48 @@ class _LiveVerification:
             self._progress.verification_check_finished, event_payload
         )
 
+    def check_skipped(
+        self,
+        *,
+        check_index: int,
+        name: str,
+        kind: str,
+        on_failure_of: tuple[str, ...],
+        reason: str,
+    ) -> None:
+        moment = _utc_now()
+        with self._lock:
+            if self._finished:
+                return
+            event_payload = self._identity_payload() | {
+                "check_index": check_index,
+                "check_count": self._check_count,
+                "name": name,
+                "kind": kind,
+                "on_failure_of": list(on_failure_of),
+                "reason": reason,
+                "skipped_at": _isoformat(moment),
+            }
+            with self._persistence.lock:
+                self._persistence.append_event(
+                    self._event_path,
+                    events.VERIFICATION_CHECK_SKIPPED_EVENT,
+                    event_payload,
+                )
+        self._emit_progress_unless_finished(
+            self._progress.verification_check_skipped, event_payload
+        )
+
     def finish(
         self,
         *,
         passed: bool,
         passed_count: int,
         reason: str,
+        skipped_count: int = 0,
+        executed_count: int | None = None,
+        gate_count: int | None = None,
+        diagnostic_count: int = 0,
         error: str | None = None,
     ) -> None:
         with self._lock:
@@ -7469,7 +7524,15 @@ class _LiveVerification:
             )
             event_payload = self._identity_payload() | {
                 "check_count": self._check_count,
+                "executed_count": (
+                    self._check_count - skipped_count
+                    if executed_count is None
+                    else executed_count
+                ),
                 "passed_count": passed_count,
+                "skipped_count": skipped_count,
+                "gate_count": self._check_count if gate_count is None else gate_count,
+                "diagnostic_count": diagnostic_count,
                 "passed": passed,
                 "reason": reason,
                 "duration_seconds": duration,
@@ -7492,7 +7555,15 @@ class _LiveVerification:
             AGENT_MUX_VERIFICATION_FINISH_REASON,
             {
                 "check_count": self._check_count,
+                "executed_count": (
+                    self._check_count - skipped_count
+                    if executed_count is None
+                    else executed_count
+                ),
                 "passed_count": passed_count,
+                "skipped_count": skipped_count,
+                "gate_count": self._check_count if gate_count is None else gate_count,
+                "diagnostic_count": diagnostic_count,
                 "passed": passed,
                 "heartbeat_count": self._heartbeat_count,
             },
@@ -8350,7 +8421,7 @@ def _verification_failure_summary(
     result: verification.VerificationResult,
 ) -> str:
     failures = result.failures
-    total = len(result.checks)
+    total = result.gate_count
     parts = [
         f"{check.name} ({check.failure_reason or 'failed'})"
         for check in failures
@@ -8365,16 +8436,25 @@ def _verification_failure_details(
     result: verification.VerificationResult,
     contract: contracts.CompletionContract,
 ) -> dict[str, Any]:
+    diagnostic_count = sum(
+        bool(check.on_failure_of) for check in contract.verify.checks
+    )
     return {
         "session": result.session_id.value,
         "recipe": {
             "check_count": len(contract.verify.checks),
+            "gate_count": len(contract.verify.checks) - diagnostic_count,
+            "diagnostic_count": diagnostic_count,
             "kinds": [check.kind for check in contract.verify.checks],
             "names": [check.name for check in contract.verify.checks],
         },
         "passed": result.passed,
         "checks": [asdict(check) for check in result.checks],
+        "skipped_checks": [asdict(check) for check in result.skipped_checks],
         "failures": [asdict(check) for check in result.failures],
+        "diagnostic_failures": [
+            asdict(check) for check in result.diagnostic_failures
+        ],
     }
 
 
@@ -9798,9 +9878,19 @@ def _enforce_session_verification(
             returncode=event.result.returncode,
         )
 
+    def _on_check_skipped(event: verification.CheckSkippedEvent) -> None:
+        live_verification.check_skipped(
+            check_index=event.check_index,
+            name=event.name,
+            kind=event.kind,
+            on_failure_of=event.on_failure_of,
+            reason=event.reason,
+        )
+
     observer = verification.VerificationObserver(
         on_check_started=_on_check_started,
         on_check_finished=_on_check_finished,
+        on_check_skipped=_on_check_skipped,
     )
 
     # Retain failed command stdout/stderr under the turn's artifact directory so
@@ -9884,9 +9974,14 @@ def _enforce_session_verification(
     passed_count = sum(
         1 for check in result.checks if check.status == "pass"
     )
+    diagnostic_count = len(result.diagnostic_names)
     live_verification.finish(
         passed=result.passed,
         passed_count=passed_count,
+        skipped_count=len(result.skipped_checks),
+        executed_count=len(result.checks),
+        gate_count=result.gate_count,
+        diagnostic_count=diagnostic_count,
         reason=(
             verification.VERIFY_EXIT_REASON_OK
             if result.passed
@@ -9906,6 +10001,8 @@ def _enforce_session_verification(
             "passed": result.passed,
             "recipe": details["recipe"],
             "checks": details["checks"],
+            "skipped_checks": details["skipped_checks"],
+            "diagnostic_failures": details["diagnostic_failures"],
         }
         _write_json_file(paths["result"], turn_payload)
         for check in result.checks:

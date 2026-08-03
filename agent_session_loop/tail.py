@@ -401,14 +401,34 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
             f"duration {format_duration_seconds(payload.get('duration_seconds'))}"
             f"{suffix}"
         )
+    if name == events.VERIFICATION_CHECK_SKIPPED_EVENT:
+        check_index = payload.get("check_index")
+        check_count = payload.get("check_count")
+        position = (
+            f"{int(check_index) + 1}/{check_count}"
+            if check_index is not None and check_count is not None
+            else "?/?"
+        )
+        dependencies = ", ".join(payload.get("on_failure_of") or [])
+        return (
+            f"verification check {position} skipped: "
+            f"{payload.get('name', 'unknown')} "
+            f"({payload.get('kind', 'unknown')}), "
+            f"condition {payload.get('reason', 'unknown')}, "
+            f"on failure of {dependencies}"
+        )
     if name == events.VERIFICATION_FINISHED_EVENT:
         outcome = "passed" if payload.get("passed") else "failed"
         passed_count = payload.get("passed_count", "?")
         check_count = payload.get("check_count", "?")
+        gate_count = payload.get("gate_count", check_count)
+        gate_plural = "" if gate_count == 1 else "s"
+        skipped_count = payload.get("skipped_count", 0)
         reason = payload.get("reason") or "unknown"
         return (
             f"verification {outcome} for session {_format_session_label(payload)} "
             f"({passed_count}/{check_count} checks passed, "
+            f"{gate_count} gate{gate_plural}, {skipped_count} skipped, "
             f"reason {reason}, "
             f"duration {format_duration_seconds(payload.get('duration_seconds'))})"
         )

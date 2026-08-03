@@ -1401,13 +1401,90 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
         contract = contracts.read_completion_contract(self.plan_dir, "2.1")
         self.assertIsNotNone(contract)
         self.assertEqual(
-            ["verify-F1", "verify-F2"],
+            ["verify-F1"],
             [check.name for check in contract.verify.checks],
         )
         self.assertEqual(
             ("F1 is fixed and tested.", "F2 is fixed and tested."),
             contract.done_when,
         )
+
+    def test_merged_diagnostic_retargets_deduplicated_gate_name(self) -> None:
+        gate_one = {
+            "type": "command",
+            "name": "gate-one",
+            "argv": ["python3", "-c", "pass"],
+        }
+        gate_two = {
+            "type": "command",
+            "name": "gate-two",
+            "argv": ["python3", "-c", "pass"],
+        }
+        diagnostic = {
+            "type": "file_exists",
+            "name": "focused-evidence",
+            "path": "focused.txt",
+            "on_failure_of": ["gate-two"],
+        }
+        self._write_plan(
+            [
+                self._finding(
+                    "F1", "runner", verification_checks=[gate_one]
+                ),
+                self._finding(
+                    "F2",
+                    "runner",
+                    verification_checks=[gate_two, diagnostic],
+                ),
+            ]
+        )
+
+        result = self._materialize()
+
+        self.assertTrue(result.ok, result.detail)
+        contract = contracts.read_completion_contract(self.plan_dir, "2.1")
+        self.assertIsNotNone(contract)
+        self.assertEqual(
+            ["gate-one", "focused-evidence"],
+            [check.name for check in contract.verify.checks],
+        )
+        self.assertEqual(
+            ("gate-one",), contract.verify.checks[1].on_failure_of
+        )
+
+    def test_duplicate_commands_with_conflicting_settings_pause_malformed(
+        self,
+    ) -> None:
+        first = {
+            "type": "command",
+            "name": "first",
+            "argv": ["python3", "-c", "pass"],
+            "timeout_seconds": 30,
+        }
+        second = {
+            "type": "command",
+            "name": "second",
+            "argv": ["python3", "-c", "pass"],
+            "timeout_seconds": 60,
+        }
+        self._write_plan(
+            [
+                self._finding(
+                    "F1", "runner", verification_checks=[first]
+                ),
+                self._finding(
+                    "F2", "runner", verification_checks=[second]
+                ),
+            ]
+        )
+
+        result = self._materialize()
+
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            review_repair.REVIEW_REPAIR_REASON_MALFORMED, result.reason
+        )
+        self.assertIn("conflicting settings", result.error)
 
     def test_no_finding_is_omitted_or_assigned_twice(self) -> None:
         findings = [

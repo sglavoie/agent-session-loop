@@ -212,6 +212,18 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertIn("Runner status: paused", rendered)
         self.assertIn("RUNNER_PAUSE: <reason> - <detail>", rendered)
 
+    def test_packet_separates_focused_validation_from_runner_verification(self) -> None:
+        rendered = runner.build_task_packet(
+            "codex", self.PLAN_DIR, session_id="9"
+        ).render()
+
+        self.assertIn("runner owns authoritative final verification", rendered)
+        self.assertIn("you own focused validation during implementation", rendered)
+        self.assertIn("run focused checks that help you iterate", rendered)
+        self.assertIn("Do not rerun the full Completion Contract", rendered)
+        self.assertIn("restores this session to pending", rendered)
+        self.assertNotIn("run any tests the session names", rendered)
+
     def test_packet_has_no_manual_mode_policy(self) -> None:
         rendered = runner.build_task_packet(
             "codex", self.PLAN_DIR, session_id="9", predecessor_id="8"

@@ -4038,9 +4038,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 session_id="1",
                 session_label="1/2",
                 total_sessions=2,
-                check_count=1,
-                check_names=("pytest",),
-                check_kinds=("command",),
+                check_count=2,
+                check_names=("pytest", "focused"),
+                check_kinds=("command", "command"),
                 heartbeat_interval=0.01,
             )
 
@@ -4069,8 +4069,20 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     failure_reason=None,
                     returncode=0,
                 )
+                live_verification.check_skipped(
+                    check_index=1,
+                    name="focused",
+                    kind="command",
+                    on_failure_of=("pytest",),
+                    reason="condition-not-met",
+                )
                 live_verification.finish(
-                    passed=True, passed_count=1, reason="ok"
+                    passed=True,
+                    passed_count=1,
+                    reason="ok",
+                    skipped_count=1,
+                    gate_count=1,
+                    diagnostic_count=1,
                 )
 
             state_payload = json.loads(state_path.read_text(encoding="utf-8"))
@@ -4082,6 +4094,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertIn(events.VERIFICATION_CHECK_STARTED_EVENT, event_names)
             self.assertIn(events.VERIFICATION_HEARTBEAT_EVENT, event_names)
             self.assertIn(events.VERIFICATION_CHECK_FINISHED_EVENT, event_names)
+            self.assertIn(events.VERIFICATION_CHECK_SKIPPED_EVENT, event_names)
             self.assertIn(events.VERIFICATION_FINISHED_EVENT, event_names)
 
             started_payload = next(
@@ -4089,8 +4102,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 for record in event_records
                 if record["name"] == events.VERIFICATION_STARTED_EVENT
             )
-            self.assertEqual(1, started_payload["check_count"])
-            self.assertEqual(["pytest"], started_payload["check_names"])
+            self.assertEqual(2, started_payload["check_count"])
+            self.assertEqual(["pytest", "focused"], started_payload["check_names"])
             self.assertEqual("1/2", started_payload["session_label"])
 
             check_started_payload = next(
@@ -4113,6 +4126,15 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertEqual(0, check_finished_payload["returncode"])
             self.assertIsNone(check_finished_payload["failure_reason"])
 
+            check_skipped_payload = next(
+                record["payload"]
+                for record in event_records
+                if record["name"] == events.VERIFICATION_CHECK_SKIPPED_EVENT
+            )
+            self.assertEqual("focused", check_skipped_payload["name"])
+            self.assertEqual(["pytest"], check_skipped_payload["on_failure_of"])
+            self.assertEqual("condition-not-met", check_skipped_payload["reason"])
+
             finished_payload = next(
                 record["payload"]
                 for record in event_records
@@ -4121,31 +4143,42 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertTrue(finished_payload["passed"])
             self.assertEqual("ok", finished_payload["reason"])
             self.assertEqual(1, finished_payload["passed_count"])
+            self.assertEqual(1, finished_payload["skipped_count"])
+            self.assertEqual(1, finished_payload["executed_count"])
+            self.assertEqual(1, finished_payload["gate_count"])
+            self.assertEqual(1, finished_payload["diagnostic_count"])
 
             stderr_text = stderr.getvalue()
             timestamp = r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] "
             self.assertRegex(
                 stderr_text,
-                timestamp + r"verification started for session 1/2 turn 1 \(1 check\)",
+                timestamp + r"verification started for session 1/2 turn 1 \(2 checks\)",
             )
             self.assertRegex(
                 stderr_text,
-                timestamp + r"verification check 1/1 started: pytest \(command\)",
-            )
-            self.assertRegex(
-                stderr_text,
-                timestamp
-                + r"verification heartbeat for session 1/2 check 1/1 pytest \(elapsed",
+                timestamp + r"verification check 1/2 started: pytest \(command\)",
             )
             self.assertRegex(
                 stderr_text,
                 timestamp
-                + r"verification check 1/1 finished: pytest \(command\) status pass",
+                + r"verification heartbeat for session 1/2 check 1/2 pytest \(elapsed",
             )
             self.assertRegex(
                 stderr_text,
                 timestamp
-                + r"verification passed for session 1/2 \(1/1 checks passed",
+                + r"verification check 1/2 finished: pytest \(command\) status pass",
+            )
+            self.assertRegex(
+                stderr_text,
+                timestamp
+                + r"verification check 2/2 skipped: focused \(command\), "
+                + r"condition condition-not-met, on failure of pytest",
+            )
+            self.assertRegex(
+                stderr_text,
+                timestamp
+                + r"verification passed for session 1/2 \(1/2 checks passed, "
+                + r"1 gate, 1 skipped",
             )
 
     def test_live_verification_check_started_finished_round_trip(self) -> None:

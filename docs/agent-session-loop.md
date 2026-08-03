@@ -221,9 +221,11 @@ shapes. Required and optional fields:
   the host file.
 - `checks` (required): non-empty array of check objects.
 - `parallel` (optional, defaults to `false`): when `true` and the recipe has at
-  least two `command` checks, `file_exists` and `regex_in_file` checks run
-  first sequentially in declared order and the command checks then run
-  concurrently (at most four at a time). Results, `result.json`, and failure
+  least two `command` checks in the same execution phase, `file_exists` and
+  `regex_in_file` checks in that phase run first sequentially in declared
+  order and its command checks then run concurrently (at most four at a time).
+  Authoritative gates form the first phase; eligible failure diagnostics form
+  the second. Results, `result.json`, and failure
   details stay in declared order, so a parallel run is byte-identical to the
   sequential one; per-check timeouts, output capture, and artifacts are
   unchanged. Commands sharing mutable state (the same output directory, port,
@@ -250,6 +252,13 @@ shapes. Required and optional fields:
   artifact, or event.
 - Each check object has `name` (string), `type` (one of `command`,
   `file_exists`, `regex_in_file`), and type-specific fields.
+- Every check accepts optional `on_failure_of`, a non-empty array of check
+  names. Without it, the check is an authoritative gate and contributes to the
+  contract's pass/fail decision. With it, the check is a diagnostic: it runs
+  only when at least one named gate fails and never changes the aggregate
+  decision. Targets must be unconditional gates in the same recipe; unknown
+  names, self-references, and diagnostic chains are rejected. A recipe must
+  contain at least one gate.
 - `command`: `argv` (non-empty array of strings, no shell), optional
   `timeout_seconds` (defaults to 60, max 3600), optional `cwd`.
 - `file_exists`: `path` (string; repo-root-relative or absolute).
@@ -260,7 +269,17 @@ shapes. Required and optional fields:
   `pass`, `fail`; defaults to `skip`). `pass`/`fail` declare how the check must
   behave on the *unmodified* repository; `asl baseline` records the evidence
   and preflight blocks a not-yet-started plan whose declared baselines lack
-  current evidence.
+  current evidence. Baseline recording evaluates each declared obligation
+  independently; `on_failure_of` controls runtime verification scheduling,
+  not whether an explicit baseline expectation is sampled.
+
+Keep one authoritative gate per logical verification surface. In particular,
+do not make a focused test command and a broader command that already contains
+it unconditional peers. If the focused command adds useful failure evidence,
+make it conditional on the aggregate gate. This rule is language-neutral:
+ASL compares and executes opaque `argv` arrays rather than interpreting a test
+runner's language or selection syntax. Preflight emits yellow
+`verification-duplicate` findings for exact duplicate `argv`/`cwd` pairs.
 
 `session-expand` validates each contract against the codebase and records any
 problems in a per-session `## Contract Issues` section in
@@ -274,11 +293,13 @@ After writing a `- **Status**: complete` handoff, the runner and the
 asl verify ~/.local/share/agent-plans/example-plan/ --session 2 --json
 ```
 
-`asl verify` runs the recipe in order (or with concurrent command checks under
-`"parallel": true`, reporting in declared order). Exit 0 means every check passed;
-non-zero exit is a hard pause. The JSON body carries a stable `reason` field
+`asl verify` runs all gates first, then diagnostics whose named gate failed
+(with concurrent command checks within each phase under `"parallel": true`,
+reported in declared order). Exit 0 means every gate passed; non-zero exit is a
+hard pause. The JSON body carries a stable `reason` field
 (`ok`, `verify-failed`, `no-contract`, `malformed-contract`, `cwd-error`, or
-`invalid-session`) plus per-check rows with `failure_reason` enums
+`invalid-session`), executed `checks`, `skipped_checks`, and separate
+`diagnostic_failures`, plus per-check rows with `failure_reason` enums
 (`command-failed`, `command-timeout`, `command-not-found`, `command-error`,
 `file-missing`, `file-error`, `regex-not-matched`). On verification failure,
 the skill reverts the session handoff back to `pending` and the runner pauses
@@ -793,6 +814,13 @@ verification gate's `no-contract` pause for sessions that lack a
 present. `--commit-per-session` then runs
 `spec commit --yes --no-verify` before the next harness turn starts.
 
+The implementation worker and runner have deliberately separate validation
+ownership. The worker runs focused checks while iterating, but does not rerun
+the full completion recipe solely to make the final gate decision. After the
+worker marks the session complete, the runner executes that recipe once as the
+authoritative post-turn verification. On failure it restores the session to
+pending and supplies the captured evidence to the next repair turn.
+
 Autonomous `asl run` turns prompt the harness with a Python-built session task
 packet (`runner.build_task_packet`): a harness-neutral prompt that references
 the session file, `context.md`, `progress.md`, expansion notes, and the
@@ -1116,8 +1144,11 @@ The readiness hash includes session files and expansion notes. Legacy
 
 `verify` reads a session's `## Completion Contract` and executes its `### Verify`
 recipe against `--cwd` (defaults to the current directory). Exit code is the
-gate decision: 0 when every check passes, non-zero otherwise. JSON output
-includes `passed`, `recipe`, `checks`, and a stable `reason` (`ok`,
+gate decision: 0 when every authoritative gate passes, non-zero otherwise.
+Conditional diagnostics run only after a named gate failure, so they enrich a
+failure without becoming an additional gate. JSON output includes `passed`,
+`recipe`, executed `checks`, `skipped_checks`, `diagnostic_failures`, and a
+stable `reason` (`ok`,
 `verify-failed`, `no-contract`, `malformed-contract`, `cwd-error`, or
 `invalid-session`). Per-check rows include stdout/stderr snippets and a stable
 `failure_reason` enum.
@@ -1734,7 +1765,8 @@ question/session/turn identity, start time, base and hard deadlines, and the
 last observed lease activity. `events.jsonl` records
 `turn_started`, `turn_heartbeat`, `action_required`, `turn_finished`,
 `verification_started`, `verification_check_started`, `verification_heartbeat`,
-`verification_check_finished`, `verification_finished`, `commit_started`,
+`verification_check_finished`, `verification_check_skipped`,
+`verification_finished`, `commit_started`,
 `commit_finished`, `run_control`, `review_scope_selected`,
 `review_session_created`, `review_cycle`,
 `review_repair_reopened`, `mailbox`, `reply_provided`,
@@ -1751,7 +1783,11 @@ checks remain observable in `tail` and the live status snapshot. Verification
 check argv is captured in the `verification_check_started` payload and not
 streamed to a log file; command stdout and stderr remain captured in the
 underlying `asl verify` invocation and in the turn `result.json` under the
-`verification` key. A `"parallel": true` recipe adds that same additive key to
+`verification` key. A conditional diagnostic whose gates all pass emits
+`verification_check_skipped` with its name, kind, dependencies, and stable
+`condition-not-met` reason. `verification_finished` reports configured,
+executed, gate, diagnostic, and skipped counts.
+A `"parallel": true` recipe adds that same additive key to
 `verification_started`; its `verification_check_started` /
 `verification_check_finished` records interleave by real completion order while
 `result.json` stays in declared order, and heartbeats track whichever check

@@ -668,6 +668,95 @@ class VerificationExecutorTests(unittest.TestCase):
             self.assertTrue(result.passed)
             self.assertEqual((), result.failures)
 
+    def test_passing_gate_skips_conditional_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "present.txt").write_text("ok\n", encoding="utf-8")
+            marker = repo_root / "diagnostic-ran"
+            contract = self._contract(
+                checks=(
+                    contracts.FileExistsCheck(name="suite", path="present.txt"),
+                    contracts.CommandCheck(
+                        name="focused",
+                        argv=(
+                            "python3",
+                            "-c",
+                            f"from pathlib import Path; Path({str(marker)!r}).touch()",
+                        ),
+                        timeout_seconds=10.0,
+                        on_failure_of=("suite",),
+                    ),
+                )
+            )
+            skipped_events: list[verification.CheckSkippedEvent] = []
+            observer = verification.VerificationObserver(
+                on_check_skipped=skipped_events.append
+            )
+
+            result = verification.run_verification(
+                contract, repo_root=repo_root, observer=observer
+            )
+
+            self.assertTrue(result.passed)
+            self.assertEqual(["suite"], [check.name for check in result.checks])
+            self.assertEqual(["focused"], [check.name for check in result.skipped_checks])
+            self.assertFalse(marker.exists())
+            self.assertEqual(1, len(skipped_events))
+            self.assertEqual(("suite",), skipped_events[0].on_failure_of)
+            self.assertEqual("condition-not-met", skipped_events[0].reason)
+
+    def test_failing_gate_runs_conditional_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            marker = repo_root / "diagnostic-ran"
+            contract = self._contract(
+                checks=(
+                    contracts.FileExistsCheck(name="suite", path="missing.txt"),
+                    contracts.CommandCheck(
+                        name="focused",
+                        argv=(
+                            "python3",
+                            "-c",
+                            f"from pathlib import Path; Path({str(marker)!r}).touch()",
+                        ),
+                        timeout_seconds=10.0,
+                        on_failure_of=("suite",),
+                    ),
+                )
+            )
+
+            result = verification.run_verification(contract, repo_root=repo_root)
+
+            self.assertFalse(result.passed)
+            self.assertTrue(marker.exists())
+            self.assertEqual(["suite", "focused"], [check.name for check in result.checks])
+            self.assertEqual(["suite"], [check.name for check in result.failures])
+            self.assertEqual((), result.diagnostic_failures)
+            self.assertEqual((), result.skipped_checks)
+
+    def test_diagnostic_failure_is_reported_but_is_not_a_gate_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            contract = self._contract(
+                checks=(
+                    contracts.FileExistsCheck(name="suite", path="missing.txt"),
+                    contracts.CommandCheck(
+                        name="focused",
+                        argv=("python3", "-c", "raise SystemExit(3)"),
+                        timeout_seconds=10.0,
+                        on_failure_of=("suite",),
+                    ),
+                )
+            )
+
+            result = verification.run_verification(contract, repo_root=repo_root)
+
+            self.assertFalse(result.passed)
+            self.assertEqual(["suite"], [check.name for check in result.failures])
+            self.assertEqual(
+                ["focused"], [check.name for check in result.diagnostic_failures]
+            )
+
     def _record_observer(
         self,
     ) -> tuple[verification.VerificationObserver, list[tuple[str, object]]]:
@@ -2010,8 +2099,12 @@ class VerifyCliTests(unittest.TestCase):
             )
             self.assertEqual(str(plan_dir), payload["plan_dir"])
             self.assertEqual(1, payload["recipe"]["check_count"])
+            self.assertEqual(1, payload["recipe"]["gate_count"])
+            self.assertEqual(0, payload["recipe"]["diagnostic_count"])
             self.assertEqual(["file_exists"], payload["recipe"]["kinds"])
             self.assertEqual(["target"], payload["recipe"]["names"])
+            self.assertEqual([], payload["skipped_checks"])
+            self.assertEqual([], payload["diagnostic_failures"])
             self.assertEqual(1, len(payload["checks"]))
             check = payload["checks"][0]
             self.assertEqual("target", check["name"])
@@ -2050,6 +2143,41 @@ class VerifyCliTests(unittest.TestCase):
             self.assertEqual("file-missing", check["failure_reason"])
             self.assertIn("absent.txt", check["detail"])
 
+    def test_verify_json_skips_conditional_diagnostic_when_gate_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            (repo_root / "target.txt").write_text("ok\n", encoding="utf-8")
+            contract = _contract_block(
+                ', '.join(
+                    (
+                        '{"type": "file_exists", "path": "target.txt", '
+                        '"name": "suite"}',
+                        '{"type": "file_exists", "path": "focused.txt", '
+                        '"name": "focused", "on_failure_of": ["suite"]}',
+                    )
+                )
+            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
+
+            completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertTrue(payload["passed"])
+            self.assertEqual(1, payload["recipe"]["gate_count"])
+            self.assertEqual(1, payload["recipe"]["diagnostic_count"])
+            self.assertEqual(["suite"], [row["name"] for row in payload["checks"]])
+            self.assertEqual(
+                ["focused"], [row["name"] for row in payload["skipped_checks"]]
+            )
+            self.assertEqual(
+                ["suite"], payload["skipped_checks"][0]["on_failure_of"]
+            )
+            self.assertEqual([], payload["diagnostic_failures"])
+
     def test_verify_json_no_contract_returns_no_contract_reason(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -2068,6 +2196,10 @@ class VerifyCliTests(unittest.TestCase):
             self.assertEqual("1", payload["session"])
             self.assertEqual([], payload["checks"])
             self.assertEqual(0, payload["recipe"]["check_count"])
+            self.assertEqual(0, payload["recipe"]["gate_count"])
+            self.assertEqual(0, payload["recipe"]["diagnostic_count"])
+            self.assertEqual([], payload["skipped_checks"])
+            self.assertEqual([], payload["diagnostic_failures"])
             self.assertFalse(payload["passed"])
 
     def test_verify_json_no_contract_attaches_skill_remediation(self) -> None:

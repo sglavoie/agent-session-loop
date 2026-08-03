@@ -1,9 +1,9 @@
 """Execute the ``Verify`` recipe for a session's completion contract.
 
 The executor consumes a parsed :class:`contracts.CompletionContract` and runs
-each :class:`contracts.VerificationCheck` against a caller-supplied repo root,
-returning structured pass/fail results that the CLI and runner enforcement can
-serialize to JSON.
+its authoritative gates against a caller-supplied repo root. Conditional
+diagnostics run only when a named gate fails, returning structured executed and
+skipped results that the CLI and runner enforcement can serialize to JSON.
 
 Command checks always use ``shell=False`` and an argv list; recipe-time
 validation (``contracts.parse_completion_contract``) already enforces argv
@@ -99,19 +99,59 @@ class CheckResult:
 
 
 @dataclass(frozen=True)
+class SkippedCheck:
+    """A conditional diagnostic omitted because none of its gates failed."""
+
+    name: str
+    kind: str
+    on_failure_of: tuple[str, ...]
+    reason: str = "condition-not-met"
+
+
+@dataclass(frozen=True)
 class VerificationResult:
-    """Aggregated result of running every check in a recipe."""
+    """Aggregated result of running gates and eligible diagnostics."""
 
     session_id: SessionId
     checks: tuple[CheckResult, ...]
+    skipped_checks: tuple[SkippedCheck, ...] = ()
+    diagnostic_names: tuple[str, ...] = ()
 
     @property
     def passed(self) -> bool:
-        return all(check.status == "pass" for check in self.checks)
+        diagnostics = set(self.diagnostic_names)
+        return all(
+            check.status == "pass"
+            for check in self.checks
+            if check.name not in diagnostics
+        )
 
     @property
     def failures(self) -> tuple[CheckResult, ...]:
-        return tuple(check for check in self.checks if check.status != "pass")
+        diagnostics = set(self.diagnostic_names)
+        return tuple(
+            check
+            for check in self.checks
+            if check.name not in diagnostics and check.status != "pass"
+        )
+
+    @property
+    def diagnostic_failures(self) -> tuple[CheckResult, ...]:
+        diagnostics = set(self.diagnostic_names)
+        return tuple(
+            check
+            for check in self.checks
+            if check.name in diagnostics and check.status != "pass"
+        )
+
+    @property
+    def gate_count(self) -> int:
+        diagnostics = set(self.diagnostic_names)
+        return sum(check.name not in diagnostics for check in self.checks)
+
+    @property
+    def configured_check_count(self) -> int:
+        return len(self.checks) + len(self.skipped_checks)
 
 
 @dataclass(frozen=True)
@@ -139,8 +179,22 @@ class CheckFinishedEvent:
     result: CheckResult
 
 
+@dataclass(frozen=True)
+class CheckSkippedEvent:
+    """Observer payload emitted for a conditional diagnostic that does not run."""
+
+    session_id: SessionId
+    check_index: int
+    check_count: int
+    name: str
+    kind: str
+    on_failure_of: tuple[str, ...]
+    reason: str
+
+
 CheckStartedCallback = Callable[[CheckStartedEvent], None]
 CheckFinishedCallback = Callable[[CheckFinishedEvent], None]
+CheckSkippedCallback = Callable[[CheckSkippedEvent], None]
 
 
 @dataclass(frozen=True)
@@ -158,6 +212,7 @@ class VerificationObserver:
 
     on_check_started: CheckStartedCallback | None = None
     on_check_finished: CheckFinishedCallback | None = None
+    on_check_skipped: CheckSkippedCallback | None = None
 
 
 def _make_check_started_event(
@@ -1001,11 +1056,15 @@ def run_verification(
     commands retain their full stdout/stderr as gzip artifacts there; without
     it, only bounded previews and metadata are recorded.
 
-    A ``parallel`` recipe with at least two command checks runs its file and
-    regex checks sequentially in declared order first, then dispatches the
-    command checks concurrently. Results are always assembled by declared
-    index, so the returned :class:`VerificationResult` is byte-identical to a
-    sequential run of the same recipe.
+    Checks without ``on_failure_of`` run first as authoritative gates. A
+    conditional diagnostic runs afterward only when at least one named gate
+    failed; otherwise ``on_check_skipped`` receives a structured skip event.
+    Diagnostics never determine the aggregate pass/fail result.
+
+    Within each phase, a ``parallel`` recipe with at least two command checks
+    runs its file and regex checks sequentially in declared order first, then
+    dispatches the command checks concurrently. Executed and skipped results
+    are always assembled by declared index.
 
     Interrupting a parallel dispatch (``KeyboardInterrupt`` on the calling
     thread, or any exception surfacing from a worker) kills every command
@@ -1020,15 +1079,16 @@ def run_verification(
     )
     on_started = observer.on_check_started if observer is not None else None
     on_finished = observer.on_check_finished if observer is not None else None
+    on_skipped = observer.on_check_skipped if observer is not None else None
     checks = contract.verify.checks
     check_count = len(checks)
-    command_indexes = [
-        index
-        for index, check in enumerate(checks)
-        if isinstance(check, CommandCheck)
+    gate_indexes = [
+        index for index, check in enumerate(checks) if not check.on_failure_of
     ]
-    dispatch_parallel = contract.verify.parallel and len(command_indexes) >= 2
-    cancellation = _ParallelCancellation() if dispatch_parallel else None
+    diagnostic_indexes = [
+        index for index, check in enumerate(checks) if check.on_failure_of
+    ]
+    cancellation = _ParallelCancellation() if contract.verify.parallel else None
 
     def execute(index: int) -> CheckResult:
         check = checks[index]
@@ -1065,13 +1125,22 @@ def run_verification(
             )
         return check_result
 
-    if dispatch_parallel:
+    results_by_index: dict[int, CheckResult] = {}
+
+    def execute_phase(indexes: list[int]) -> None:
+        command_indexes = [
+            index for index in indexes if isinstance(checks[index], CommandCheck)
+        ]
+        dispatch_parallel = contract.verify.parallel and len(command_indexes) >= 2
+        if not dispatch_parallel:
+            for index in indexes:
+                results_by_index[index] = execute(index)
+            return
+
         deferred = set(command_indexes)
-        results_by_index = {
-            index: execute(index)
-            for index in range(check_count)
-            if index not in deferred
-        }
+        for index in indexes:
+            if index not in deferred:
+                results_by_index[index] = execute(index)
         executor = ThreadPoolExecutor(max_workers=min(4, len(command_indexes)))
         try:
             futures = {
@@ -1081,6 +1150,7 @@ def run_verification(
             for future in as_completed(futures):
                 results_by_index[futures[future]] = future.result()
         except BaseException:
+            assert cancellation is not None
             # Kill first, then wait: killing makes the in-flight checks return
             # at once, and the wait is what guarantees no abandoned worker
             # outlives this raise to emit a callback or write an artifact.
@@ -1088,12 +1158,49 @@ def run_verification(
             executor.shutdown(wait=True, cancel_futures=True)
             raise
         executor.shutdown(wait=True)
-        results = [results_by_index[index] for index in range(check_count)]
-    else:
-        results = [execute(index) for index in range(check_count)]
+
+    execute_phase(gate_indexes)
+    failed_gate_names = {
+        checks[index].name
+        for index in gate_indexes
+        if results_by_index[index].status != "pass"
+    }
+    eligible_diagnostics: list[int] = []
+    skipped_by_index: dict[int, SkippedCheck] = {}
+    for index in diagnostic_indexes:
+        check = checks[index]
+        if failed_gate_names.intersection(check.on_failure_of):
+            eligible_diagnostics.append(index)
+            continue
+        skipped = SkippedCheck(
+            name=check.name,
+            kind=check.kind,
+            on_failure_of=check.on_failure_of,
+        )
+        skipped_by_index[index] = skipped
+        if on_skipped is not None:
+            on_skipped(
+                CheckSkippedEvent(
+                    session_id=contract.session_id,
+                    check_index=index,
+                    check_count=check_count,
+                    name=check.name,
+                    kind=check.kind,
+                    on_failure_of=check.on_failure_of,
+                    reason=skipped.reason,
+                )
+            )
+
+    execute_phase(eligible_diagnostics)
+    results = [results_by_index[index] for index in sorted(results_by_index)]
+    skipped_checks = [
+        skipped_by_index[index] for index in sorted(skipped_by_index)
+    ]
     return VerificationResult(
         session_id=contract.session_id,
         checks=tuple(results),
+        skipped_checks=tuple(skipped_checks),
+        diagnostic_names=tuple(checks[index].name for index in diagnostic_indexes),
     )
 
 
@@ -1109,8 +1216,13 @@ def _check_result_payload(result: CheckResult) -> dict[str, Any]:
 
 
 def _recipe_summary(contract: CompletionContract) -> dict[str, Any]:
+    diagnostic_count = sum(
+        bool(check.on_failure_of) for check in contract.verify.checks
+    )
     return {
         "check_count": len(contract.verify.checks),
+        "gate_count": len(contract.verify.checks) - diagnostic_count,
+        "diagnostic_count": diagnostic_count,
         "kinds": [check.kind for check in contract.verify.checks],
         "names": [check.name for check in contract.verify.checks],
     }
@@ -1126,7 +1238,7 @@ def _print_text_verify_success(
     print(f"Plan: {plan_dir}")
     print(f"Session: {contract.session_id.value}")
     print(f"Repo root: {cwd}")
-    print(f"Checks: {len(result.checks)}")
+    print(f"Checks: {result.configured_check_count}")
     for check in result.checks:
         marker = "PASS" if check.status == "pass" else "FAIL"
         print(f"  [{marker}] {check.kind} {check.name}: {check.detail}")
@@ -1139,11 +1251,17 @@ def _print_text_verify_success(
                 snippet = check.stderr.strip().splitlines()[-1] if check.stderr.strip() else ""
                 if snippet:
                     print(f"      stderr: {snippet}", file=sys.stderr)
+    for check in result.skipped_checks:
+        dependencies = ", ".join(check.on_failure_of)
+        print(
+            f"  [SKIP] {check.kind} {check.name}: {check.reason} "
+            f"(on failure of: {dependencies})"
+        )
     if result.passed:
         print("Verify: passed")
     else:
         print(
-            f"Verify: failed ({len(result.failures)} of {len(result.checks)} checks)",
+            f"Verify: failed ({len(result.failures)} of {result.gate_count} gates)",
             file=sys.stderr,
         )
 
@@ -1309,8 +1427,16 @@ def verify_from_args(args: argparse.Namespace) -> int:
             cwd=str(canonical_cwd),
             extra={
                 "passed": False,
-                "recipe": {"check_count": 0, "kinds": [], "names": []},
+                "recipe": {
+                    "check_count": 0,
+                    "gate_count": 0,
+                    "diagnostic_count": 0,
+                    "kinds": [],
+                    "names": [],
+                },
                 "checks": [],
+                "skipped_checks": [],
+                "diagnostic_failures": [],
             },
         )
         if not want_json:
@@ -1335,6 +1461,10 @@ def verify_from_args(args: argparse.Namespace) -> int:
                     passed=True,
                     recipe=_recipe_summary(contract),
                     checks=[_check_result_payload(check) for check in result.checks],
+                    skipped_checks=[
+                        asdict(check) for check in result.skipped_checks
+                    ],
+                    diagnostic_failures=[],
                 )
             )
         else:
@@ -1343,7 +1473,7 @@ def verify_from_args(args: argparse.Namespace) -> int:
                 want_json=True,
                 reason=VERIFY_EXIT_REASON_FAILED,
                 error=(
-                    f"{len(result.failures)} of {len(result.checks)} "
+                    f"{len(result.failures)} of {result.gate_count} "
                     "verification check(s) failed"
                 ),
                 plan_dir=str(plan_dir_arg),
@@ -1360,6 +1490,13 @@ def verify_from_args(args: argparse.Namespace) -> int:
                     "checks": [
                         _check_result_payload(check)
                         for check in result.checks
+                    ],
+                    "skipped_checks": [
+                        asdict(check) for check in result.skipped_checks
+                    ],
+                    "diagnostic_failures": [
+                        _check_result_payload(check)
+                        for check in result.diagnostic_failures
                     ],
                 },
             )

@@ -84,6 +84,7 @@ PreflightCategory = Literal[
     "ambiguity-sentinel",
     "path-reference",
     "verification-scope",
+    "verification-duplicate",
     "command-not-runnable",
     "progress-journal-missing",
     "baseline-missing",
@@ -109,6 +110,7 @@ PREFLIGHT_CATEGORIES: tuple[PreflightCategory, ...] = (
     "ambiguity-sentinel",
     "path-reference",
     "verification-scope",
+    "verification-duplicate",
     "command-not-runnable",
     "progress-journal-missing",
     "baseline-missing",
@@ -313,6 +315,21 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
         question_template=(
             "Session {session_id} contains an overly broad verification "
             "command ({detail}). Should I narrow the recipe?"
+        ),
+        fix_category="plan-edit",
+    ),
+    "verification-duplicate": RepairHint(
+        category="verification-duplicate",
+        check_id="verification-duplicate.remove",
+        severity_hint="yellow",
+        message=(
+            "Remove the duplicate command check. Keep one authoritative gate, "
+            "or make a genuinely narrower check conditional with "
+            "`on_failure_of` when it adds failure diagnostics."
+        ),
+        question_template=(
+            "Session {session_id} repeats an identical verification command "
+            "({detail}). Remove the duplicate?"
         ),
         fix_category="plan-edit",
     ),
@@ -1313,6 +1330,41 @@ def _check_verification_scope(
     return tuple(findings)
 
 
+def _check_duplicate_verification_commands(
+    contracts_by_session: dict[str, CompletionContract],
+) -> tuple[PreflightFinding, ...]:
+    """Flag identical command argv/cwd pairs within one session recipe."""
+
+    findings: list[PreflightFinding] = []
+    for session_id in sorted(contracts_by_session):
+        contract = contracts_by_session[session_id]
+        first_by_identity: dict[tuple[tuple[str, ...], str], CommandCheck] = {}
+        for check in contract.verify.checks:
+            if not isinstance(check, CommandCheck):
+                continue
+            identity = (check.argv, check.cwd or ".")
+            first = first_by_identity.get(identity)
+            if first is None:
+                first_by_identity[identity] = check
+                continue
+            cwd = check.cwd or "."
+            findings.append(
+                _finding(
+                    "yellow",
+                    "verification-duplicate",
+                    (
+                        f"session {session_id} checks {first.name!r} and "
+                        f"{check.name!r} run the same command"
+                    ),
+                    session_id=session_id,
+                    detail=(
+                        f"argv: {list(check.argv)!r}; cwd: {cwd!r}"
+                    ),
+                )
+            )
+    return tuple(findings)
+
+
 def _check_command_runnability(
     contracts_by_session: dict[str, CompletionContract],
     cwd: str | Path | None,
@@ -1678,6 +1730,7 @@ def run_core_preflight(plan_dir: str | Path) -> PreflightReport:
     findings.extend(_check_ambiguity_sentinels(snapshot))
     findings.extend(_check_path_references(contracts_by_session))
     findings.extend(_check_verification_scope(contracts_by_session))
+    findings.extend(_check_duplicate_verification_commands(contracts_by_session))
     findings.extend(_check_progress_journal(snapshot))
 
     return PreflightReport(

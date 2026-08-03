@@ -389,6 +389,27 @@ class ParserAndStateTests(unittest.TestCase):
         self.assertIn("status fail", failed)
         self.assertIn("failure command-failed", failed)
 
+    def test_tail_event_messages_format_verification_check_skipped(self) -> None:
+        message = tail._event_message(
+            events.VERIFICATION_CHECK_SKIPPED_EVENT,
+            {
+                "session": 2,
+                "session_id": "2",
+                "total_sessions": 5,
+                "turn_index": 3,
+                "check_index": 1,
+                "check_count": 2,
+                "name": "focused-tests",
+                "kind": "command",
+                "on_failure_of": ["full-suite"],
+                "reason": "condition-not-met",
+            },
+        )
+        self.assertIn("verification check 2/2 skipped", message)
+        self.assertIn("focused-tests (command)", message)
+        self.assertIn("condition condition-not-met", message)
+        self.assertIn("on failure of full-suite", message)
+
     def test_tail_event_messages_format_verification_finished(self) -> None:
         passed = tail._event_message(
             events.VERIFICATION_FINISHED_EVENT,
@@ -2284,6 +2305,99 @@ class ParserAndStateTests(unittest.TestCase):
         self.assertNotIn(
             "parallel", authoring.render_completion_contract(contract)
         )
+
+    def test_render_completion_contract_round_trips_failure_diagnostic(self) -> None:
+        contract = authoring.contract_from_payload(
+            "1",
+            ["something"],
+            {
+                "checks": [
+                    {"name": "suite", "type": "file_exists", "path": "a"},
+                    {
+                        "name": "focused",
+                        "type": "command",
+                        "argv": ["python3", "-c", "pass"],
+                        "on_failure_of": ["suite"],
+                    },
+                ]
+            },
+        )
+
+        rendered = authoring.render_completion_contract(contract)
+        reparsed = contracts.parse_completion_contract(rendered, session_id="1")
+
+        self.assertIn('"on_failure_of": [', rendered)
+        self.assertEqual((), reparsed.verify.checks[0].on_failure_of)
+        self.assertEqual(("suite",), reparsed.verify.checks[1].on_failure_of)
+
+    def test_parse_completion_contract_rejects_invalid_failure_diagnostics(self) -> None:
+        invalid_recipes = (
+            (
+                {
+                    "checks": [
+                        {"name": "suite", "type": "file_exists", "path": "a"},
+                        {
+                            "name": "focused",
+                            "type": "file_exists",
+                            "path": "b",
+                            "on_failure_of": [],
+                        },
+                    ]
+                },
+                "must be a non-empty list",
+            ),
+            (
+                {
+                    "checks": [
+                        {"name": "suite", "type": "file_exists", "path": "a"},
+                        {
+                            "name": "focused",
+                            "type": "file_exists",
+                            "path": "b",
+                            "on_failure_of": ["missing"],
+                        },
+                    ]
+                },
+                "references unknown check",
+            ),
+            (
+                {
+                    "checks": [
+                        {
+                            "name": "suite",
+                            "type": "file_exists",
+                            "path": "a",
+                            "on_failure_of": ["suite"],
+                        }
+                    ]
+                },
+                "at least one unconditional gate",
+            ),
+            (
+                {
+                    "checks": [
+                        {"name": "suite", "type": "file_exists", "path": "a"},
+                        {
+                            "name": "diagnostic-1",
+                            "type": "file_exists",
+                            "path": "b",
+                            "on_failure_of": ["suite"],
+                        },
+                        {
+                            "name": "diagnostic-2",
+                            "type": "file_exists",
+                            "path": "c",
+                            "on_failure_of": ["diagnostic-1"],
+                        },
+                    ]
+                },
+                "diagnostics may depend only on unconditional gates",
+            ),
+        )
+        for payload, message in invalid_recipes:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(plans.PlanError, message):
+                    authoring.contract_from_payload("1", ["something"], payload)
 
     def test_parse_completion_contract_reports_malformed_json(self) -> None:
         text = "\n".join(

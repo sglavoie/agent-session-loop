@@ -19,7 +19,8 @@ Planning is read-only, and materialization is deterministic and atomic:
 - Each group becomes one repair child whose body renders lineage, the finding
   references (evidence + explanation), the child scope, and the merged done
   criteria, and whose ``## Completion Contract`` embeds the findings'
-  ``verification_checks`` verbatim (deduped by name).
+  ``verification_checks`` verbatim (deduped by name and by identical command
+  execution).
 - Every child carries the versioned review-repair marker so later cycles can
   recognize generated repair sessions.
 - All child files, the manifest table/count refresh, and any predecessor
@@ -237,14 +238,18 @@ def _dedupe_preserving_order(items: Sequence[str]) -> list[str]:
 def _merge_verification_checks(
     group: str, group_findings: Sequence[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Merge a group's findings' verification checks, deduped by name.
+    """Merge a group's findings' verification checks without repeated work.
 
     Named checks are kept verbatim; an unnamed check is given a stable,
     finding-scoped synthetic name so cross-finding merges cannot collide on the
     per-finding default names. Two checks that share a name but disagree on
-    payload are a genuine conflict and fail closed.
+    payload are a genuine conflict and fail closed. Commands with different
+    names but the same effective argv/cwd are collapsed when their remaining
+    execution settings also agree. Conflicting settings for the same command
+    fail closed instead of materializing a contract that preflight would reject
+    as duplicate.
     """
-    merged: list[dict[str, Any]] = []
+    named_checks: list[dict[str, Any]] = []
     by_name: dict[str, dict[str, Any]] = {}
     for finding in group_findings:
         for index, check in enumerate(finding["verification_checks"]):
@@ -259,7 +264,56 @@ def _merge_verification_checks(
                     )
                 continue
             by_name[name] = payload
+            named_checks.append(payload)
+
+    merged: list[dict[str, Any]] = []
+    aliases: dict[str, str] = {}
+    validation_session_id = parse_session_id("1")
+    commands_by_identity: dict[
+        tuple[tuple[str, ...], str], contracts.CommandCheck
+    ] = {}
+    for index, payload in enumerate(named_checks):
+        parsed = contracts._parse_check(
+            payload,
+            index=index,
+            session_id=validation_session_id,
+        )
+        if not isinstance(parsed, contracts.CommandCheck):
             merged.append(payload)
+            continue
+        identity = (parsed.argv, parsed.cwd or ".")
+        previous = commands_by_identity.get(identity)
+        if previous is None:
+            commands_by_identity[identity] = parsed
+            merged.append(payload)
+            continue
+        settings = (
+            parsed.timeout_seconds,
+            parsed.cwd or ".",
+            parsed.baseline_expectation,
+            parsed.on_failure_of,
+        )
+        previous_settings = (
+            previous.timeout_seconds,
+            previous.cwd or ".",
+            previous.baseline_expectation,
+            previous.on_failure_of,
+        )
+        if settings != previous_settings:
+            raise ReviewRepairError(
+                f"repair group {group!r} has conflicting settings for "
+                f"duplicate verification commands {previous.name!r} and "
+                f"{parsed.name!r}"
+            )
+        aliases[parsed.name] = previous.name
+
+    for payload in merged:
+        dependencies = payload.get("on_failure_of")
+        if not isinstance(dependencies, list):
+            continue
+        payload["on_failure_of"] = _dedupe_preserving_order(
+            [aliases.get(name, name) for name in dependencies]
+        )
     return merged
 
 

@@ -1202,6 +1202,57 @@ class PreflightCommandRunnabilityTests(unittest.TestCase):
             timeout_seconds=300,
         )
 
+    def test_duplicate_command_and_cwd_emits_yellow(self) -> None:
+        contracts_by_session = {
+            "1": self._contract(
+                "1",
+                self._command("first", ("python3", "-m", "unittest")),
+                self._command("second", ("python3", "-m", "unittest")),
+            )
+        }
+
+        findings = preflight._check_duplicate_verification_commands(
+            contracts_by_session
+        )
+
+        self.assertEqual(1, len(findings))
+        finding = findings[0]
+        self.assertEqual("yellow", finding.severity)
+        self.assertEqual("verification-duplicate", finding.category)
+        self.assertIn("'first' and 'second'", finding.message)
+
+    def test_same_argv_in_different_cwds_is_not_duplicate(self) -> None:
+        command = ("python3", "-m", "unittest")
+        first = contracts.CommandCheck(
+            name="first", argv=command, timeout_seconds=300, cwd="one"
+        )
+        second = contracts.CommandCheck(
+            name="second", argv=command, timeout_seconds=300, cwd="two"
+        )
+        contracts_by_session = {"1": self._contract("1", first, second)}
+
+        self.assertEqual(
+            (),
+            preflight._check_duplicate_verification_commands(contracts_by_session),
+        )
+
+    def test_default_and_dot_cwd_are_duplicate(self) -> None:
+        command = ("python3", "-m", "unittest")
+        first = contracts.CommandCheck(
+            name="first", argv=command, timeout_seconds=300
+        )
+        second = contracts.CommandCheck(
+            name="second", argv=command, timeout_seconds=300, cwd="."
+        )
+        contracts_by_session = {"1": self._contract("1", first, second)}
+
+        findings = preflight._check_duplicate_verification_commands(
+            contracts_by_session
+        )
+
+        self.assertEqual(1, len(findings))
+        self.assertEqual("verification-duplicate", findings[0].category)
+
     def test_missing_bare_executable_emits_single_red(self) -> None:
         contracts_by_session = {
             "1": self._contract(

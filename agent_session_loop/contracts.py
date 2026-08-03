@@ -65,6 +65,7 @@ class CommandCheck:
     cwd: str | None = None
     baseline_expectation: BaselineExpectation = DEFAULT_BASELINE_EXPECTATION
     kind: CommandKind = "command"
+    on_failure_of: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,7 @@ class FileExistsCheck:
     path: str
     baseline_expectation: BaselineExpectation = DEFAULT_BASELINE_EXPECTATION
     kind: FileExistsKind = "file_exists"
+    on_failure_of: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -92,6 +94,7 @@ class RegexInFileCheck:
     pattern: str
     baseline_expectation: BaselineExpectation = DEFAULT_BASELINE_EXPECTATION
     kind: RegexInFileKind = "regex_in_file"
+    on_failure_of: tuple[str, ...] = ()
 
 
 VerificationCheck = Union[CommandCheck, FileExistsCheck, RegexInFileCheck]
@@ -101,10 +104,13 @@ VerificationCheck = Union[CommandCheck, FileExistsCheck, RegexInFileCheck]
 class VerifyRecipe:
     """Ordered tuple of verification checks for a session.
 
-    ``parallel`` opts the recipe's command checks into concurrent execution.
-    Results, artifacts, and failure reporting stay in declared order either
-    way, so the author is responsible for the commands being side-effect-free
-    with respect to one another.
+    Checks without ``on_failure_of`` are authoritative gates. Checks that name
+    one or more gates in ``on_failure_of`` are diagnostics: they run only when
+    at least one named gate fails and never determine whether verification
+    passes. ``parallel`` opts the command checks within each execution phase
+    into concurrent execution. Results, artifacts, and failure reporting stay
+    in declared order either way, so the author is responsible for concurrently
+    eligible commands being side-effect-free with respect to one another.
     """
 
     checks: tuple[VerificationCheck, ...]
@@ -255,6 +261,36 @@ def _check_name(raw_name: object, *, index: int, session_id: SessionId) -> str:
     return raw_name.strip()
 
 
+def _on_failure_of(
+    payload: dict, *, index: int, session_id: SessionId
+) -> tuple[str, ...]:
+    raw = payload.get("on_failure_of")
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not raw:
+        raise PlanError(
+            f"session {session_id.value} contract check #{index + 1} "
+            "'on_failure_of' must be a non-empty list of check names when provided"
+        )
+    names: list[str] = []
+    seen: set[str] = set()
+    for dependency_index, value in enumerate(raw):
+        if not isinstance(value, str) or not value.strip():
+            raise PlanError(
+                f"session {session_id.value} contract check #{index + 1} "
+                f"'on_failure_of'[{dependency_index}] must be a non-empty string"
+            )
+        name = value.strip()
+        if name in seen:
+            raise PlanError(
+                f"session {session_id.value} contract check #{index + 1} "
+                f"'on_failure_of' duplicates check name {name!r}"
+            )
+        seen.add(name)
+        names.append(name)
+    return tuple(names)
+
+
 def _parse_command_check(
     payload: dict, *, index: int, session_id: SessionId
 ) -> CommandCheck:
@@ -292,12 +328,14 @@ def _parse_command_check(
 
     name = _check_name(payload.get("name"), index=index, session_id=session_id)
     baseline = _baseline_expectation(payload, index=index, session_id=session_id)
+    on_failure_of = _on_failure_of(payload, index=index, session_id=session_id)
     return CommandCheck(
         name=name,
         argv=tuple(argv),
         timeout_seconds=timeout,
         cwd=raw_cwd,
         baseline_expectation=baseline,
+        on_failure_of=on_failure_of,
     )
 
 
@@ -307,7 +345,13 @@ def _parse_file_exists_check(
     path = _require_str(payload.get("path"), label="path", session_id=session_id)
     name = _check_name(payload.get("name"), index=index, session_id=session_id)
     baseline = _baseline_expectation(payload, index=index, session_id=session_id)
-    return FileExistsCheck(name=name, path=path, baseline_expectation=baseline)
+    on_failure_of = _on_failure_of(payload, index=index, session_id=session_id)
+    return FileExistsCheck(
+        name=name,
+        path=path,
+        baseline_expectation=baseline,
+        on_failure_of=on_failure_of,
+    )
 
 
 def _parse_regex_in_file_check(
@@ -326,8 +370,13 @@ def _parse_regex_in_file_check(
         ) from error
     name = _check_name(payload.get("name"), index=index, session_id=session_id)
     baseline = _baseline_expectation(payload, index=index, session_id=session_id)
+    on_failure_of = _on_failure_of(payload, index=index, session_id=session_id)
     return RegexInFileCheck(
-        name=name, path=path, pattern=pattern, baseline_expectation=baseline
+        name=name,
+        path=path,
+        pattern=pattern,
+        baseline_expectation=baseline,
+        on_failure_of=on_failure_of,
     )
 
 
@@ -402,6 +451,35 @@ def _parse_verify_payload(payload: object, *, session_id: SessionId) -> VerifyRe
             )
         seen_names.add(check.name)
         checks.append(check)
+
+    checks_by_name = {check.name: check for check in checks}
+    gate_names = {
+        check.name for check in checks if not check.on_failure_of
+    }
+    if not gate_names:
+        raise PlanError(
+            f"session {session_id.value} Verify JSON must contain at least one "
+            "unconditional gate check"
+        )
+    for check in checks:
+        for dependency in check.on_failure_of:
+            if dependency == check.name:
+                raise PlanError(
+                    f"session {session_id.value} contract check {check.name!r} "
+                    "cannot name itself in 'on_failure_of'"
+                )
+            target = checks_by_name.get(dependency)
+            if target is None:
+                raise PlanError(
+                    f"session {session_id.value} contract check {check.name!r} "
+                    f"'on_failure_of' references unknown check {dependency!r}"
+                )
+            if target.on_failure_of:
+                raise PlanError(
+                    f"session {session_id.value} contract check {check.name!r} "
+                    f"'on_failure_of' target {dependency!r} is diagnostic; "
+                    "diagnostics may depend only on unconditional gates"
+                )
 
     return VerifyRecipe(checks=tuple(checks), parallel=raw_parallel)
 

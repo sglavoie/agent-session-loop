@@ -654,6 +654,8 @@ def _check_to_json(check: _contracts.VerificationCheck) -> dict[str, object]:
         payload["pattern"] = check.pattern
     if check.baseline_expectation != _contracts.DEFAULT_BASELINE_EXPECTATION:
         payload["baseline_expectation"] = check.baseline_expectation
+    if check.on_failure_of:
+        payload["on_failure_of"] = list(check.on_failure_of)
     return payload
 
 
