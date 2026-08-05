@@ -159,6 +159,43 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         self.assertTrue(policy["requires_user"])
         self.assertEqual(0, policy["max_retries"])
 
+    def test_new_waits_emit_the_rolling_ceiling_and_not_a_hard_deadline(
+        self,
+    ) -> None:
+        started_at = datetime(2026, 7, 24, 12, tzinfo=timezone.utc)
+        waiting = runner._waiting_for_reply_payload(
+            question_id="question-1",
+            session_id="9",
+            turn_index=3,
+            started_at=started_at,
+            base_deadline=started_at + timedelta(minutes=5),
+            unsupervised_deadline_at=started_at + timedelta(minutes=30),
+            unsupervised_ceiling_seconds=1800.0,
+            last_lease_activity_at=None,
+        )
+
+        self.assertNotIn("hard_deadline", waiting)
+        self.assertEqual(
+            (started_at + timedelta(minutes=30)).isoformat(),
+            waiting["unsupervised_deadline_at"],
+        )
+        self.assertEqual(1800.0, waiting["unsupervised_ceiling_seconds"])
+
+        for bad_ceiling in (0, -1.0, float("nan"), float("inf"), "1800", True):
+            with self.assertRaisesRegex(
+                ValueError, "unsupervised_ceiling_seconds"
+            ):
+                runner._waiting_for_reply_payload(
+                    question_id="question-1",
+                    session_id="9",
+                    turn_index=3,
+                    started_at=started_at,
+                    base_deadline=started_at + timedelta(minutes=5),
+                    unsupervised_deadline_at=started_at + timedelta(minutes=30),
+                    unsupervised_ceiling_seconds=bad_ceiling,
+                    last_lease_activity_at=None,
+                )
+
     def test_waiting_state_helpers_have_no_pause_side_effects(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -178,7 +215,8 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 turn_index=3,
                 started_at=started_at,
                 base_deadline=started_at + timedelta(minutes=5),
-                hard_deadline=started_at + timedelta(minutes=15),
+                unsupervised_deadline_at=started_at + timedelta(minutes=15),
+                unsupervised_ceiling_seconds=900.0,
                 last_lease_activity_at=started_at + timedelta(minutes=1),
             )
             persistence = runner._RunPersistence()
@@ -273,7 +311,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         settings = runner._MailboxReplyWaitSettings(
             base_seconds=2.0,
             lease_extension_seconds=1.0,
-            hard_seconds=5.0,
+            unsupervised_ceiling_seconds=5.0,
             poll_seconds=0.5,
             io_grace_seconds=1.0,
         )
@@ -350,7 +388,8 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 turn_index=3,
                 started_at=started_at,
                 base_deadline=started_at + timedelta(minutes=5),
-                hard_deadline=started_at + timedelta(minutes=30),
+                unsupervised_deadline_at=started_at + timedelta(minutes=30),
+                unsupervised_ceiling_seconds=1800.0,
                 last_lease_activity_at=None,
             )
             persistence = runner._RunPersistence()
@@ -368,7 +407,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 payload,
                 question_id="question-1",
                 base_deadline=wake + timedelta(minutes=3),
-                hard_deadline=wake + timedelta(minutes=28),
+                unsupervised_deadline_at=wake + timedelta(minutes=28),
                 persistence=persistence,
             )
 
@@ -382,7 +421,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             )
             self.assertEqual(
                 (wake + timedelta(minutes=28)).isoformat(),
-                rebased["hard_deadline"],
+                rebased["unsupervised_deadline_at"],
             )
             self.assertEqual(waiting["started_at"], rebased["started_at"])
             self.assertFalse(payload["paused"])
@@ -423,7 +462,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             {
                 runner.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "nan",
                 runner.MAILBOX_REPLY_WAIT_LEASE_EXTENSION_ENV_VAR: "-1",
-                runner.MAILBOX_REPLY_WAIT_HARD_ENV_VAR: "0",
+                runner.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "0",
                 runner.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "not-a-number",
                 runner.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "inf",
             }
@@ -437,8 +476,8 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             settings.lease_extension_seconds,
         )
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_HARD_SECONDS,
-            settings.hard_seconds,
+            runner.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_SECONDS,
+            settings.unsupervised_ceiling_seconds,
         )
         self.assertEqual(
             runner.MAILBOX_REPLY_WAIT_POLL_SECONDS,
@@ -452,11 +491,11 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         clamped = runner._mailbox_reply_wait_settings(
             {
                 runner.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "20",
-                runner.MAILBOX_REPLY_WAIT_HARD_ENV_VAR: "10",
+                runner.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "10",
             }
         )
         self.assertEqual(10.0, clamped.base_seconds)
-        self.assertEqual(10.0, clamped.hard_seconds)
+        self.assertEqual(10.0, clamped.unsupervised_ceiling_seconds)
 
     def test_mailbox_question_identity_is_stable_uuid5_per_turn(self) -> None:
         first = runner._mailbox_question_id(
@@ -481,7 +520,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         self.assertNotEqual(first, next_turn)
         self.assertEqual(5, uuid.UUID(first).version)
 
-    def test_mailbox_reply_wait_uses_lease_extensions_until_hard_bound(
+    def test_mailbox_reply_wait_lease_extensions_outlive_the_ceiling(
         self,
     ) -> None:
         question_id = "00000000-0000-0000-0000-000000000010"
@@ -501,18 +540,26 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             supervisor_id="00000000-0000-0000-0000-000000000011",
             updated_at="2026-07-24T12:00:00+00:00",
         )
-        lease = mailbox.MailboxLeaseView(
-            lease_path=Path("/tmp/mailbox-lease.json"),
+        lease_path = Path("/tmp/mailbox-lease.json")
+        fresh_lease = mailbox.MailboxLeaseView(
+            lease_path=lease_path,
             lease=lease_record,
             fresh=True,
+        )
+        stale_lease = mailbox.MailboxLeaseView(
+            lease_path=lease_path,
+            lease=lease_record,
+            fresh=False,
+            reason=mailbox.LEASE_EXPIRED,
         )
         settings = runner._MailboxReplyWaitSettings(
             base_seconds=2.0,
             lease_extension_seconds=1.0,
-            hard_seconds=5.0,
+            unsupervised_ceiling_seconds=5.0,
             poll_seconds=0.5,
             io_grace_seconds=1.0,
         )
+        supervision_ends = 8.0
         now = [0.0]
 
         def monotonic() -> float:
@@ -520,6 +567,11 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
 
         def sleep(seconds: float) -> None:
             now[0] += seconds
+
+        def read_lease(*_args: object, **_kwargs: object) -> object:
+            if now[0] >= supervision_ends:
+                return stale_lease
+            return fresh_lease
 
         payload = {
             "waiting_for_reply": {
@@ -536,7 +588,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 runner.mailbox, "read_mailbox", return_value=view
             ),
             mock.patch.object(
-                runner.mailbox, "read_lease", return_value=lease
+                runner.mailbox, "read_lease", side_effect=read_lease
             ),
         ):
             result = runner._wait_for_mailbox_reply(
@@ -552,8 +604,14 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             )
 
         self.assertIsNone(result.reply)
-        self.assertEqual("timeout", result.reason)
-        self.assertEqual(5.0, now[0])
+        # Each fresh lease moves the ceiling with the active deadline, so the
+        # ratchet carried the wait past a bound that used to end it at 5.0.
+        self.assertEqual(
+            runner.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            result.reason,
+        )
+        self.assertEqual(supervision_ends, now[0])
+        self.assertGreater(now[0], settings.unsupervised_ceiling_seconds)
         self.assertEqual(
             lease_record.updated_at,
             payload["waiting_for_reply"]["last_lease_activity_at"],
@@ -565,7 +623,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         settings = runner._MailboxReplyWaitSettings(
             base_seconds=10.0,
             lease_extension_seconds=1.0,
-            hard_seconds=20.0,
+            unsupervised_ceiling_seconds=20.0,
             poll_seconds=1.0,
             io_grace_seconds=3.0,
         )

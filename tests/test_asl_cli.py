@@ -7,7 +7,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import dataclasses
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import errno
 import hashlib
 import importlib.util
@@ -20,6 +20,7 @@ import select
 import shlex
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -53,6 +54,7 @@ from agent_session_loop import (
     progress_repair,
     qna,
     responses,
+    retention,
     review,
     review_repair,
     run_control,
@@ -993,6 +995,9 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertEqual(
             metrics.DEFAULT_SINCE_DAYS, cli._METRICS_DEFAULT_SINCE_DAYS
         )
+        self.assertEqual(
+            retention.DEFAULT_MAX_AGE_DAYS, cli._RETENTION_DEFAULT_MAX_AGE_DAYS
+        )
 
     def test_expand_ingest_requires_batch_file(self) -> None:
         parser = cli.build_parser()
@@ -1898,6 +1903,262 @@ class JsonCliTests(unittest.TestCase):
             payload = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(2, payload["version"])
             self.assertNotIn("stdout", payload["turns"][0]["verification"]["checks"][0])
+
+    def _write_gc_run(
+        self,
+        *,
+        plan_dir: Path,
+        state_dir: Path,
+        run_id: str,
+        days_ago: float,
+        log_bytes: int,
+    ) -> Path:
+        plan_state = state.plan_state_dir(plan_dir, state_dir)
+        plan_state.mkdir(parents=True, exist_ok=True)
+        (plan_state / "state.json").write_text(
+            json.dumps(
+                {"plan_dir": str(plans.canonicalize_path(plan_dir))}, sort_keys=True
+            ),
+            encoding="utf-8",
+        )
+        run_dir = plan_state / state.RUNS_DIR_NAME / run_id
+        turn_dir = run_dir / "turn-0001-session-1"
+        turn_dir.mkdir(parents=True)
+        (turn_dir / "stderr.log").write_bytes(b"x" * log_bytes)
+        finished_at = datetime.now(timezone.utc) - timedelta(days=days_ago)
+        (turn_dir / "result.json").write_text(
+            json.dumps(
+                {"finished_at": finished_at.isoformat(), "status_result": "ok"},
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        return run_dir
+
+    def test_gc_cli_dry_run_then_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("pending",))
+            old = self._write_gc_run(
+                plan_dir=plan_dir,
+                state_dir=state_dir,
+                run_id="20260401T000000000000Z-11",
+                days_ago=90,
+                log_bytes=4096,
+            )
+            newest = self._write_gc_run(
+                plan_dir=plan_dir,
+                state_dir=state_dir,
+                run_id="20260803T000000000000Z-22",
+                days_ago=1,
+                log_bytes=16,
+            )
+
+            def _run_gc(*extra: str) -> dict:
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "agent_session_loop",
+                        "gc",
+                        str(plan_dir),
+                        "--state-dir",
+                        str(state_dir),
+                        "--json",
+                        *extra,
+                    ],
+                    cwd=REPO_ROOT,
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                )
+                return json.loads(completed.stdout)
+
+            dry = _run_gc("--dry-run")
+            self.assertTrue(dry["ok"])
+            self.assertEqual("gc", dry["command"])
+            self.assertEqual("plan", dry["scope"])
+            self.assertFalse(dry["applied"])
+            self.assertEqual(1, dry["reclaimable_run_count"])
+            self.assertGreaterEqual(dry["reclaimable_bytes"], 4096)
+            self.assertEqual(0, dry["removed_run_count"])
+            self.assertEqual(0, dry["reclaimed_bytes"])
+            self.assertEqual(
+                1, dry["retained_by_reason"][retention.RETAIN_NEWEST_RUN]["run_count"]
+            )
+            self.assertEqual(
+                dry["reclaimable_bytes"], dry["plans"][0]["reclaimable_bytes"]
+            )
+            self.assertTrue(old.is_dir())
+
+            applied = _run_gc("--apply")
+            self.assertTrue(applied["applied"])
+            self.assertEqual(1, applied["removed_run_count"])
+            self.assertEqual(dry["reclaimable_bytes"], applied["reclaimed_bytes"])
+            self.assertEqual(0, applied["failed_removal_count"])
+            self.assertFalse(old.exists())
+            self.assertTrue(newest.is_dir())
+
+    def test_gc_cli_corpus_scope_aggregates_and_refuses_locked_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            state_dir = tmp_dir / "state"
+            sweepable = tmp_dir / "sweepable"
+            locked = tmp_dir / "locked"
+            write_plan(sweepable, ("pending",))
+            write_plan(locked, ("pending",))
+            for plan_dir in (sweepable, locked):
+                self._write_gc_run(
+                    plan_dir=plan_dir,
+                    state_dir=state_dir,
+                    run_id="20260401T000000000000Z-11",
+                    days_ago=90,
+                    log_bytes=2048,
+                )
+                self._write_gc_run(
+                    plan_dir=plan_dir,
+                    state_dir=state_dir,
+                    run_id="20260803T000000000000Z-22",
+                    days_ago=1,
+                    log_bytes=16,
+                )
+            locked_state = state.plan_state_dir(locked, state_dir)
+            (locked_state / state.LOCK_FILE_NAME).write_text(
+                json.dumps(
+                    {
+                        "plan_dir": str(plans.canonicalize_path(locked)),
+                        "created_at": "2026-08-01T00:00:00+00:00",
+                        "pid": 4_242_424,
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+
+            args = cli.build_parser().parse_args(
+                ["gc", "--state-dir", str(state_dir), "--json"]
+            )
+            handler = cli.resolve_handler(args)
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = handler(args)
+
+            self.assertIs(retention.gc_from_args, handler)
+            self.assertEqual(0, code)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual("corpus", payload["scope"])
+            self.assertFalse(payload["applied"])
+            self.assertEqual(2, payload["plan_count"])
+            self.assertEqual(1, payload["reclaimable_run_count"])
+            self.assertEqual(
+                2,
+                payload["retained_by_reason"][retention.RETAIN_PLAN_LOCKED][
+                    "run_count"
+                ],
+            )
+            by_plan = {
+                entry["plan_dir"]: entry["reclaimable_bytes"]
+                for entry in payload["plans"]
+            }
+            self.assertEqual(
+                0, by_plan[str(plans.canonicalize_path(locked))]
+            )
+            self.assertEqual(
+                payload["reclaimable_bytes"],
+                by_plan[str(plans.canonicalize_path(sweepable))],
+            )
+            self.assertTrue(
+                (
+                    locked_state / state.RUNS_DIR_NAME / "20260401T000000000000Z-11"
+                ).is_dir()
+            )
+
+    def test_gc_cli_preserves_a_dead_local_lock_in_both_scopes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            state_dir = tmp_dir / "state"
+            plan_dir = tmp_dir / "dead-locked"
+            write_plan(plan_dir, ("pending",))
+            old = self._write_gc_run(
+                plan_dir=plan_dir,
+                state_dir=state_dir,
+                run_id="20260401T000000000000Z-11",
+                days_ago=90,
+                log_bytes=2048,
+            )
+            self._write_gc_run(
+                plan_dir=plan_dir,
+                state_dir=state_dir,
+                run_id="20260803T000000000000Z-22",
+                days_ago=1,
+                log_bytes=16,
+            )
+            # A pid this host can prove dead: the lock every other command
+            # reclaims on sight, and the one `gc` has promised not to touch.
+            lock_path = (
+                state.plan_state_dir(plan_dir, state_dir) / state.LOCK_FILE_NAME
+            )
+            lock_path.write_text(
+                json.dumps(
+                    {
+                        "plan_dir": str(plans.canonicalize_path(plan_dir)),
+                        "created_at": "2026-08-01T00:00:00+00:00",
+                        "pid": 4_242_424,
+                        "hostname": socket.gethostname(),
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            lock_bytes = lock_path.read_bytes()
+
+            def _gc(*argv: str) -> dict:
+                args = cli.build_parser().parse_args(
+                    ["gc", *argv, "--state-dir", str(state_dir), "--json"]
+                )
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    self.assertEqual(0, cli.resolve_handler(args)(args))
+                return json.loads(stdout.getvalue())
+
+            def _decisions(payload: dict) -> list:
+                entry = next(
+                    plan
+                    for plan in payload["plans"]
+                    if plan["plan_dir"] == str(plans.canonicalize_path(plan_dir))
+                )
+                return [
+                    (run["run_id"], run["reclaimable"], run["reason"])
+                    for run in entry["runs"]
+                ]
+
+            corpus = _gc()
+            self.assertEqual(lock_bytes, lock_path.read_bytes())
+            plan = _gc(str(plan_dir))
+            self.assertEqual(lock_bytes, lock_path.read_bytes())
+
+            self.assertEqual(_decisions(corpus), _decisions(plan))
+            self.assertEqual(
+                {reason for _id, _reclaimable, reason in _decisions(plan)},
+                {retention.RETAIN_PLAN_LOCKED},
+            )
+            self.assertEqual(0, plan["reclaimable_run_count"])
+
+            applied = _gc(str(plan_dir), "--apply")
+            self.assertEqual(0, applied["removed_run_count"])
+            self.assertEqual(lock_bytes, lock_path.read_bytes())
+            self.assertTrue(old.is_dir())
+
+    def test_gc_rejects_apply_together_with_dry_run(self) -> None:
+        parser = cli.build_parser()
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            parser.parse_args(["gc", "--apply", "--dry-run"])
+
+        self.assertEqual(2, raised.exception.code)
 
     def test_status_and_dry_run_json_outputs_nested_session_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -51,6 +51,7 @@ from agent_session_loop import pause_policy as _pause_policy  # noqa: E402
 from agent_session_loop import review as _review  # noqa: E402
 from agent_session_loop import review_continuation as _review_continuation  # noqa: E402
 from agent_session_loop import run_flags as _run_flags  # noqa: E402
+from agent_session_loop import state as _state  # noqa: E402
 from agent_session_loop import tail as _tail  # noqa: E402
 
 HELPER_NAME = "asl-autopilot"
@@ -1197,6 +1198,15 @@ def _status_snapshot(status: object) -> dict:
             "turn_index": waiting_for_reply.get("turn_index"),
             "base_deadline": waiting_for_reply.get("base_deadline"),
             "hard_deadline": waiting_for_reply.get("hard_deadline"),
+            "unsupervised_deadline_at": waiting_for_reply.get(
+                "unsupervised_deadline_at"
+            ),
+            "unsupervised_ceiling_seconds": waiting_for_reply.get(
+                "unsupervised_ceiling_seconds"
+            ),
+            "last_lease_activity_at": waiting_for_reply.get(
+                "last_lease_activity_at"
+            ),
             **common,
         }
         if isinstance(waiting_status, str) and waiting_status:
@@ -1393,6 +1403,15 @@ class _EventsTailer:
                     "turn_index": payload.get("turn_index"),
                     "base_deadline": payload.get("base_deadline"),
                     "hard_deadline": payload.get("hard_deadline"),
+                    "unsupervised_deadline_at": payload.get(
+                        "unsupervised_deadline_at"
+                    ),
+                    "unsupervised_ceiling_seconds": payload.get(
+                        "unsupervised_ceiling_seconds"
+                    ),
+                    "last_lease_activity_at": payload.get(
+                        "last_lease_activity_at"
+                    ),
                 }
             )
         elif (
@@ -1461,8 +1480,11 @@ def _heartbeat_detail(
       tailer reports the verification stream went silent past the threshold (the
       heartbeat carries no ``idle_seconds``, so event silence is the only signal).
     - ``waiting_for_reply``: healthy when the authoritative
-      ``waiting_for_reply_status`` is ``live`` and its valid hard deadline
-      remains in the future. An explicitly non-live status, elapsed deadline, or
+      ``waiting_for_reply_status`` is ``live`` and its valid unsupervised
+      ceiling remains in the future. That ceiling rolls forward with the last
+      lease activity the record carries, so a watched wait has no terminal
+      instant; records predating the rolling ceiling fall back to their static
+      ``hard_deadline``. An explicitly non-live status, elapsed ceiling, or
       malformed deadline is reported as a stall. When the status is absent for
       compatibility with older ``asl`` builds, the deadline-only behavior is
       preserved. Event silence alone is ignored inside that bound.
@@ -1541,19 +1563,28 @@ def _heartbeat_detail(
             return True, with_outbox(
                 f"{detail}: wait status {waiting_status} (no output)"
             )
-        hard_deadline = _parse_timestamp(snapshot.get("hard_deadline"))
-        if hard_deadline is None:
+        # The ceiling rolls forward with the last lease that proved a
+        # supervisor alive, so it is projected from the record rather than
+        # read as a static instant. Waits persisted before the ceiling rolled
+        # carry only ``hard_deadline`` and keep their original wording.
+        ceiling_label = (
+            "hard deadline"
+            if snapshot.get("unsupervised_deadline_at") is None
+            else "unsupervised ceiling"
+        )
+        ceiling_deadline = _state.waiting_for_reply_ceiling(snapshot)
+        if ceiling_deadline is None:
             return True, with_outbox(
-                f"{detail}: invalid hard deadline (no output)"
+                f"{detail}: invalid {ceiling_label} (no output)"
             )
         current = datetime.now(timezone.utc) if now is None else now
         if current.tzinfo is None or current.utcoffset() is None:
             current = current.replace(tzinfo=timezone.utc)
         else:
             current = current.astimezone(timezone.utc)
-        if current >= hard_deadline:
+        if current >= ceiling_deadline:
             return True, with_outbox(
-                f"{detail}: hard deadline elapsed (no output)"
+                f"{detail}: {ceiling_label} elapsed (no output)"
             )
         # Within the runner's absolute bound, ordinary event silence does not
         # imply a stall because the reply poll intentionally emits no heartbeat.
@@ -1580,9 +1611,9 @@ def _format_heartbeat(
     - ``verifying`` (review phase): the same running line with a ``verifying``
       label instead of a session.
     - ``waiting_for_reply``: a healthy line while its wait status is live and
-      before its hard deadline, or under the legacy deadline-only fallback when
-      the status is absent; a non-live status, elapsed deadline, or malformed
-      deadline produces a stall warning.
+      before its unsupervised ceiling, or under the legacy deadline-only
+      fallback when the status is absent; a non-live status, elapsed ceiling,
+      or malformed deadline produces a stall warning.
     - any other snapshot (``paused``/``unknown``/errored): the legacy plain
       ``running, elapsed Ns`` line, preserving pre-enrichment behavior.
     """
@@ -2885,8 +2916,8 @@ def supervise_run(
     to ``run_result(False, "worker_hung", hang=...)`` — the ``asl run`` child is
     never killed or waited on, so re-running the same command re-attaches. A
     bounded ``waiting_for_reply`` state suppresses
-    event-silence warnings only until its hard deadline; an overdue or malformed
-    deadline is reported as possibly stalled. Between attach heartbeats the loop
+    event-silence warnings only until its unsupervised ceiling; an overdue or
+    malformed deadline is reported as possibly stalled. Between attach heartbeats the loop
     only ``os.stat``s ``events.jsonl`` (via the ``events_stat`` seam) and services
     watcher deadlines rather than re-running ``asl status`` every poll; a fresh
     full probe — which keeps lock/pending classification authoritative — runs

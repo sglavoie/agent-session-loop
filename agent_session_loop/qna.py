@@ -30,6 +30,9 @@ REASON_MISSING_QUESTION_CONTEXT = "missing-question-context"
 REASON_REPLY_CONTEXT_MISMATCH = "reply-context-mismatch"
 EXPIRED_WAIT_PAUSE_REASON = "wait-expired"
 
+WAIT_CEILING_FIELD = "unsupervised_deadline_at"
+LEGACY_WAIT_CEILING_FIELD = "hard_deadline"
+
 QNA_ERROR_REASONS: tuple[str, ...] = (
     REASON_NO_PAUSED_RUN,
     REASON_MISSING_QUESTION_CONTEXT,
@@ -131,6 +134,34 @@ def load_qna_context(
     )
 
 
+def _wait_ceiling_field(waiting_for_reply: dict[str, Any]) -> str:
+    """Name the key carrying this record's unsupervised ceiling.
+
+    Waits persisted before the ceiling began rolling carry only the static
+    ``hard_deadline``, so operator-facing output must keep naming that key for
+    them rather than reporting a newer one as missing.
+    """
+    if WAIT_CEILING_FIELD in waiting_for_reply:
+        return WAIT_CEILING_FIELD
+    return LEGACY_WAIT_CEILING_FIELD
+
+
+def _wait_ceiling_details(waiting_for_reply: dict[str, Any]) -> dict[str, Any]:
+    field = _wait_ceiling_field(waiting_for_reply)
+    details: dict[str, Any] = {field: waiting_for_reply.get(field)}
+    if field == WAIT_CEILING_FIELD:
+        # The persisted instant is only the anchor; the lease activity and the
+        # ceiling span are what move it, so a bare deadline no longer explains
+        # the classification on its own.
+        details["unsupervised_ceiling_seconds"] = waiting_for_reply.get(
+            "unsupervised_ceiling_seconds"
+        )
+        details["last_lease_activity_at"] = waiting_for_reply.get(
+            "last_lease_activity_at"
+        )
+    return details
+
+
 def build_qna_context(
     snapshot: plans.PlanSnapshot,
     payload: dict[str, Any],
@@ -157,11 +188,11 @@ def build_qna_context(
         if wait_status == state.WAITING_FOR_REPLY_STATUS_INVALID:
             raise QnAError(
                 REASON_MISSING_QUESTION_CONTEXT,
-                "waiting-for-reply state has an invalid hard deadline",
+                "waiting-for-reply state has an invalid unsupervised ceiling",
                 details={
                     "state_path": str(state_path),
                     "question_id": waiting_for_reply.get("question_id"),
-                    "hard_deadline": waiting_for_reply.get("hard_deadline"),
+                    **_wait_ceiling_details(waiting_for_reply),
                 },
             )
         if wait_status == state.WAITING_FOR_REPLY_STATUS_EXPIRED:
@@ -304,7 +335,7 @@ def _expired_wait_recovery_payload(
     )
     recovery["pause_details"] = {
         "question_id": waiting_for_reply.get("question_id"),
-        "hard_deadline": waiting_for_reply.get("hard_deadline"),
+        **_wait_ceiling_details(waiting_for_reply),
     }
     return recovery
 
@@ -523,7 +554,11 @@ def _validate_waiting_identity(
             },
         )
 
-    for field_name in ("started_at", "base_deadline", "hard_deadline"):
+    for field_name in (
+        "started_at",
+        "base_deadline",
+        _wait_ceiling_field(waiting),
+    ):
         if _optional_str(waiting.get(field_name)) is None:
             raise QnAError(
                 REASON_MISSING_QUESTION_CONTEXT,
@@ -771,7 +806,20 @@ def _render_waiting_resolver_prompt(context: QnAContext) -> str:
     lines.append(f"- Question ID: {_display(context.question_id)}")
     lines.append(f"- Started: {_display(waiting.get('started_at'))}")
     lines.append(f"- Base deadline: {_display(waiting.get('base_deadline'))}")
-    lines.append(f"- Hard deadline: {_display(waiting.get('hard_deadline'))}")
+    if _wait_ceiling_field(waiting) == LEGACY_WAIT_CEILING_FIELD:
+        lines.append(
+            f"- Hard deadline: {_display(waiting.get('hard_deadline'))}"
+        )
+    else:
+        lines.append(
+            "- Unsupervised deadline: "
+            f"{_display(waiting.get(WAIT_CEILING_FIELD))} "
+            "(rolls forward with every lease that proves a supervisor alive)"
+        )
+        lines.append(
+            "- Unsupervised ceiling: "
+            f"{_display(waiting.get('unsupervised_ceiling_seconds'))}s"
+        )
     lines.append(
         "- Last lease activity: "
         f"{_display(waiting.get('last_lease_activity_at'))}"
@@ -829,7 +877,7 @@ def _render_waiting_resolver_prompt(context: QnAContext) -> str:
         "paused-run recovery."
     )
     lines.append(
-        "4. Submit the selected command before the hard deadline. A reply "
+        "4. Submit the selected command while the wait is still live. A reply "
         "continues with the operator's answer; continue supplies no answer; "
         "pause ends the live wait without inventing one."
     )

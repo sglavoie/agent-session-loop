@@ -6,6 +6,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -507,7 +508,7 @@ class MetricsCollectionTests(unittest.TestCase):
             cycles["reopen_failures_by_result"],
         )
 
-    def test_materializations_reconcile_child_only_crash_with_evaluator(
+    def test_child_only_crash_materialization_is_undatable_in_any_window(
         self,
     ) -> None:
         plan_dir = self.tmp_path / "plan-child-only-materialization"
@@ -518,15 +519,16 @@ class MetricsCollectionTests(unittest.TestCase):
         projected = review_continuation.evaluate_review_continuation(
             plans.inspect_plan(plan_dir), event_path
         )
-        cycles = self._collect().review_cycles
 
+        # The evaluator stays the whole-history cap authority and still
+        # recovers the child whose event append was lost. Metrics cannot: the
+        # lost append is what carried the timestamp, so no window can place it.
         self.assertEqual(1, projected.historical_materializations)
-        self.assertEqual(
-            projected.historical_materializations,
-            cycles["unique_materializations"],
-        )
-        self.assertEqual(1, cycles["repairs_materialized"])
-        self.assertEqual(0, cycles["cycles_recorded"])
+        for since_days in (7, 3650):
+            cycles = self._collect(since_days=since_days).review_cycles
+            self.assertEqual(0, cycles["unique_materializations"])
+            self.assertEqual(0, cycles["repairs_materialized"])
+            self.assertEqual(0, cycles["cycles_recorded"])
 
     def test_materializations_reconcile_legacy_cycle_and_child_once(
         self,
@@ -549,16 +551,118 @@ class MetricsCollectionTests(unittest.TestCase):
         projected = review_continuation.evaluate_review_continuation(
             plans.inspect_plan(plan_dir), event_path
         )
-        cycles = self._collect().review_cycles
+        wide = self._collect(since_days=60).review_cycles
+        narrow = self._collect().review_cycles
 
         self.assertEqual(1, projected.historical_materializations)
         self.assertEqual(
             projected.historical_materializations,
-            cycles["unique_materializations"],
+            wide["unique_materializations"],
         )
-        self.assertEqual(1, cycles["repairs_materialized"])
-        self.assertEqual(0, cycles["cycles_recorded"])
-        self.assertEqual({}, cycles["by_disposition"])
+        self.assertEqual(1, wide["repairs_materialized"])
+        # One cycle event plus its durable child still reconcile to a single
+        # materialization; a window that excludes the event excludes both.
+        self.assertEqual(1, wide["cycles_recorded"])
+        self.assertEqual(0, narrow["unique_materializations"])
+        self.assertEqual(0, narrow["cycles_recorded"])
+        self.assertEqual({}, narrow["by_disposition"])
+
+    def test_materializations_shrink_with_a_narrower_window(self) -> None:
+        recent_dir = _make_state_dir(
+            self.state_root, self.tmp_path / "plan-window-recent"
+        )
+        older_dir = _make_state_dir(
+            self.state_root, self.tmp_path / "plan-window-older"
+        )
+        _append_event(
+            recent_dir,
+            created_at=_iso(self.now, hours_ago=2),
+            name=events.REVIEW_CYCLE_EVENT,
+            payload={
+                "cycle": 1,
+                "review_session_id": "2",
+                "disposition": "repairs-materialized",
+                "repair_session_ids": ["2.1"],
+            },
+        )
+        _append_event(
+            older_dir,
+            created_at=_iso(self.now, hours_ago=24 * 10),
+            name=events.REVIEW_CYCLE_EVENT,
+            payload={
+                "cycle": 1,
+                "review_session_id": "2",
+                "disposition": "repairs-materialized",
+                "repair_session_ids": ["2.1"],
+            },
+        )
+        _append_event(
+            older_dir,
+            created_at=_iso(self.now, hours_ago=24 * 30),
+            name=events.REVIEW_CYCLE_EVENT,
+            payload={
+                "cycle": 2,
+                "review_session_id": "3",
+                "disposition": "repairs-materialized",
+                "repair_session_ids": ["3.1"],
+            },
+        )
+
+        narrow = self._collect(since_days=3).review_cycles
+        wide = self._collect(since_days=45).review_cycles
+
+        self.assertEqual(1, narrow["unique_materializations"])
+        self.assertEqual(3, wide["unique_materializations"])
+        self.assertLess(
+            narrow["unique_materializations"], wide["unique_materializations"]
+        )
+        self.assertEqual(
+            narrow["unique_materializations"], narrow["repairs_materialized"]
+        )
+        self.assertEqual(
+            wide["unique_materializations"], wide["repairs_materialized"]
+        )
+
+    def test_state_dirs_untouched_in_window_are_skipped_before_events(
+        self,
+    ) -> None:
+        state_dir = _make_state_dir(self.state_root, self.tmp_path / "plan-stale")
+        _append_event(
+            state_dir,
+            created_at=_iso(self.now, hours_ago=1),
+            name=events.REVIEW_CYCLE_EVENT,
+            payload={
+                "cycle": 1,
+                "review_session_id": "2",
+                "disposition": "repairs-materialized",
+                "repair_session_ids": ["2.1"],
+            },
+        )
+        _append_event(
+            state_dir,
+            created_at=_iso(self.now, hours_ago=1),
+            name="run_paused",
+            payload={"reason": "blocked", "details": {}},
+        )
+        stale = (self.now - timedelta(days=30)).timestamp()
+        total_bytes = 0
+        for path in state_dir.rglob("*"):
+            if path.is_file():
+                total_bytes += path.stat().st_size
+            os.utime(path, (stale, stale))
+
+        report = self._collect()
+
+        # File mtimes are the cheap in-window probe: nothing here was written
+        # inside the window, so the events file is never read.
+        self.assertEqual(1, report.state_dirs_scanned)
+        self.assertEqual(0, report.state_dirs_active)
+        self.assertEqual(0, report.pauses["total"])
+        self.assertEqual(0, report.review_cycles["cycles_recorded"])
+        self.assertEqual(0, report.review_cycles["unique_materializations"])
+        self.assertEqual(total_bytes, report.artifacts["total_bytes"])
+        self.assertEqual(0, report.artifacts["grown_bytes"])
+        self.assertEqual(0, report.artifacts["grown_files"])
 
     def test_recovered_reopen_supplies_lineage_not_attempt_activity(
         self,

@@ -10,11 +10,12 @@ share one cap and continuation projection.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime
 import json
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
-from . import events, plans, review, review_repair
+from . import events, plans, review, review_repair, session_overview
 
 
 REVIEW_CYCLE_DISPOSITION_ALL_CLEAR = "all-clear"
@@ -72,6 +73,7 @@ class ReviewEventRecord:
 
     name: str
     payload: Mapping[str, Any]
+    created_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -165,7 +167,16 @@ def read_review_events(event_path: str | Path) -> tuple[ReviewEventRecord, ...]:
             name = record.get("name")
             payload = record.get("payload")
             if name in relevant and isinstance(payload, dict):
-                records.append(ReviewEventRecord(name=name, payload=payload))
+                created_at = record.get("created_at")
+                records.append(
+                    ReviewEventRecord(
+                        name=name,
+                        payload=payload,
+                        created_at=(
+                            created_at if isinstance(created_at, str) else None
+                        ),
+                    )
+                )
     return tuple(records)
 
 
@@ -292,19 +303,38 @@ def review_event_materialization_key(
     )
 
 
-def _event_materialization_keys(
+def _note_materialization_time(
+    times: dict[str, datetime | None],
+    key: str,
+    moment: datetime | None,
+) -> None:
+    """Track the newest dated event attributed to one materialization key."""
+    if key not in times:
+        times[key] = moment
+        return
+    existing = times[key]
+    if moment is not None and (existing is None or moment > existing):
+        times[key] = moment
+
+
+def _event_materialization_key_times(
     records: tuple[ReviewEventRecord, ...],
-) -> set[str]:
-    keys: set[str] = set()
+) -> dict[str, datetime | None]:
+    times: dict[str, datetime | None] = {}
     for ordinal, record in enumerate(records, start=1):
         key = review_event_materialization_key(
             record.name,
             record.payload,
             ordinal=ordinal,
         )
-        if key is not None:
-            keys.add(key)
-    return keys
+        if key is None:
+            continue
+        _note_materialization_time(
+            times,
+            key,
+            session_overview.parse_iso_timestamp(record.created_at),
+        )
+    return times
 
 
 def _review_id_for_cycle_position(
@@ -321,16 +351,21 @@ def _review_id_for_cycle_position(
     return review_ids[review_position - 1]
 
 
-def _reconciled_materialization_keys(
+def _materialization_key_times(
     records: tuple[ReviewEventRecord, ...],
     generated_repairs: Mapping[
         str, Mapping[str, plans.SessionStatus]
     ] | None = None,
     generated_reviews: Mapping[str, plans.SessionStatus] | None = None,
-) -> set[str]:
-    """Return unique materializations across events and durable children."""
+) -> dict[str, datetime | None]:
+    """Return each unique materialization with the newest event that dated it.
 
-    keys = _event_materialization_keys(records)
+    A materialization recovered from durable children alone maps to ``None``:
+    the lost event append is what carried its timestamp, so nothing on disk
+    can place it in time.
+    """
+
+    times = _event_materialization_key_times(records)
     if generated_repairs is not None:
         review_ids = (
             sorted(
@@ -372,19 +407,36 @@ def _reconciled_materialization_keys(
                 source_id
             ):
                 continue
-            keys.discard(key)
-            keys.add(f"review:{source_id}")
-        keys.update(
-            f"review:{source_id}"
-            for source_id, children in generated_repairs.items()
-            if children
+            _note_materialization_time(
+                times, f"review:{source_id}", times.pop(key, None)
+            )
+        for source_id, children in generated_repairs.items():
+            if children:
+                times.setdefault(f"review:{source_id}", None)
+    return times
+
+
+def _reconciled_materialization_keys(
+    records: tuple[ReviewEventRecord, ...],
+    generated_repairs: Mapping[
+        str, Mapping[str, plans.SessionStatus]
+    ] | None = None,
+    generated_reviews: Mapping[str, plans.SessionStatus] | None = None,
+) -> set[str]:
+    """Return unique materializations across events and durable children."""
+
+    return set(
+        _materialization_key_times(
+            records, generated_repairs, generated_reviews
         )
-    return keys
+    )
 
 
 def reconciled_materialization_keys(
     event_path: str | Path,
     snapshot_or_plan_dir: plans.PlanSnapshot | str | Path | None = None,
+    *,
+    since: datetime | None = None,
 ) -> frozenset[str]:
     """Return durable source-review materialization identities.
 
@@ -392,6 +444,11 @@ def reconciled_materialization_keys(
     readable plan snapshot is available, generated repair children also
     recover materializations whose event append was lost and reconcile legacy
     cycle records that predate explicit source-review lineage.
+
+    ``since`` narrows the result to materializations whose newest attributed
+    event landed at or after that instant.  A materialization recovered from
+    durable children alone carries no timestamp and is left out, the same way
+    an undated turn or event record falls outside a window.
     """
 
     records = read_review_events(event_path)
@@ -410,10 +467,15 @@ def reconciled_materialization_keys(
     generated_reviews = (
         _generated_review_statuses(snapshot) if snapshot is not None else None
     )
+    times = _materialization_key_times(
+        records, generated_repairs, generated_reviews
+    )
+    if since is None:
+        return frozenset(times)
     return frozenset(
-        _reconciled_materialization_keys(
-            records, generated_repairs, generated_reviews
-        )
+        key
+        for key, moment in times.items()
+        if moment is not None and moment >= since
     )
 
 

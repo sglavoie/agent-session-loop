@@ -12,9 +12,13 @@ reports workflow reliability and storage numbers for a recent window
 - artifact growth and projected compaction savings.
 
 Windowed activity is derived from ``events.jsonl`` and per-turn
-``result.json`` files. Durable review-materialization totals additionally
-inspect readable current plan snapshots so generated repair children can be
-reconciled with the full review-event history. No state or plan content is
+``result.json`` files. A state directory whose files were all last written
+before the window opened is measured for size and then skipped, so a narrow
+window never reads the whole corpus. Review-materialization totals are
+windowed the same way: readable current plan snapshots still reconcile
+generated repair children with the full review-event history so one source
+review is never counted twice, but a materialization is only counted when the
+event carrying it falls inside the window. No state or plan content is
 mutated. Compaction savings are projected with a dry-run over the state
 directories that had activity inside the window (the full corpus is available
 via ``asl compact-state`` per plan).
@@ -226,6 +230,18 @@ def collect_metrics(
     for plan_state_dir in sorted(session_overview._iter_state_plan_dirs(state_root)):
         state_dirs_scanned += 1
         dir_key = plan_state_dir.name
+        total_bytes, grown_bytes, grown_files = _directory_sizes(
+            plan_state_dir, cutoff
+        )
+        artifact_total_bytes += total_bytes
+        artifact_grown_bytes += grown_bytes
+        artifact_grown_files += grown_files
+        if grown_files == 0:
+            # Nothing under this dir was written inside the window, so no turn
+            # result or event record can carry an in-window timestamp either.
+            # Skipping here is what keeps a narrow window off the full corpus.
+            continue
+
         active = False
         plan_dir = _plan_dir_for_state_dir(plan_state_dir)
         snapshot = None
@@ -240,6 +256,7 @@ def collect_metrics(
             review_continuation.reconciled_materialization_keys(
                 plan_state_dir / events.EVENTS_FILE_NAME,
                 snapshot,
+                since=cutoff,
             )
         )
         unique_materialization_keys.update(
@@ -394,13 +411,6 @@ def collect_metrics(
                     agent_mux_legacy += 1
                 else:
                     agent_mux_failed += 1
-
-        total_bytes, grown_bytes, grown_files = _directory_sizes(
-            plan_state_dir, cutoff
-        )
-        artifact_total_bytes += total_bytes
-        artifact_grown_bytes += grown_bytes
-        artifact_grown_files += grown_files
 
         if active:
             state_dirs_active += 1

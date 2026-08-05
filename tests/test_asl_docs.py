@@ -56,6 +56,7 @@ from agent_session_loop import (
     progress_cli,
     progress_repair,
     qna,
+    retention,
     review,
     review_continuation,
     review_repair,
@@ -609,7 +610,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "waits five minutes initially",
             "Lease freshness is checked only at an\nactive deadline",
             "extends the wait by 60 seconds",
-            "30-minute limit",
+            "30-minute ceiling bounds *unsupervised* time, not wall clock",
             "ordinary\nterminal pause",
             "next\nimplementation invocation",
             "never affect generated review turns",
@@ -651,7 +652,16 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         )
         self.assertIn(
             "a non-fresh lease neither ends the wait nor extends the active "
-            "deadline, and the grace never extends the hard deadline",
+            "deadline, and the grace never extends the ceiling",
+            normalized,
+        )
+        self.assertIn(
+            "a continuously watched wait has no terminal instant and outlives "
+            "the ceiling indefinitely",
+            normalized,
+        )
+        self.assertIn(
+            "`timeout` only when the unsupervised ceiling was reached",
             normalized,
         )
         self.assertIn(
@@ -660,6 +670,11 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             normalized,
         )
         self.assertIn("`suspend_skew_seconds`", normalized)
+        self.assertIn(
+            "`unsupervised_seconds`, how long it ran without a supervisor "
+            "lease proving liveness",
+            normalized,
+        )
 
     def test_docs_describe_shared_closure_reserve_and_availability(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
@@ -1070,6 +1085,76 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             r"This recovery reason is\s+never written into `state\.json`",
         )
 
+    def test_docs_describe_the_rolling_unsupervised_ceiling(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        state_files = docs.split("## State Files", 1)[1].split("\n## ", 1)[0]
+        status_docs = docs.split("## JSON Output", 1)[1].split(
+            "\n## Pause Semantics", 1
+        )[0]
+        pause_docs = docs.split("## Pause Semantics", 1)[1].split(
+            "\n## Autopilot Skill", 1
+        )[0]
+
+        for section_name, section, markers in (
+            (
+                "state files",
+                state_files,
+                (
+                    "`unsupervised_deadline_at` with its "
+                    "`unsupervised_ceiling_seconds` span",
+                    "`unsupervised_deadline_at` is the ceiling as of the last "
+                    "anchor the runner persisted",
+                    "a reader rolls it forward from `last_lease_activity_at` "
+                    "plus the ceiling span rather than reading it as a "
+                    "terminal instant",
+                    "Waits persisted before the ceiling began rolling carry a "
+                    "static `hard_deadline` instead of those two keys, and "
+                    "every reader still renders that key for them",
+                ),
+            ),
+            (
+                "wait validity",
+                status_docs,
+                (
+                    "the classification consults lease freshness rather than "
+                    "a bare timestamp",
+                    "the projected ceiling is the later of "
+                    "`unsupervised_deadline_at` and `last_lease_activity_at` "
+                    "plus `unsupervised_ceiling_seconds`",
+                    "a wait whose supervisor keeps renewing stays `live` past "
+                    "the instant persisted at its start",
+                    "A record written before the ceiling began rolling "
+                    "carries only `hard_deadline` and is classified from that "
+                    "timestamp exactly as it was before",
+                ),
+            ),
+            (
+                "pause semantics",
+                pause_docs,
+                (
+                    "classify it as `expired` even before its unsupervised "
+                    "ceiling",
+                    "That lock check is what makes an abandoned wait "
+                    "recoverable promptly",
+                    "the ceiling itself rolls forward with lease activity, so "
+                    "a record left behind by a supervised wait can carry a "
+                    "projected ceiling well in the future",
+                    "orphaned nonterminal wait whose unsupervised ceiling "
+                    "passed",
+                ),
+            ),
+        ):
+            normalized = " ".join(section.split())
+            for marker in markers:
+                self.assertIn(
+                    marker,
+                    normalized,
+                    msg=(
+                        f"{section_name} docs omit rolling-ceiling marker: "
+                        f"{marker!r}"
+                    ),
+                )
+
     def test_docs_enumerate_mailbox_lease_reasons(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
         status_docs = docs.split("## JSON Output", 1)[1].split(
@@ -1179,7 +1264,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "`asl run --no-mailbox`",
             "The seven mailbox commands",
             "Lease freshness is checked only at an active\ndeadline",
-            "30-minute absolute maximum",
+            "30-minute ceiling bounds unsupervised time rather\nthan wall clock",
             "`asl control set-model",
             "no runner/supervisor thread",
             "no Workbench",
@@ -1194,7 +1279,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "resumes the same session",
             "Lease freshness is checked only at an active deadline",
             "awake grace to re-prove liveness before a stale lease ends the",
-            "never waits beyond 30 minutes",
+            "30-minute ceiling bounds unsupervised time,\nnot wall clock",
             "already-committed reply or resolution takes\nprecedence over "
             "mailbox exhaustion",
             "affect only the next implementation invocation",
@@ -1820,6 +1905,81 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
         self.assertIn("asl prepare --resume PLAN_DIR", self.docs)
         self.assertIn("[--max-review-fix-cycles N]", self.docs)
 
+    def test_docs_pin_gc_retention_contract(self) -> None:
+        self.assertIn(
+            "asl gc [PLAN_DIR] [--state-dir DIR] [--max-age-days DAYS] "
+            "[--dry-run|--apply] [--json]",
+            self.docs,
+        )
+        self.assertIn(
+            "reports reclaimable bytes per plan directory as well as in\n"
+            "aggregate",
+            self.docs,
+        )
+        self.assertIn(
+            "A stale lock is\nrefused exactly like an active one", self.docs
+        )
+        self.assertIn(
+            "The\ndefault is a dry-run that deletes nothing", self.docs
+        )
+        self.assertIn(
+            "`asl gc --dry-run` is a pure projection: it deletes nothing and "
+            "writes nothing,\nlocks included.",
+            self.docs,
+        )
+        self.assertIn(
+            "`asl gc` is the one command exempt from all\nof this", self.docs
+        )
+        for reason in (
+            retention.RETAIN_PLAN_LOCKED,
+            retention.RETAIN_LIVE_RUN,
+            retention.RETAIN_UNFINISHED,
+            retention.RETAIN_UNDATED,
+            retention.RETAIN_NEWEST_RUN,
+            retention.RETAIN_WITHIN_CUTOFF,
+        ):
+            self.assertIn(f"`{reason}`", self.docs)
+
+    def test_docs_pin_review_cycle_default_and_lock_reclamation(self) -> None:
+        default_cycles = runner.DEFAULT_MAX_REVIEW_FIX_CYCLES
+        self.assertIn(
+            f"unique source-review materializations (default {default_cycles};",
+            self.docs,
+        )
+        self.assertIn(
+            f"absolute cap — {default_cycles} unique source-review "
+            "materializations unless the supervised",
+            self.docs,
+        )
+        skill = (REPO_ROOT / "skills" / "asl" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        for skill_claim in (
+            f"`asl run --max-review-fix-cycles` (default {default_cycles}).",
+            f"`asl run --max-review-fix-cycles` (default {default_cycles};",
+        ):
+            self.assertIn(skill_claim, skill)
+
+        self.assertIn("Reading such a lock also removes it", self.docs)
+        self.assertIn("reclaimed stale lock at <path>", self.docs)
+        self.assertIn(
+            "a legacy\nlock with no `hostname` key (its pid names no process table)",
+            self.docs,
+        )
+        self.assertIn(
+            "`asl unlock` remains the only route out for\na cross-host lock",
+            self.docs,
+        )
+        self.assertIn(
+            f"an\nexclusive `flock` on a `{state.LOCK_MUTEX_FILE_NAME}` sidecar",
+            self.docs,
+        )
+        self.assertIn("No mutator ever\nunlinks without holding the claim", self.docs)
+        self.assertIn(
+            "the release at the end of a run leaves its\nlock in place",
+            self.docs,
+        )
+
     def test_contract_example_parses_with_authoritative_parser(self) -> None:
         section = self.docs.split("## Completion Contracts", 1)[1]
         match = re.search(r"```json\n(.*?)\n```", section, re.DOTALL)
@@ -1990,7 +2150,11 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
         ):
             self.assertIn(field, report.review_cycles)
             self.assertIn(field, self.docs)
-        self.assertIn("durable current-plan totals", self.docs)
+        self.assertIn("Review materializations\nare timestamp-windowed too", self.docs)
+        self.assertIn(
+            "counted only when the event that carries one falls inside the\nwindow",
+            self.docs,
+        )
         self.assertIn("recovered reopen\nbackfills", self.docs)
         self.assertIn("not fresh attempts", self.docs)
 
@@ -2037,6 +2201,23 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
             f"schema version {runner.STATE_SCHEMA_VERSION}", state_files
         )
         self.assertIn(f"`version: {runner.STATE_SCHEMA_VERSION}`", state_files)
+
+    def test_json_output_pins_windowed_metrics_contract(self) -> None:
+        section = self.docs.split("## JSON Output", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("`metrics --json`", section)
+        self.assertIn(
+            "narrowing `--since-days` never\nraises a count", section
+        )
+        self.assertIn(
+            "skipped before its event log is read", section
+        )
+        for field in (
+            "state_dirs_scanned",
+            "state_dirs_active",
+            "review_cycles.unique_materializations",
+            "review_cycles.repairs_materialized",
+        ):
+            self.assertIn(field, section)
 
     def test_metrics_docs_match_default_window(self) -> None:
         self.assertEqual(7, metrics.DEFAULT_SINCE_DAYS)

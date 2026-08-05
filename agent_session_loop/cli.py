@@ -23,6 +23,7 @@ from . import contracts, harnesses, run_flags, session_overview, tail
 _WORKBENCH_DEFAULT_HOST = "127.0.0.1"  # workbench_server.DEFAULT_HOST
 _WORKBENCH_DEFAULT_PORT = 8765  # workbench_server.DEFAULT_PORT
 _METRICS_DEFAULT_SINCE_DAYS = 7  # metrics.DEFAULT_SINCE_DAYS
+_RETENTION_DEFAULT_MAX_AGE_DAYS = 30.0  # retention.DEFAULT_MAX_AGE_DAYS
 
 
 _WORKBENCH_SERVE_CHILD_DESTS = {
@@ -727,6 +728,50 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     compact_state_parser.set_defaults(
         handler_ref="compact_state:compact_state_from_args"
     )
+
+    gc_parser = subparsers.add_parser(
+        "gc",
+        help=(
+            "Reclaim persisted run directories older than an age cutoff, for "
+            "one plan or the whole state root (default: dry-run)."
+        ),
+    )
+    gc_parser.add_argument(
+        "plan_dir",
+        nargs="?",
+        help="Split plan directory to sweep (default: every plan in the state root)",
+    )
+    gc_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    gc_parser.add_argument(
+        "--max-age-days",
+        type=float,
+        default=_RETENTION_DEFAULT_MAX_AGE_DAYS,
+        metavar="DAYS",
+        help=(
+            "Reclaim runs that finished at least this many days ago "
+            f"(default: {_RETENTION_DEFAULT_MAX_AGE_DAYS:g})"
+        ),
+    )
+    gc_mode = gc_parser.add_mutually_exclusive_group()
+    gc_mode.add_argument(
+        "--apply",
+        action="store_true",
+        help="Delete the reclaimable run directories (default: dry-run, no writes)",
+    )
+    gc_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Project the reclaim without deleting anything (the default)",
+    )
+    gc_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    gc_parser.set_defaults(handler_ref="retention:gc_from_args")
 
     migrate_state_parser = subparsers.add_parser(
         "migrate-state",

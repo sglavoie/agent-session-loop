@@ -581,6 +581,8 @@ def _build_running_row(
 
 def scan_running_rows(
     state_root_path: str | Path | None = None,
+    *,
+    reclaim: bool = True,
 ) -> tuple[
     tuple[RunningRow, ...],
     tuple[StaleLock, ...],
@@ -609,6 +611,10 @@ def scan_running_rows(
     Returns ``(rows, stale_locks, skipped)``. ``rows`` is sorted newest-start
     first via :func:`running_sort_key`; the stale and skipped tuples preserve
     discovery order so callers can correlate them with directory iteration.
+
+    Reading a lock reclaims it when this host has proven its owner dead. Pass
+    ``reclaim=False`` to classify without that side effect, which is what a
+    caller that has promised to write nothing needs.
     """
     state_root = state.state_root(state_root_path)
     rows: list[RunningRow] = []
@@ -670,7 +676,9 @@ def scan_running_rows(
                 )
             )
             continue
-        lock_info = state._read_lock_path(lock_path, canonical_plan_dir)
+        lock_info = state._read_lock_path(
+            lock_path, canonical_plan_dir, reclaim=reclaim
+        )
         if lock_info is None:
             continue
         if lock_info.stale:

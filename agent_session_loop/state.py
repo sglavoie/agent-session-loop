@@ -11,14 +11,16 @@ import argparse
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import shlex
 import socket
 import sys
+import time
 from typing import Any
 
 from . import (
@@ -38,6 +40,15 @@ LOCK_FILE_NAME = "lock.json"
 # plan lock: abandonment runs *while* another process holds or is taking that
 # lock, so the two claims have to be independent.
 ABANDON_CLAIM_FILE_NAME = "abandon.lock"
+# Sidecar `flock` target that serializes every mutation of the plan lock. The
+# lock file itself cannot play this role: it is created and unlinked, so two
+# callers holding that path can be looking at different files.
+LOCK_MUTEX_FILE_NAME = "lock.mutex"
+# How long a lock mutation waits for that mutex. Each critical section is a
+# read plus one create or unlink, so contention past this bound means a holder
+# is wedged rather than busy.
+LOCK_MUTEX_WAIT_SECONDS = 5.0
+LOCK_MUTEX_POLL_SECONDS = 0.01
 RUNS_DIR_NAME = "runs"
 RESULT_FILE_NAME = "result.json"
 TURN_DIR_PREFIX = "turn-"
@@ -377,7 +388,97 @@ def _coerce_pid(value: Any) -> int | None:
     return pid if pid > 0 else None
 
 
-def _read_lock_path(lock_path: Path, expected_plan_dir: Path) -> LockInfo | None:
+@contextmanager
+def _plan_lock_mutex(
+    lock_path: Path, *, wait_seconds: float | None = None
+) -> Iterator[bool]:
+    """Hold the per-plan exclusive claim on mutating the lock file.
+
+    Reclaim, takeover, publication, unlock and release all replace the lock
+    file, so none of them can be ordered by the lock file itself: a validated
+    payload says nothing about what occupies that path one syscall later. This
+    sidecar is never unlinked, so an ``flock`` on it is a stable identity every
+    mutator can queue behind. Yields ``False`` when the claim could not be
+    taken within ``wait_seconds`` so each caller picks its own degradation;
+    ``None`` reads :data:`LOCK_MUTEX_WAIT_SECONDS` at call time, so a test can
+    observe a contended claim without holding the real bound.
+    """
+    mutex_path = lock_path.parent / LOCK_MUTEX_FILE_NAME
+    bound = LOCK_MUTEX_WAIT_SECONDS if wait_seconds is None else wait_seconds
+    fd: int | None = None
+    held = False
+    try:
+        fd = os.open(mutex_path, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError:
+        fd = None
+    if fd is not None:
+        deadline = time.monotonic() + max(bound, 0.0)
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(LOCK_MUTEX_POLL_SECONDS)
+    try:
+        yield held
+    finally:
+        if fd is not None:
+            if held:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            os.close(fd)
+
+
+def _lock_mutex_unavailable(lock_path: Path) -> str:
+    return (
+        f"could not claim the lock mutex at "
+        f"{lock_path.parent / LOCK_MUTEX_FILE_NAME} within "
+        f"{LOCK_MUTEX_WAIT_SECONDS:g}s; another process is mutating this plan's lock"
+    )
+
+
+def _lock_mutex_error(lock_path: Path) -> StateError:
+    return StateError(_lock_mutex_unavailable(lock_path))
+
+
+def _reclaim_dead_local_lock(lock_path: Path, expected_raw: dict[str, Any]) -> None:
+    """Remove a lock this host has just proven its owner cannot be holding.
+
+    The proof is re-established under the mutex and the file is unlinked before
+    it is released, so no takeover or publication can land in between. Without
+    that ordering two readers can both validate the same dead payload and the
+    slower one deletes whatever replaced it, leaving two runners on one plan.
+    Best-effort throughout — hygiene must never break a read path, so a
+    contended mutex leaves the lock for the next reader instead of waiting it
+    out or removing it unserialized.
+    """
+    reclaimed = False
+    with _plan_lock_mutex(lock_path) as held:
+        if held and _read_json_object_safe(lock_path) == expected_raw:
+            pid = _coerce_pid(expected_raw.get("pid"))
+            if pid is not None and not is_pid_running(pid):
+                try:
+                    lock_path.unlink()
+                except OSError:
+                    pass
+                else:
+                    reclaimed = True
+    if reclaimed:
+        print(
+            f"agent-session-loop: reclaimed stale lock at {lock_path} "
+            f"(pid {expected_raw.get('pid')} is not running on this host)",
+            file=sys.stderr,
+        )
+
+
+def _read_lock_path(
+    lock_path: Path, expected_plan_dir: Path, *, reclaim: bool = True
+) -> LockInfo | None:
     if not lock_path.exists():
         return None
 
@@ -419,6 +520,12 @@ def _read_lock_path(lock_path: Path, expected_plan_dir: Path) -> LockInfo | None
     elif not is_pid_running(pid):
         stale = True
         reason = f"pid {pid} is not running"
+        if reclaim and hostname is not None:
+            # Reaching here with a hostname means it is this host's, so the
+            # local process table is the one that owns the pid and its absence
+            # is proof. A legacy lock carrying no hostname names no process
+            # table at all and keeps needing a deliberate `asl unlock`.
+            _reclaim_dead_local_lock(lock_path, raw)
 
     return LockInfo(
         path=lock_path,
@@ -436,6 +543,25 @@ def read_lock_info(plan_dir: str | Path, state_dir: str | Path | None = None) ->
     return _read_lock_path(lock_path_for_plan(canonical_plan_dir, state_dir), canonical_plan_dir)
 
 
+def inspect_lock_info(
+    plan_dir: str | Path, state_dir: str | Path | None = None
+) -> LockInfo | None:
+    """Classify a plan's lock without ever removing it.
+
+    :func:`read_lock_info` reclaims a lock this host has proven dead, which is
+    the hygiene most commands want. A caller that has promised to write nothing
+    — `asl gc` in either mode — needs the classification without the side
+    effect, so that its projection is a function of the corpus rather than of
+    the order in which it happened to read.
+    """
+    canonical_plan_dir = plans.canonicalize_path(plan_dir)
+    return _read_lock_path(
+        lock_path_for_plan(canonical_plan_dir, state_dir),
+        canonical_plan_dir,
+        reclaim=False,
+    )
+
+
 def acquire_lock(
     plan_dir: str | Path,
     state_dir: str | Path | None = None,
@@ -446,6 +572,9 @@ def acquire_lock(
 
     A lock recorded on another host is refused rather than removed: nothing
     here can tell a dead remote runner from a live one.
+
+    The takeover and the publication run under the per-plan mutex, so a reader
+    that proved the old lock dead cannot unlink the replacement published here.
     """
     snapshot = plans.inspect_plan(plan_dir)
     lock_path = lock_path_for_plan(snapshot.plan_dir, state_dir)
@@ -464,54 +593,83 @@ def acquire_lock(
     }
 
     stolen_lock: LockInfo | None = None
-    for _attempt in range(2):
-        try:
-            fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-        except FileExistsError as error:
-            existing = read_lock_info(snapshot.plan_dir, state_dir)
-            if existing is not None and existing.stale and not existing.foreign_host:
-                stolen_lock = existing
-                try:
-                    lock_path.unlink()
-                except FileNotFoundError:
-                    pass
-                continue
-            if existing is None:
-                continue
-            if existing.foreign_host:
+    with _plan_lock_mutex(lock_path) as held:
+        if not held:
+            raise _lock_mutex_error(lock_path)
+        for _attempt in range(2):
+            try:
+                fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            except FileExistsError as error:
+                # Reading with `reclaim=False`: the mutex is already held, and
+                # this path does its own proven removal below.
+                existing = _read_lock_path(
+                    lock_path, snapshot.plan_dir, reclaim=False
+                )
+                if (
+                    existing is not None
+                    and existing.stale
+                    and not existing.foreign_host
+                ):
+                    stolen_lock = existing
+                    try:
+                        lock_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    continue
+                if existing is None:
+                    continue
+                if existing.foreign_host:
+                    raise StateError(
+                        f"plan is locked by pid {existing.pid} on host "
+                        f"{existing.owner_hostname} at {lock_path}; this host cannot "
+                        "tell whether that runner is alive — clear it with "
+                        "'asl unlock' once you have confirmed it is gone"
+                    ) from error
                 raise StateError(
-                    f"plan is locked by pid {existing.pid} on host "
-                    f"{existing.owner_hostname} at {lock_path}; this host cannot "
-                    "tell whether that runner is alive — clear it with "
-                    "'asl unlock' once you have confirmed it is gone"
+                    f"plan is locked by pid {existing.pid} at {lock_path}"
                 ) from error
-            raise StateError(
-                f"plan is locked by pid {existing.pid} at {lock_path}"
-            ) from error
 
-        with os.fdopen(fd, "w", encoding="utf-8") as lock_file:
-            json.dump(payload, lock_file, sort_keys=True)
-            lock_file.write("\n")
-        lock_info = read_lock_info(snapshot.plan_dir, state_dir)
-        if lock_info is None:
-            raise StateError(f"created lock disappeared: {lock_path}")
-        if stolen_lock is not None:
-            mark_run_abandoned(
-                lock_path.parent,
-                lock_info=stolen_lock,
-                trigger=ABANDONED_TRIGGER_LOCK_TAKEOVER,
-            )
-        return lock_info
+            with os.fdopen(fd, "w", encoding="utf-8") as lock_file:
+                json.dump(payload, lock_file, sort_keys=True)
+                lock_file.write("\n")
+            lock_info = _read_lock_path(lock_path, snapshot.plan_dir, reclaim=False)
+            if lock_info is None:
+                raise StateError(f"created lock disappeared: {lock_path}")
+            if stolen_lock is not None:
+                mark_run_abandoned(
+                    lock_path.parent,
+                    lock_info=stolen_lock,
+                    trigger=ABANDONED_TRIGGER_LOCK_TAKEOVER,
+                )
+            return lock_info
 
     raise StateError(f"could not acquire lock at {lock_path}")
 
 
 def release_lock(plan_dir: str | Path, state_dir: str | Path | None = None) -> None:
+    """Remove this run's lock, but never without holding the per-plan mutex.
+
+    A timed-out claim means another process is mutating this path right now, so
+    the file here at the end of the wait may already be a replacement owner's
+    live lock rather than this run's record. Fail closed and leave it: release
+    runs in teardown, where raising would replace a finished run's result with
+    an error, and the lock left behind names a pid on this host — the next read
+    reclaims it once this process exits.
+    """
     lock_path = lock_path_for_plan(plan_dir, state_dir)
-    try:
-        lock_path.unlink()
-    except FileNotFoundError:
-        return
+    with _plan_lock_mutex(lock_path) as held:
+        if not held:
+            print(
+                f"agent-session-loop: left the lock at {lock_path} in place — "
+                f"{_lock_mutex_unavailable(lock_path)}. The next read reclaims "
+                "it once this process exits.",
+                file=sys.stderr,
+            )
+            return
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            return
 
 
 def unlock_plan(
@@ -522,27 +680,36 @@ def unlock_plan(
 ) -> UnlockResult:
     canonical_plan_dir = plans.canonicalize_path(plan_dir)
     lock_path = lock_path_for_plan(canonical_plan_dir, state_dir)
-    lock_info = _read_lock_path(lock_path, canonical_plan_dir)
 
-    if lock_info is None:
-        return UnlockResult(
-            path=lock_path,
-            had_lock=False,
-            removed=False,
-            was_active=False,
-            was_stale=False,
-            message=f"no lock present at {lock_path}",
-        )
+    with _plan_lock_mutex(lock_path) as held:
+        # `reclaim=False` under the mutex: the removal below is this call's own
+        # job and its report has to describe the lock it actually removed.
+        lock_info = _read_lock_path(lock_path, canonical_plan_dir, reclaim=False)
 
-    if lock_info.active and not force:
-        raise StateError(
-            f"active lock held by pid {lock_info.pid} at {lock_path}; use --force to remove it"
-        )
+        if lock_info is None:
+            # Nothing to serialize, and a plan that never ran has no state
+            # directory to hold the sidecar in the first place.
+            return UnlockResult(
+                path=lock_path,
+                had_lock=False,
+                removed=False,
+                was_active=False,
+                was_stale=False,
+                message=f"no lock present at {lock_path}",
+            )
 
-    try:
-        lock_path.unlink()
-    except FileNotFoundError:
-        pass
+        if not held:
+            raise _lock_mutex_error(lock_path)
+
+        if lock_info.active and not force:
+            raise StateError(
+                f"active lock held by pid {lock_info.pid} at {lock_path}; use --force to remove it"
+            )
+
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
     state_label = "active" if lock_info.active else "stale"
     return UnlockResult(
@@ -616,6 +783,54 @@ def _lock_payload(lock_info: LockInfo | None, lock_path: Path) -> dict[str, Any]
     }
 
 
+def _parse_wait_moment(raw: Any) -> datetime | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment
+
+
+def waiting_for_reply_ceiling(
+    waiting_for_reply: dict[str, Any],
+) -> datetime | None:
+    """Project the instant a wait runs out of unsupervised budget.
+
+    Records written before the ceiling became a rolling bound carry only a
+    static ``hard_deadline`` and are read exactly as they were written. Newer
+    records carry the ceiling span too, so the deadline rolls forward with the
+    last lease activity the runner observed: while a supervisor keeps renewing,
+    the wait has no terminal instant to compare against.
+    """
+    raw_deadline = waiting_for_reply.get("unsupervised_deadline_at")
+    if raw_deadline is None:
+        return _parse_wait_moment(waiting_for_reply.get("hard_deadline"))
+    deadline = _parse_wait_moment(raw_deadline)
+    if deadline is None:
+        return None
+    ceiling = waiting_for_reply.get("unsupervised_ceiling_seconds")
+    if (
+        isinstance(ceiling, bool)
+        or not isinstance(ceiling, (int, float))
+        or not math.isfinite(ceiling)
+        or ceiling <= 0
+    ):
+        return deadline
+    last_lease = _parse_wait_moment(
+        waiting_for_reply.get("last_lease_activity_at")
+    )
+    if last_lease is None:
+        return deadline
+    return max(deadline, last_lease + timedelta(seconds=ceiling))
+
+
 def waiting_for_reply_status(
     waiting_for_reply: dict[str, Any],
     *,
@@ -623,22 +838,13 @@ def waiting_for_reply_status(
     now: datetime | None = None,
 ) -> str:
     """Classify whether a persisted wait still has a runner to accept a reply."""
-    raw_deadline = waiting_for_reply.get("hard_deadline")
-    if not isinstance(raw_deadline, str) or not raw_deadline.strip():
+    ceiling_deadline = waiting_for_reply_ceiling(waiting_for_reply)
+    if ceiling_deadline is None:
         return WAITING_FOR_REPLY_STATUS_INVALID
-    deadline_text = raw_deadline.strip()
-    if deadline_text.endswith("Z"):
-        deadline_text = deadline_text[:-1] + "+00:00"
-    try:
-        hard_deadline = datetime.fromisoformat(deadline_text)
-    except ValueError:
-        return WAITING_FOR_REPLY_STATUS_INVALID
-    if hard_deadline.tzinfo is None:
-        hard_deadline = hard_deadline.replace(tzinfo=timezone.utc)
     resolved_now = now if now is not None else datetime.now(timezone.utc)
     if resolved_now.tzinfo is None:
         resolved_now = resolved_now.replace(tzinfo=timezone.utc)
-    if hard_deadline <= resolved_now:
+    if ceiling_deadline <= resolved_now:
         return WAITING_FOR_REPLY_STATUS_EXPIRED
     if lock_info is None or not lock_info.active:
         return WAITING_FOR_REPLY_STATUS_EXPIRED
@@ -1544,12 +1750,16 @@ def _print_text_status(payload: dict[str, Any]) -> None:
             f"since {waiting_for_reply.get('started_at') or 'unknown'}"
         )
         base_deadline = waiting_for_reply.get("base_deadline")
-        hard_deadline = waiting_for_reply.get("hard_deadline")
-        if base_deadline or hard_deadline:
+        ceiling_deadline = waiting_for_reply.get("unsupervised_deadline_at")
+        ceiling_label = "unsupervised"
+        if ceiling_deadline is None:
+            ceiling_deadline = waiting_for_reply.get("hard_deadline")
+            ceiling_label = "hard"
+        if base_deadline or ceiling_deadline:
             print(
                 "  Deadlines: "
                 f"base {base_deadline or 'unknown'}, "
-                f"hard {hard_deadline or 'unknown'}"
+                f"{ceiling_label} {ceiling_deadline or 'unknown'}"
             )
         print(f"  Status: {waiting_status}")
 

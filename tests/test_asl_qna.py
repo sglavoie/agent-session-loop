@@ -238,6 +238,122 @@ class QnAContextLoaderTests(unittest.TestCase):
             )
             self.assertIn(payload["pause_command"], payload["rendered_prompt"])
             self.assertIn("Choose blue or green?", payload["rendered_prompt"])
+            self.assertIn(
+                "- Hard deadline: 2999-07-24T12:15:00+00:00",
+                payload["rendered_prompt"],
+            )
+            self.assertNotIn("Unsupervised", payload["rendered_prompt"])
+
+    def test_supervised_wait_past_its_anchor_still_offers_waiting_path(
+        self,
+    ) -> None:
+        # The persisted anchor lapsed long ago; only the lease activity and
+        # the ceiling span keep this wait live.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path = self._seed_plan(tmp_dir)
+            last_message_path = str(tmp_dir / "last-message.txt")
+            waiting = {
+                "question_id": "question-1",
+                "session": 1,
+                "session_id": "1",
+                "session_number": 1,
+                "turn_index": 1,
+                "started_at": "2026-07-24T12:00:00+00:00",
+                "base_deadline": "2026-07-24T12:05:00+00:00",
+                "unsupervised_deadline_at": "2026-07-24T12:30:00+00:00",
+                "unsupervised_ceiling_seconds": 1800.0,
+                "last_lease_activity_at": "2999-07-24T12:01:00+00:00",
+            }
+            self._write_state(
+                state_path,
+                paused=False,
+                last_message_path=last_message_path,
+                payload_overrides={
+                    "waiting_for_reply": waiting,
+                    "run_config": {"state_dir_override": str(state_dir)},
+                },
+            )
+            self._write_last_message(last_message_path, "Choose blue or green?\n")
+            state.acquire_lock(plan_dir, state_dir)
+
+            try:
+                context = qna.load_qna_context(plan_dir, state_dir=state_dir)
+                payload = qna.questions_payload(context)
+                status_payload = state.status_payload(
+                    plans.inspect_plan(plan_dir),
+                    state_dir,
+                )
+            finally:
+                state.release_lock(plan_dir, state_dir)
+
+            self.assertEqual("waiting", context.context_kind)
+            self.assertEqual("question-1", context.question_id)
+            self.assertEqual(waiting, payload["waiting_for_reply"])
+            self.assertEqual(
+                state.WAITING_FOR_REPLY_STATUS_LIVE,
+                status_payload["waiting_for_reply_status"],
+            )
+            self.assertIn(
+                "- Unsupervised deadline: 2026-07-24T12:30:00+00:00 "
+                "(rolls forward with every lease that proves a supervisor "
+                "alive)",
+                payload["rendered_prompt"],
+            )
+            self.assertIn(
+                "- Unsupervised ceiling: 1800.0s",
+                payload["rendered_prompt"],
+            )
+            self.assertNotIn("Hard deadline", payload["rendered_prompt"])
+
+    def test_unwatched_wait_past_its_ceiling_recovers_as_expired(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, state_path = self._seed_plan(tmp_dir)
+            last_message_path = str(tmp_dir / "last-message.txt")
+            waiting = {
+                "question_id": "question-1",
+                "session": 1,
+                "session_id": "1",
+                "session_number": 1,
+                "turn_index": 1,
+                "started_at": "2026-07-24T12:00:00+00:00",
+                "base_deadline": "2026-07-24T12:05:00+00:00",
+                "unsupervised_deadline_at": "2026-07-24T12:30:00+00:00",
+                "unsupervised_ceiling_seconds": 1800.0,
+                "last_lease_activity_at": None,
+            }
+            self._write_state(
+                state_path,
+                paused=False,
+                last_message_path=last_message_path,
+                payload_overrides={
+                    "waiting_for_reply": waiting,
+                    "run_config": {"state_dir_override": str(state_dir)},
+                },
+            )
+            self._write_last_message(last_message_path, "Choose blue or green?\n")
+            state.acquire_lock(plan_dir, state_dir)
+
+            try:
+                context = qna.load_qna_context(plan_dir, state_dir=state_dir)
+            finally:
+                state.release_lock(plan_dir, state_dir)
+
+            self.assertEqual("pause", context.context_kind)
+            self.assertEqual(
+                qna.EXPIRED_WAIT_PAUSE_REASON,
+                context.pause_reason,
+            )
+            self.assertEqual(
+                {
+                    "question_id": "question-1",
+                    "unsupervised_deadline_at": "2026-07-24T12:30:00+00:00",
+                    "unsupervised_ceiling_seconds": 1800.0,
+                    "last_lease_activity_at": None,
+                },
+                context.pause_details,
+            )
 
     def test_rebased_wait_after_suspend_still_offers_waiting_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -255,7 +371,8 @@ class QnAContextLoaderTests(unittest.TestCase):
                     "turn_index": 1,
                     "started_at": "2026-07-24T12:00:00+00:00",
                     "base_deadline": "2026-07-24T12:05:00+00:00",
-                    "hard_deadline": "2026-07-24T12:30:00+00:00",
+                    "unsupervised_deadline_at": "2026-07-24T12:30:00+00:00",
+                    "unsupervised_ceiling_seconds": 1800.0,
                     "last_lease_activity_at": None,
                 }
             }
@@ -265,7 +382,7 @@ class QnAContextLoaderTests(unittest.TestCase):
                 base_deadline=datetime(
                     2999, 7, 24, 20, 3, 0, tzinfo=timezone.utc
                 ),
-                hard_deadline=datetime(
+                unsupervised_deadline_at=datetime(
                     2999, 7, 24, 20, 28, 0, tzinfo=timezone.utc
                 ),
                 persistence=runner._RunPersistence(write_state=False),
@@ -277,7 +394,7 @@ class QnAContextLoaderTests(unittest.TestCase):
             )
             self.assertEqual(
                 "2999-07-24T20:28:00+00:00",
-                waiting["hard_deadline"],
+                waiting["unsupervised_deadline_at"],
             )
             self._write_state(
                 state_path,

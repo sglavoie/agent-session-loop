@@ -243,8 +243,18 @@ def _mailbox_message(payload: dict[str, Any]) -> str:
             f"turn {payload.get('turn_index', 'unknown')}",
             f"pending outbox {payload.get('pending_outbox', 'unknown')}",
             f"base deadline {payload.get('base_deadline', 'unknown')}",
-            f"hard deadline {payload.get('hard_deadline', 'unknown')}",
         ]
+        unsupervised_deadline = payload.get("unsupervised_deadline_at")
+        if unsupervised_deadline is None:
+            details.append(
+                f"hard deadline {payload.get('hard_deadline', 'unknown')}"
+            )
+        else:
+            details.append(f"unsupervised deadline {unsupervised_deadline}")
+            details.append(
+                "unsupervised ceiling "
+                f"{payload.get('unsupervised_ceiling_seconds', 'unknown')}s"
+            )
         lease_activity = payload.get("last_lease_activity_at")
         if lease_activity is not None:
             details.append(f"last lease activity {lease_activity}")

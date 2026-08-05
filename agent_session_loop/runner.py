@@ -210,13 +210,15 @@ WORKER_MODE_SKILL = "skill"
 REVIEW_GUARD_EXCLUDE_ENV_VAR = "ASL_REVIEW_GUARD_EXCLUDE"
 
 # A runner that receives a reply-capable pause remains live for five minutes.
-# An active supervisor lease may extend that deadline one minute at a time,
-# but never beyond thirty minutes from the start of the wait. Environment
+# An active supervisor lease may extend that deadline one minute at a time.
+# The ceiling below bounds *unsupervised* time, not wall clock: it is measured
+# from the last lease that proved a supervisor alive, so a watched wait outlives
+# it while an unwatched one still ends within thirty minutes. Environment
 # overrides are deliberately narrow test seams; invalid, non-finite, or
 # non-positive values fall back to these production defaults.
 MAILBOX_REPLY_WAIT_BASE_SECONDS = 5 * 60.0
 MAILBOX_REPLY_WAIT_LEASE_EXTENSION_SECONDS = 60.0
-MAILBOX_REPLY_WAIT_HARD_SECONDS = 30 * 60.0
+MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_SECONDS = 30 * 60.0
 MAILBOX_REPLY_WAIT_POLL_SECONDS = 2.0
 MAILBOX_REPLY_WAIT_IO_GRACE_SECONDS = 10.0
 # The wait paces itself on the monotonic clock, which freezes across system
@@ -236,10 +238,10 @@ MAILBOX_REPLY_WAIT_SUSPEND_SKEW_SECONDS = 5.0
 # window (mailbox.MAILBOX_LEASE_FRESH_SECONDS, 90 seconds) — roughly eighteen
 # chances at the autopilot's 5-second poll cadence, the tick that actually
 # republishes the projection. Inside the grace a stale lease neither ends the
-# wait nor extends the active deadline, and the hard deadline is never
-# extended. Like the skew threshold above, this is a detection bound rather
-# than an operator budget, exercised through the injected clock seams, so it
-# deliberately has no environment override.
+# wait nor extends the active deadline, and the grace never extends the
+# unsupervised ceiling. Like the skew threshold above, this is a detection
+# bound rather than an operator budget, exercised through the injected clock
+# seams, so it deliberately has no environment override.
 MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS = (
     mailbox.MAILBOX_LEASE_FRESH_SECONDS
 )
@@ -275,7 +277,9 @@ MAILBOX_REPLY_WAIT_BASE_ENV_VAR = "ASL_MAILBOX_REPLY_WAIT_BASE_SECONDS"
 MAILBOX_REPLY_WAIT_LEASE_EXTENSION_ENV_VAR = (
     "ASL_MAILBOX_REPLY_WAIT_LEASE_EXTENSION_SECONDS"
 )
-MAILBOX_REPLY_WAIT_HARD_ENV_VAR = "ASL_MAILBOX_REPLY_WAIT_HARD_SECONDS"
+MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR = (
+    "ASL_MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_SECONDS"
+)
 MAILBOX_REPLY_WAIT_POLL_ENV_VAR = "ASL_MAILBOX_REPLY_WAIT_POLL_SECONDS"
 MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR = (
     "ASL_MAILBOX_REPLY_WAIT_IO_GRACE_SECONDS"
@@ -315,7 +319,7 @@ REVIEW_VERDICT_FINGERPRINT_PREFIX = "review-verdict"
 # (:func:`review.finding_fingerprint`) let the next cycle detect repeated
 # findings across processes; a repeated fingerprint stops the loop without
 # another cycle.
-DEFAULT_MAX_REVIEW_FIX_CYCLES = 2
+DEFAULT_MAX_REVIEW_FIX_CYCLES = 4
 REVIEW_CYCLE_DISPOSITION_ALL_CLEAR = (
     review_continuation.REVIEW_CYCLE_DISPOSITION_ALL_CLEAR
 )
@@ -4903,7 +4907,8 @@ def _waiting_for_reply_payload(
     turn_index: int,
     started_at: datetime,
     base_deadline: datetime,
-    hard_deadline: datetime,
+    unsupervised_deadline_at: datetime,
+    unsupervised_ceiling_seconds: float,
     last_lease_activity_at: datetime | None,
 ) -> dict[str, Any]:
     """Build the compact persisted identity and deadline record for a live wait."""
@@ -4919,7 +4924,7 @@ def _waiting_for_reply_payload(
     moments = (
         ("started_at", started_at),
         ("base_deadline", base_deadline),
-        ("hard_deadline", hard_deadline),
+        ("unsupervised_deadline_at", unsupervised_deadline_at),
     )
     if last_lease_activity_at is not None:
         moments += (("last_lease_activity_at", last_lease_activity_at),)
@@ -4928,15 +4933,29 @@ def _waiting_for_reply_payload(
             raise ValueError(f"{name} must be timezone-aware")
     if base_deadline < started_at:
         raise ValueError("base_deadline must not precede started_at")
-    if hard_deadline < base_deadline:
-        raise ValueError("hard_deadline must not precede base_deadline")
+    if (
+        isinstance(unsupervised_ceiling_seconds, bool)
+        or not isinstance(unsupervised_ceiling_seconds, (int, float))
+        or not math.isfinite(unsupervised_ceiling_seconds)
+        or unsupervised_ceiling_seconds <= 0
+    ):
+        raise ValueError(
+            "unsupervised_ceiling_seconds must be a finite positive number"
+        )
+    # The two deadlines no longer share an anchor: the base ratchets off the
+    # last lease probe while the ceiling rolls off the last *fresh* one, so a
+    # supervised wait legitimately holds a base beyond the current ceiling.
+    # ``unsupervised_deadline_at`` is the ceiling as of the last anchor the
+    # runner persisted; a reader rolls it forward from ``last_lease_activity_at``
+    # and the ceiling span rather than treating it as terminal.
     return {
         "question_id": question_id,
         **_session_identity_payload(session_id),
         "turn_index": turn_index,
         "started_at": _isoformat(started_at),
         "base_deadline": _isoformat(base_deadline),
-        "hard_deadline": _isoformat(hard_deadline),
+        "unsupervised_deadline_at": _isoformat(unsupervised_deadline_at),
+        "unsupervised_ceiling_seconds": float(unsupervised_ceiling_seconds),
         "last_lease_activity_at": (
             _isoformat(last_lease_activity_at)
             if last_lease_activity_at is not None
@@ -4989,6 +5008,7 @@ def _clear_waiting_for_reply(
     lease_supervisor_id: str | None = None,
     suspend_skew_seconds: float | None = None,
     suspend_lease_grace_seconds: float | None = None,
+    unsupervised_seconds: float | None = None,
     resolution_action: mailbox.ResolutionAction | None = None,
     resolution_message_id: str | None = None,
     resolution_seq: int | None = None,
@@ -5045,6 +5065,7 @@ def _clear_waiting_for_reply(
                 ("lease_supervisor_id", lease_supervisor_id),
                 ("suspend_skew_seconds", suspend_skew_seconds),
                 ("suspend_lease_grace_seconds", suspend_lease_grace_seconds),
+                ("unsupervised_seconds", unsupervised_seconds),
                 ("resolution_action", resolution_action),
                 ("resolution_message_id", resolution_message_id),
                 ("resolution_seq", resolution_seq),
@@ -5089,7 +5110,7 @@ def _record_mailbox_reply_wait_preparation_failed(
 class _MailboxReplyWaitSettings:
     base_seconds: float
     lease_extension_seconds: float
-    hard_seconds: float
+    unsupervised_ceiling_seconds: float
     poll_seconds: float
     io_grace_seconds: float
 
@@ -5115,6 +5136,7 @@ class _MailboxReplyWaitResult:
     lease_supervisor_id: str | None = None
     suspend_skew_seconds: float | None = None
     suspend_lease_grace_seconds: float | None = None
+    unsupervised_seconds: float | None = None
 
 
 class _MailboxReplyWaitUnavailable(Exception):
@@ -5158,9 +5180,9 @@ def _mailbox_reply_wait_settings(
         MAILBOX_REPLY_WAIT_LEASE_EXTENSION_SECONDS,
         environ=environ,
     )
-    hard_seconds = _finite_positive_env(
-        MAILBOX_REPLY_WAIT_HARD_ENV_VAR,
-        MAILBOX_REPLY_WAIT_HARD_SECONDS,
+    unsupervised_ceiling_seconds = _finite_positive_env(
+        MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR,
+        MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_SECONDS,
         environ=environ,
     )
     poll_seconds = _finite_positive_env(
@@ -5174,13 +5196,13 @@ def _mailbox_reply_wait_settings(
         environ=environ,
     )
     # A malformed cross-field override must not move the base deadline beyond
-    # the absolute hard bound. Clamp the base instead of extending the hard
-    # limit so the wait remains bounded under every environment value.
-    base_seconds = min(base_seconds, hard_seconds)
+    # the unsupervised ceiling. Clamp the base instead of raising the ceiling
+    # so an unwatched wait remains bounded under every environment value.
+    base_seconds = min(base_seconds, unsupervised_ceiling_seconds)
     return _MailboxReplyWaitSettings(
         base_seconds=base_seconds,
         lease_extension_seconds=lease_extension_seconds,
-        hard_seconds=hard_seconds,
+        unsupervised_ceiling_seconds=unsupervised_ceiling_seconds,
         poll_seconds=poll_seconds,
         io_grace_seconds=io_grace_seconds,
     )
@@ -5408,9 +5430,11 @@ def _prepare_mailbox_reply_wait(
         base_deadline=(
             resolved_started_at + timedelta(seconds=settings.base_seconds)
         ),
-        hard_deadline=(
-            resolved_started_at + timedelta(seconds=settings.hard_seconds)
+        unsupervised_deadline_at=(
+            resolved_started_at
+            + timedelta(seconds=settings.unsupervised_ceiling_seconds)
         ),
+        unsupervised_ceiling_seconds=settings.unsupervised_ceiling_seconds,
         last_lease_activity_at=None,
     )
     try:
@@ -5482,18 +5506,16 @@ def _rebase_waiting_deadlines(
     *,
     question_id: str,
     base_deadline: datetime,
-    hard_deadline: datetime,
+    unsupervised_deadline_at: datetime,
     persistence: _RunPersistence,
 ) -> None:
     """Re-anchor persisted wall-clock deadlines without emitting a new event."""
     for name, moment in (
         ("base_deadline", base_deadline),
-        ("hard_deadline", hard_deadline),
+        ("unsupervised_deadline_at", unsupervised_deadline_at),
     ):
         if moment.tzinfo is None or moment.utcoffset() is None:
             raise ValueError(f"{name} must be timezone-aware")
-    if hard_deadline < base_deadline:
-        raise ValueError("hard_deadline must not precede base_deadline")
     with persistence.lock:
         current = payload.get("waiting_for_reply")
         if not isinstance(current, dict):
@@ -5502,7 +5524,7 @@ def _rebase_waiting_deadlines(
             return
         rebased = {
             "base_deadline": _isoformat(base_deadline),
-            "hard_deadline": _isoformat(hard_deadline),
+            "unsupervised_deadline_at": _isoformat(unsupervised_deadline_at),
         }
         if all(current.get(key) == value for key, value in rebased.items()):
             return
@@ -5517,6 +5539,7 @@ def _lease_evidence(
     *,
     suspend_skew_seconds: float = 0.0,
     suspend_lease_grace_seconds: float = 0.0,
+    unsupervised_seconds: float | None = None,
 ) -> dict[str, str | float | None]:
     """Name the lease and clock skew a failing wait saw, so the exit is attributable."""
     evidence: dict[str, str | float | None] = {}
@@ -5530,6 +5553,8 @@ def _lease_evidence(
         evidence["suspend_skew_seconds"] = suspend_skew_seconds
     if suspend_lease_grace_seconds > 0.0:
         evidence["suspend_lease_grace_seconds"] = suspend_lease_grace_seconds
+    if unsupervised_seconds is not None:
+        evidence["unsupervised_seconds"] = unsupervised_seconds
     return evidence
 
 
@@ -5548,10 +5573,9 @@ def _wait_for_mailbox_reply(
     sleep: Callable[[float], None] = time.sleep,
     wall_clock: Callable[[], datetime] = _utc_now,
 ) -> _MailboxReplyWaitResult:
-    """Poll one closure with monotonic base, lease-extension, and hard bounds."""
+    """Poll one closure under monotonic base, lease-extension, and ceiling bounds."""
     started = monotonic() if started_monotonic is None else started_monotonic
     active_deadline = started + settings.base_seconds
-    hard_deadline = started + settings.hard_seconds
     io_failure_started: float | None = None
     pending_outbox: int | None = None
     mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir_arg)
@@ -5561,8 +5585,21 @@ def _wait_for_mailbox_reply(
     suspend_skew_seconds = 0.0
     suspend_lease_grace_seconds = 0.0
     lease_grace_until: float | None = None
+    # The wait begins where supervision was last known, so a wait that never
+    # probes a lease still measures its unsupervised stretch from a real
+    # instant rather than from nothing.
+    last_fresh_lease = started
     last_skew_monotonic = monotonic()
     last_skew_wall = wall_clock()
+
+    def unsupervised_elapsed() -> float:
+        return max(0.0, monotonic() - last_fresh_lease)
+
+    # The ceiling bounds unsupervised time, so it rolls forward with every
+    # lease that proves a supervisor alive: a watched wait has no terminal
+    # instant, while an unwatched one ends a full ceiling after the last proof.
+    def unsupervised_deadline() -> float:
+        return last_fresh_lease + settings.unsupervised_ceiling_seconds
 
     while True:
         if poll_controls is not None:
@@ -5573,8 +5610,8 @@ def _wait_for_mailbox_reply(
         # threshold on monotonic time since the previous iteration means the
         # process was suspended for ~skew seconds. Re-express the persisted
         # wall-clock deadlines around the surviving monotonic budget so
-        # status tooling keeps reporting this wait live; the budget itself
-        # is deliberately not extended.
+        # status tooling keeps reporting this wait live; the active deadline
+        # itself is deliberately not extended.
         skew_monotonic = monotonic()
         skew_wall = wall_clock()
         skew = (
@@ -5591,6 +5628,10 @@ def _wait_for_mailbox_reply(
             lease_grace_until = (
                 skew_monotonic + MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS
             )
+            # Suspended time is not supervision loss: nobody could have proven
+            # liveness while the machine slept, so the unsupervised stretch
+            # restarts at the wake instant.
+            last_fresh_lease = skew_monotonic
             _rebase_waiting_deadlines(
                 payload,
                 question_id=question_id,
@@ -5598,9 +5639,9 @@ def _wait_for_mailbox_reply(
                 + timedelta(
                     seconds=max(0.0, active_deadline - skew_monotonic)
                 ),
-                hard_deadline=skew_wall
+                unsupervised_deadline_at=skew_wall
                 + timedelta(
-                    seconds=max(0.0, hard_deadline - skew_monotonic)
+                    seconds=max(0.0, unsupervised_deadline() - skew_monotonic)
                 ),
                 persistence=persistence,
             )
@@ -5656,6 +5697,7 @@ def _wait_for_mailbox_reply(
                         suspend_lease_grace_seconds=(
                             suspend_lease_grace_seconds
                         ),
+                        unsupervised_seconds=unsupervised_elapsed(),
                     ),
                 )
             question = next(
@@ -5677,13 +5719,14 @@ def _wait_for_mailbox_reply(
                         suspend_lease_grace_seconds=(
                             suspend_lease_grace_seconds
                         ),
+                        unsupervised_seconds=unsupervised_elapsed(),
                     ),
                 )
 
         now = monotonic()
         if (
             io_failure_reason is None
-            and now < hard_deadline
+            and now < unsupervised_deadline()
             and now >= active_deadline
         ):
             try:
@@ -5707,10 +5750,11 @@ def _wait_for_mailbox_reply(
                         persistence=persistence,
                     )
                 if lease.fresh:
-                    active_deadline = min(
-                        now + settings.lease_extension_seconds,
-                        hard_deadline,
-                    )
+                    # A fresh lease is proof of supervision, so it moves the
+                    # ceiling with it; clamping the extension against a bound
+                    # that just rolled away would be meaningless.
+                    last_fresh_lease = now
+                    active_deadline = now + settings.lease_extension_seconds
                 elif lease_grace_until is None or now >= lease_grace_until:
                     return _MailboxReplyWaitResult(
                         reason=MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
@@ -5721,19 +5765,20 @@ def _wait_for_mailbox_reply(
                             suspend_lease_grace_seconds=(
                                 suspend_lease_grace_seconds
                             ),
+                            unsupervised_seconds=unsupervised_elapsed(),
                         ),
                     )
                 # A non-fresh lease inside the post-suspend grace neither
-                # ends the wait nor ratchets the active deadline: the wait
-                # keeps advancing toward its unchanged hard deadline while
-                # the supervisor re-proves liveness.
+                # ends the wait nor ratchets the active deadline: it proves
+                # nothing, so the wait keeps advancing toward the ceiling
+                # while the supervisor re-proves liveness.
 
         if io_failure_reason is not None:
             if io_failure_started is None:
                 io_failure_started = now
             if (
                 now - io_failure_started >= settings.io_grace_seconds
-                or now >= hard_deadline
+                or now >= unsupervised_deadline()
             ):
                 return _MailboxReplyWaitResult(
                     reason=io_failure_reason,
@@ -5742,6 +5787,7 @@ def _wait_for_mailbox_reply(
                         last_lease,
                         suspend_skew_seconds=suspend_skew_seconds,
                         suspend_lease_grace_seconds=suspend_lease_grace_seconds,
+                        unsupervised_seconds=unsupervised_elapsed(),
                     ),
                 )
             sleep(
@@ -5750,14 +5796,14 @@ def _wait_for_mailbox_reply(
                     min(
                         settings.poll_seconds,
                         (io_failure_started + settings.io_grace_seconds) - now,
-                        hard_deadline - now,
+                        unsupervised_deadline() - now,
                     ),
                 )
             )
             continue
         io_failure_started = None
 
-        if now >= hard_deadline:
+        if now >= unsupervised_deadline():
             return _MailboxReplyWaitResult(
                 reason="timeout",
                 pending_outbox=pending_outbox,
@@ -5765,13 +5811,14 @@ def _wait_for_mailbox_reply(
                     last_lease,
                     suspend_skew_seconds=suspend_skew_seconds,
                     suspend_lease_grace_seconds=suspend_lease_grace_seconds,
+                    unsupervised_seconds=unsupervised_elapsed(),
                 ),
             )
 
         # During a post-suspend lease grace the active deadline stays in the
         # past, so it bounds the sleep only while it is still ahead — pacing
         # on a passed deadline would busy-spin at zero-length sleeps.
-        sleep_bound = min(settings.poll_seconds, hard_deadline - now)
+        sleep_bound = min(settings.poll_seconds, unsupervised_deadline() - now)
         if now < active_deadline:
             sleep_bound = min(sleep_bound, active_deadline - now)
         sleep(max(0.0, sleep_bound))
@@ -12054,6 +12101,11 @@ def _run_locked(
                                 ),
                                 suspend_lease_grace_seconds=(
                                     wait_result.suspend_lease_grace_seconds
+                                    if wait_result is not None
+                                    else None
+                                ),
+                                unsupervised_seconds=(
+                                    wait_result.unsupervised_seconds
                                     if wait_result is not None
                                     else None
                                 ),

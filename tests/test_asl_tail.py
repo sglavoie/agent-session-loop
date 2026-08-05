@@ -191,7 +191,37 @@ class TailFollowerTests(unittest.TestCase):
         )
         self.assertNotIn("notice body", message)
 
+    def test_mailbox_wait_started_event_renders_rolling_ceiling(self) -> None:
+        message = tail._event_message(
+            events.MAILBOX_EVENT,
+            {
+                "action": events.MAILBOX_ACTION_WAIT_STARTED,
+                "question_id": "question-1",
+                "session_id": "9",
+                "turn_index": 3,
+                "pending_outbox": 2,
+                "base_deadline": "2026-07-24T12:05:00+00:00",
+                "unsupervised_deadline_at": "2026-07-24T12:30:00+00:00",
+                "unsupervised_ceiling_seconds": 1800.0,
+                "last_lease_activity_at": "2026-07-24T12:01:00+00:00",
+            },
+        )
+
+        self.assertEqual(
+            "mailbox: reply wait started "
+            "(question question-1, session 9, turn 3, "
+            "pending outbox 2, "
+            "base deadline 2026-07-24T12:05:00+00:00, "
+            "unsupervised deadline 2026-07-24T12:30:00+00:00, "
+            "unsupervised ceiling 1800.0s, "
+            "last lease activity 2026-07-24T12:01:00+00:00)",
+            message,
+        )
+        self.assertNotIn("hard deadline", message)
+
     def test_mailbox_wait_started_event_renders_as_nonterminal_wait(self) -> None:
+        # Historical records carry no rolling ceiling; they keep their original
+        # `hard deadline` rendering.
         message = tail._event_message(
             events.MAILBOX_EVENT,
             {

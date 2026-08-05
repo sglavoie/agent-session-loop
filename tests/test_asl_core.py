@@ -7,7 +7,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import dataclasses
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import errno
 import hashlib
 import importlib.util
@@ -3479,6 +3479,219 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertEqual(
                 state.WAITING_FOR_REPLY_STATUS_EXPIRED,
                 payload["waiting_for_reply_status"],
+            )
+
+    def _active_lock(self) -> state.LockInfo:
+        return state.LockInfo(
+            path=Path("/tmp/plan-lock.json"),
+            pid=os.getpid(),
+            plan_dir="/tmp/plan",
+            created_at="2026-07-24T12:00:00+00:00",
+            stale=False,
+            reason="active",
+            raw={},
+        )
+
+    def test_historical_hard_deadline_waits_classify_unchanged(self) -> None:
+        # Records persisted before the ceiling began rolling carry only the
+        # bare timestamp; they must classify exactly as they always did.
+        lock_info = self._active_lock()
+        started = datetime(2026, 7, 24, 12, 0, tzinfo=timezone.utc)
+        historical = {
+            "question_id": "question-1",
+            "started_at": started.isoformat(),
+            "base_deadline": (started + timedelta(minutes=5)).isoformat(),
+            "hard_deadline": (started + timedelta(minutes=30)).isoformat(),
+            "last_lease_activity_at": (
+                started + timedelta(minutes=29)
+            ).isoformat(),
+        }
+
+        self.assertEqual(
+            state.WAITING_FOR_REPLY_STATUS_LIVE,
+            state.waiting_for_reply_status(
+                historical,
+                lock_info=lock_info,
+                now=started + timedelta(minutes=29),
+            ),
+        )
+        # Recent lease activity cannot roll a historical record forward: it
+        # never recorded the ceiling span that would justify the extension.
+        self.assertEqual(
+            state.WAITING_FOR_REPLY_STATUS_EXPIRED,
+            state.waiting_for_reply_status(
+                historical,
+                lock_info=lock_info,
+                now=started + timedelta(minutes=30),
+            ),
+        )
+        self.assertEqual(
+            state.WAITING_FOR_REPLY_STATUS_EXPIRED,
+            state.waiting_for_reply_status(
+                historical,
+                lock_info=None,
+                now=started + timedelta(minutes=10),
+            ),
+        )
+        for broken in ({}, {"hard_deadline": ""}, {"hard_deadline": "nope"}):
+            self.assertEqual(
+                state.WAITING_FOR_REPLY_STATUS_INVALID,
+                state.waiting_for_reply_status(
+                    broken,
+                    lock_info=lock_info,
+                    now=started,
+                ),
+                msg=f"{broken!r} should be invalid",
+            )
+
+    def test_rolling_ceiling_keeps_supervised_wait_live(self) -> None:
+        lock_info = self._active_lock()
+        started = datetime(2026, 7, 24, 12, 0, tzinfo=timezone.utc)
+        supervised = {
+            "question_id": "question-1",
+            "started_at": started.isoformat(),
+            "base_deadline": (started + timedelta(minutes=5)).isoformat(),
+            "unsupervised_deadline_at": (
+                started + timedelta(minutes=30)
+            ).isoformat(),
+            "unsupervised_ceiling_seconds": 1800.0,
+            "last_lease_activity_at": (
+                started + timedelta(minutes=90)
+            ).isoformat(),
+        }
+
+        # Two hours in, the persisted anchor is 90 minutes stale, but the last
+        # lease proved a supervisor alive 30 minutes ago.
+        self.assertEqual(
+            state.WAITING_FOR_REPLY_STATUS_LIVE,
+            state.waiting_for_reply_status(
+                supervised,
+                lock_info=lock_info,
+                now=started + timedelta(minutes=119),
+            ),
+        )
+        self.assertEqual(
+            state.WAITING_FOR_REPLY_STATUS_EXPIRED,
+            state.waiting_for_reply_status(
+                supervised,
+                lock_info=lock_info,
+                now=started + timedelta(minutes=120),
+            ),
+        )
+        # An absent lock still expires the wait immediately: the projected
+        # ceiling only says nobody proved supervision, not that a runner
+        # remains to accept the reply.
+        self.assertEqual(
+            state.WAITING_FOR_REPLY_STATUS_EXPIRED,
+            state.waiting_for_reply_status(
+                supervised,
+                lock_info=None,
+                now=started + timedelta(minutes=119),
+            ),
+        )
+
+    def test_unwatched_wait_expires_at_its_persisted_ceiling(self) -> None:
+        lock_info = self._active_lock()
+        started = datetime(2026, 7, 24, 12, 0, tzinfo=timezone.utc)
+        unwatched = {
+            "question_id": "question-1",
+            "started_at": started.isoformat(),
+            "base_deadline": (started + timedelta(minutes=5)).isoformat(),
+            "unsupervised_deadline_at": (
+                started + timedelta(minutes=30)
+            ).isoformat(),
+            "unsupervised_ceiling_seconds": 1800.0,
+            "last_lease_activity_at": None,
+        }
+
+        self.assertEqual(
+            state.WAITING_FOR_REPLY_STATUS_LIVE,
+            state.waiting_for_reply_status(
+                unwatched,
+                lock_info=lock_info,
+                now=started + timedelta(minutes=29),
+            ),
+        )
+        self.assertEqual(
+            state.WAITING_FOR_REPLY_STATUS_EXPIRED,
+            state.waiting_for_reply_status(
+                unwatched,
+                lock_info=lock_info,
+                now=started + timedelta(minutes=30),
+            ),
+        )
+        self.assertEqual(
+            state.WAITING_FOR_REPLY_STATUS_INVALID,
+            state.waiting_for_reply_status(
+                {**unwatched, "unsupervised_deadline_at": "nope"},
+                lock_info=lock_info,
+                now=started,
+            ),
+        )
+        # A malformed span degrades to the persisted anchor rather than
+        # discarding a wait that is otherwise well formed.
+        for bad_ceiling in (0, -1.0, float("inf"), "1800", True, None):
+            self.assertEqual(
+                (started + timedelta(minutes=30)),
+                state.waiting_for_reply_ceiling(
+                    {
+                        **unwatched,
+                        "unsupervised_ceiling_seconds": bad_ceiling,
+                        "last_lease_activity_at": (
+                            started + timedelta(minutes=90)
+                        ).isoformat(),
+                    }
+                ),
+                msg=f"ceiling {bad_ceiling!r} should not roll the deadline",
+            )
+
+    def test_status_text_labels_the_rolling_ceiling(self) -> None:
+        # The historical `hard ...` rendering is pinned by
+        # test_status_projects_waiting_for_reply_without_hiding_pause_state.
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            plan_state.mkdir(parents=True)
+            (plan_state / events.STATE_FILE_NAME).write_text(
+                json.dumps(
+                    {
+                        "run_id": "run-1",
+                        "ok": True,
+                        "paused": False,
+                        "reason": "",
+                        "run_started_at": "2026-07-24T11:59:00+00:00",
+                        "run_finished_at": None,
+                        "waiting_for_reply": {
+                            "question_id": "question-1",
+                            "session_id": "1",
+                            "turn_index": 2,
+                            "started_at": "2026-07-24T12:00:00+00:00",
+                            "base_deadline": "2026-07-24T12:05:00+00:00",
+                            "unsupervised_deadline_at": (
+                                "2026-07-24T12:30:00+00:00"
+                            ),
+                            "unsupervised_ceiling_seconds": 1800.0,
+                            "last_lease_activity_at": None,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            payload = state.status_payload(
+                plans.inspect_plan(plan_dir),
+                state_dir,
+            )
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                state._print_text_status(payload)
+
+            self.assertIn(
+                "Deadlines: base 2026-07-24T12:05:00+00:00, "
+                "unsupervised 2026-07-24T12:30:00+00:00",
+                buffer.getvalue(),
             )
 
     def test_status_payload_progress_journal_absent(self) -> None:

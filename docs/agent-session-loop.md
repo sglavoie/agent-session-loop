@@ -400,6 +400,7 @@ asl control select-harness PLAN_DIR_OR_ID --harness codex|claude|copilot [--stat
 asl control set-model PLAN_DIR_OR_ID [--harness codex|claude|copilot] [--harness-model MODEL|--clear-harness-model] [--effort EFFORT|--clear-effort] [--state-dir DIR] [--json]
 asl unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
 asl compact-state PLAN_DIR [--state-dir DIR] [--apply] [--json]
+asl gc [PLAN_DIR] [--state-dir DIR] [--max-age-days DAYS] [--dry-run|--apply] [--json]
 asl migrate-state PLAN_DIR --from OLD_PLAN_PATH [--state-dir DIR] [--apply] [--json]
 asl metrics [--since-days N] [--state-dir DIR] [--json]
 ```
@@ -623,18 +624,27 @@ without appending a further record, and questions written before run
 attribution carry no `run_id` and are never open.
 
 The runner waits five minutes initially. Lease freshness is checked only at an
-active deadline. At that checkpoint, a fresh supervisor lease extends the wait by 60 seconds,
-never beyond the absolute 30-minute limit; an absent or stale
-lease ends the live wait unless a post-suspend lease grace is active. The wait
-paces itself on the monotonic clock, which freezes across system sleep, so a
-suspend never refunds wait budget. On wake the runner detects the suspend,
+active deadline. At that checkpoint, a fresh supervisor lease extends the wait by 60 seconds;
+an absent or stale lease ends the live wait unless a post-suspend lease grace is
+active. The 30-minute ceiling bounds *unsupervised* time, not wall clock. It is
+measured from the last lease that proved a supervisor alive, so it rolls forward
+with every fresh probe: a continuously watched wait has no terminal instant and
+outlives the ceiling indefinitely, while a wait nobody watches still ends within
+30 minutes of the last proof. A live autopilot therefore no longer loses a run
+because a human took a long time to answer; the backstops for a genuinely stuck
+run are the autopilot's own attach bound and hang escalation, not this counter.
+The wait paces itself on the monotonic clock, which freezes across system sleep,
+so a suspend never refunds the active-deadline budget. On wake the runner detects
+the suspend,
 re-anchors the persisted wall-clock deadlines around the surviving monotonic
 budget, and grants the supervisor a 90-second awake grace to re-prove
 liveness — the autopilot has not polled yet, so the on-disk lease is briefly
 wall-clock ancient even with a live supervisor. Inside that grace a non-fresh
 lease neither ends the wait nor extends the active deadline, and the grace
-never extends the hard deadline; once the grace lapses with the lease still
-stale, the wait ends exactly as before. The runner polls the mailbox every two seconds and
+never extends the ceiling; once the grace lapses with the lease still
+stale, the wait ends exactly as before. Suspended time is not unsupervised time —
+nobody could prove liveness while the machine slept — so the ceiling alone
+re-anchors at the wake instant and starts its full span again from there. The runner polls the mailbox every two seconds and
 tolerates sustained mailbox or checkpoint lease I/O failure for ten seconds
 before falling back. The first reply or resolution wins the closure race. A
 reply starts an explicit one-shot answer continuation of the same session. A
@@ -716,9 +726,13 @@ capacity, and context reasons are
 
 The `mailbox`/`wait-cleared` event reports why the live wait ended. Its reason
 is `reply` when an answer arrived, `resolution` when an answerless closure
-arrived, `timeout` only when the absolute hard deadline was reached, and
+arrived, `timeout` only when the unsupervised ceiling was reached — a full
+ceiling has passed since the last lease that proved a supervisor alive — and
 `supervisor-lost` when the active deadline found an absent, stale, or otherwise
 non-fresh supervisor lease with no post-suspend lease grace left to cover it.
+`supervisor-lost` is the ordinary end of an unwatched wait, so `timeout` is now
+the narrow case: the ceiling lapsed while the wait was still covered by a lease
+extension or a post-suspend grace that had not yet let the wait exit.
 Resolution exits add `resolution_message_id`, `resolution_seq`, and
 `resolution_action`. Other fallback paths
 preserve their specific error reason, such as `mailbox-full`,
@@ -729,16 +743,26 @@ A wait that ended without a closure also names the lease evidence behind that
 reason: `lease_supervisor_id` and `lease_updated_at` identify the last lease the
 wait actually read, and `lease_reason` carries the non-fresh reason that
 rejected it. Each key is omitted when the wait has no value for it, so a
-`timeout` that watched a fresh supervisor the whole time reports the lease
+`timeout` whose last probe still found a fresh lease reports that lease
 without a rejection reason, and a wait that never probed a lease — including
 every `reply` or `resolution` exit — reports none of the three. This distinguishes a supervisor
-that was never there from one that watched a human run out of clock. A wait
+that was never there from one that was still watching when the wait ended. A wait
 that detected a system suspend additionally reports `suspend_skew_seconds`,
 the wall-clock time the sleeping machine cost the wait, and
 `suspend_lease_grace_seconds`, the awake lease grace that suspend applied —
 so a `supervisor-lost` that fired only after a lapsed grace reads differently
 from one that never saw a suspend. Both keys are omitted when no suspend was
 detected, and every reply or resolution exit still reports none of these keys.
+
+Such a wait also reports `unsupervised_seconds`, how long it ran without a
+supervisor lease proving liveness. It is measured from the last fresh lease the
+wait probed, or from the start of the wait when no probe ever found one, and it
+excludes suspended time because a sleeping machine gives nobody the chance to
+prove liveness. It is exactly the quantity the ceiling bounds, so a `timeout`
+always reports at least the ceiling, a `supervisor-lost` that was watched until
+moments before the end reports a short stretch even after a wait of many hours,
+and one that never saw a live supervisor reports nearly the whole wait. Every
+reply or resolution exit reports none of it.
 
 ### Future implementation model control
 
@@ -773,7 +797,9 @@ deadlines, the exit `reason`, `pending_outbox`, the measured count of
 questions open for that run when a final mailbox snapshot is available, and the
 `lease_supervisor_id`, `lease_updated_at`, and `lease_reason` evidence for the
 last lease a non-closure exit observed, plus `suspend_skew_seconds` and
-`suspend_lease_grace_seconds` when the wait detected a system suspend.
+`suspend_lease_grace_seconds` when the wait detected a system suspend. It also
+carries `unsupervised_seconds`, the suspend-excluded stretch that non-closure
+exit ran without a lease proving supervision.
 `wait-preparation-failed` carries run/session/turn identity and the exact
 preparation `reason`, without creating live-wait state.
 For a resolution, `wait-cleared` additionally carries resolution message
@@ -987,7 +1013,7 @@ child per `repair_group` beneath the review session (`N.1`, `N.2`, ... via
 `agent_session_loop.review_repair`), executes the children serially with the
 implementation harness, then appends the next top-level review session and
 rereviews. `--max-review-fix-cycles N` is an **absolute cross-run cap** on
-unique source-review materializations (default 2; `0` still runs the review but
+unique source-review materializations (default 4; `0` still runs the review but
 never creates repair sessions; `--max-review-fix-plans` is a deprecated
 compatibility alias — passing both flags is an input error). A source review
 counts once when it produced repair children, including legacy
@@ -1300,6 +1326,40 @@ Every rewrite is atomic (temp-file + rename), so an interrupted compaction never
 leaves a partially written JSON file, and re-running is idempotent. `--json`
 emits the full `CompactionReport` payload.
 
+`gc` reclaims whole `runs/<run-id>/` directories once they age past a cutoff,
+which is what finally reaches the per-turn `stdout.log`/`stderr.log` files that
+dominate the corpus: `compact-state` rewrites JSON records and never touches
+those logs, which is why compaction projects a rounding error against gigabytes
+of growth. Unlike the Workbench cleanup and archive views, which retire a whole
+plan a human selected, `gc` judges individual runs against an age cutoff and
+leaves their plan in place. With `PLAN_DIR` it sweeps one plan; with no
+positional argument it judges every plan state directory under the resolved
+state root and reports reclaimable bytes per plan directory as well as in
+aggregate. A run is reclaimable only when its finish time can be read from its
+own `turn-*/result.json` artifacts and is at least `--max-age-days` (default 30)
+old, its plan directory carries no lock, it is not reported running by the same
+scan `asl sessions` uses, and it is not the newest run of its plan. Every other
+run is retained with a stated reason — `plan-locked`, `live-run`, `unfinished`,
+`undated`, `newest-run`, or `within-cutoff`, evaluated in that order — so a
+sweep that reclaims little still explains what held the rest. A stale lock is
+refused exactly like an active one: clearing it stays a deliberate `asl unlock`,
+never a side effect of reclaiming disk. State directories whose plan directory
+cannot be recovered are counted as unresolved and are not judged at all. The
+default is a dry-run that deletes nothing (`--dry-run` says so explicitly and is
+mutually exclusive with `--apply`); `--apply` removes the projected directories,
+reports the bytes actually reclaimed, and exits nonzero if any removal failed.
+`asl gc --dry-run` is a pure projection: it deletes nothing and writes nothing,
+locks included. It is the one reader that inspects a lock without the read-side
+reclamation described under [Stale unfinished `state.json` with no
+lock](#stale-unfinished-statejson-with-no-lock), so a dry run leaves every lock
+file in place and one plan is judged identically whether it was reached through
+`PLAN_DIR` or through the corpus sweep — the whole-corpus liveness pre-pass can
+no longer decide a retain question by removing the lock that answers it.
+`--apply` deletes `runs/<run-id>/` directories and nothing else, so lock hygiene
+is never an applied action either.
+`--json` emits the full per-plan projection, including every run's size and
+retain reason.
+
 `migrate-state` repairs the state orphaning that a plan-directory move causes:
 because operational state is keyed by the SHA-256 of the plan's canonical path,
 renaming or moving a plan directory strands its state under the old path hash.
@@ -1448,11 +1508,16 @@ finding counts, reopen attempts and successful/failed reopen materializations,
 reopen attempts by source disposition, and reopen failures by result. Those
 cycle and reopen activity counters are timestamp-windowed; recovered reopen
 backfills supply lineage but are not fresh attempts. Review materializations
-are durable current-plan totals, independent of the timestamp window, and are
-deduplicated by source review across the full `review_cycle` and
-`review_repair_reopened` history plus generated repair children. This matches
-`review_resume` cap accounting after materialize/event-append crashes and for
-legacy lineage-less cycles. JSON exposes the explicit
+are timestamp-windowed too: they are deduplicated by source review across the
+full `review_cycle` and `review_repair_reopened` history plus generated repair
+children, then counted only when the event that carries one falls inside the
+window. Reconciling against the whole history is what keeps one source review
+from being counted twice for legacy lineage-less cycles, while a
+materialization recovered from durable children alone has no timestamp and is
+excluded, exactly as an undated turn or event is. `review_resume` remains the
+whole-history cap authority after materialize/event-append crashes, so its
+`historical_materializations` deliberately exceeds a narrow window's count.
+JSON exposes the explicit
 `review_cycles.unique_materializations`, `reopen_attempts`,
 `successful_reopen_materializations`, `reopen_failures`,
 `reopen_attempts_by_source_disposition`, and `reopen_failures_by_result`
@@ -1461,7 +1526,14 @@ fields while retaining
 idempotent value. Metrics also report artifact corpus size and in-window
 growth, and projected compaction savings (a dry-run over the state directories
 active inside the window, net of retained failure-artifact bytes; use
-`asl compact-state` for a full per-plan projection). The command is read-only:
+`asl compact-state` for a full per-plan projection). Every state directory is
+sized, since corpus size is not a windowed question, but one whose files were
+all last written before the window opened is skipped before its event log is
+read, so a narrow window costs a stat walk instead of a full-corpus read. Those compaction savings
+cover operational JSON only; `asl gc` projects the age-based reclaim over
+`runs/<run-id>/` directories, which is where corpus size actually accumulates,
+and renders its byte totals the same way so the two commands compare directly.
+The command is read-only:
 it never mutates state, events, or plan directories.
 
 `asl questions` reads either an active live mailbox wait or the durable paused
@@ -1761,8 +1833,15 @@ total `check_count`, the declared `check_names` and `check_kinds`,
 `active_verification` is populated, so the two phases are mutually exclusive;
 both are `null` between turns and after `run_finished`. During the bounded
 nonterminal answer window, additive `waiting_for_reply` records only the
-question/session/turn identity, start time, base and hard deadlines, and the
-last observed lease activity. `events.jsonl` records
+question/session/turn identity, start time, base deadline,
+`unsupervised_deadline_at` with its `unsupervised_ceiling_seconds` span, and the
+last observed lease activity. `unsupervised_deadline_at` is the ceiling as of
+the last anchor the runner persisted — the start of the wait, or the instant it
+woke from a system suspend — and a reader rolls it forward from
+`last_lease_activity_at` plus the ceiling span rather than reading it as a
+terminal instant. Waits persisted before the ceiling began rolling carry a
+static `hard_deadline` instead of those two keys, and every reader still renders
+that key for them. `events.jsonl` records
 `turn_started`, `turn_heartbeat`, `action_required`, `turn_finished`,
 `verification_started`, `verification_check_started`, `verification_heartbeat`,
 `verification_check_finished`, `verification_check_skipped`,
@@ -1937,11 +2016,17 @@ its successor.
 Both `status --json` and a live run's state
 expose compact `waiting_for_reply` metadata while a bounded answer wait is
 active. The adjacent top-level `waiting_for_reply_status` field is `live` when
-its hard deadline is still in the future and the plan has an active runner
-lock, `expired` when that deadline has passed or the owning runner lock is
-absent or stale, and `invalid` when the persisted hard deadline is missing or
-malformed; it is `null` when no wait is present. A terminal paused projection
-still takes precedence for legacy pause consumers.
+the wait's unsupervised ceiling is still in the future and the plan has an
+active runner lock, `expired` when that ceiling has passed or the owning runner
+lock is absent or stale, and `invalid` when the persisted ceiling is missing or
+malformed; it is `null` when no wait is present. Because the ceiling bounds
+unsupervised time, the classification consults lease freshness rather than a
+bare timestamp: the projected ceiling is the later of `unsupervised_deadline_at`
+and `last_lease_activity_at` plus `unsupervised_ceiling_seconds`, so a wait whose
+supervisor keeps renewing stays `live` past the instant persisted at its start.
+A record written before the ceiling began rolling carries only `hard_deadline`
+and is classified from that timestamp exactly as it was before. A terminal
+paused projection still takes precedence for legacy pause consumers.
 
 Paused `run --json` payloads also carry an `interactive_help` object whenever
 the paused turn left a non-empty `last-message.txt` body (it is `null`
@@ -2110,6 +2195,19 @@ arrays. Invalid parsed inputs such as `--limit -1` produce
 `reason: input-error`; catastrophic state-root errors produce
 `reason: state-error`.
 
+`metrics --json` prints `command: "metrics"`, the resolved `state_root`, the
+window as `since_days`, `window_start`, and `generated_at`, then
+`state_dirs_scanned` and `state_dirs_active` beside the `turns`, `first_pass`,
+`pauses`, `verification_repair`, `review_cycles`, `agent_mux_delivery`,
+`artifacts`, and `compaction` objects. Every field in those objects answers for
+the window alone, including `review_cycles.unique_materializations` and its
+`review_cycles.repairs_materialized` alias, so narrowing `--since-days` never
+raises a count. `state_dirs_scanned` counts the whole corpus and
+`artifacts.total_bytes` measures it, because size is not a windowed question;
+`state_dirs_active` counts only the directories with in-window turn or event
+activity, and a directory whose files were all last written before the window
+opened is skipped before its event log is read.
+
 ## Pause Semantics
 
 A stop-after-current request is not a pause. When `p` is active at a lifecycle
@@ -2126,8 +2224,11 @@ that runner remains alive, a bounded-wait timeout or unavailable mailbox makes
 it clear the additive field before entering the ordinary pause path below. If
 the runner exits before it can perform that cleanup, the persisted wait remains
 nonterminal; once its plan lock is absent or stale, recovery surfaces classify
-it as `expired` even before its hard deadline and synthesize the
-`wait-expired` pause reason without rewriting `state.json`.
+it as `expired` even before its unsupervised ceiling and synthesize the
+`wait-expired` pause reason without rewriting `state.json`. That lock check is
+what makes an abandoned wait recoverable promptly: the ceiling itself rolls
+forward with lease activity, so a record left behind by a supervised wait can
+carry a projected ceiling well in the future.
 
 A paused run exits nonzero and leaves the plan lock released. Inspect the JSON
 payload, `state.json`, `events.jsonl`, and the last turn artifacts, then rerun
@@ -2184,8 +2285,8 @@ Common pause reasons:
   turn references a session whose current pending status no longer matches the
   plan, typically because another runner already advanced past it).
 - `wait-expired`: `asl questions` synthesized reply-oriented recovery for an
-  orphaned nonterminal wait whose hard deadline passed or whose owning runner
-  lock is absent or stale. This recovery reason is never written into `state.json`;
+  orphaned nonterminal wait whose unsupervised ceiling passed or whose owning
+  runner lock is absent or stale. This recovery reason is never written into `state.json`;
   the persisted wait remains available for read-only status and recovery
   projection.
 - `verify-failed`: `asl verify` returned non-zero after a completed session.
@@ -2378,8 +2479,9 @@ the same plan. The supervisor attaches to an active matching lock before
 considering zero-pending completion, and when unlocked it relaunches only for
 `initial-review`, `materialize-repairs`, or `rereview` actions permitted by the
 command's review harness. Only `materialize-repairs` is gated by the effective
-absolute cap; eligible `rereview` launches are cap-free because they consume no
-materialization budget. A corrected malformed artifact or a higher cap can
+absolute cap — 4 unique source-review materializations unless the supervised
+command passed `--max-review-fix-cycles N`; eligible `rereview` launches are
+cap-free because they consume no materialization budget. A corrected malformed artifact or a higher cap can
 therefore resume the same command later without a second plan. Insufficient
 caps and terminal all-clear/repeated/unstructured findings do not relaunch, so
 every supervision loop has a deterministic stop. The skill never authors,
@@ -2476,7 +2578,10 @@ A lock whose recorded `hostname` is not this host reports
 take over: the local process table holds no entry for a remote pid, so liveness
 there is unknowable rather than dead. Acquisition fails with a lock-contention
 error naming that host; clear it with `asl unlock` (no `--force` — the lock is
-stale) once you have confirmed the other runner is gone.
+stale) once you have confirmed the other runner is gone. A dead pid recorded on
+*this* host needs no command at all: the next read of that lock reclaims it (see
+[Stale unfinished `state.json` with no
+lock](#stale-unfinished-statejson-with-no-lock)).
 
 If a plan has no pending sessions but is not complete, inspect every final
 `session-<id>.md` handoff and normalize statuses to exactly `pending` or
@@ -2542,6 +2647,36 @@ over is not itself proof: the takeover path proves the *previous* owner's death
 from the lock it removed, so reclaiming an unparseable or pid-less lock clears
 the lock and leaves `state.json` and `events.jsonl` untouched. Any
 `waiting_for_reply` record survives as evidence of what the run died holding.
+
+Reading such a lock also removes it, so a dead runner stops blocking the plan
+without an operator. The one case that qualifies is a pid missing from the local
+process table on a lock whose recorded `hostname` is this host; the removal is
+reported once on stderr as `reclaimed stale lock at <path>`. The call that
+reclaims still reports the lock it found, so that `asl status` prints
+`Lock: stale (pid N is not running)` and the next one finds no lock at all.
+Nothing else is reclaimed by a read: a lock recorded on another host, a legacy
+lock with no `hostname` key (its pid names no process table), an unparseable
+lock, and any live pid all survive. `asl gc` is the one command exempt from all
+of this: it has promised to write nothing in dry-run and to touch only run
+directories under `--apply`, so it inspects locks without reclaiming them in
+either mode. `asl unlock` remains the only route out for
+a cross-host lock; the rest are taken over by the next `asl run`. Every
+mutation of `lock.json` — a read-side reclaim, a stale takeover, publishing a
+new lock, `asl unlock`, and the release at the end of a run — runs under an
+exclusive `flock` on a `lock.mutex` sidecar in the plan's state directory. The
+lock file cannot order its own replacement because it is created and unlinked,
+so two callers holding that path can be looking at different files; the sidecar
+is never removed and is therefore a stable identity to queue behind. The proof
+that a lock is dead is re-established under that claim and the file is unlinked
+before it is released, so a lock a new runner published between the proof and
+the removal is left to its new owner rather than deleted. No mutator ever
+unlinks without holding the claim, and each degrades in its own way when the
+wait expires: a reclaim skips, leaving the lock for the next reader; acquiring
+and `asl unlock` fail loudly; and the release at the end of a run leaves its
+lock in place and reports that on stderr, because the file sitting there after
+a contended wait may already be a replacement owner's live lock. That abandoned
+lock names a pid on this host, so it is reclaimed by the next read once the
+process exits.
 
 ### Missing progress journal entry for the final session after a killed runner
 

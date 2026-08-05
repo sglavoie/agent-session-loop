@@ -4653,6 +4653,54 @@ class EventsTailerTest(unittest.TestCase):
         self.assertEqual(snapshot["state"], "running")
         self.assertEqual(snapshot["pending_outbox"], 2)
 
+    def test_supervised_wait_past_its_anchor_stays_healthy(self) -> None:
+        # The persisted anchor lapsed two hours ago, but the last lease proved
+        # a supervisor alive well inside the ceiling, so the wait rolls on.
+        snapshot = {
+            "state": "waiting_for_reply",
+            "session_id": "12",
+            "pending_outbox": 2,
+            "unsupervised_deadline_at": "2026-07-24T19:15:00+00:00",
+            "unsupervised_ceiling_seconds": 1800.0,
+            "last_lease_activity_at": "2026-07-24T21:00:00+00:00",
+        }
+
+        message = autopilot._format_heartbeat(
+            1,
+            900.0,
+            snapshot,
+            90.0,
+            events_stale=True,
+            now=datetime(2026, 7, 24, 21, 15, tzinfo=timezone.utc),
+        )
+
+        self.assertNotIn("WARN possibly stalled", message)
+        self.assertIn("waiting for reply for session 12", message)
+
+    def test_unwatched_wait_past_its_ceiling_triggers_stall_warning(
+        self,
+    ) -> None:
+        snapshot = {
+            "state": "waiting_for_reply",
+            "session_id": "12",
+            "pending_outbox": 2,
+            "unsupervised_deadline_at": "2026-07-24T19:15:00+00:00",
+            "unsupervised_ceiling_seconds": 1800.0,
+            "last_lease_activity_at": None,
+        }
+
+        message = autopilot._format_heartbeat(
+            1,
+            900.0,
+            snapshot,
+            90.0,
+            events_stale=False,
+            now=datetime(2026, 7, 24, 19, 15, tzinfo=timezone.utc),
+        )
+
+        self.assertIn("WARN possibly stalled", message)
+        self.assertIn("unsupervised ceiling elapsed", message)
+
     def test_elapsed_wait_hard_deadline_triggers_stall_warning(self) -> None:
         snapshot = {
             "state": "waiting_for_reply",

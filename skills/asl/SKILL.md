@@ -22,7 +22,7 @@ detection and the recoverable-pause retry budget (see payload `pause_policy`),
 reply resume, and final-review verdict parsing. The runner itself owns automatic
 repair/rereview cycles: after a findings review it materializes same-plan repair
 sessions, executes them, and rereviews, bounded by
-`asl run --max-review-fix-cycles` (default 2). This skill is supervision and Q&A
+`asl run --max-review-fix-cycles` (default 4). This skill is supervision and Q&A
 only — run the helper; when a paused run needs an answer, infer a defensible
 reply or ask the user, then resume; and when it reports remaining review
 findings, surface them to the user. It never drafts, splits, or expands
@@ -168,8 +168,10 @@ the wait by 60 seconds, while an absent or stale lease ends it — unless the
 runner detected a system suspend, which grants the supervisor a 90-second
 awake grace to re-prove liveness before a stale lease ends the wait. Inside
 that grace a stale lease neither ends the wait nor extends it, and the grace
-never stretches the hard cap. The runner
-never waits beyond 30 minutes. An already-committed reply or resolution takes
+never stretches the ceiling. The 30-minute ceiling bounds unsupervised time,
+not wall clock: it rolls forward with every fresh lease, so keeping the
+supervisor alive keeps the wait alive, and a wait nobody watches still ends
+within 30 minutes of the last proof. An already-committed reply or resolution takes
 precedence over mailbox exhaustion and is delivered even when the mailbox is
 full. If no closure is available, timeout, mailbox fullness/unavailability, or
 a stale lease at an active deadline that outlasts any post-suspend grace falls
@@ -310,7 +312,7 @@ that re-running the same command continues from the remaining sessions.
   run start/attach, polling, the retry budget (`pause_policy`), reply handling,
   and final-review verdict parsing. Keep the skill workflow thin.
 - Automatic repair/rereview cycles are runner-owned, bounded by
-  `asl run --max-review-fix-cycles` (default 2; `--max-review-fix-plans` is a
+  `asl run --max-review-fix-cycles` (default 4; `--max-review-fix-plans` is a
   deprecated alias). Corrected artifacts and higher caps resume the same plan;
   this skill never creates follow-up fix plans.
 - Keep the mailbox discipline: continue only plainly nonblocking messages,
