@@ -754,9 +754,16 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 },
                 notified[start_index][1],
             )
+            self.assertEqual(question.id, notified[end_index][1]["question_id"])
+            self.assertEqual("reply", notified[end_index][1]["wait_reason"])
             self.assertEqual(
-                {"question_id": question.id, "wait_reason": "reply"},
-                notified[end_index][1],
+                "consumed", notified[end_index][1]["delivery_state"]
+            )
+            self.assertTrue(notified[end_index][1]["closure_consumed"])
+            reply = view.reply_for(question.id)
+            assert reply is not None
+            self.assertEqual(
+                reply.id, notified[end_index][1]["closure_id"]
             )
 
     def test_runner_owned_continue_resolution_runs_once_before_stop(self) -> None:

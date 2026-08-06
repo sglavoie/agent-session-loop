@@ -949,7 +949,7 @@ def _mailbox_ask_command_text(
         parts.extend(["--question-id", "QUESTION_ID"])
     else:
         parts.append("QUESTION")
-    parts.append("--wait")
+    parts.extend(["--wait", "--wait-timeout", "300"])
     if state_dir_arg is not None:
         parts.extend(["--state-dir", str(state_dir_arg)])
     return shlex.join(parts)
@@ -1004,6 +1004,10 @@ def _mailbox_protocol_lines(
         "",
         f"    {resume_ask_command}",
         "",
+        "- If the resumed wait also times out, do not choose a default and do "
+        "not mark the session complete. Leave the session pending and emit "
+        "`RUNNER_PAUSE: blocked - blocking mailbox question remained "
+        "unanswered after the resumed wait`.",
         "- A successful ask can close with a factual reply or a structured "
         "`continue`/`pause` resolution. Follow the rendered resolution "
         "instructions without treating an optional note as an answer.",
@@ -4744,13 +4748,22 @@ def _notify_agent_mux_loop_wait_ended(
     *,
     question_id: str,
     wait_reason: str,
+    closure_id: str | None = None,
     persistence: _RunPersistence | None = None,
 ) -> None:
     _notify_agent_mux_loop(
         AGENT_MUX_WAIT_END_EVENT,
         payload,
         reason=AGENT_MUX_WAIT_END_REASON,
-        extra={"question_id": question_id, "wait_reason": wait_reason},
+        extra={
+            "question_id": question_id,
+            "wait_reason": wait_reason,
+            "delivery_state": (
+                "consumed" if closure_id is not None else "unconsumed"
+            ),
+            "closure_consumed": closure_id is not None,
+            **({"closure_id": closure_id} if closure_id is not None else {}),
+        },
         persistence=persistence,
     )
 
@@ -5119,6 +5132,7 @@ class _MailboxReplyWaitSettings:
 class _PreparedMailboxReplyWait:
     context: qna.QnAContext
     question: mailbox.MailboxMessage
+    wait_start: mailbox.MailboxMessage
     waiting_for_reply: dict[str, Any]
     pending_outbox: int
     settings: _MailboxReplyWaitSettings
@@ -5316,6 +5330,7 @@ def _ensure_mailbox_question(
         )
         if existing is None:
             return None
+        closed = view.closure_for(existing.id)
         if (
             existing.kind != mailbox.KIND_QUESTION
             or existing.text != text
@@ -5323,6 +5338,10 @@ def _ensure_mailbox_question(
             or existing.session_id != session_id
             or existing.turn_index != turn_index
             or existing.waiter_origin != mailbox.WAITER_ORIGIN_RUNNER
+            or (
+                existing.delivery_mode != mailbox.DELIVERY_MODE_WAIT
+                and closed is None
+            )
         ):
             raise _MailboxReplyWaitUnavailable(
                 qna.REASON_MISSING_QUESTION_CONTEXT
@@ -5340,6 +5359,15 @@ def _ensure_mailbox_question(
         raise _MailboxReplyWaitUnavailable(reason) from error
     existing = existing_question(view)
     if existing is not None:
+        if (
+            existing.delivery_mode == mailbox.DELIVERY_MODE_WAIT
+            and
+            view.active_wait_for(existing.id) is None
+            and closed is None
+        ):
+            mailbox.append_wait_start(
+                plan_dir, existing.id, state_dir=state_dir_arg
+            )
         return existing
     # A question append is refused at the reduced question cap, not the file
     # cap; the wait loop's own guard stays on ``view.full`` because there the
@@ -5348,7 +5376,7 @@ def _ensure_mailbox_question(
         raise _MailboxReplyWaitUnavailable(mailbox.ERROR_MAILBOX_FULL)
 
     try:
-        return mailbox.append_question(
+        question, _wait_start = mailbox.append_wait_question(
             plan_dir,
             text,
             state_dir=state_dir_arg,
@@ -5358,6 +5386,7 @@ def _ensure_mailbox_question(
             turn_index=turn_index,
             waiter_origin=mailbox.WAITER_ORIGIN_RUNNER,
         )
+        return question
     except mailbox.MailboxError as error:
         if error.reason != mailbox.REJECT_DUPLICATE_ID:
             raise _MailboxReplyWaitUnavailable(error.reason) from error
@@ -5469,9 +5498,13 @@ def _prepare_mailbox_reply_wait(
             else mailbox.ERROR_MAILBOX_READ
         )
         raise _MailboxReplyWaitUnavailable(reason) from error
+    wait_start = prepared_view.active_wait_for(question.id)
+    if wait_start is None:
+        raise _MailboxReplyWaitUnavailable(mailbox.REJECT_QUESTION_NOT_WAITING)
     return _PreparedMailboxReplyWait(
         context=context,
         question=question,
+        wait_start=wait_start,
         waiting_for_reply=waiting_for_reply,
         pending_outbox=len(prepared_view.open_questions(run_id)),
         settings=settings,
@@ -5822,6 +5855,45 @@ def _wait_for_mailbox_reply(
         if now < active_deadline:
             sleep_bound = min(sleep_bound, active_deadline - now)
         sleep(max(0.0, sleep_bound))
+
+
+def _finish_mailbox_reply_wait_lifecycle(
+    *,
+    plan_dir: Path,
+    state_dir_arg: str | None,
+    question_id: str,
+    wait_id: str,
+    result: _MailboxReplyWaitResult,
+) -> _MailboxReplyWaitResult:
+    """Commit wait termination and let a lock-winning closure override timeout."""
+    completion = mailbox.finish_wait(
+        plan_dir,
+        question_id,
+        wait_id,
+        reason=(
+            mailbox.WAIT_END_REASON_TIMEOUT
+            if result.reason == "timeout"
+            else mailbox.WAIT_END_REASON_ERROR
+        ),
+        state_dir=state_dir_arg,
+    )
+    closure = completion.closure
+    if closure is None:
+        return result
+    common = {
+        "pending_outbox": result.pending_outbox,
+        "lease_updated_at": result.lease_updated_at,
+        "lease_reason": result.lease_reason,
+        "lease_supervisor_id": result.lease_supervisor_id,
+        "suspend_skew_seconds": result.suspend_skew_seconds,
+        "suspend_lease_grace_seconds": result.suspend_lease_grace_seconds,
+        "unsupervised_seconds": result.unsupervised_seconds,
+    }
+    if closure.kind == mailbox.KIND_REPLY:
+        return _MailboxReplyWaitResult(reason="reply", reply=closure, **common)
+    return _MailboxReplyWaitResult(
+        reason="resolution", resolution=closure, **common
+    )
 
 
 class _ReplyStatePreserver:
@@ -9515,6 +9587,146 @@ def _revert_session_status_to_pending(
     return path
 
 
+def _mailbox_completion_guard_evidence(
+    *,
+    plan_dir: Path,
+    state_dir_arg: str | None,
+    run_id: str,
+    session_id: str,
+    turn_index: int,
+) -> dict[str, Any] | None:
+    """Return body-free evidence when a blocking worker question was ignored."""
+    try:
+        view = mailbox.read_mailbox(plan_dir, state_dir=state_dir_arg)
+    except (OSError, mailbox.MailboxError) as error:
+        return {
+            "mailbox_path": str(
+                mailbox.mailbox_path_for_plan(plan_dir, state_dir_arg)
+            ),
+            "mailbox_schema_version": mailbox.MAILBOX_SCHEMA_VERSION,
+            "projection_seq": None,
+            "read_error": (
+                error.reason
+                if isinstance(error, mailbox.MailboxError)
+                else mailbox.ERROR_MAILBOX_READ
+            ),
+            "questions": [],
+        }
+    violations: list[dict[str, Any]] = []
+    for question in view.messages:
+        if (
+            question.kind != mailbox.KIND_QUESTION
+            or question.version < mailbox.MAILBOX_SCHEMA_VERSION
+            or question.delivery_mode != mailbox.DELIVERY_MODE_WAIT
+            or question.waiter_origin != mailbox.WAITER_ORIGIN_WORKER
+            or question.run_id != run_id
+            or question.session_id != session_id
+            or question.turn_index != turn_index
+        ):
+            continue
+        closure = view.closure_for(question.id)
+        receipt = (
+            None
+            if closure is None
+            else view.receipt_for_closure(closure.id)
+        )
+        if closure is None:
+            violation = "unanswered"
+        elif receipt is None:
+            violation = "unconsumed"
+        elif (
+            closure.kind == mailbox.KIND_RESOLUTION
+            and closure.action == mailbox.RESOLUTION_ACTION_PAUSE
+        ):
+            violation = "pause-resolved"
+        else:
+            continue
+        record: dict[str, Any] = {
+            "question_id": question.id,
+            "question_seq": question.seq,
+            "delivery_mode": question.delivery_mode,
+            "violation": violation,
+            "active_wait": view.active_wait_for(question.id) is not None,
+        }
+        if closure is not None:
+            record.update(
+                closure_id=closure.id,
+                closure_seq=closure.seq,
+                closure_kind=closure.kind,
+                resolution_action=closure.action,
+            )
+        if receipt is not None:
+            record.update(receipt_id=receipt.id, receipt_seq=receipt.seq)
+        violations.append(record)
+    if not violations:
+        return None
+    return {
+        "mailbox_path": str(view.mailbox_path),
+        "mailbox_schema_version": mailbox.MAILBOX_SCHEMA_VERSION,
+        "projection_seq": view.last_seq,
+        "questions": violations,
+    }
+
+
+def _enforce_mailbox_completion_guard(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    persistence: _RunPersistence,
+    after: plans.PlanSnapshot,
+    session_id: str,
+    session_label: str,
+    session_details: dict[str, Any],
+    turn_index: int,
+    state_dir_arg: str | None,
+    turn_payload: dict[str, Any],
+    paths: dict[str, Path],
+    plan_cache: plans.PlanSnapshotCache,
+) -> bool:
+    """Reject completion that bypassed a v3 blocking-question lifecycle."""
+    evidence = _mailbox_completion_guard_evidence(
+        plan_dir=after.plan_dir,
+        state_dir_arg=state_dir_arg,
+        run_id=str(payload.get("run_id")),
+        session_id=session_id,
+        turn_index=turn_index,
+    )
+    if evidence is None:
+        return False
+    reverted = _revert_session_status_to_pending(
+        after,
+        session_id,
+        failure_note=(
+            "runner rejected completion: a blocking mailbox question was "
+            "unanswered, unconsumed, or resolved with pause"
+        ),
+    )
+    snapshot_after = _reinspect_after_revert(
+        after.plan_dir, after, reverted, plan_cache
+    )
+    guard = {
+        "passed": False,
+        "reverted_to_pending": reverted is not None,
+        **evidence,
+    }
+    with persistence.lock:
+        payload["final_snapshot"] = _snapshot_payload(snapshot_after)
+        turn_payload["mailbox_completion_guard"] = guard
+        _write_json_file(paths["result"], turn_payload)
+    _pause_run(
+        event_path,
+        payload,
+        reason="blocked",
+        message=(
+            f"{session_label} completed while a blocking mailbox question "
+            "was not safely consumed"
+        ),
+        details={**session_details, "mailbox": evidence},
+        persistence=persistence,
+    )
+    return True
+
+
 def _read_review_verdict(
     plan_dir: Path, *, require_artifact: bool = False
 ) -> dict[str, Any]:
@@ -11963,6 +12175,35 @@ def _run_locked(
                 )
                 break
 
+            selected_after = next(
+                (
+                    item
+                    for item in after.sessions
+                    if item.id == session_id
+                ),
+                None,
+            )
+            if (
+                mailbox_enabled
+                and selected_after is not None
+                and selected_after.status == "complete"
+                and _enforce_mailbox_completion_guard(
+                    event_path=event_path,
+                    payload=payload,
+                    persistence=persistence,
+                    after=after,
+                    session_id=session_id,
+                    session_label=session_label,
+                    session_details=session_details,
+                    turn_index=turn_index,
+                    state_dir_arg=args.state_dir,
+                    turn_payload=turn_payload,
+                    paths=paths,
+                    plan_cache=plan_cache,
+                )
+            ):
+                break
+
             runner_pause = turn_payload.get("runner_pause")
             if runner_pause is not None:
                 pause_reason = _runner_pause_reason(str(runner_pause))
@@ -12064,6 +12305,13 @@ def _run_locked(
                                     prepared_wait.started_monotonic
                                 ),
                             )
+                            wait_result = _finish_mailbox_reply_wait_lifecycle(
+                                plan_dir=after.plan_dir,
+                                state_dir_arg=args.state_dir,
+                                question_id=prepared_wait.question.id,
+                                wait_id=prepared_wait.wait_start.id,
+                                result=wait_result,
+                            )
                         finally:
                             wait_reason = (
                                 wait_result.reason
@@ -12133,6 +12381,15 @@ def _run_locked(
                                 payload,
                                 question_id=prepared_wait.question.id,
                                 wait_reason=wait_reason,
+                                closure_id=(
+                                    wait_result.reply.id
+                                    if wait_result is not None
+                                    and wait_result.reply is not None
+                                    else wait_result.resolution.id
+                                    if wait_result is not None
+                                    and wait_result.resolution is not None
+                                    else None
+                                ),
                                 persistence=persistence,
                             )
 

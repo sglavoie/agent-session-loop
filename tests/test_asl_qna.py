@@ -209,22 +209,26 @@ class QnAContextLoaderTests(unittest.TestCase):
             plan = str(plans.canonicalize_path(plan_dir))
             self.assertEqual(
                 f"asl inbox reply {plan} --to question-1 "
-                f"--state-dir {state_dir} --text TEXT",
+                f"--state-dir {state_dir} --text TEXT "
+                "--wait-consumed --wait-timeout 300",
                 payload["reply_command"],
             )
             self.assertEqual(
                 f"asl inbox reply {plan} --to question-1 "
-                f"--state-dir {state_dir} --text-stdin",
+                f"--state-dir {state_dir} --text-stdin "
+                "--wait-consumed --wait-timeout 300",
                 payload["reply_stdin_command"],
             )
             self.assertEqual(
                 f"asl inbox resolve {plan} --to question-1 "
-                f"--action continue --state-dir {state_dir}",
+                f"--action continue --state-dir {state_dir} "
+                "--wait-consumed --wait-timeout 300",
                 payload["continue_command"],
             )
             self.assertEqual(
                 f"asl inbox resolve {plan} --to question-1 "
-                f"--action pause --state-dir {state_dir}",
+                f"--action pause --state-dir {state_dir} "
+                "--wait-consumed --wait-timeout 300",
                 payload["pause_command"],
             )
             self.assertIn(

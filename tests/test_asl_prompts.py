@@ -459,6 +459,9 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertIn("structured `continue`/`pause` resolution", rendered)
         self.assertIn("without treating an optional note as an answer", rendered)
         self.assertIn("Use `RUNNER_PAUSE:` only as a fallback", rendered)
+        self.assertIn("If the resumed wait also times out", rendered)
+        self.assertIn("do not choose a default", rendered)
+        self.assertIn("do not mark the session complete", rendered)
 
         assert packet.mailbox_read_command is not None
         read_argv = shlex.split(packet.mailbox_read_command)
@@ -478,6 +481,16 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertEqual(runner._prompt_plan_dir(plan_dir), notify_argv[2])
         self.assertEqual("NOTICE", notify_argv[3])
         self.assertEqual(state_dir, notify_argv[-1])
+
+        for command in (
+            packet.mailbox_ask_command,
+            packet.mailbox_resume_ask_command,
+        ):
+            assert command is not None
+            argv = shlex.split(command)
+            self.assertIn("--wait", argv)
+            timeout_index = argv.index("--wait-timeout")
+            self.assertEqual("300", argv[timeout_index + 1])
 
     def test_pending_multiline_guidance_is_json_escaped_and_delimited(
         self,

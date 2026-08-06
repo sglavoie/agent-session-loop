@@ -930,12 +930,29 @@ def _mailbox_reply_command_base(context: QnAContext) -> list[str]:
 
 def mailbox_reply_command_text(context: QnAContext) -> str:
     """Return live mailbox reply guidance with an inline text placeholder."""
-    return shlex.join([*_mailbox_reply_command_base(context), "--text", "TEXT"])
+    return shlex.join(
+        [
+            *_mailbox_reply_command_base(context),
+            "--text",
+            "TEXT",
+            "--wait-consumed",
+            "--wait-timeout",
+            "300",
+        ]
+    )
 
 
 def mailbox_reply_stdin_command_text(context: QnAContext) -> str:
     """Return live mailbox reply guidance that reads the answer from stdin."""
-    return shlex.join([*_mailbox_reply_command_base(context), "--text-stdin"])
+    return shlex.join(
+        [
+            *_mailbox_reply_command_base(context),
+            "--text-stdin",
+            "--wait-consumed",
+            "--wait-timeout",
+            "300",
+        ]
+    )
 
 
 def _mailbox_resolution_command_base(
@@ -956,6 +973,7 @@ def _mailbox_resolution_command_base(
     ]
     if context.state_dir_override:
         parts.extend(["--state-dir", context.state_dir_override])
+    parts.extend(["--wait-consumed", "--wait-timeout", "300"])
     return parts
 
 

@@ -913,6 +913,8 @@ def _notify_agent_mux_mailbox_reply(
             active_turn=None,
             extra={
                 "question_id": projection.question_id,
+                "delivery_state": "accepted",
+                "consumed": False,
                 # A lease that predates the question carries a stale
                 # generation; the reply's seq is monotonic in the same file,
                 # so it substitutes as a valid generation counter.
@@ -990,6 +992,8 @@ def _notify_agent_mux_mailbox_resolution(
             extra={
                 "question_id": projection.question_id,
                 "resolution_action": message.action,
+                "delivery_state": "accepted",
+                "consumed": False,
                 "mailbox_projection_sequence": str(
                     message.seq
                     if projection.lease_predates_question
@@ -1095,6 +1099,62 @@ def _mailbox_path(
     )
 
 
+def _consumption_wait_timeout(
+    args: argparse.Namespace,
+    *,
+    command_name: str,
+    text_label: str,
+) -> float | None:
+    requested = getattr(args, "wait_timeout", None)
+    wait_consumed = bool(getattr(args, "wait_consumed", False))
+    if requested is not None and not wait_consumed:
+        _print_input_error(
+            args,
+            command_name=command_name,
+            text_label=text_label,
+            reason="invalid-timeout",
+            error="--wait-timeout requires --wait-consumed",
+        )
+        return None
+    return _validated_timeout(
+        args,
+        value=(
+            DEFAULT_ASK_WAIT_TIMEOUT_SECONDS if requested is None else requested
+        ),
+        option="--wait-timeout",
+        command_name=command_name,
+        text_label=text_label,
+    )
+
+
+def _wait_for_receipt(
+    plan_dir: str | Path,
+    closure_id: str,
+    *,
+    state_dir: str | Path | None,
+    timeout: float,
+) -> mailbox.MailboxMessage | None:
+    deadline = time.monotonic() + timeout
+    mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
+    token: object = _MAILBOX_TOKEN_UNSEEN
+    while True:
+        current = mailbox.mailbox_change_token(mailbox_path)
+        if (
+            token is _MAILBOX_TOKEN_UNSEEN
+            or current is mailbox.MAILBOX_CHANGE_TOKEN_UNAVAILABLE
+            or current != token
+        ):
+            view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+            token = current
+            receipt = view.receipt_for_closure(closure_id)
+            if receipt is not None:
+                return receipt
+        now = time.monotonic()
+        if now >= deadline:
+            return None
+        time.sleep(min(ASK_WAIT_POLL_INTERVAL_SECONDS, deadline - now))
+
+
 def inbox_reply_from_args(args: argparse.Namespace) -> int:
     """Atomically append the first supervisor reply to a question."""
     text = _body_from_args(
@@ -1103,6 +1163,13 @@ def inbox_reply_from_args(args: argparse.Namespace) -> int:
         text_label="inbox reply",
     )
     if text is None:
+        return 1
+    consumption_timeout = _consumption_wait_timeout(
+        args,
+        command_name=COMMAND_INBOX_REPLY,
+        text_label="inbox reply",
+    )
+    if consumption_timeout is None:
         return 1
     projection: _MailboxReplyProjection | None = None
 
@@ -1126,6 +1193,20 @@ def inbox_reply_from_args(args: argparse.Namespace) -> int:
         return 1
     context, message, supervisor_id = result
     _notify_agent_mux_mailbox_reply(context, args, message, projection)
+    receipt = None
+    if getattr(args, "wait_consumed", False):
+        try:
+            receipt = _wait_for_receipt(
+                context.snapshot.plan_dir,
+                message.id,
+                state_dir=args.state_dir,
+                timeout=consumption_timeout,
+            )
+        except mailbox.MailboxError:
+            # The closure append is authoritative. A later observation failure
+            # must remain a truthful successful append with consumed=false.
+            receipt = None
+    consumed = receipt is not None
     payload = responses.success_payload(
         COMMAND_INBOX_REPLY,
         plan_dir=str(context.snapshot.plan_dir),
@@ -1135,13 +1216,16 @@ def inbox_reply_from_args(args: argparse.Namespace) -> int:
         ),
         supervisor_id=supervisor_id,
         message=_message_payload(message),
+        delivery_state="consumed" if consumed else "accepted",
+        consumed=consumed,
+        receipt=None if receipt is None else _message_payload(receipt),
     )
     if args.json:
         responses.print_json(payload)
     else:
         print(
-            f"Queued reply {message.id} to question {args.to} "
-            f"(seq {message.seq})"
+            f"Accepted reply {message.id} to question {args.to} "
+            f"(seq {message.seq}, consumed: {'yes' if consumed else 'no'})"
         )
     return 0
 
@@ -1160,6 +1244,13 @@ def inbox_resolve_from_args(args: argparse.Namespace) -> int:
         return 1
     note_ok, note = _optional_note_from_args(args)
     if not note_ok:
+        return 1
+    consumption_timeout = _consumption_wait_timeout(
+        args,
+        command_name=COMMAND_INBOX_RESOLVE,
+        text_label="inbox resolve",
+    )
+    if consumption_timeout is None:
         return 1
     context = _resolve(
         args,
@@ -1208,6 +1299,18 @@ def inbox_resolve_from_args(args: argparse.Namespace) -> int:
         projection,
         active_run_id=run_id,
     )
+    receipt = None
+    if getattr(args, "wait_consumed", False):
+        try:
+            receipt = _wait_for_receipt(
+                context.snapshot.plan_dir,
+                message.id,
+                state_dir=args.state_dir,
+                timeout=consumption_timeout,
+            )
+        except mailbox.MailboxError:
+            receipt = None
+    consumed = receipt is not None
 
     payload = responses.success_payload(
         COMMAND_INBOX_RESOLVE,
@@ -1222,13 +1325,17 @@ def inbox_resolve_from_args(args: argparse.Namespace) -> int:
         supervisor_id=lease.supervisor_id,
         run_id=run_id,
         message=_message_payload(message),
+        delivery_state="consumed" if consumed else "accepted",
+        consumed=consumed,
+        receipt=None if receipt is None else _message_payload(receipt),
     )
     if args.json:
         responses.print_json(payload)
     else:
         print(
-            f"Resolved question {args.to} with action {action} "
-            f"(resolution {message.id}, seq {message.seq})"
+            f"Accepted resolution for question {args.to} with action {action} "
+            f"(resolution {message.id}, seq {message.seq}, "
+            f"consumed: {'yes' if consumed else 'no'})"
         )
     return 0
 
@@ -1409,6 +1516,7 @@ def _wait_for_closure(
     state_dir: str | Path | None,
     timeout: float,
     initial_view: mailbox.MailboxView | None = None,
+    wait_id: str | None = None,
 ) -> tuple[mailbox.MailboxMessage | None, bool]:
     deadline = time.monotonic() + timeout
     mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
@@ -1440,12 +1548,52 @@ def _wait_for_closure(
                 last_read_token = current_token
                 closure = view.closure_for(question_id)
                 if closure is not None:
+                    if wait_id is not None:
+                        try:
+                            completion = mailbox.consume_wait_closure(
+                                plan_dir,
+                                question_id,
+                                wait_id,
+                                state_dir=state_dir,
+                            )
+                        except mailbox.MailboxError as error:
+                            if error.reason != mailbox.REJECT_QUESTION_NOT_WAITING:
+                                raise
+                            completed_view = mailbox.read_mailbox(
+                                plan_dir, state_dir=state_dir
+                            )
+                            if completed_view.receipt_for_closure(closure.id) is None:
+                                raise
+                        else:
+                            if completion is not None:
+                                closure = completion.closure
+                    elif view.receipt_for_closure(closure.id) is None:
+                        try:
+                            mailbox.append_receipt(
+                                plan_dir,
+                                question_id,
+                                closure.id,
+                                state_dir=state_dir,
+                            )
+                        except mailbox.MailboxError as error:
+                            if error.reason != mailbox.REJECT_CLOSURE_ALREADY_CONSUMED:
+                                raise
                     return closure, False
 
         now = time.monotonic()
         if now >= deadline:
             if last_successful_view is None and last_read_error is not None:
                 raise last_read_error
+            if wait_id is not None:
+                completion = mailbox.finish_wait(
+                    plan_dir,
+                    question_id,
+                    wait_id,
+                    reason=mailbox.WAIT_END_REASON_TIMEOUT,
+                    state_dir=state_dir,
+                )
+                if completion.closure is not None:
+                    return completion.closure, False
             return None, True
         time.sleep(min(ASK_WAIT_POLL_INTERVAL_SECONDS, deadline - now))
 
@@ -1524,6 +1672,7 @@ def ask_from_args(args: argparse.Namespace) -> int:
         return 1
 
     initial_view: mailbox.MailboxView | None = None
+    wait_start: mailbox.MailboxMessage | None = None
     created = text is not None
     try:
         if text is not None:
@@ -1533,15 +1682,27 @@ def ask_from_args(args: argparse.Namespace) -> int:
                 turn_index,
                 waiter_origin,
             ) = _status_question_ownership(context)
-            question = mailbox.append_question(
-                context.snapshot.plan_dir,
-                text,
-                state_dir=args.state_dir,
-                run_id=run_id,
-                session_id=session_id,
-                turn_index=turn_index,
-                waiter_origin=waiter_origin,
-            )
+            if args.wait:
+                question, wait_start = mailbox.append_wait_question(
+                    context.snapshot.plan_dir,
+                    text,
+                    state_dir=args.state_dir,
+                    run_id=run_id,
+                    session_id=session_id,
+                    turn_index=turn_index,
+                    waiter_origin=waiter_origin,
+                )
+            else:
+                question = mailbox.append_question(
+                    context.snapshot.plan_dir,
+                    text,
+                    state_dir=args.state_dir,
+                    run_id=run_id,
+                    session_id=session_id,
+                    turn_index=turn_index,
+                    waiter_origin=waiter_origin,
+                    delivery_mode=mailbox.DELIVERY_MODE_ASYNC,
+                )
         else:
             initial_view = mailbox.read_mailbox(
                 context.snapshot.plan_dir,
@@ -1549,11 +1710,43 @@ def ask_from_args(args: argparse.Namespace) -> int:
             )
             question = _question_from_view(initial_view, question_id)
 
+            if args.wait:
+                wait_start = initial_view.active_wait_for(question.id)
+                if (
+                    wait_start is None
+                    and initial_view.closure_for(question.id) is None
+                ):
+                    wait_start = mailbox.append_wait_start(
+                        context.snapshot.plan_dir,
+                        question.id,
+                        state_dir=args.state_dir,
+                    )
+
         closure = (
             initial_view.closure_for(question.id)
             if initial_view is not None
             else None
         )
+        if (
+            args.wait
+            and closure is not None
+            and initial_view is not None
+            and initial_view.receipt_for_closure(closure.id) is None
+        ):
+            if wait_start is not None:
+                mailbox.consume_wait_closure(
+                    context.snapshot.plan_dir,
+                    question.id,
+                    wait_start.id,
+                    state_dir=args.state_dir,
+                )
+            else:
+                mailbox.append_receipt(
+                    context.snapshot.plan_dir,
+                    question.id,
+                    closure.id,
+                    state_dir=args.state_dir,
+                )
         timed_out = False
         if args.wait and closure is None:
             closure, timed_out = _wait_for_closure(
@@ -1562,6 +1755,7 @@ def ask_from_args(args: argparse.Namespace) -> int:
                 state_dir=args.state_dir,
                 timeout=wait_timeout,
                 initial_view=initial_view,
+                wait_id=None if wait_start is None else wait_start.id,
             )
     except mailbox.MailboxError as error:
         _print_mailbox_error(
@@ -1585,6 +1779,13 @@ def ask_from_args(args: argparse.Namespace) -> int:
         resolution is not None
         and resolution.action == mailbox.RESOLUTION_ACTION_PAUSE
     )
+    receipt = None
+    if closure is not None:
+        final_view = mailbox.read_mailbox(
+            context.snapshot.plan_dir, state_dir=args.state_dir
+        )
+        receipt = final_view.receipt_for_closure(closure.id)
+    consumed = receipt is not None
 
     payload = responses.success_payload(
         COMMAND_ASK,
@@ -1603,6 +1804,20 @@ def ask_from_args(args: argparse.Namespace) -> int:
         resolution=(
             None if resolution is None else _message_payload(resolution)
         ),
+        wait_start=(
+            None if wait_start is None else _message_payload(wait_start)
+        ),
+        delivery_state=(
+            "consumed"
+            if consumed
+            else "accepted"
+            if closure is not None
+            else "timed-out"
+            if timed_out
+            else "open"
+        ),
+        consumed=consumed,
+        receipt=None if receipt is None else _message_payload(receipt),
     )
     if args.json:
         responses.print_json(payload)

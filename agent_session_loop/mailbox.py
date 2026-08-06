@@ -29,9 +29,11 @@ from . import state
 MAILBOX_FILE_NAME = "mailbox.jsonl"
 MAILBOX_LEASE_FILE_NAME = "mailbox-lease.json"
 MAILBOX_LEGACY_SCHEMA_VERSION = 1
-MAILBOX_SCHEMA_VERSION = 2
+MAILBOX_PREVIOUS_SCHEMA_VERSION = 2
+MAILBOX_SCHEMA_VERSION = 3
 MAILBOX_SUPPORTED_SCHEMA_VERSIONS = (
     MAILBOX_LEGACY_SCHEMA_VERSION,
+    MAILBOX_PREVIOUS_SCHEMA_VERSION,
     MAILBOX_SCHEMA_VERSION,
 )
 MAILBOX_LEASE_VERSION = 2
@@ -52,6 +54,13 @@ MAILBOX_MIN_RESOLUTION_BYTES = 200
 # Guidance, questions, notices, and acknowledgements stop at the reduced cap
 # so they cannot strand a waiting run by consuming its closure capacity.
 MAILBOX_CLOSURE_RESERVE_BYTES = 512 * 1024
+# Lifecycle records must remain appendable after ordinary messages and even a
+# maximal closure have exhausted their respective tiers.  The three nested
+# limits are intentionally conservative: a closure cannot consume the bytes
+# reserved for ending its wait and recording consumption, and a wait-end cannot
+# consume the final receipt reserve.
+MAILBOX_WAIT_END_RESERVE_BYTES = 192 * 1024
+MAILBOX_RECEIPT_RESERVE_BYTES = 96 * 1024
 # Backward-compatible names for callers that compute the old reply/question
 # reserve. Both aliases intentionally name the shared closure reserve.
 MAILBOX_REPLY_RESERVE_BYTES = MAILBOX_CLOSURE_RESERVE_BYTES
@@ -76,16 +85,35 @@ MessageKind = Literal[
     "resolution",
     "notice",
     "ack",
+    "wait-start",
+    "wait-end",
+    "receipt",
 ]
 ResolutionAction = Literal["continue", "pause"]
 WaiterOrigin = Literal["worker", "runner"]
+DeliveryMode = Literal["async", "wait"]
+WaitEndReason = Literal["timeout", "closure", "error"]
 KIND_GUIDANCE: MessageKind = "guidance"
 KIND_QUESTION: MessageKind = "question"
 KIND_REPLY: MessageKind = "reply"
 KIND_RESOLUTION: MessageKind = "resolution"
 KIND_NOTICE: MessageKind = "notice"
 KIND_ACK: MessageKind = "ack"
+KIND_WAIT_START: MessageKind = "wait-start"
+KIND_WAIT_END: MessageKind = "wait-end"
+KIND_RECEIPT: MessageKind = "receipt"
 MESSAGE_KINDS: tuple[MessageKind, ...] = (
+    KIND_GUIDANCE,
+    KIND_QUESTION,
+    KIND_REPLY,
+    KIND_RESOLUTION,
+    KIND_NOTICE,
+    KIND_ACK,
+    KIND_WAIT_START,
+    KIND_WAIT_END,
+    KIND_RECEIPT,
+)
+V2_MESSAGE_KINDS: tuple[MessageKind, ...] = (
     KIND_GUIDANCE,
     KIND_QUESTION,
     KIND_REPLY,
@@ -100,6 +128,25 @@ LEGACY_MESSAGE_KINDS: tuple[MessageKind, ...] = (
     KIND_ACK,
 )
 CLOSURE_KINDS: tuple[MessageKind, ...] = (KIND_REPLY, KIND_RESOLUTION)
+LIFECYCLE_KINDS: tuple[MessageKind, ...] = (
+    KIND_WAIT_START,
+    KIND_WAIT_END,
+    KIND_RECEIPT,
+)
+DELIVERY_MODE_ASYNC: DeliveryMode = "async"
+DELIVERY_MODE_WAIT: DeliveryMode = "wait"
+DELIVERY_MODES: tuple[DeliveryMode, ...] = (
+    DELIVERY_MODE_ASYNC,
+    DELIVERY_MODE_WAIT,
+)
+WAIT_END_REASON_TIMEOUT: WaitEndReason = "timeout"
+WAIT_END_REASON_CLOSURE: WaitEndReason = "closure"
+WAIT_END_REASON_ERROR: WaitEndReason = "error"
+WAIT_END_REASONS: tuple[WaitEndReason, ...] = (
+    WAIT_END_REASON_TIMEOUT,
+    WAIT_END_REASON_CLOSURE,
+    WAIT_END_REASON_ERROR,
+)
 RESOLUTION_ACTION_CONTINUE: ResolutionAction = "continue"
 RESOLUTION_ACTION_PAUSE: ResolutionAction = "pause"
 RESOLUTION_ACTIONS: tuple[ResolutionAction, ...] = (
@@ -136,6 +183,14 @@ REJECT_INVALID_WAITER_ORIGIN = "invalid-waiter-origin"
 REJECT_INVALID_ACTION = "invalid-action"
 REJECT_INVALID_NOTE = "invalid-note"
 REJECT_INVALID_ACKNOWLEDGEMENT = "invalid-acknowledgement"
+REJECT_INVALID_DELIVERY_MODE = "invalid-delivery-mode"
+REJECT_QUESTION_NOT_WAITING = "question-not-waiting"
+REJECT_QUESTION_ALREADY_WAITING = "question-already-waiting"
+REJECT_INVALID_WAIT_ID = "invalid-wait-id"
+REJECT_INVALID_WAIT_END_REASON = "invalid-wait-end-reason"
+REJECT_INVALID_CLOSURE_ID = "invalid-closure-id"
+REJECT_CLOSURE_NOT_FOUND = "closure-not-found"
+REJECT_CLOSURE_ALREADY_CONSUMED = "closure-already-consumed"
 
 # Stable operation errors. Validation failures use the corresponding rejection
 # reason where possible so callers receive the same reason for live input and
@@ -198,6 +253,10 @@ class MailboxMessage:
     waiter_origin: WaiterOrigin | None = None
     action: ResolutionAction | None = None
     note: str | None = None
+    delivery_mode: DeliveryMode | None = None
+    wait_id: str | None = None
+    wait_end_reason: WaitEndReason | None = None
+    closure_id: str | None = None
     version: int = MAILBOX_SCHEMA_VERSION
 
     def to_record(self) -> dict[str, Any]:
@@ -226,6 +285,14 @@ class MailboxMessage:
             payload["action"] = self.action
         if self.note is not None:
             payload["note"] = self.note
+        if self.delivery_mode is not None:
+            payload["delivery_mode"] = self.delivery_mode
+        if self.wait_id is not None:
+            payload["wait_id"] = self.wait_id
+        if self.wait_end_reason is not None:
+            payload["reason"] = self.wait_end_reason
+        if self.closure_id is not None:
+            payload["closure_id"] = self.closure_id
         return payload
 
     def to_payload(self) -> dict[str, Any]:
@@ -267,12 +334,15 @@ class MailboxCounts:
     resolutions: int
     notices: int
     acknowledgements: int
+    wait_starts: int
+    wait_ends: int
+    receipts: int
     pending_guidance: int
     unanswered_questions: int
     rejected: int
 
     def to_payload(self) -> dict[str, int]:
-        return {
+        payload = {
             "acknowledgements": self.acknowledgements,
             "guidance": self.guidance,
             "pending_guidance": self.pending_guidance,
@@ -283,6 +353,16 @@ class MailboxCounts:
             "notices": self.notices,
             "unanswered_questions": self.unanswered_questions,
         }
+        # Preserve the exact legacy summary shape for logs without v3
+        # lifecycle activity while exposing additive counts as soon as they
+        # are meaningful.
+        if self.wait_starts or self.wait_ends or self.receipts:
+            payload.update(
+                wait_starts=self.wait_starts,
+                wait_ends=self.wait_ends,
+                receipts=self.receipts,
+            )
+        return payload
 
 
 @dataclass(frozen=True)
@@ -328,6 +408,28 @@ class MailboxView:
             if message.kind == KIND_QUESTION and message.id not in closed
         )
 
+    def active_wait_for(self, question_id: str) -> MailboxMessage | None:
+        """Return the latest valid wait-start not paired with a wait-end."""
+        ended = {
+            message.wait_id
+            for message in self.messages
+            if message.kind == KIND_WAIT_END and message.wait_id is not None
+        }
+        for message in reversed(self.messages):
+            if (
+                message.kind == KIND_WAIT_START
+                and message.to == question_id
+                and message.id not in ended
+            ):
+                return message
+        return None
+
+    def receipt_for_closure(self, closure_id: str) -> MailboxMessage | None:
+        for message in self.messages:
+            if message.kind == KIND_RECEIPT and message.closure_id == closure_id:
+                return message
+        return None
+
     def open_questions(
         self,
         run_id: str | None,
@@ -345,6 +447,11 @@ class MailboxView:
             message
             for message in self.unanswered_questions
             if message.run_id == run_id
+            and (
+                message.version < MAILBOX_SCHEMA_VERSION
+                or message.delivery_mode != DELIVERY_MODE_WAIT
+                or self.active_wait_for(message.id) is not None
+            )
         )
 
     @property
@@ -363,6 +470,15 @@ class MailboxView:
             notices=sum(message.kind == KIND_NOTICE for message in self.messages),
             acknowledgements=sum(
                 message.kind == KIND_ACK for message in self.messages
+            ),
+            wait_starts=sum(
+                message.kind == KIND_WAIT_START for message in self.messages
+            ),
+            wait_ends=sum(
+                message.kind == KIND_WAIT_END for message in self.messages
+            ),
+            receipts=sum(
+                message.kind == KIND_RECEIPT for message in self.messages
             ),
             pending_guidance=len(self.pending_guidance),
             unanswered_questions=len(self.unanswered_questions),
@@ -432,6 +548,16 @@ class MailboxView:
             if message.kind in CLOSURE_KINDS and message.to == question_id:
                 return message
         return None
+
+    def delivery_state_for(self, question_id: str) -> str:
+        closure = self.closure_for(question_id)
+        if closure is None:
+            return "waiting" if self.active_wait_for(question_id) else "open"
+        return (
+            "consumed"
+            if self.receipt_for_closure(closure.id) is not None
+            else "accepted"
+        )
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -525,6 +651,21 @@ class MailboxLeaseView:
                 }
             )
         return payload
+
+
+@dataclass(frozen=True)
+class WaitCompletion:
+    """Atomic result of ending a v3 wait or consuming its closure."""
+
+    question: MailboxMessage
+    wait_start: MailboxMessage
+    wait_end: MailboxMessage
+    closure: MailboxMessage | None = None
+    receipt: MailboxMessage | None = None
+
+    @property
+    def consumed(self) -> bool:
+        return self.receipt is not None
 
 
 def mailbox_path_for_plan(
@@ -658,7 +799,10 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
     rejected: list[RejectedMailboxRecord] = []
     seen_ids: set[str] = set()
     questions: dict[str, MailboxMessage] = {}
-    closures: dict[str, MessageKind] = {}
+    closures: dict[str, MailboxMessage] = {}
+    wait_starts: dict[str, MailboxMessage] = {}
+    active_waits: dict[str, MailboxMessage] = {}
+    receipts: dict[str, MailboxMessage] = {}
     physical_lines = _physical_lines(data)
 
     for seq, raw_bytes in enumerate(physical_lines, start=1):
@@ -712,6 +856,8 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
         allowed_kinds = (
             LEGACY_MESSAGE_KINDS
             if version == MAILBOX_LEGACY_SCHEMA_VERSION
+            else V2_MESSAGE_KINDS
+            if version == MAILBOX_PREVIOUS_SCHEMA_VERSION
             else MESSAGE_KINDS
         )
         if kind not in allowed_kinds:
@@ -764,6 +910,10 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
         waiter_origin: WaiterOrigin | None = None
         action: ResolutionAction | None = None
         note: str | None = None
+        delivery_mode: DeliveryMode | None = None
+        wait_id: str | None = None
+        wait_end_reason: WaitEndReason | None = None
+        closure_id: str | None = None
 
         if kind in (KIND_GUIDANCE, KIND_QUESTION, KIND_REPLY, KIND_NOTICE):
             text_value = payload.get("text")
@@ -826,6 +976,18 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
                         )
                         continue
                     waiter_origin = waiter_value
+                if version >= MAILBOX_SCHEMA_VERSION:
+                    delivery_value = payload.get("delivery_mode")
+                    if delivery_value not in DELIVERY_MODES:
+                        _reject(
+                            rejected,
+                            seq=seq,
+                            reason=REJECT_INVALID_DELIVERY_MODE,
+                            raw=raw,
+                            detail=str(delivery_value),
+                        )
+                        continue
+                    delivery_mode = delivery_value
 
         if kind == KIND_NOTICE:
             run_value = payload.get("run_id")
@@ -887,9 +1049,23 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
                     seq=seq,
                     reason=(
                         REJECT_QUESTION_ALREADY_ANSWERED
-                        if prior_closure == KIND_REPLY
+                        if prior_closure.kind == KIND_REPLY
                         else REJECT_QUESTION_ALREADY_RESOLVED
                     ),
+                    raw=raw,
+                    detail=target,
+                )
+                continue
+            question = questions[target]
+            if (
+                question.version >= MAILBOX_SCHEMA_VERSION
+                and question.delivery_mode == DELIVERY_MODE_WAIT
+                and target not in active_waits
+            ):
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_QUESTION_NOT_WAITING,
                     raw=raw,
                     detail=target,
                 )
@@ -955,6 +1131,173 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
                 continue
             upto = upto_value
 
+        if kind in LIFECYCLE_KINDS:
+            target_value = payload.get("to")
+            if not _is_uuid(target_value):
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_INVALID_TARGET,
+                    raw=raw,
+                )
+                continue
+            assert isinstance(target_value, str)
+            target = target_value
+            question = questions.get(target)
+            if question is None:
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_QUESTION_NOT_FOUND,
+                    raw=raw,
+                    detail=target,
+                )
+                continue
+        if kind == KIND_WAIT_START:
+            assert target is not None
+            if target in closures:
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_QUESTION_NOT_OPEN,
+                    raw=raw,
+                    detail=target,
+                )
+                continue
+            if target in active_waits:
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_QUESTION_ALREADY_WAITING,
+                    raw=raw,
+                    detail=target,
+                )
+                continue
+
+        if kind == KIND_WAIT_END:
+            assert target is not None
+            wait_value = payload.get("wait_id")
+            active_wait = active_waits.get(target)
+            if (
+                not _is_uuid(wait_value)
+                or active_wait is None
+                or active_wait.id != wait_value
+            ):
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_INVALID_WAIT_ID,
+                    raw=raw,
+                    detail=str(wait_value),
+                )
+                continue
+            wait_id = wait_value
+
+        if kind == KIND_RECEIPT:
+            assert target is not None
+            wait_value = payload.get("wait_id")
+            active_wait = active_waits.get(target)
+            question = questions[target]
+            strict = (
+                question.version >= MAILBOX_SCHEMA_VERSION
+                and question.delivery_mode == DELIVERY_MODE_WAIT
+            )
+            if wait_value is not None:
+                if (
+                    not _is_uuid(wait_value)
+                    or active_wait is None
+                    or active_wait.id != wait_value
+                ):
+                    _reject(
+                        rejected,
+                        seq=seq,
+                        reason=REJECT_INVALID_WAIT_ID,
+                        raw=raw,
+                        detail=str(wait_value),
+                    )
+                    continue
+                wait_id = wait_value
+            elif strict or active_wait is not None:
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=(
+                        REJECT_QUESTION_NOT_WAITING
+                        if strict
+                        else REJECT_INVALID_WAIT_ID
+                    ),
+                    raw=raw,
+                    detail=target,
+                )
+                continue
+
+        if kind == KIND_WAIT_END:
+            reason_value = payload.get("reason")
+            if reason_value not in WAIT_END_REASONS:
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_INVALID_WAIT_END_REASON,
+                    raw=raw,
+                    detail=str(reason_value),
+                )
+                continue
+            wait_end_reason = reason_value
+            closure_value = payload.get("closure_id")
+            closure = closures.get(target)
+            if reason_value == WAIT_END_REASON_CLOSURE:
+                if (
+                    not _is_uuid(closure_value)
+                    or closure is None
+                    or closure.id != closure_value
+                    or closure_value not in receipts
+                ):
+                    _reject(
+                        rejected,
+                        seq=seq,
+                        reason=REJECT_INVALID_CLOSURE_ID,
+                        raw=raw,
+                        detail=str(closure_value),
+                    )
+                    continue
+                closure_id = closure_value
+            elif closure_value is not None or closure is not None:
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_INVALID_CLOSURE_ID,
+                    raw=raw,
+                    detail=str(closure_value),
+                )
+                continue
+
+        if kind == KIND_RECEIPT:
+            closure_value = payload.get("closure_id")
+            closure = closures.get(target)
+            if (
+                not _is_uuid(closure_value)
+                or closure is None
+                or closure.id != closure_value
+            ):
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_INVALID_CLOSURE_ID,
+                    raw=raw,
+                    detail=str(closure_value),
+                )
+                continue
+            if closure_value in receipts:
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_CLOSURE_ALREADY_CONSUMED,
+                    raw=raw,
+                    detail=closure_value,
+                )
+                continue
+            closure_id = closure_value
+
         message = MailboxMessage(
             seq=seq,
             id=message_id,
@@ -969,6 +1312,10 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
             waiter_origin=waiter_origin,
             action=action,
             note=note,
+            delivery_mode=delivery_mode,
+            wait_id=wait_id,
+            wait_end_reason=wait_end_reason,
+            closure_id=closure_id,
             version=version,
         )
         messages.append(message)
@@ -976,7 +1323,14 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
         if kind == KIND_QUESTION:
             questions[message_id] = message
         elif kind in CLOSURE_KINDS and target is not None:
-            closures[target] = kind
+            closures[target] = message
+        elif kind == KIND_WAIT_START and target is not None:
+            wait_starts[message_id] = message
+            active_waits[target] = message
+        elif kind == KIND_RECEIPT and closure_id is not None:
+            receipts[closure_id] = message
+        elif kind == KIND_WAIT_END and target is not None:
+            active_waits.pop(target, None)
 
     return MailboxView(
         mailbox_path=mailbox_path,
@@ -996,6 +1350,77 @@ def _read_locked(fd: int) -> bytes:
             break
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+def _message_from_record(record: dict[str, Any], seq: int) -> MailboxMessage:
+    return MailboxMessage(
+        seq=seq,
+        id=record["id"],
+        kind=record["kind"],
+        created_at=record["created_at"],
+        text=record.get("text"),
+        to=record.get("to"),
+        upto=record.get("upto"),
+        run_id=record.get("run_id"),
+        session_id=record.get("session_id"),
+        turn_index=record.get("turn_index"),
+        waiter_origin=record.get("waiter_origin"),
+        action=record.get("action"),
+        note=record.get("note"),
+        delivery_mode=record.get("delivery_mode"),
+        wait_id=record.get("wait_id"),
+        wait_end_reason=record.get("reason"),
+        closure_id=record.get("closure_id"),
+        version=record["version"],
+    )
+
+
+def _encoded_records(records: list[dict[str, Any]]) -> bytes:
+    return b"".join(
+        json.dumps(record, separators=(",", ":"), sort_keys=True).encode(
+            "utf-8"
+        )
+        + b"\n"
+        for record in records
+    )
+
+
+def _write_locked_records(
+    fd: int,
+    *,
+    existing: bytes,
+    records: list[dict[str, Any]],
+    effective_max_bytes: int,
+    mailbox_path: Path,
+) -> tuple[MailboxMessage, ...]:
+    """Append a prevalidated batch as one lock-scoped lifecycle transaction."""
+    separator = b"\n" if existing and not existing.endswith(b"\n") else b""
+    encoded = separator + _encoded_records(records)
+    original_size = os.fstat(fd).st_size
+    if original_size + len(encoded) > effective_max_bytes:
+        raise MailboxError(
+            ERROR_MAILBOX_FULL,
+            f"append would exceed {effective_max_bytes} bytes",
+            path=mailbox_path,
+        )
+    try:
+        written = os.write(fd, encoded)
+        if written != len(encoded):
+            os.ftruncate(fd, original_size)
+            raise OSError(
+                f"short mailbox append: wrote {written} of {len(encoded)} bytes"
+            )
+    except OSError:
+        try:
+            os.ftruncate(fd, original_size)
+        except OSError:
+            pass
+        raise
+    first_seq = len(_physical_lines(existing)) + 1
+    return tuple(
+        _message_from_record(record, first_seq + offset)
+        for offset, record in enumerate(records)
+    )
 
 
 def mailbox_change_token(mailbox_path: str | Path) -> object:
@@ -1122,6 +1547,10 @@ def _normalize_append_record(
     waiter_origin: WaiterOrigin | None = None,
     action: ResolutionAction | str | None = None,
     note: str | None = None,
+    delivery_mode: DeliveryMode | str | None = None,
+    wait_id: str | None = None,
+    wait_end_reason: WaitEndReason | str | None = None,
+    closure_id: str | None = None,
 ) -> dict[str, Any]:
     if kind not in MESSAGE_KINDS:
         raise MailboxError(REJECT_UNKNOWN_KIND, str(kind))
@@ -1144,6 +1573,9 @@ def _normalize_append_record(
         record["text"] = text
 
     if kind == KIND_QUESTION:
+        if delivery_mode not in DELIVERY_MODES:
+            raise MailboxError(REJECT_INVALID_DELIVERY_MODE, str(delivery_mode))
+        record["delivery_mode"] = delivery_mode
         if run_id is not None:
             if not _valid_run_id(run_id):
                 raise MailboxError(REJECT_INVALID_RUN_ID)
@@ -1179,6 +1611,39 @@ def _normalize_append_record(
         if not _is_uuid(target):
             raise MailboxError(REJECT_INVALID_TARGET)
         record["to"] = target
+
+    if kind in LIFECYCLE_KINDS:
+        if not _is_uuid(target):
+            raise MailboxError(REJECT_INVALID_TARGET)
+        record["to"] = target
+
+    if kind == KIND_WAIT_END:
+        if not _is_uuid(wait_id):
+            raise MailboxError(REJECT_INVALID_WAIT_ID)
+        record["wait_id"] = wait_id
+
+    if kind == KIND_RECEIPT and wait_id is not None:
+        if not _is_uuid(wait_id):
+            raise MailboxError(REJECT_INVALID_WAIT_ID)
+        record["wait_id"] = wait_id
+
+    if kind == KIND_WAIT_END:
+        if wait_end_reason not in WAIT_END_REASONS:
+            raise MailboxError(
+                REJECT_INVALID_WAIT_END_REASON, str(wait_end_reason)
+            )
+        record["reason"] = wait_end_reason
+        if wait_end_reason == WAIT_END_REASON_CLOSURE:
+            if not _is_uuid(closure_id):
+                raise MailboxError(REJECT_INVALID_CLOSURE_ID)
+            record["closure_id"] = closure_id
+        elif closure_id is not None:
+            raise MailboxError(REJECT_INVALID_CLOSURE_ID)
+
+    if kind == KIND_RECEIPT:
+        if not _is_uuid(closure_id):
+            raise MailboxError(REJECT_INVALID_CLOSURE_ID)
+        record["closure_id"] = closure_id
 
     if kind == KIND_RESOLUTION:
         if not _valid_run_id(run_id):
@@ -1222,6 +1687,10 @@ def _append_record(
     waiter_origin: WaiterOrigin | None = None,
     action: ResolutionAction | str | None = None,
     note: str | None = None,
+    delivery_mode: DeliveryMode | str | None = None,
+    wait_id: str | None = None,
+    wait_end_reason: WaitEndReason | str | None = None,
+    closure_id: str | None = None,
 ) -> MailboxMessage:
     record = _normalize_append_record(
         kind=kind,
@@ -1236,6 +1705,10 @@ def _append_record(
         waiter_origin=waiter_origin,
         action=action,
         note=note,
+        delivery_mode=delivery_mode,
+        wait_id=wait_id,
+        wait_end_reason=wait_end_reason,
+        closure_id=closure_id,
     )
     encoded_record = (
         json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -1269,6 +1742,7 @@ def _append_record(
             )
 
         seq = current_view.last_seq + 1
+        strict_wait_closure = False
         if kind == KIND_ACK:
             ack_upto = record["upto"]
             if ack_upto >= seq:
@@ -1314,15 +1788,146 @@ def _append_record(
                     question_id,
                     path=mailbox_path,
                 )
+            if (
+                question.version >= MAILBOX_SCHEMA_VERSION
+                and question.delivery_mode == DELIVERY_MODE_WAIT
+                and current_view.active_wait_for(question_id) is None
+            ):
+                raise MailboxError(
+                    REJECT_QUESTION_NOT_WAITING,
+                    question_id,
+                    path=mailbox_path,
+                )
+            strict_wait_closure = (
+                question.version >= MAILBOX_SCHEMA_VERSION
+                and question.delivery_mode == DELIVERY_MODE_WAIT
+            )
+            if not strict_wait_closure:
+                strict_wait_closure = any(
+                    candidate.kind == KIND_QUESTION
+                    and current_view.active_wait_for(candidate.id) is not None
+                    for candidate in current_view.messages
+                )
+
+        if kind == KIND_WAIT_START:
+            question_id = record["to"]
+            question = next(
+                (
+                    message
+                    for message in current_view.messages
+                    if message.kind == KIND_QUESTION
+                    and message.id == question_id
+                ),
+                None,
+            )
+            if question is None:
+                raise MailboxError(
+                    REJECT_QUESTION_NOT_FOUND, question_id, path=mailbox_path
+                )
+            if current_view.closure_for(question_id) is not None:
+                raise MailboxError(
+                    REJECT_QUESTION_NOT_OPEN, question_id, path=mailbox_path
+                )
+            if current_view.active_wait_for(question_id) is not None:
+                raise MailboxError(
+                    REJECT_QUESTION_ALREADY_WAITING,
+                    question_id,
+                    path=mailbox_path,
+                )
+
+        if kind == KIND_WAIT_END:
+            question_id = record["to"]
+            active_wait = current_view.active_wait_for(question_id)
+            if active_wait is None or active_wait.id != record["wait_id"]:
+                raise MailboxError(
+                    REJECT_QUESTION_NOT_WAITING,
+                    question_id,
+                    path=mailbox_path,
+                )
+
+        if kind == KIND_RECEIPT:
+            question_id = record["to"]
+            question = next(
+                (
+                    message
+                    for message in current_view.messages
+                    if message.kind == KIND_QUESTION
+                    and message.id == question_id
+                ),
+                None,
+            )
+            if question is None:
+                raise MailboxError(
+                    REJECT_QUESTION_NOT_FOUND, question_id, path=mailbox_path
+                )
+            closure = current_view.closure_for(question_id)
+            if closure is None or closure.id != record["closure_id"]:
+                raise MailboxError(
+                    REJECT_CLOSURE_NOT_FOUND,
+                    record["closure_id"],
+                    path=mailbox_path,
+                )
+            if current_view.receipt_for_closure(closure.id) is not None:
+                raise MailboxError(
+                    REJECT_CLOSURE_ALREADY_CONSUMED,
+                    closure.id,
+                    path=mailbox_path,
+                )
+            active_wait = current_view.active_wait_for(question_id)
+            strict = (
+                question.version >= MAILBOX_SCHEMA_VERSION
+                and question.delivery_mode == DELIVERY_MODE_WAIT
+            )
+            if active_wait is not None and record.get("wait_id") is None:
+                raise MailboxError(
+                    (
+                        REJECT_QUESTION_NOT_WAITING
+                        if strict
+                        else REJECT_INVALID_WAIT_ID
+                    ),
+                    question_id,
+                    path=mailbox_path,
+                )
+            if strict and (
+                active_wait is None
+                or active_wait.id != record.get("wait_id")
+            ):
+                raise MailboxError(
+                    REJECT_QUESTION_NOT_WAITING,
+                    question_id,
+                    path=mailbox_path,
+                )
+            if record.get("wait_id") is not None and (
+                active_wait is None
+                or active_wait.id != record["wait_id"]
+            ):
+                raise MailboxError(
+                    REJECT_INVALID_WAIT_ID,
+                    record["wait_id"],
+                    path=mailbox_path,
+                )
 
         separator = b"\n" if existing and not existing.endswith(b"\n") else b""
         append_bytes = separator + encoded_record
         original_size = os.fstat(fd).st_size
-        effective_max_bytes = (
-            MAILBOX_MAX_BYTES
-            if kind in CLOSURE_KINDS
-            else MAILBOX_MAX_BYTES - MAILBOX_CLOSURE_RESERVE_BYTES
-        )
+        if kind == KIND_RECEIPT:
+            effective_max_bytes = MAILBOX_MAX_BYTES
+        elif kind == KIND_WAIT_END:
+            effective_max_bytes = (
+                MAILBOX_MAX_BYTES - MAILBOX_RECEIPT_RESERVE_BYTES
+            )
+        elif kind in CLOSURE_KINDS and strict_wait_closure:
+            effective_max_bytes = (
+                MAILBOX_MAX_BYTES
+                - MAILBOX_WAIT_END_RESERVE_BYTES
+                - MAILBOX_RECEIPT_RESERVE_BYTES
+            )
+        elif kind in CLOSURE_KINDS:
+            effective_max_bytes = MAILBOX_MAX_BYTES
+        else:
+            effective_max_bytes = (
+                MAILBOX_MAX_BYTES - MAILBOX_CLOSURE_RESERVE_BYTES
+            )
         if original_size + len(append_bytes) > effective_max_bytes:
             raise MailboxError(
                 ERROR_MAILBOX_FULL,
@@ -1374,6 +1979,10 @@ def _append_record(
         waiter_origin=record.get("waiter_origin"),
         action=record.get("action"),
         note=record.get("note"),
+        delivery_mode=record.get("delivery_mode"),
+        wait_id=record.get("wait_id"),
+        wait_end_reason=record.get("reason"),
+        closure_id=record.get("closure_id"),
         version=record["version"],
     )
 
@@ -1407,6 +2016,7 @@ def append_question(
     session_id: str | None = None,
     turn_index: int | None = None,
     waiter_origin: WaiterOrigin | None = None,
+    delivery_mode: DeliveryMode | str = DELIVERY_MODE_ASYNC,
 ) -> MailboxMessage:
     return _append_record(
         plan_dir,
@@ -1419,6 +2029,103 @@ def append_question(
         session_id=session_id,
         turn_index=turn_index,
         waiter_origin=waiter_origin,
+        delivery_mode=delivery_mode,
+    )
+
+
+def append_wait_question(
+    plan_dir: str | Path,
+    text: str,
+    *,
+    state_dir: str | Path | None = None,
+    message_id: str | None = None,
+    wait_id: str | None = None,
+    created_at: str | None = None,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    turn_index: int | None = None,
+    waiter_origin: WaiterOrigin | None = None,
+) -> tuple[MailboxMessage, MailboxMessage]:
+    """Atomically create a wait-delivered question and its first active wait."""
+    question_record = _normalize_append_record(
+        kind=KIND_QUESTION,
+        text=text,
+        target=None,
+        upto=None,
+        message_id=message_id,
+        created_at=created_at,
+        run_id=run_id,
+        session_id=session_id,
+        turn_index=turn_index,
+        waiter_origin=waiter_origin,
+        delivery_mode=DELIVERY_MODE_WAIT,
+    )
+    wait_record = _normalize_append_record(
+        kind=KIND_WAIT_START,
+        text=None,
+        target=question_record["id"],
+        upto=None,
+        message_id=wait_id,
+        created_at=created_at,
+    )
+    mailbox_path = mailbox_path_for_plan(plan_dir, state_dir)
+    try:
+        mailbox_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(
+            mailbox_path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600
+        )
+    except OSError as error:
+        raise MailboxError(ERROR_MAILBOX_WRITE, str(error), path=mailbox_path) from error
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.fchmod(fd, 0o600)
+        existing = _read_locked(fd)
+        view = _parse_mailbox_bytes(existing, mailbox_path)
+        existing_ids = {message.id for message in view.messages}
+        for record in (question_record, wait_record):
+            if record["id"] in existing_ids:
+                raise MailboxError(
+                    REJECT_DUPLICATE_ID, record["id"], path=mailbox_path
+                )
+            existing_ids.add(record["id"])
+        messages = _write_locked_records(
+            fd,
+            existing=existing,
+            records=[question_record, wait_record],
+            effective_max_bytes=(
+                MAILBOX_MAX_BYTES - MAILBOX_CLOSURE_RESERVE_BYTES
+            ),
+            mailbox_path=mailbox_path,
+        )
+    except MailboxError:
+        raise
+    except OSError as error:
+        raise MailboxError(ERROR_MAILBOX_WRITE, str(error), path=mailbox_path) from error
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
+    return messages[0], messages[1]
+
+
+def append_wait_start(
+    plan_dir: str | Path,
+    question_id: str,
+    *,
+    state_dir: str | Path | None = None,
+    message_id: str | None = None,
+    created_at: str | None = None,
+) -> MailboxMessage:
+    """Start a resumed wait for an open v3 wait-delivered question."""
+    return _append_record(
+        plan_dir,
+        kind=KIND_WAIT_START,
+        state_dir=state_dir,
+        target=question_id,
+        message_id=message_id,
+        created_at=created_at,
     )
 
 
@@ -1465,6 +2172,170 @@ def append_resolution(
         note=note,
         message_id=message_id,
         created_at=created_at,
+    )
+
+
+def append_receipt(
+    plan_dir: str | Path,
+    question_id: str,
+    closure_id: str,
+    *,
+    wait_id: str | None = None,
+    state_dir: str | Path | None = None,
+    message_id: str | None = None,
+    created_at: str | None = None,
+) -> MailboxMessage:
+    """Record that an ask/runner consumer actually observed one closure."""
+    return _append_record(
+        plan_dir,
+        kind=KIND_RECEIPT,
+        state_dir=state_dir,
+        target=question_id,
+        wait_id=wait_id,
+        closure_id=closure_id,
+        message_id=message_id,
+        created_at=created_at,
+    )
+
+
+def finish_wait(
+    plan_dir: str | Path,
+    question_id: str,
+    wait_id: str,
+    *,
+    reason: WaitEndReason | str,
+    state_dir: str | Path | None = None,
+    created_at: str | None = None,
+) -> WaitCompletion:
+    """Atomically end a wait, giving any committed closure priority.
+
+    The mailbox lock is the serialization point for timeout-versus-closure
+    races.  If a closure won first, this transaction records its receipt and a
+    closure wait-end.  Otherwise it records the requested timeout/error end;
+    any later strict wait-mode closure is rejected as ``question-not-waiting``.
+    """
+    if reason not in (WAIT_END_REASON_TIMEOUT, WAIT_END_REASON_ERROR):
+        raise MailboxError(REJECT_INVALID_WAIT_END_REASON, str(reason))
+    if not _is_uuid(question_id):
+        raise MailboxError(REJECT_INVALID_TARGET)
+    if not _is_uuid(wait_id):
+        raise MailboxError(REJECT_INVALID_WAIT_ID)
+    mailbox_path = mailbox_path_for_plan(plan_dir, state_dir)
+    try:
+        fd = os.open(mailbox_path, os.O_RDWR | os.O_APPEND)
+    except FileNotFoundError as error:
+        raise MailboxError(
+            REJECT_QUESTION_NOT_FOUND, question_id, path=mailbox_path
+        ) from error
+    except OSError as error:
+        raise MailboxError(ERROR_MAILBOX_WRITE, str(error), path=mailbox_path) from error
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        existing = _read_locked(fd)
+        view = _parse_mailbox_bytes(existing, mailbox_path)
+        question = next(
+            (
+                message
+                for message in view.messages
+                if message.kind == KIND_QUESTION and message.id == question_id
+            ),
+            None,
+        )
+        if question is None:
+            raise MailboxError(
+                REJECT_QUESTION_NOT_FOUND, question_id, path=mailbox_path
+            )
+        wait_start = view.active_wait_for(question_id)
+        if wait_start is None or wait_start.id != wait_id:
+            raise MailboxError(
+                REJECT_QUESTION_NOT_WAITING, question_id, path=mailbox_path
+            )
+        closure = view.closure_for(question_id)
+        records: list[dict[str, Any]] = []
+        receipt: MailboxMessage | None = None
+        if closure is not None:
+            existing_receipt = view.receipt_for_closure(closure.id)
+            if existing_receipt is None:
+                records.append(
+                    _normalize_append_record(
+                        kind=KIND_RECEIPT,
+                        text=None,
+                        target=question_id,
+                        upto=None,
+                        message_id=None,
+                        created_at=created_at,
+                        wait_id=wait_id,
+                        closure_id=closure.id,
+                    )
+                )
+            else:
+                receipt = existing_receipt
+            end_reason: WaitEndReason = WAIT_END_REASON_CLOSURE
+        else:
+            end_reason = reason
+        records.append(
+            _normalize_append_record(
+                kind=KIND_WAIT_END,
+                text=None,
+                target=question_id,
+                upto=None,
+                message_id=None,
+                created_at=created_at,
+                wait_id=wait_id,
+                wait_end_reason=end_reason,
+                closure_id=closure.id if closure is not None else None,
+            )
+        )
+        written = _write_locked_records(
+            fd,
+            existing=existing,
+            records=records,
+            effective_max_bytes=(
+                MAILBOX_MAX_BYTES
+                if closure is not None
+                else MAILBOX_MAX_BYTES - MAILBOX_RECEIPT_RESERVE_BYTES
+            ),
+            mailbox_path=mailbox_path,
+        )
+        if closure is not None and receipt is None:
+            receipt = written[0]
+        wait_end = written[-1]
+    except MailboxError:
+        raise
+    except OSError as error:
+        raise MailboxError(ERROR_MAILBOX_WRITE, str(error), path=mailbox_path) from error
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
+    return WaitCompletion(
+        question=question,
+        wait_start=wait_start,
+        wait_end=wait_end,
+        closure=closure,
+        receipt=receipt,
+    )
+
+
+def consume_wait_closure(
+    plan_dir: str | Path,
+    question_id: str,
+    wait_id: str,
+    *,
+    state_dir: str | Path | None = None,
+) -> WaitCompletion | None:
+    """Consume a closure if present without ending an otherwise active wait."""
+    view = read_mailbox(plan_dir, state_dir=state_dir)
+    if view.closure_for(question_id) is None:
+        return None
+    return finish_wait(
+        plan_dir,
+        question_id,
+        wait_id,
+        reason=WAIT_END_REASON_ERROR,
+        state_dir=state_dir,
     )
 
 

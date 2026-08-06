@@ -389,8 +389,8 @@ asl tail PLAN_DIR [--state-dir DIR] [--lines N] [--no-follow]
 asl sessions [--running] [--recent] [--limit N] [--state-dir DIR] [--verbose] [--json]
 asl doctor --harness codex|claude|copilot [--harness-model MODEL] [--effort EFFORT] [--cwd REPO_ROOT] --plan-dir PLAN_DIR [--unsafe-bypass|--no-unsafe-bypass] [--json]
 asl inbox guidance PLAN_DIR_OR_ID (--text TEXT | --text-stdin) [--state-dir DIR] [--json]
-asl inbox reply PLAN_DIR_OR_ID --to QUESTION_ID (--text TEXT | --text-stdin) [--state-dir DIR] [--json]
-asl inbox resolve PLAN_DIR_OR_ID --to QUESTION_ID --action continue|pause [--note TEXT|--note-stdin] [--state-dir DIR] [--json]
+asl inbox reply PLAN_DIR_OR_ID --to QUESTION_ID (--text TEXT | --text-stdin) [--wait-consumed] [--wait-timeout SECONDS] [--state-dir DIR] [--json]
+asl inbox resolve PLAN_DIR_OR_ID --to QUESTION_ID --action continue|pause [--note TEXT|--note-stdin] [--wait-consumed] [--wait-timeout SECONDS] [--state-dir DIR] [--json]
 asl inbox read PLAN_DIR_OR_ID [--peek] [--state-dir DIR] [--json]
 asl ask PLAN_DIR_OR_ID (TEXT | --question-id QUESTION_ID) [--wait] [--wait-timeout SECONDS] [--state-dir DIR] [--json]
 asl notify PLAN_DIR_OR_ID (TEXT | --text-stdin) [--state-dir DIR] [--json]
@@ -412,20 +412,21 @@ changing the selected session or converting every question into a terminal
 pause. It adds exactly two files below the canonical per-plan state directory:
 
 - `mailbox.jsonl` is a non-destructive JSONL log containing `guidance`,
-  `question`, `reply`, `resolution`, `notice`, and worker `ack` records. New
-  appends use schema v2 while reads remain compatible with legacy v1 and mixed
-  logs. Physical 1-based line number is the durable sequence, including
+  `question`, `reply`, `resolution`, `notice`, worker `ack`, `wait-start`,
+  `wait-end`, and `receipt` records. New appends use schema v3 while reads
+  remain compatible with legacy v1/v2 and mixed logs. Physical 1-based line
+  number is the durable sequence, including
   malformed lines. Appends are locked, the file is never truncated or rotated,
   and an append that would exceed 4 MiB
   fails atomically with `mailbox-full`. The `full` field in `asl status --json`
   reports exhaustion rather than exact cap equality: it becomes true when
   fewer bytes remain than the smallest record produced with normal generated
   metadata. Individual larger appends can fail before that exhaustion
-  threshold. The final 512 KiB below the cap is a shared closure reserve that
-  only `reply` and `resolution` records may consume: `guidance`, `question`,
-  `notice`, and `ack` appends fail `mailbox-full` once they would cross into the
-  reserve, so the closure that unblocks a waiting run can still land after
-  every non-closure append kind reaches its effective cap. The
+  threshold. The final 512 KiB below the cap is a lifecycle reserve. Ordinary
+  records stop at its boundary; closures retain 288 KiB of nested headroom for
+  wait termination and receipts, and wait termination retains the final 96 KiB
+  for receipts. Thus ordinary exhaustion cannot strand an active question,
+  its `wait-end`, or its consumption evidence. The
   `accepts_questions` field in `asl status --json` reports that shared
   non-closure cap with the same exhaustion probe `full` applies to the file
   cap. `accepts_replies` and `accepts_resolutions` separately report whether
@@ -514,14 +515,18 @@ The seven mailbox commands share normal plan-reference, `--state-dir`, and
   or `--text-stdin` and renews the supervisor lease first.
 - `asl inbox reply` atomically appends the first reply to `--to QUESTION_ID`.
   Concurrent later replies fail with `question-already-answered`; a missing
-  target fails with `question-not-found`.
+  target fails with `question-not-found`. `--wait-consumed` optionally waits
+  for a worker/runner receipt, with `--wait-timeout` defaulting to 90 seconds;
+  a receipt timeout leaves the successful append `ok: true`,
+  `delivery_state: accepted`, and `consumed: false`.
 - `asl inbox resolve` atomically closes a live-run question without fabricating
   reply text. `--action continue` directs a worker to proceed without treating
   an optional `--note`/`--note-stdin` value as an operator answer;
   `--action pause` directs a raw worker wait to emit `RUNNER_PAUSE: blocked`
   and makes a runner-owned wait preserve its original ordinary terminal pause.
   Resolution is accepted only when authoritative status identifies an active
-  run and the question belongs to that run.
+  run and the question belongs to that run. It supports the same
+  `--wait-consumed` and `--wait-timeout` consumption contract as replies.
 - `asl inbox read` returns pending guidance and, unless `--peek` is supplied,
   appends an acknowledgement through the last guidance sequence in that
   complete snapshot, even if text-mode rendering omits records under its shared
@@ -541,6 +546,14 @@ The seven mailbox commands share normal plan-reference, `--state-dir`, and
   The wait polls mailbox
   metadata every two seconds and re-parses the append-only log only when its
   metadata changes.
+  New waits use mailbox schema v3: the question and first `wait-start` are
+  appended atomically, resumed waits append another `wait-start`, and timeout
+  appends `wait-end` under the same mailbox lock used by closures. A reply or
+  resolution to a v3 `delivery_mode: wait` question is accepted only during an
+  active wait; a late closure fails with `question-not-waiting`. When `asl ask`
+  observes a closure it atomically appends a `receipt` and closure `wait-end`.
+  Historical v1/v2 and v3 `delivery_mode: async` questions retain their
+  asynchronous closure behavior.
 - `asl notify` publishes a nonblocking worker notice from exactly one of
   positional `TEXT` or `--text-stdin`. Publication requires authoritative
   status to identify a live, unpaused, unfinished run with an active lock and
@@ -587,12 +600,13 @@ With `--json`, failures use the common error envelope and the following stable
   `invalid-since` when the outbox cursor is not a non-negative integer,
   `invalid-include` when the outbox include mode is unsupported, and
   `invalid-timeout` when a timeout is outside 0 through 1800 seconds or
-  `--wait-timeout` is supplied without `--wait`.
+  `--wait-timeout` is supplied without its corresponding `--wait` or
+  `--wait-consumed`. Lifecycle end reasons include `timeout`.
 - Mailbox-state errors are `no-active-run`, `question-not-found`,
   `question-not-open`, `question-already-answered`,
-  `question-already-resolved`, `mailbox-full`, `mailbox-read-error`, and
-  `mailbox-write-error`. Lease I/O errors are `lease-read-error` and
-  `lease-write-error`.
+  `question-already-resolved`, `question-not-waiting`, `mailbox-full`,
+  `mailbox-read-error`, and `mailbox-write-error`. Lease I/O errors are
+  `lease-read-error` and `lease-write-error`.
 - Plan resolution shared by all seven commands reports `ambiguous-plan`,
   `malformed-plan`, `state-error`, or `os-error`.
 
@@ -653,7 +667,7 @@ explicitly says no operator answer was supplied; a `pause` resolution clears
 the live wait and preserves the ordinary terminal pause. Even a queued
 stop-after-current is consumed only after a scheduled continuation completes.
 An already-committed closure takes precedence over mailbox exhaustion and is
-delivered even when the mailbox is full. Every reply
+consumed before exhaustion can end the wait. Every reply
 continuation source—mailbox, `--reply`, or `--reply-stdin`—uses the same safe
 prompt representation under `### Operator reply`: one ASCII JSON object
 between `BEGIN ASL OPERATOR REPLY JSONL` and
@@ -668,6 +682,13 @@ post-suspend grace, a full/unavailable
 mailbox, or missing question context clears `waiting_for_reply` and records the
 same ordinary
 terminal pause the non-mailbox flow would have recorded.
+
+Before accepting a completed handoff, the runner checks every v3 wait-mode
+question attributed to that exact worker turn. If one is unanswered, has an
+accepted closure without a receipt, or was consumed with a `pause` resolution,
+the runner restores the session to `pending` and pauses with body-free mailbox
+IDs and sequences as evidence. Question, reply, and note bodies are never
+copied into that guard evidence.
 
 When `asl inbox reply` sees a fresh v2 supervisor lease, it captures that
 evidence before renewing the lease. The lease supplies the owning `run_id` and

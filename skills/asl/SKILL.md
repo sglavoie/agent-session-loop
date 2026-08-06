@@ -67,6 +67,15 @@ Run it with the user's exact command:
 <skill-dir>/scripts/asl-autopilot.py --command '<exact asl run command>' --json
 ```
 
+Supervision is a strict turn-lifetime invariant: **never end the agent turn
+while the helper is active**, even if the harness backgrounds the helper or
+returns a session/cell identifier. Poll that background output at least every
+30 seconds until the helper reaches a terminal result. Surface every
+`QUESTION` record immediately; use `asl outbox wait` when a direct mailbox
+long-poll is needed rather than waiting for a user status prompt. After queuing
+a reply or resolution, continue supervising until a `CLOSURE_CONSUMED` record,
+an equivalent consumed receipt, or a terminal pause/result is observed.
+
 `--json` emits a single machine-readable result on stdout; progress heartbeats
 go to stderr. Each heartbeat carries live progress — the running session label,
 `(n/total)`, and `idle <n>s` since the child last emitted output — and escalates
@@ -90,6 +99,9 @@ the lifetime of that supervisor process while allowing another supervisor
 process to replay them at least once. Notices never enter the open-question
 projection or lease payload. The watcher stops renewing and lets the lease
 expire when supervision returns.
+Lifecycle progress is body-free and bounded: `WAIT_ENDED ...` identifies a
+terminated wait and `CLOSURE_CONSUMED ...` confirms that the worker or runner
+actually observed an accepted closure.
 
 One-shot supervisor commands do not displace a live helper. When the on-disk
 lease is fresh and carries a question projection, `asl inbox guidance`,
@@ -155,6 +167,12 @@ asl inbox resolve <plan-dir> --to <question-id> --action continue [--note '<note
 asl inbox resolve <plan-dir> --to <question-id> --action pause [--note '<note>'] [--state-dir DIR] --json
 ```
 
+Add `--wait-consumed --wait-timeout 300` when closing a live question so the
+command can confirm the receipt. A successful append is only **accepted** until
+`consumed: true` and a receipt are returned; a consumption timeout remains a
+successful append with `consumed: false`. Never call an unconsumed closure
+“delivered,” and keep polling the helper after either outcome.
+
 Use `--text-stdin` or `--note-stdin` when a body should not appear in argv. A
 reply supplies a factual answer. A `continue` resolution supplies no answer and
 resumes the same session; its optional note is context, never an answer. A
@@ -171,10 +189,12 @@ that grace a stale lease neither ends the wait nor extends it, and the grace
 never stretches the ceiling. The 30-minute ceiling bounds unsupervised time,
 not wall clock: it rolls forward with every fresh lease, so keeping the
 supervisor alive keeps the wait alive, and a wait nobody watches still ends
-within 30 minutes of the last proof. An already-committed reply or resolution takes
-precedence over mailbox exhaustion and is delivered even when the mailbox is
-full. If no closure is available, timeout, mailbox fullness/unavailability, or
-a stale lease at an active deadline that outlasts any post-suspend grace falls
+within 30 minutes of the last proof.
+An already-committed reply or resolution takes
+precedence over mailbox exhaustion and is consumed before exhaustion can end
+the wait. If no closure is available, timeout, mailbox
+fullness/unavailability, or a stale lease at an active deadline that outlasts
+any post-suspend grace falls
 back to the existing terminal pause flow below; there is no mailbox-only
 terminal status.
 

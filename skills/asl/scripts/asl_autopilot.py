@@ -647,6 +647,20 @@ def _notice_progress_record(notice: _mailbox.MailboxMessage) -> str:
     return f"NOTICE id={notice.id} preview={preview}"
 
 
+def _wait_end_progress_record(message: _mailbox.MailboxMessage) -> str:
+    return (
+        f"WAIT_ENDED question={message.to} wait={message.wait_id} "
+        f"reason={message.wait_end_reason}"
+    )
+
+
+def _receipt_progress_record(message: _mailbox.MailboxMessage) -> str:
+    return (
+        f"CLOSURE_CONSUMED question={message.to} "
+        f"closure={message.closure_id} receipt={message.id}"
+    )
+
+
 class _MailboxWatcher:
     """Poll one plan mailbox with a durable cursor and renewable lease.
 
@@ -980,6 +994,7 @@ class _MailboxWatcher:
                 pass
             else:
                 read_succeeded = True
+                prior_seq = self.last_seq
                 if self._include_unanswered_backlog:
                     # The backlog is only meaningful once an identity is bound,
                     # so stay armed until then rather than dropping it.
@@ -996,6 +1011,13 @@ class _MailboxWatcher:
                     if message.kind == _mailbox.KIND_NOTICE
                     and message.run_id == self.run_id
                     and message.id not in self._observed_notice_ids
+                )
+                lifecycle = tuple(
+                    message
+                    for message in view.messages
+                    if message.seq > prior_seq
+                    and message.kind
+                    in (_mailbox.KIND_WAIT_END, _mailbox.KIND_RECEIPT)
                 )
                 self.last_seq = max(self.last_seq, view.last_seq)
                 self._observed_question_ids.update(
@@ -1032,6 +1054,12 @@ class _MailboxWatcher:
                 )
                 self._progress_records.extend(
                     _notice_progress_record(notice) for notice in notices
+                )
+                self._progress_records.extend(
+                    _wait_end_progress_record(message)
+                    if message.kind == _mailbox.KIND_WAIT_END
+                    else _receipt_progress_record(message)
+                    for message in lifecycle
                 )
         if read_succeeded or resolved_now >= self._next_lease_at:
             # Every successful mailbox read republishes the projection. This

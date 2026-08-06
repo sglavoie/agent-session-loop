@@ -530,6 +530,306 @@ class MailboxTests(unittest.TestCase):
             0o600,
         )
 
+    def test_v3_wait_question_creation_and_consumption_are_atomic(self) -> None:
+        question, wait_start = mailbox.append_wait_question(
+            self.plan_dir,
+            "Choose A or B?",
+            state_dir=self.state_dir,
+            run_id="run-A",
+            session_id="1",
+            turn_index=2,
+            waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
+            created_at=self.timestamp(),
+        )
+        initial = mailbox.read_mailbox(
+            self.plan_dir, state_dir=self.state_dir
+        )
+        self.assertEqual((question, wait_start), initial.messages)
+        self.assertEqual(mailbox.DELIVERY_MODE_WAIT, question.delivery_mode)
+        self.assertEqual(wait_start, initial.active_wait_for(question.id))
+
+        reply = mailbox.append_reply(
+            self.plan_dir,
+            question.id,
+            "A",
+            state_dir=self.state_dir,
+            created_at=self.timestamp(),
+        )
+        completion = mailbox.consume_wait_closure(
+            self.plan_dir,
+            question.id,
+            wait_start.id,
+            state_dir=self.state_dir,
+        )
+        assert completion is not None
+        self.assertEqual(reply, completion.closure)
+        self.assertIsNotNone(completion.receipt)
+        self.assertEqual(
+            mailbox.WAIT_END_REASON_CLOSURE,
+            completion.wait_end.wait_end_reason,
+        )
+        final = mailbox.read_mailbox(
+            self.plan_dir, state_dir=self.state_dir
+        )
+        self.assertEqual("consumed", final.delivery_state_for(question.id))
+        self.assertIsNone(final.active_wait_for(question.id))
+        self.assertEqual(1, final.counts.receipts)
+
+    def test_mixed_v1_v2_v3_log_parses_without_rewrite(self) -> None:
+        legacy_guidance_id = self.message_id()
+        v2_question_id = self.message_id()
+        v2_reply_id = self.message_id()
+        self.append_raw(
+            {
+                "created_at": self.timestamp(),
+                "id": legacy_guidance_id,
+                "kind": mailbox.KIND_GUIDANCE,
+                "text": "v1",
+            }
+        )
+        self.append_raw(
+            {
+                "created_at": self.timestamp(),
+                "id": v2_question_id,
+                "kind": mailbox.KIND_QUESTION,
+                "run_id": "run-old",
+                "text": "v2",
+                "version": mailbox.MAILBOX_PREVIOUS_SCHEMA_VERSION,
+            }
+        )
+        self.append_raw(
+            {
+                "created_at": self.timestamp(),
+                "id": v2_reply_id,
+                "kind": mailbox.KIND_REPLY,
+                "text": "old answer",
+                "to": v2_question_id,
+                "version": mailbox.MAILBOX_PREVIOUS_SCHEMA_VERSION,
+            }
+        )
+        v3_question, v3_wait = mailbox.append_wait_question(
+            self.plan_dir,
+            "v3",
+            state_dir=self.state_dir,
+            run_id="run-new",
+            session_id="1",
+            turn_index=1,
+            waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
+        )
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        self.assertEqual((), view.rejected)
+        self.assertEqual(
+            [1, 2, 2, 3, 3],
+            [message.version for message in view.messages],
+        )
+        self.assertEqual(v3_wait, view.active_wait_for(v3_question.id))
+
+    def test_timeout_wins_lock_then_late_reply_requires_resumed_wait(self) -> None:
+        question, first_wait = mailbox.append_wait_question(
+            self.plan_dir,
+            "Still blocked?",
+            state_dir=self.state_dir,
+            run_id="run-A",
+            session_id="1",
+            turn_index=1,
+            waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
+        )
+        timed_out = mailbox.finish_wait(
+            self.plan_dir,
+            question.id,
+            first_wait.id,
+            reason=mailbox.WAIT_END_REASON_TIMEOUT,
+            state_dir=self.state_dir,
+        )
+        self.assertIsNone(timed_out.closure)
+        with self.assertRaises(mailbox.MailboxError) as raised:
+            mailbox.append_reply(
+                self.plan_dir,
+                question.id,
+                "too late",
+                state_dir=self.state_dir,
+            )
+        self.assertEqual(mailbox.REJECT_QUESTION_NOT_WAITING, raised.exception.reason)
+
+        resumed_wait = mailbox.append_wait_start(
+            self.plan_dir, question.id, state_dir=self.state_dir
+        )
+        reply = mailbox.append_reply(
+            self.plan_dir,
+            question.id,
+            "now accepted",
+            state_dir=self.state_dir,
+        )
+        consumed = mailbox.finish_wait(
+            self.plan_dir,
+            question.id,
+            resumed_wait.id,
+            reason=mailbox.WAIT_END_REASON_TIMEOUT,
+            state_dir=self.state_dir,
+        )
+        self.assertEqual(reply, consumed.closure)
+        self.assertTrue(consumed.consumed)
+
+    def test_closure_wins_lock_over_timeout_and_records_receipt(self) -> None:
+        question, wait_start = mailbox.append_wait_question(
+            self.plan_dir,
+            "Race?",
+            state_dir=self.state_dir,
+            run_id="run-A",
+            session_id="1",
+            turn_index=1,
+            waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
+        )
+        resolution = mailbox.append_resolution(
+            self.plan_dir,
+            question.id,
+            mailbox.RESOLUTION_ACTION_CONTINUE,
+            expected_run_id="run-A",
+            state_dir=self.state_dir,
+        )
+        completion = mailbox.finish_wait(
+            self.plan_dir,
+            question.id,
+            wait_start.id,
+            reason=mailbox.WAIT_END_REASON_TIMEOUT,
+            state_dir=self.state_dir,
+        )
+        self.assertEqual(resolution, completion.closure)
+        self.assertTrue(completion.consumed)
+        self.assertEqual(
+            mailbox.WAIT_END_REASON_CLOSURE,
+            completion.wait_end.wait_end_reason,
+        )
+
+    def test_runner_completion_guard_uses_body_free_lifecycle_evidence(self) -> None:
+        secret_question = "private blocking body"
+        question, wait_start = mailbox.append_wait_question(
+            self.plan_dir,
+            secret_question,
+            state_dir=self.state_dir,
+            run_id="run-A",
+            session_id="1",
+            turn_index=4,
+            waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
+        )
+        evidence = runner._mailbox_completion_guard_evidence(
+            plan_dir=self.plan_dir,
+            state_dir_arg=str(self.state_dir),
+            run_id="run-A",
+            session_id="1",
+            turn_index=4,
+        )
+        assert evidence is not None
+        self.assertEqual("unanswered", evidence["questions"][0]["violation"])
+        self.assertNotIn(secret_question, repr(evidence))
+
+        mailbox.append_reply(
+            self.plan_dir, question.id, "private answer", state_dir=self.state_dir
+        )
+        evidence = runner._mailbox_completion_guard_evidence(
+            plan_dir=self.plan_dir,
+            state_dir_arg=str(self.state_dir),
+            run_id="run-A",
+            session_id="1",
+            turn_index=4,
+        )
+        assert evidence is not None
+        self.assertEqual("unconsumed", evidence["questions"][0]["violation"])
+        self.assertNotIn("private answer", repr(evidence))
+
+        mailbox.consume_wait_closure(
+            self.plan_dir,
+            question.id,
+            wait_start.id,
+            state_dir=self.state_dir,
+        )
+        self.assertIsNone(
+            runner._mailbox_completion_guard_evidence(
+                plan_dir=self.plan_dir,
+                state_dir_arg=str(self.state_dir),
+                run_id="run-A",
+                session_id="1",
+                turn_index=4,
+            )
+        )
+
+        pause_question, pause_wait = mailbox.append_wait_question(
+            self.plan_dir,
+            "pause privately",
+            state_dir=self.state_dir,
+            run_id="run-A",
+            session_id="1",
+            turn_index=5,
+            waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
+        )
+        mailbox.append_resolution(
+            self.plan_dir,
+            pause_question.id,
+            mailbox.RESOLUTION_ACTION_PAUSE,
+            expected_run_id="run-A",
+            note="private note",
+            state_dir=self.state_dir,
+        )
+        mailbox.consume_wait_closure(
+            self.plan_dir,
+            pause_question.id,
+            pause_wait.id,
+            state_dir=self.state_dir,
+        )
+        evidence = runner._mailbox_completion_guard_evidence(
+            plan_dir=self.plan_dir,
+            state_dir_arg=str(self.state_dir),
+            run_id="run-A",
+            session_id="1",
+            turn_index=5,
+        )
+        assert evidence is not None
+        self.assertEqual("pause-resolved", evidence["questions"][0]["violation"])
+        self.assertNotIn("private note", repr(evidence))
+
+    def test_capacity_reserves_cannot_strand_closure_end_or_receipt(self) -> None:
+        with mock.patch.multiple(
+            mailbox,
+            MAILBOX_MAX_BYTES=4096,
+            MAILBOX_CLOSURE_RESERVE_BYTES=1536,
+            MAILBOX_WAIT_END_RESERVE_BYTES=768,
+            MAILBOX_RECEIPT_RESERVE_BYTES=384,
+        ):
+            question, wait_start = mailbox.append_wait_question(
+                self.plan_dir,
+                "Capacity?",
+                state_dir=self.state_dir,
+                run_id="run-A",
+                session_id="1",
+                turn_index=1,
+                waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
+            )
+            while True:
+                try:
+                    mailbox.append_guidance(
+                        self.plan_dir,
+                        "g" * 80,
+                        state_dir=self.state_dir,
+                    )
+                except mailbox.MailboxError as error:
+                    self.assertEqual(mailbox.ERROR_MAILBOX_FULL, error.reason)
+                    break
+            reply = mailbox.append_reply(
+                self.plan_dir,
+                question.id,
+                "accepted after ordinary capacity exhausted",
+                state_dir=self.state_dir,
+            )
+            completion = mailbox.finish_wait(
+                self.plan_dir,
+                question.id,
+                wait_start.id,
+                reason=mailbox.WAIT_END_REASON_TIMEOUT,
+                state_dir=self.state_dir,
+            )
+            self.assertEqual(reply, completion.closure)
+            self.assertTrue(completion.consumed)
+
     def test_missing_mailbox_is_an_empty_view_and_read_does_not_create_it(
         self,
     ) -> None:
@@ -1016,7 +1316,7 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(1, view.counts.notices)
         self.assertIn("accepts_resolutions", view.to_payload())
 
-    def test_versionless_v1_and_v2_records_coexist_in_one_log(self) -> None:
+    def test_versionless_v1_and_v3_records_coexist_in_one_log(self) -> None:
         legacy_guidance_id = self.message_id()
         legacy_question_id = self.message_id()
         self.append_raw(
@@ -1039,7 +1339,7 @@ class MailboxTests(unittest.TestCase):
         )
         notice = mailbox.append_notice(
             self.plan_dir,
-            "v2 notice",
+            "v3 notice",
             run_id="run-A",
             session_id="1",
             turn_index=1,
@@ -1059,14 +1359,14 @@ class MailboxTests(unittest.TestCase):
 
         self.assertEqual((), view.rejected)
         self.assertEqual(
-            [1, 1, 2, 2],
+            [1, 1, 3, 3],
             [message.version for message in view.messages],
         )
         self.assertEqual(notice, view.messages[2])
         self.assertEqual(resolution, view.closure_for(legacy_question_id))
         self.assertEqual((), view.unanswered_questions)
 
-    def test_v2_malformed_fields_and_cross_record_references_are_rejected(
+    def test_v3_malformed_fields_and_cross_record_references_are_rejected(
         self,
     ) -> None:
         question_id = self.message_id()
@@ -1075,6 +1375,7 @@ class MailboxTests(unittest.TestCase):
                 "created_at": self.timestamp(),
                 "id": question_id,
                 "kind": mailbox.KIND_QUESTION,
+                "delivery_mode": mailbox.DELIVERY_MODE_ASYNC,
                 "run_id": "run-A",
                 "text": "valid question",
                 "version": mailbox.MAILBOX_SCHEMA_VERSION,
@@ -1152,6 +1453,11 @@ class MailboxTests(unittest.TestCase):
             ),
         )
         for _reason, fields in malformed:
+            if fields.get("kind") == mailbox.KIND_QUESTION:
+                fields = {
+                    "delivery_mode": mailbox.DELIVERY_MODE_ASYNC,
+                    **fields,
+                }
             self.append_raw(
                 {
                     "created_at": self.timestamp(),
@@ -3507,6 +3813,7 @@ class MailboxCliTests(unittest.TestCase):
             "peek": False,
             "question_id": None,
             "wait": False,
+            "wait_consumed": False,
             "wait_timeout": None,
             "since": 0,
             "timeout": mailbox_cli.DEFAULT_OUTBOX_WAIT_TIMEOUT_SECONDS,
@@ -3520,6 +3827,70 @@ class MailboxCliTests(unittest.TestCase):
         with redirect_stdout(stdout):
             exit_code = handler(args)
         return exit_code, json.loads(stdout.getvalue())
+
+    def test_reply_consumption_timeout_keeps_successful_append_truthful(self) -> None:
+        self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
+        question, _wait_start = mailbox.append_wait_question(
+            self.plan_dir,
+            "Need answer",
+            state_dir=self.state_dir,
+            run_id="run-live",
+            session_id="5",
+            turn_index=2,
+            waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
+        )
+        with mock.patch.object(mailbox_cli, "_wait_for_receipt", return_value=None):
+            code, payload = self.payload_from(
+                mailbox_cli.inbox_reply_from_args,
+                self.args(
+                    to=question.id,
+                    text="answer",
+                    wait_consumed=True,
+                    wait_timeout=0,
+                ),
+            )
+        self.assertEqual(0, code)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("accepted", payload["delivery_state"])
+        self.assertFalse(payload["consumed"])
+        self.assertIsNone(payload["receipt"])
+
+    def test_reply_json_exposes_consumption_receipt(self) -> None:
+        self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
+        question, wait_start = mailbox.append_wait_question(
+            self.plan_dir,
+            "Need answer",
+            state_dir=self.state_dir,
+            run_id="run-live",
+            session_id="5",
+            turn_index=2,
+            waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
+        )
+        receipt = mailbox.MailboxMessage(
+            seq=4,
+            id=str(uuid.uuid4()),
+            kind=mailbox.KIND_RECEIPT,
+            created_at="2026-08-01T00:00:00+00:00",
+            to=question.id,
+            wait_id=wait_start.id,
+            closure_id=str(uuid.uuid4()),
+        )
+        with mock.patch.object(
+            mailbox_cli, "_wait_for_receipt", return_value=receipt
+        ):
+            code, payload = self.payload_from(
+                mailbox_cli.inbox_reply_from_args,
+                self.args(
+                    to=question.id,
+                    text="answer",
+                    wait_consumed=True,
+                    wait_timeout=1,
+                ),
+            )
+        self.assertEqual(0, code)
+        self.assertEqual("consumed", payload["delivery_state"])
+        self.assertTrue(payload["consumed"])
+        self.assertEqual(receipt.id, payload["receipt"]["id"])
 
     def cli_payload_from(self, argv: list[str]) -> tuple[int, dict, str]:
         stdout, stderr = io.StringIO(), io.StringIO()

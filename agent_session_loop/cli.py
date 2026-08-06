@@ -1089,6 +1089,18 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         action="store_true",
         help="Read the reply body from standard input",
     )
+    inbox_reply_parser.add_argument(
+        "--wait-consumed",
+        action="store_true",
+        help="Wait for the worker or runner to record closure consumption",
+    )
+    inbox_reply_parser.add_argument(
+        "--wait-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Consumption wait timeout in seconds (default: 90; maximum: 1800)",
+    )
     inbox_reply_parser.set_defaults(
         handler_ref="mailbox_cli:inbox_reply_from_args",
     )
@@ -1114,6 +1126,18 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     resolution_note.add_argument(
         "--note",
         help="Optional resolution note (not an operator reply)",
+    )
+    inbox_resolve_parser.add_argument(
+        "--wait-consumed",
+        action="store_true",
+        help="Wait for the worker or runner to record closure consumption",
+    )
+    inbox_resolve_parser.add_argument(
+        "--wait-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Consumption wait timeout in seconds (default: 90; maximum: 1800)",
     )
     resolution_note.add_argument(
         "--note-stdin",

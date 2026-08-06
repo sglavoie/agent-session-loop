@@ -630,7 +630,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
 
         self.assertIn(
             "An already-committed closure takes precedence over mailbox "
-            "exhaustion and is delivered even when the mailbox is full.",
+            "exhaustion and is consumed before exhaustion can end the wait.",
             normalized,
         )
         self.assertIn(
@@ -695,19 +695,20 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         )
         self.assertEqual(176, mailbox.MAILBOX_MIN_REPLY_BYTES)
         self.assertEqual(200, mailbox.MAILBOX_MIN_RESOLUTION_BYTES)
+        self.assertEqual(192 * 1024, mailbox.MAILBOX_WAIT_END_RESERVE_BYTES)
+        self.assertEqual(96 * 1024, mailbox.MAILBOX_RECEIPT_RESERVE_BYTES)
         self.assertIn(
-            "The final 512 KiB below the cap is a shared closure reserve that "
-            "only `reply` and `resolution` records may consume",
+            "The final 512 KiB below the cap is a lifecycle reserve",
             normalized,
         )
         self.assertIn(
-            "`guidance`, `question`, `notice`, and `ack` appends fail "
-            "`mailbox-full` once they would cross into the reserve",
+            "closures retain 288 KiB of nested headroom for wait termination "
+            "and receipts",
             normalized,
         )
         self.assertIn(
-            "the closure that unblocks a waiting run can still land after "
-            "every non-closure append kind reaches its effective cap",
+            "ordinary exhaustion cannot strand an active question, its "
+            "`wait-end`, or its consumption evidence",
             normalized,
         )
         self.assertIn(

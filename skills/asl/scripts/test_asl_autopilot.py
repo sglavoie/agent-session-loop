@@ -3226,6 +3226,49 @@ class MailboxWatcherTest(unittest.TestCase):
             turn_index=1,
         )
 
+    def test_watcher_emits_bounded_wait_end_and_receipt_progress(self) -> None:
+        question = self._question(seq=1, run_id="run-current")
+        wait_end = autopilot._mailbox.MailboxMessage(
+            seq=2,
+            id="00000000-0000-0000-0000-000000000021",
+            kind=autopilot._mailbox.KIND_WAIT_END,
+            created_at="2026-07-24T19:00:01+00:00",
+            to=question.id,
+            wait_id="00000000-0000-0000-0000-000000000020",
+            wait_end_reason=autopilot._mailbox.WAIT_END_REASON_CLOSURE,
+            closure_id="00000000-0000-0000-0000-000000000022",
+        )
+        receipt = autopilot._mailbox.MailboxMessage(
+            seq=3,
+            id="00000000-0000-0000-0000-000000000023",
+            kind=autopilot._mailbox.KIND_RECEIPT,
+            created_at="2026-07-24T19:00:01+00:00",
+            to=question.id,
+            wait_id=wait_end.wait_id,
+            closure_id=wait_end.closure_id,
+        )
+        view = autopilot._mailbox.MailboxView(
+            mailbox_path=autopilot.Path(self.mailbox_path),
+            messages=(question, receipt, wait_end),
+            last_seq=3,
+        )
+        watcher = autopilot._MailboxWatcher.from_status(
+            self._status(last_seq=0),
+            clock=lambda: 0.0,
+            read_mailbox=lambda *_args, **_kwargs: view,
+            write_lease=lambda *_args, **_kwargs: None,
+        )
+        assert watcher is not None
+        watcher.set_run_id("run-current")
+        watcher.establish(now=0.0)
+        watcher.poll(now=0.0, force_read=True)
+        progress = watcher.drain_progress_records()
+        self.assertTrue(any(line.startswith("WAIT_ENDED ") for line in progress))
+        self.assertTrue(
+            any(line.startswith("CLOSURE_CONSUMED ") for line in progress)
+        )
+        self.assertNotIn(question.text, repr(progress))
+
     def test_resolves_paths_renews_lease_and_returns_questions_once(self) -> None:
         writes = []
         reads = []
