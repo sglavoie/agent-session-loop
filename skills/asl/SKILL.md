@@ -69,12 +69,42 @@ Run it with the user's exact command:
 
 Supervision is a strict turn-lifetime invariant: **never end the agent turn
 while the helper is active**, even if the harness backgrounds the helper or
-returns a session/cell identifier. Poll that background output at least every
-30 seconds until the helper reaches a terminal result. Surface every
-`QUESTION` record immediately; use `asl outbox wait` when a direct mailbox
-long-poll is needed rather than waiting for a user status prompt. After queuing
-a reply or resolution, continue supervising until a `CLOSURE_CONSUMED` record,
-an equivalent consumed receipt, or a terminal pause/result is observed.
+returns a session/cell identifier. Supervise by blocking on `asl outbox wait`,
+which long-polls the mailbox and returns the moment a record lands:
+
+```text
+asl outbox wait <plan-dir> --include all --since <next_since> --timeout 550 [--state-dir DIR] --json
+```
+
+- Start at `--since 0`, then feed each response's `next_since` into the next
+  call.
+- `timed_out: true` with empty `questions` and `notices` means nothing happened —
+  reissue immediately. `timed_out: false` means records are present; handle them
+  before reissuing.
+- The wait returns on a five-second internal cadence, so a question surfaces
+  within seconds rather than at the next poll boundary.
+- Cap `--timeout` below the supervising harness's own tool-call ceiling (550 is
+  safe for a 600-second cap) and loop, rather than spending the 1800-second
+  maximum in a single call.
+- Running this against a live helper heartbeats its lease; it does not take over
+  supervision.
+
+Cadence matters because the runner's first wait is five minutes: any polling
+interval near or above 300 seconds can let a question open and expire entirely
+between two observations. Tailing the helper's background output is the fallback
+for when the mailbox is unavailable — not the primary path; when relying on it,
+poll at least every 30 seconds until the helper reaches a terminal result.
+
+`outbox wait` selects on sequence and kind only, with no answer-state filter, so
+it re-returns a question whose seq is past the cursor even when that question was
+already replied to, resolved, or expired. Before replying to any returned
+question, confirm it is still open: a `WAIT_ENDED` or `CLOSURE_CONSUMED` record
+for that id, or an `asl inbox reply` rejected with `question-not-waiting`, means
+it is already finished and must not be answered again.
+
+Surface every `QUESTION` record immediately. After queuing a reply or resolution,
+continue supervising until a `CLOSURE_CONSUMED` record, an equivalent consumed
+receipt, or a terminal pause/result is observed.
 
 `--json` emits a single machine-readable result on stdout; progress heartbeats
 go to stderr. Each heartbeat carries live progress — the running session label,
@@ -335,6 +365,8 @@ that re-running the same command continues from the remaining sessions.
   `asl run --max-review-fix-cycles` (default 4; `--max-review-fix-plans` is a
   deprecated alias). Corrected artifacts and higher caps resume the same plan;
   this skill never creates follow-up fix plans.
+- `asl outbox wait` is the supervision loop; tailing the helper's background
+  output is the fallback for when the mailbox is unavailable.
 - Keep the mailbox discipline: continue only plainly nonblocking messages,
   reply only from clearly defensible plan/repository/artifact facts, relay
   user-owned ambiguity, and use pause only to enter ordinary paused recovery.
