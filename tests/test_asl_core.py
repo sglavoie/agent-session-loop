@@ -3481,6 +3481,39 @@ class ParserAndStateTests(unittest.TestCase):
                 payload["waiting_for_reply_status"],
             )
 
+    def test_runner_state_payload_exposes_review_harness(self) -> None:
+        # `asl control stop-after-current` reports whether the stop also
+        # prevents a pending review, which it can only know from the run's
+        # configured review harness.
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / events.STATE_FILE_NAME
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "run_id": "run-1",
+                        "harness": "codex",
+                        "run_config": {"review_harness": "claude"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            payload = state._runner_state_payload(
+                state_path, lock_info=self._active_lock()
+            )
+
+            self.assertEqual("codex", payload["harness"])
+            self.assertEqual("claude", payload["review_harness"])
+
+            state_path.write_text(
+                json.dumps({"run_id": "run-1", "harness": "codex"}),
+                encoding="utf-8",
+            )
+            without_review = state._runner_state_payload(
+                state_path, lock_info=self._active_lock()
+            )
+            self.assertIsNone(without_review["review_harness"])
+
     def _active_lock(self) -> state.LockInfo:
         return state.LockInfo(
             path=Path("/tmp/plan-lock.json"),

@@ -173,14 +173,16 @@ the helper in the background — whenever a mid-run stop may be needed. The requ
 is queued durably, so it is also safe to send when no run is active yet: the next
 runner to drain the queue applies it.
 
-The stop takes effect **after the current session finishes** and surfaces as
+The stop takes effect **after the current session finishes** and prevents
+everything the run would start next — remaining sessions, the generated
+`--review-harness` review, and review repair children — surfacing as
 `reason: stopped` with `ok: true` plus `completed` and `pending` counts — an
 intentional clean early stop, not a pause and not a failure. This holds whether
 the helper launched the run itself or **attached** to a run already in flight:
 in the attach case it reads the stop back from the finished run's persisted
 state, so it never relaunches over an honored request. Do **not** auto-resume
-it; re-running the same command later continues from the remaining sessions.
-See Step 4.
+it; re-running the same command later continues from the remaining sessions, or
+runs the pending review when every session is already complete. See Step 4.
 
 ### Step 2: Handle notices, live questions, and pauses
 
@@ -353,7 +355,8 @@ graceful stop mid-run* under Step 1). It too carries `ok: true` with `completed`
 and `pending` counts and is an **intentional, clean early stop** — never report
 it as a pause,
 a failure, or `blocked`, and never auto-resume it. Report the progress and say
-that re-running the same command continues from the remaining sessions.
+that re-running the same command continues from the remaining sessions, or runs
+the pending review when the stop landed after the last session.
 
 ## Notes
 

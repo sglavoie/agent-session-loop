@@ -938,12 +938,17 @@ def _runner_state_payload(
     if not isinstance(runner_pause_policy, dict):
         runner_pause_policy = None
 
+    run_config = raw.get("run_config")
+    if not isinstance(run_config, dict):
+        run_config = {}
+
     return {
         "present": True,
         "path": str(state_path),
         "error": None,
         "run_id": raw.get("run_id"),
         "harness": raw.get("harness"),
+        "review_harness": run_config.get("review_harness"),
         "ok": raw.get("ok"),
         "paused": raw.get("paused"),
         "reason": raw.get("reason"),

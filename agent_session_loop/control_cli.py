@@ -33,6 +33,9 @@ NO_ACTIVE_RUN_NOTE = (
     "no active run; command applies when a runner next drains the queue"
 )
 STOP_WILL_APPLY_NOTE = "will stop after current session"
+STOP_BEFORE_REVIEW_NOTE = (
+    "current session is the last; stop also prevents the pending review"
+)
 STOP_NOOP_NOTE = "current session is the last; stop is a no-op"
 MODEL_APPLIES_TO = "next-implementation-turn"
 
@@ -47,14 +50,32 @@ def _pending_after_current(status: dict[str, Any]) -> int:
 
     A session that is mid-flight is still recorded as ``pending`` in its handoff
     (the runner only marks it complete afterwards), so subtract it when a turn
-    is active. ``runner._consume_run_control_stop`` declines to stop when
-    ``snapshot.next_pending`` is empty at the drain checkpoint, which is exactly
-    the ``0`` case callers surface as a no-op.
+    is active.
     """
     pending = int(status["counts"]["pending"])
     if status.get("active_turn") is not None:
         pending -= 1
     return max(0, pending)
+
+
+def _review_continuation_pending(status: dict[str, Any]) -> bool:
+    """Would review work still start once the executing session finishes?
+
+    Only a run carrying a review harness can append a review or materialize its
+    repair children, and only while the shared ``review_resume`` projection asks
+    for one — a ``terminal`` projection means the plan is done. This is what
+    keeps a stop on the last session from being reported as a no-op when the
+    runner would in fact stop before the review.
+    """
+    runner_state = status.get("runner_state")
+    if not isinstance(runner_state, dict):
+        return False
+    if not runner_state.get("review_harness"):
+        return False
+    review_resume = status.get("review_resume")
+    if not isinstance(review_resume, dict):
+        return False
+    return review_resume.get("action") != "terminal"
 
 
 def _enqueue_and_report(
@@ -154,15 +175,21 @@ def control_stop_after_current_from_args(args: argparse.Namespace) -> int:
     ) -> tuple[dict[str, Any], str]:
         run_active = _run_active(status)
         pending_after_current = _pending_after_current(status)
+        review_continuation_pending = (
+            run_active and _review_continuation_pending(status)
+        )
         if not run_active:
             note = NO_ACTIVE_RUN_NOTE
-        elif pending_after_current == 0:
-            note = STOP_NOOP_NOTE
-        else:
+        elif pending_after_current > 0:
             note = STOP_WILL_APPLY_NOTE
+        elif review_continuation_pending:
+            note = STOP_BEFORE_REVIEW_NOTE
+        else:
+            note = STOP_NOOP_NOTE
         fields = {
             "run_active": run_active,
             "pending_after_current": pending_after_current,
+            "review_continuation_pending": review_continuation_pending,
             "note": note,
         }
         summary = (

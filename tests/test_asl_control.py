@@ -3207,7 +3207,12 @@ class ControlCliTests(unittest.TestCase):
         namespace.update(overrides)
         return argparse.Namespace(**namespace)
 
-    def mark_run_active(self, plan_dir: Path | None = None) -> None:
+    def mark_run_active(
+        self,
+        plan_dir: Path | None = None,
+        *,
+        review_harness: str | None = None,
+    ) -> None:
         """Simulate a live runner: an active lock plus a mid-flight turn."""
         target = plan_dir if plan_dir is not None else self.plan_dir
         _write_lock_file(target, self.state_dir, pid=os.getpid())
@@ -3219,6 +3224,7 @@ class ControlCliTests(unittest.TestCase):
                 "paused": False,
                 "run_id": "20260724T100000Z-1",
                 "harness": "codex",
+                "run_config": {"review_harness": review_harness},
                 "reason": "",
                 "run_started_at": "2026-07-24T10:00:00+00:00",
                 "run_finished_at": None,
@@ -3298,8 +3304,26 @@ class ControlCliTests(unittest.TestCase):
 
         self.assertTrue(payload["run_active"])
         self.assertEqual(0, payload["pending_after_current"])
+        self.assertFalse(payload["review_continuation_pending"])
         self.assertEqual(
             "current session is the last; stop is a no-op", payload["note"]
+        )
+
+    def test_stop_after_current_last_session_reports_pending_review(self) -> None:
+        write_plan(self.plan_dir, ("complete", "pending"))
+        self.mark_run_active(review_harness="codex")
+
+        _, payload = self.payload_from(
+            control_cli.control_stop_after_current_from_args,
+            self.args(),
+        )
+
+        self.assertTrue(payload["run_active"])
+        self.assertEqual(0, payload["pending_after_current"])
+        self.assertTrue(payload["review_continuation_pending"])
+        self.assertEqual(
+            "current session is the last; stop also prevents the pending review",
+            payload["note"],
         )
 
     def test_stop_after_current_without_active_run_still_enqueues(self) -> None:

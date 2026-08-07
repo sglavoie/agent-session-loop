@@ -8096,7 +8096,7 @@ class _MailboxPoll:
             self._evented_guidance_ids.add(message.id)
 
 
-def _consume_run_control_stop(
+def _honor_stop_after_current(
     listener: run_control.RunControlListener,
     *,
     snapshot: plans.PlanSnapshot,
@@ -8105,24 +8105,56 @@ def _consume_run_control_stop(
     control_payload: dict[str, Any],
     context: dict[str, Any] | None = None,
     persistence: _RunPersistence | None = None,
-) -> bool:
+) -> None:
+    """Consume the pending stop request and record the run's clean early exit.
+
+    Consumption happens only here, at the moment the loop actually stops, so a
+    request is never recorded as ``consumed`` by a run that then keeps working.
+    """
     persistence = _run_persistence(persistence)
-    action = listener.consume_stop_after_current()
-    if action is None:
-        return False
-    _record_run_control_action(
-        event_path=event_path,
-        payload=payload,
-        control_payload=control_payload,
-        action=action,
-        context=context,
-        persistence=persistence,
-    )
-    if snapshot.next_pending is None:
-        return False
     with persistence.lock:
+        action = listener.consume_stop_after_current()
+        if action is not None:
+            _record_run_control_action(
+                event_path=event_path,
+                payload=payload,
+                control_payload=control_payload,
+                action=action,
+                context=context,
+                persistence=persistence,
+            )
         payload["reason"] = "stopped"
-    return True
+        payload["final_snapshot"] = _snapshot_payload(snapshot)
+        persistence.write_state(payload)
+
+
+def _stop_before_review_work(
+    listener: run_control.RunControlListener,
+    *,
+    snapshot: plans.PlanSnapshot,
+    payload: dict[str, Any],
+    event_path: Path,
+    control_payload: dict[str, Any],
+    persistence: _RunPersistence | None = None,
+) -> None:
+    """Honor a stop that lands when only review work would follow.
+
+    The generated review session and its repair children are work that starts
+    after the session the operator asked to stop after, so an all-complete plan
+    is not a no-op: the run exits ``stopped`` with the review still pending, and
+    re-running the same command later performs it.
+    """
+    persistence = _run_persistence(persistence)
+    with persistence.lock:
+        _set_existing_review_verdict(payload, snapshot.plan_dir)
+        _honor_stop_after_current(
+            listener,
+            snapshot=snapshot,
+            payload=payload,
+            event_path=event_path,
+            control_payload=control_payload,
+            persistence=persistence,
+        )
 
 
 def _allow_not_loop_ready(args: argparse.Namespace) -> bool:
@@ -11184,6 +11216,25 @@ def _run_locked(
                     continue
 
                 if review_requested and not review_appended:
+                    # The review and its repair children are work that starts
+                    # *after* the session the operator asked to stop after, so
+                    # the request has to be visible before either begins.
+                    _drain_external_control_queue(
+                        plan_dir=snapshot.plan_dir,
+                        state_dir_arg=args.state_dir,
+                        control_state=run_controls.state,
+                        seen_ids=seen_external_command_ids,
+                        payload=payload,
+                        event_path=event_path,
+                        control_payload=control_payload,
+                        context=None,
+                        persistence=persistence,
+                        run_control_lock=run_control_lock,
+                    )
+                    with run_control_lock:
+                        stop_before_review = (
+                            run_controls.state.stop_after_current
+                        )
                     review_resume = _set_review_resume(
                         snapshot=snapshot,
                         event_path=event_path,
@@ -11286,6 +11337,17 @@ def _run_locked(
                                     "review_resume": review_resume.to_payload(),
                                     "error": reopen_error,
                                 },
+                                persistence=persistence,
+                            )
+                            break
+
+                        if stop_before_review:
+                            _stop_before_review_work(
+                                run_controls,
+                                snapshot=snapshot,
+                                payload=payload,
+                                event_path=event_path,
+                                control_payload=control_payload,
                                 persistence=persistence,
                             )
                             break
@@ -11433,6 +11495,17 @@ def _run_locked(
                         # they complete, the next all-complete pass evaluates
                         # to ``rereview`` and creates a fresh review.
                         continue
+
+                    if stop_before_review:
+                        _stop_before_review_work(
+                            run_controls,
+                            snapshot=snapshot,
+                            payload=payload,
+                            event_path=event_path,
+                            control_payload=control_payload,
+                            persistence=persistence,
+                        )
+                        break
 
                     review_delta, review_scope_fallback = (
                         _compute_review_delta_context(
@@ -12562,8 +12635,9 @@ def _run_locked(
                 # request has to be visible *here* or it would be honored a
                 # whole review turn late. The queue drain is what makes an
                 # `asl control stop` observable at all on a review turn; the
-                # read below is deliberately non-consuming so the tail's
-                # consume-and-record stays the single stop-consumption site.
+                # read below is non-consuming, like every other checkpoint —
+                # only `_honor_stop_after_current` consumes, at the moment the
+                # loop actually stops.
                 _drain_external_control_queue(
                     plan_dir=before.plan_dir,
                     state_dir_arg=args.state_dir,
@@ -12773,16 +12847,24 @@ def _run_locked(
                 run_control_lock=run_control_lock,
             )
             with run_control_lock:
-                should_stop_after_current = _consume_run_control_stop(
-                    run_controls,
-                    snapshot=snapshot,
-                    payload=payload,
-                    event_path=event_path,
-                    control_payload=control_payload,
-                    context=turn_payload,
-                    persistence=persistence,
+                # An unpending request is left set on purpose: the all-complete
+                # branch at the top of the loop owns it, so a stop is never
+                # swallowed by a run that still has a review to append.
+                stop_now = (
+                    run_controls.state.stop_after_current
+                    and snapshot.next_pending is not None
                 )
-            if should_stop_after_current:
+                if stop_now:
+                    _honor_stop_after_current(
+                        run_controls,
+                        snapshot=snapshot,
+                        payload=payload,
+                        event_path=event_path,
+                        control_payload=control_payload,
+                        context=turn_payload,
+                        persistence=persistence,
+                    )
+            if stop_now:
                 break
 
     except KeyboardInterrupt:

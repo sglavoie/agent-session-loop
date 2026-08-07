@@ -504,14 +504,13 @@ class FakeRunControlListener:
     def __init__(
         self,
         *,
-        consume_on_call: int | None = None,
+        stop_requested: bool = False,
         actions_on_start: tuple[run_control.RunControlAction, ...] = (),
         status_on_start: tuple[run_control.RunControlAction, ...] = (),
         state_path: Path | None = None,
         events_path: Path | None = None,
         current_harness: str | None = None,
     ) -> None:
-        self.consume_on_call = consume_on_call
         self.actions_on_start = actions_on_start
         self.status_on_start = status_on_start
         self.state_path = state_path
@@ -524,6 +523,8 @@ class FakeRunControlListener:
         self.state_exists_at_start = False
         self.events_exists_at_start = False
         self.state = run_control.RunControlState(current_harness=current_harness)
+        if stop_requested:
+            self.state.request_stop_after_current()
 
     def start(self) -> bool:
         self.start_calls += 1
@@ -545,17 +546,11 @@ class FakeRunControlListener:
         self.stop_calls += 1
 
     def consume_stop_after_current(self) -> run_control.RunControlAction | None:
+        # The runner peeks the shared state at every checkpoint and consumes
+        # only when it honors the request, so the fake has to route both
+        # through the real state rather than faking the consume side.
         self.consume_calls += 1
-        # Real state takes precedence so the durable control queue tests
-        # observe the genuine transition.
-        if self.state.stop_after_current:
-            return self.state.consume_stop_after_current()
-        if self.consume_on_call is None or self.consume_calls != self.consume_on_call:
-            return None
-        return run_control.RunControlAction(
-            action="consumed",
-            stop_after_current=False,
-        )
+        return self.state.consume_stop_after_current()
 
 
 def _contract_block(

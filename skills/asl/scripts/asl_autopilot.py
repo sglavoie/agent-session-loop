@@ -3203,10 +3203,11 @@ def supervise_run(
         # sent out of band) is the same kind of clean, intentional early stop as
         # a spent budget: the run — ours or the one we attached to — exited `ok`
         # after finishing its session, so relaunching here would silently undo
-        # the operator's request. As with the budget, `pending > 0` keeps a stop
-        # that lands exactly as pending reaches 0 from pre-empting the normal
-        # complete/review path.
-        if stop_requested and pending > 0:
+        # the operator's request. The stop covers everything the loop would do
+        # next, review continuations included, so the guard is exactly "would we
+        # otherwise launch": a stop landing on a genuinely finished plan still
+        # falls through to the normal complete path.
+        if stop_requested and _should_launch_for_status(parsed, status, pending):
             return run_result(
                 True,
                 "stopped",

@@ -208,6 +208,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         harness_model: str | None = None,
         review_harness_model: str | None = None,
         max_sessions: int | None = None,
+        max_review_fix_cycles: int | None = None,
         allow_not_loop_ready: bool = False,
         dry_run: bool = False,
         timeout: int | None = None,
@@ -245,6 +246,10 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             argv.append("--allow-not-loop-ready")
         if max_sessions is not None:
             argv.extend(["--max-sessions", str(max_sessions)])
+        if max_review_fix_cycles is not None:
+            argv.extend(
+                ["--max-review-fix-cycles", str(max_review_fix_cycles)]
+            )
         if timeout is not None:
             argv.extend(["--timeout", str(timeout)])
         if commit_per_session:
@@ -1824,6 +1829,142 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         )
         self.assertEqual([], self._review_verdict_retries())
         self.assertEqual(1, len(payload["turns"]))
+
+    def _write_reviewed_plan(self, findings: list[dict[str, object]]) -> None:
+        """Author a finished plan whose completed review carries ``findings``."""
+        write_completed_review_plan(
+            self.plan_dir,
+            findings,
+            contracts_by_id={
+                "1": _contract_block(
+                    '{"type": "file_exists", "path": "README.md", '
+                    '"name": "readme-1"}',
+                    session="1",
+                )
+            },
+        )
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="complete",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+
+    def _queue_stop_after_current(self) -> None:
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+            state_dir=self.state_dir,
+        )
+
+    def _generated_review_sessions(self) -> list[Path]:
+        return [
+            path
+            for path in sorted(self.plan_dir.glob("session-*.md"))
+            if runner.is_generated_review_session_file(path)
+        ]
+
+    def test_stop_after_current_prevents_the_generated_review(self) -> None:
+        self._write_plan(("pending",), readiness="loop-ready")
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        self._precreate_final_review()
+        self._queue_stop_after_current()
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual("stopped", payload["reason"])
+        self.assertFalse(payload["review_completed"])
+        self.assertEqual("stopped", payload["review_skipped_reason"])
+        self.assertEqual("initial-review", payload["review_resume"]["action"])
+        self.assertEqual(
+            [runner.SESSION_KIND_IMPLEMENTATION],
+            [turn["session_kind"] for turn in payload["turns"]],
+        )
+        self.assertEqual([], self._generated_review_sessions())
+
+        resumed_completed, resumed = self._run(review_harness="claude")
+
+        self.assertEqual(
+            0, resumed_completed.returncode, resumed_completed.stderr
+        )
+        self.assertTrue(resumed["review_completed"])
+        self.assertEqual("2", resumed["review_session_id"])
+
+    def test_stop_after_current_suppresses_repair_materialization(
+        self,
+    ) -> None:
+        self._write_reviewed_plan([_structured_review_finding()])
+        self._queue_stop_after_current()
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("stopped", payload["reason"])
+        self.assertEqual([], payload["turns"])
+        self.assertFalse((self.plan_dir / "session-2.1.md").is_file())
+
+    def test_stop_after_current_during_review_still_materializes_repairs(
+        self,
+    ) -> None:
+        # Accepted asymmetry: a stop landing *during* the review turn does not
+        # unwind the cycle the turn just completed, so the repair children are
+        # written; the loop then stops before executing any of them.
+        self._setup_complete_plan_with_pending_review()
+        self._queue_stop_after_current()
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            extra_env={"FAKE_CODEX_REVIEW_OUTCOMES": "findings"},
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual("stopped", payload["reason"])
+        self.assertEqual(1, len(payload["turns"]))
+        repair = self.plan_dir / "session-2.1.md"
+        self.assertTrue(repair.is_file())
+        self.assertEqual(
+            "pending",
+            plans.read_session_status(
+                plans.SessionFile(plans.parse_session_id("2.1"), repair)
+            ).status,
+        )
+
+    def test_stop_after_current_keeps_a_terminal_plan_all_complete(
+        self,
+    ) -> None:
+        self._write_reviewed_plan([])
+        self._queue_stop_after_current()
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual("terminal", payload["review_resume"]["action"])
+        self.assertEqual([], payload["turns"])
+
+    def test_stop_after_current_keeps_a_capped_plan_all_complete(self) -> None:
+        self._write_reviewed_plan([_structured_review_finding()])
+        self._queue_stop_after_current()
+
+        completed, payload = self._run(
+            review_harness="claude", max_review_fix_cycles=0
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual(
+            "higher-cap-required", payload["review_resume"]["blocker"]
+        )
+        self.assertEqual([], payload["turns"])
+        self.assertFalse((self.plan_dir / "session-2.1.md").is_file())
 
     def test_review_verdict_retry_preserves_note_across_rescope(self) -> None:
         finding = _structured_review_finding()

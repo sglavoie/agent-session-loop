@@ -1893,7 +1893,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertLess(commit_finished, consumed)
 
     def test_run_control_stop_after_current_stops_between_sessions(self) -> None:
-        listener = FakeRunControlListener(consume_on_call=1)
+        listener = FakeRunControlListener(stop_requested=True)
         exit_code, payload, _plan_dir, _state_dir, _fake_codex = (
             self.run_locked_with_listener(
                 mode="success",
@@ -1915,7 +1915,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
 
     def test_run_control_events_record_actions_and_final_control_payload(self) -> None:
         listener = FakeRunControlListener(
-            consume_on_call=1,
+            stop_requested=True,
             actions_on_start=(
                 run_control.RunControlAction(
                     action="request",
@@ -2796,7 +2796,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual(str(missing_claude), paused_details["executable"])
 
     def test_run_control_starts_after_state_and_event_files_exist(self) -> None:
-        listener = FakeRunControlListener(consume_on_call=None)
+        listener = FakeRunControlListener()
 
         exit_code, payload, _plan_dir, _state_dir, _fake_codex = (
             self.run_locked_with_listener(
@@ -2866,7 +2866,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual([], control_events)
 
     def test_run_control_final_session_keeps_all_complete_reason(self) -> None:
-        listener = FakeRunControlListener(consume_on_call=1)
+        listener = FakeRunControlListener(stop_requested=True)
 
         exit_code, payload, _plan_dir, _state_dir, _fake_codex = (
             self.run_locked_with_listener(
@@ -2881,7 +2881,10 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual("all-complete", payload["reason"])
         self.assertEqual([1], payload["completed_sessions"])
         self.assertIsNone(payload["final_snapshot"]["next_pending"])
-        self.assertEqual(1, listener.consume_calls)
+        # Without a review harness nothing follows the last session, so the
+        # request is never honored — and therefore never consumed.
+        self.assertEqual(0, listener.consume_calls)
+        self.assertTrue(listener.state.stop_after_current)
 
     def test_run_control_stop_after_current_waits_for_per_session_commit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2889,7 +2892,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             repo_dir = tmp_dir / "repo"
             init_git_repo(repo_dir)
             _fake_spec, spec_log, spec_env = self.setup_fake_spec(tmp_dir)
-            listener = FakeRunControlListener(consume_on_call=1)
+            listener = FakeRunControlListener(stop_requested=True)
 
             exit_code, payload, _plan_dir, _state_dir, _fake_codex = (
                 self.run_locked_with_listener(
@@ -2924,7 +2927,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertLess(commit_finished, consumed)
 
     def test_run_control_stop_request_does_not_override_harness_failure(self) -> None:
-        listener = FakeRunControlListener(consume_on_call=1)
+        listener = FakeRunControlListener(stop_requested=True)
 
         exit_code, payload, _plan_dir, _state_dir, _fake_codex = (
             self.run_locked_with_listener(

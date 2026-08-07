@@ -371,7 +371,9 @@ git worktree before the first harness turn starts, and require `spec` on
 `--commit-at-end` to commit once after all pending sessions complete in the
 same run. Both modes always invoke `spec commit --yes --no-verify`. A
 stop-after-current request before all sessions complete exits successfully
-(`reason: stopped`) without running the final `--commit-at-end` commit.
+(`reason: stopped`) without running the final `--commit-at-end` commit. A stop
+honored once every session is complete still runs that commit first, then stops
+before any `--review-harness` work.
 
 ## Commands
 
@@ -1216,10 +1218,11 @@ Ctrl+C interrupted exits. JSON/state output preserves it as top-level `note`.
 For normal text TTY runs, `run` also listens for keyboard controls:
 
 - `p`: toggle stop-after-current. When active, the current session still
-  finishes and any `--commit-per-session` commit for that session runs; if more
-  sessions remain, the run exits 0 with `ok: true`, `paused: false`, and
-  `reason: stopped`. Press `p` again before the session finishes to cancel the
-  request.
+  finishes and any `--commit-per-session` commit for that session runs; the run
+  then exits 0 with `ok: true`, `paused: false`, and `reason: stopped`. The stop
+  covers every kind of work the loop would start next: remaining sessions, the
+  generated `--review-harness` session, and review repair children. Press `p`
+  again before the session finishes to cancel the request.
 - `h`: print a timestamped help line with available keys and current control
   state.
 - `s`: print a compact live status snapshot to stderr. The snapshot includes
@@ -1247,11 +1250,14 @@ applies the identical transition the keyboard listener emits. Nothing else is
 mutated — the runner alone owns `state.json`.
 
 - `asl control stop-after-current PLAN_DIR_OR_ID` queues the `p` request. Its
-  payload reports `enqueued`, `command_id`, `run_active`, and
+  payload reports `enqueued`, `command_id`, `run_active`,
   `pending_after_current` (sessions still pending once the executing one
-  finishes), plus a `note`: `will stop after current session`, `current session
-  is the last; stop is a no-op` when nothing would follow, or `no active run;
-  command applies when a runner next drains the queue`.
+  finishes), and `review_continuation_pending` (the run carries a review harness
+  and its `review_resume` projection is not `terminal`), plus a `note`: `will
+  stop after current session`, `current session is the last; stop also prevents
+  the pending review`, `current session is the last; stop is a no-op` when
+  nothing would follow, or `no active run; command applies when a runner next
+  drains the queue`.
 - `asl control select-harness PLAN_DIR_OR_ID --harness H` queues the `1`/`2`/`3`
   request. Its payload reports `enqueued`, `command_id`, `harness`,
   `run_active`, and a `note` naming the harness future sessions will use. An
@@ -2262,10 +2268,13 @@ opened is skipped before its event log is read.
 ## Pause Semantics
 
 A stop-after-current request is not a pause. When `p` is active at a lifecycle
-checkpoint and another session remains pending, the run exits successfully with
-`ok: true`, `paused: false`, and `reason: stopped`, then releases the plan
-lock. If the just-completed session was the final pending session, the run ends
-with `reason: all-complete`. Stop-after-current does not add a pause reason.
+checkpoint and any further work remains — another pending session, an
+unappended `--review-harness` review, or repair children a findings review would
+materialize — the run exits successfully with `ok: true`, `paused: false`, and
+`reason: stopped`, then releases the plan lock. The request is consumed only at
+that moment, so a run that keeps working never records it as honored. If nothing
+would follow the just-completed session, the run ends with `reason:
+all-complete`. Stop-after-current does not add a pause reason.
 
 An active `waiting_for_reply` mailbox window is also not a pause. The runner
 retains its lock, `paused` remains false, status/tail report healthy bounded
@@ -2550,10 +2559,12 @@ terminal verdict (`ok` is `true` only for a clean completion):
   failure. `completed` and `pending` counts are attached; re-running the same
   command continues from the remaining sessions.
 - `stopped` (`ok: true`): a stop-after-current request (the `p` key or
-  `asl control stop-after-current`) was honored with sessions still pending —
-  the structural twin of `max-sessions`, not a pause or a failure. `completed`
-  and `pending` counts are attached and the helper does not relaunch;
-  re-running the same command continues from the remaining sessions.
+  `asl control stop-after-current`) was honored with work still to do — the
+  structural twin of `max-sessions`, not a pause or a failure. `completed` and
+  `pending` counts are attached and the helper does not relaunch; re-running the
+  same command continues from the remaining sessions, or runs the pending
+  review when every session is already complete (`review_skipped_reason:
+  stopped`).
 - `needs_agent_reply` (`ok: false`): the run paused on a decision the helper
   could not auto-resolve; a `questions` block carries the resolver context and
   the driving agent must supply a reply.
@@ -3805,6 +3816,10 @@ Manual smoke checklist:
   later turns use the selected harness.
 - Repeat the text TTY run with `--commit-per-session` and confirm the
   per-session commit runs before the stop-after-current request is consumed.
+- Queue `asl control stop-after-current` while the last session of a
+  `--review-harness` run executes, and confirm the run exits `reason: stopped`
+  with `review_skipped_reason: stopped`, no generated review session file, and
+  `asl status` reporting `review_resume.action: initial-review`.
 - Run a text TTY plan with `--commit-at-end`, stop before all sessions are
   complete, and confirm no final `commit-0001-end` artifact is created.
 - Run `run --json` and confirm stdout is the final JSON payload, stderr is

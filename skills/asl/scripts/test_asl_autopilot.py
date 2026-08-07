@@ -1597,6 +1597,30 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         self.assertEqual(result["reason"], "complete")
         self.assertEqual(run.chunks, [1])
 
+    def test_stop_with_a_pending_review_stops_instead_of_completing(self) -> None:
+        # The runner's stop covers the review too, so a stop that lands as
+        # pending reaches 0 while a review is still projected is an early stop,
+        # not a completion: relaunching would run the review the operator
+        # asked to prevent.
+        pending_review = _status_payload(0)
+        pending_review["review_resume"] = _review_resume(
+            "initial-review", eligible=True
+        )
+        status = _StatusScript([_status_payload(1), pending_review])
+        run = _RunScript([{"ok": True, "paused": False, "reason": "stopped"}])
+        parsed = {
+            "plan_dir": "/tmp/plan",
+            "argv": [
+                "asl", "run", "/tmp/plan", "--review-harness", "codex", "--json"
+            ],
+            "review_harness": "codex",
+            "max_review_fix_cycles": 2,
+        }
+        result = self._supervise(status, run, parsed=parsed)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "stopped")
+        self.assertEqual(run.chunks, [1])
+
     def test_stop_takes_precedence_over_a_relaunch_without_progress(self) -> None:
         # Even when the stopped chunk completed no session (pending unchanged),
         # the request is honored rather than relaunched, and the reported counts
