@@ -45,9 +45,36 @@ Pipe the captured content to `asl split --inline-stdin` in Step 6 (it persists t
 
 If the user explicitly provides a base directory, pass it through with `--base-dir <dir>` in Step 6; it applies to both the captured inline source and the split output. `asl split --json` reports the resolved `source_path`; report it so the user can reuse it with `plan-iterate`, `plan-ideal`, `<skill-prefix>session-expand`, or a later `<skill-prefix>session-split`.
 
-### Step 2: Parse the Plan
+### Step 2: Validate and Repair the Source Plan
 
-Read the entire plan file. Session detection, boundaries, and heading canonicalization are owned by `agent_session_loop.authoring.parse_plan_document` (which `asl split` runs in Step 6) — its source-only grammar is authoritative, so do not re-derive boundaries by hand. Proceed without asking for normalization approval and without rewriting the source merely to canonicalize a heading's spelling, level, separator, or ID padding. For any malformed `Session` heading the parser raises a line-specific `PlanError`; `asl split` returns it verbatim with reason `malformed-plan`, never as ordinary content. Read the plan normally so you can reason about Steps 3–4; the parser remains the source of truth for the final boundaries.
+Session detection, boundaries, and heading canonicalization are owned by `agent_session_loop.authoring.parse_plan_document` (which `asl split` runs in Step 6) — its source-only grammar is authoritative, so do not re-derive boundaries by hand. Proceed without asking for normalization approval and without rewriting the source merely to canonicalize a heading's spelling, level, separator, or ID padding. Read the plan normally so you can reason about Steps 3–4; the parser remains the source of truth for the final boundaries.
+
+Validate before authoring anything. `asl split --check` runs the same parser, requires no contracts, writes nothing, and — unlike the fail-fast parser — reports every malformed heading in one payload:
+
+```bash
+asl split --check --plan-file "<plan-file>" --json
+```
+
+For inline input, pipe the captured content to `asl split --check --inline-stdin --json` instead; `--check` never persists a source file, so re-checking is free.
+
+Read the payload:
+
+- `ok: true` — record `session_ids` (the canonical ids to key contracts by in Step 5) and continue to Step 3.
+- `reason: single-session` — apply the Step 4 single-session outcome and stop.
+- `reason: malformed-plan` — repair the plan, then re-check. Each finding carries `line`, `category`, `message`, `source_line`, and `suggested_line`.
+
+**Repair loop** (at most 3 rounds):
+
+1. For every finding with a non-null `suggested_line`, replace that line with the suggestion. These have exactly one correct rewrite, so apply them silently — this is canonicalization, not restructuring.
+2. For every finding with `suggested_line: null`, the repair would change what the plan means (inventing an id, renumbering a duplicate, dropping a title). Derive a concrete proposal from the finding's `message` and the session's own body, then ask the user to approve it. Batch all such findings from the round into one question.
+3. Edit only the flagged heading lines. Never alter body content, never reorder, merge, or renumber sessions beyond an approved repair, and never write to the original plan file.
+4. Re-run `asl split --check` on the repaired text. Repairing one heading can expose a finding the fail-fast parser had masked (a duplicate id only becomes visible once both headings parse), so keep looping while findings remain and rounds are left.
+
+If findings remain after 3 rounds, or the user declines a repair, surface the failure `reason`/`error` verbatim and stop.
+
+Once any repair has been applied, the repaired text — not the original file — is the split source: pipe it to `asl split --inline-stdin` in Step 6, which persists it as a durable content-hash-addressed source file. Report the user's original path alongside the resolved `source_path`.
+
+For any malformed `Session` heading the parser raises a line-specific `PlanError`; `asl split` returns it verbatim with reason `malformed-plan`, never as ordinary content.
 
 ### Step 3: Surface Scan
 
@@ -67,7 +94,7 @@ Extract file paths from the plan text, check existence and line counts, and buil
 
 ### Step 4: Handle Edge Cases
 
-**No session markers found**: Enter this workflow only when canonical parsing succeeds with zero explicit session headings. Parser errors are malformed-plan errors, not an invitation to propose boundaries. Propose session boundaries using concrete data:
+**No session markers found**: Enter this workflow only when canonical parsing succeeds with zero explicit session headings — that is, `asl split --check` reported no findings and an empty `session_ids`. Parser errors are malformed-plan errors, not an invitation to propose boundaries; repair them mechanically in Step 2 instead. Propose session boundaries using concrete data:
 
 1. Group work items that share files or directories into one session (use surface-scan data when available).
 2. Estimate session weight: plan text lines + files touched + existing LoC + subsystem spread.
@@ -77,13 +104,13 @@ Extract file paths from the plan text, check existence and line counts, and buil
 6. Ask the user for approval before proceeding.
 7. Once approved, write the restructured plan — original content unchanged, organized under canonical `## Session N: <title>` headings — save it as a new source markdown file, and pass that path to `asl split --plan-file` in Step 6 so the generated directory traces to a real source file.
 
-**Single session found**: `asl split` reports reason `single-session`. Tell the user "Only 1 session found — splitting is not needed." and stop.
+**Single session found**: `asl split --check` (and `asl split`) reports reason `single-session`. Tell the user "Only 1 session found — splitting is not needed." and stop.
 
 **Two or more sessions found**: Continue to Step 5.
 
 ### Step 5: Author Completion Contracts
 
-Contracts are the only generated content this skill authors; everything else is rendered deterministically by `asl split`. Write one contract per session to a temp JSON file (`contracts_file`), keyed by canonical session id, and pass it as `--contracts-file`:
+Contracts are the only generated content this skill authors; everything else is rendered deterministically by `asl split`. Write one contract per session to a temp JSON file (`contracts_file`), keyed by the canonical session ids reported by the final clean `asl split --check` (never by a hand-read of the plan), and pass it as `--contracts-file`:
 
 ```json
 {
@@ -118,7 +145,7 @@ Optionally, also write an analysis markdown file and pass it as `--analysis-file
 
 Run `asl split` with the source resolved in Step 1 and the contracts authored in Step 5, using `--json` and reading its output as the source of truth. `asl split` resolves a fresh collision-safe `output_dir` itself and never overwrites an existing one, so do not pre-create it or ask overwrite prompts; use the reported `output_dir` for every path you print (collision suffixes may have been applied, so never rebuild the path from `plan_id` or the source filename).
 
-**Path input:**
+**Path input** (an unrepaired plan file):
 
 ```bash
 asl split \
@@ -130,7 +157,7 @@ asl split \
   --json
 ```
 
-**Inline input** (pipe the captured plan content on stdin):
+**Inline input** (pipe the captured plan content on stdin — also the path for any plan repaired in Step 2):
 
 ```bash
 printf '%s\n' "<inline-plan-content>" | asl split \
@@ -149,7 +176,7 @@ The transaction is atomic: a failure while staging or committing leaves no parti
 Echo the `asl split --json` output as a concise summary:
 
 1. Number of sessions extracted (`session_ids`).
-2. Source plan path (`source_path`), especially when inline content was captured.
+2. Source plan path (`source_path`), especially when inline content was captured. If Step 2 repaired any heading, also print the user's original path and one `line <N>: <category>` line per repair so the change is auditable.
 3. Output directory (`output_dir`) and its `Plan ID` (`plan_id`).
 4. File listing (`files`) with approximate sizes.
 5. The ready-to-paste serial execution command (the `## Execution` block from `manifest.md`).
@@ -159,7 +186,7 @@ Echo the `asl split --json` output as a concise summary:
 
 ## Important Notes
 
-- Never modify the original plan file; only restructure (never rewrite) content, and save inline plans as source markdown before splitting (`asl split --inline-stdin` does this).
+- Never modify the original plan file; only restructure (never rewrite) content, and save inline plans as source markdown before splitting (`asl split --inline-stdin` does this). A plan repaired in Step 2 follows the same rule: the repaired text is persisted as a new source file, and the user's original is left byte-identical.
 - Deterministic generation is owned by `asl split` / `agent_session_loop.authoring`. This skill authors only session boundaries and completion contracts; it never hand-writes `context.md`, `session-N.md`, `manifest.md`, or `progress.md`.
 - The generated plan is serial-only. Do not emit `## Parallel Metadata`, dependency waves, worker prompts, or explicit `--session N` commands; do not generate `parallel-validation.md` (the readiness hash ignores it even when a legacy copy lingers). `session-run` accepts only directory auto-advance.
 - Every emitted `session-N.md` carries a parseable `## Completion Contract` above its `## Handoff`; plans without contracts are rejected by `asl preflight` (red `missing-contract`) and by `asl run`'s verification gate (`reason="no-contract"` unless `--allow-not-loop-ready`).

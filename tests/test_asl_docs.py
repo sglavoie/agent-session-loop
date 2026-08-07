@@ -169,6 +169,65 @@ class SkillInstructionTests(unittest.TestCase):
             text,
         )
 
+    def test_session_split_repairs_malformed_headings_before_stopping(self) -> None:
+        text = (REPO_ROOT / "skills/session-split/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+
+        # A malformed heading is a repairable typo, not a dead end: the skill
+        # lints first, repairs, re-checks, and only then stops.
+        self.assertIn("### Step 2: Validate and Repair the Source Plan", text)
+        self.assertIn("asl split --check --plan-file", text)
+        self.assertIn("asl split --check --inline-stdin --json", text)
+        self.assertIn("**Repair loop** (at most 3 rounds):", text)
+        self.assertIn("non-null `suggested_line`", text)
+        self.assertIn("`suggested_line: null`", text)
+        self.assertIn("ask the user to approve it", text)
+        self.assertIn("never write to the original plan file", text)
+        self.assertIn("If findings remain after 3 rounds", text)
+        self.assertIn(
+            "keyed by the canonical session ids reported by the final clean "
+            "`asl split --check`",
+            text,
+        )
+        self.assertIn("one `line <N>: <category>` line per repair", text)
+
+    def test_docs_document_split_check_lint_contract(self) -> None:
+        text = (REPO_ROOT / "docs/agent-session-loop.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "`split --check` lints a source plan's session headings", text
+        )
+        self.assertIn("It needs no `--contracts-file`", text)
+        self.assertIn("`lint_plan_document`", text)
+        self.assertIn("`findings` array", text)
+        self.assertIn(
+            "`suggested_line` is non-null exactly when the damage has", text
+        )
+        self.assertIn("`reason: malformed-plan`", text)
+        self.assertIn("for at most three", text)
+        # The fail-fast parser's verbatim-message promise is unchanged.
+        self.assertIn(
+            "`malformed-plan` (the parser's line-specific `PlanError` verbatim)",
+            text,
+        )
+
+    def test_docs_name_every_lint_category(self) -> None:
+        text = (REPO_ROOT / "docs/agent-session-loop.md").read_text(
+            encoding="utf-8"
+        )
+
+        categories = [
+            value
+            for name, value in vars(authoring).items()
+            if name.startswith("LINT_") and isinstance(value, str)
+        ]
+        self.assertGreaterEqual(len(categories), 12)
+        for category in categories:
+            self.assertIn(f"`{category}`", text)
+
     def test_session_run_documents_bounded_manual_auto_repair(self) -> None:
         text = (REPO_ROOT / "skills/session-run/SKILL.md").read_text(
             encoding="utf-8"

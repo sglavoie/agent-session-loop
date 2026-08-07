@@ -83,7 +83,10 @@ and recomputable `manifest.md` readiness metadata) before pausing, so a freshly
 split-and-expanded plan rarely needs a manual repair step. Each session is
 gated on its `## Completion Contract` `### Verify` recipe.
 
-1. Create the split plan with `session-split`. The skill writes
+1. Create the split plan with `session-split`. The skill first validates the
+   source plan with `asl split --check`, repairs mechanical session-heading
+   damage (and asks before any repair that would change what the plan means),
+   and only then splits. The skill writes
    `manifest.md` with three readiness lines populated as
    `**Readiness**: draft`, `**Readiness SHA-256**`, and
    `**Readiness checked at**`. Every `session-<id>.md` is emitted with a
@@ -1433,6 +1436,33 @@ Stable failure reasons: `single-session` (splitting is not needed),
 is not a JSON object or is missing `done_when`/`verify`), and `input-error`. The
 `session-split` skill is a thin
 wrapper that authors the per-session contracts and then calls `asl split`.
+
+`split --check` lints a source plan's session headings and exits without writing
+anything: no output directory, and no captured source file even with
+`--inline-stdin`. It needs no `--contracts-file`, which is what lets it run
+*before* any contract is authored. `parse_plan_document` is fail-fast and raises
+on the first malformed heading; `--check` walks the same fence-aware grammar
+through `lint_plan_document` and accumulates instead, so one pass reports every
+malformed heading in the plan. Each entry in the `findings` array carries `line`,
+`category`, the verbatim `message`, `source_line`, and `suggested_line`. Stable
+categories: `invalid-session-id`, `zero-id-component`, `malformed-heading`,
+`missing-id-whitespace`, `missing-session-id`, `non-numeric-session-id`,
+`session-id-suffix`, `dangling-title-separator`, `malformed-title`,
+`punctuation-free-title`, `unsupported-title-separator`, and
+`duplicate-session-id`. `suggested_line` is non-null exactly when the damage has
+a single correct rewrite (`punctuation-free-title` and
+`unsupported-title-separator`), and any suggestion emitted is guaranteed to
+parse; every other category would invent an id, renumber sessions, or drop a
+title, so it is left for a human decision. A clean check exits `0` with
+`ok: true`, `checked: true`, `session_ids`, and `session_count` — the canonical
+ids a caller should key contracts by. Findings exit `1` with
+`reason: malformed-plan` and `error` set to the first finding's message; fewer
+than two sessions exits `1` with `reason: single-session`. Because repairing one
+heading can expose a finding the fail-fast parser had masked (a duplicate
+canonical id is only visible once both headings parse), callers re-check after
+each repair round; the `session-split` skill drives that loop for at most three
+rounds and splits the repaired text through `--inline-stdin`, leaving the user's
+original plan file untouched.
 
 `prepare` runs the whole preparation pipeline in one deterministic command:
 structure gate (at least two session headings, each with a parseable inline

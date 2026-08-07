@@ -505,12 +505,22 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         ),
     )
     split_parser.add_argument(
+        "--check",
+        dest="check",
+        action="store_true",
+        help=(
+            "Lint the source plan's session headings and exit without writing "
+            "anything; reports every malformed heading at once"
+        ),
+    )
+    split_parser.add_argument(
         "--contracts-file",
         dest="contracts_file",
-        required=True,
+        default=None,
         help=(
             "JSON file of completion contracts keyed by canonical session id "
-            "({\"1\": {\"done_when\": [...], \"verify\": {...}}, ...})"
+            "({\"1\": {\"done_when\": [...], \"verify\": {...}}, ...}); "
+            "required unless --check is given"
         ),
     )
     split_parser.add_argument(

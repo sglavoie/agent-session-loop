@@ -29,7 +29,7 @@ Canonical session identities come from :mod:`agent_session_loop.plans`
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -83,6 +83,53 @@ _ATX_CLOSING_MARKER_RE = re.compile(r"[ \t]+#+[ \t]*$")
 _TITLE_SEPARATORS = frozenset((":", "-", "–", "—"))
 #: Matches an opening/closing fenced-code delimiter (``` or ~~~, 3+ chars).
 _FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+
+#: Stable machine-readable categories for malformed source-heading diagnostics.
+#: They are the repair vocabulary shared by ``asl split --check`` and the
+#: ``session-split`` skill, so they are part of the public JSON contract.
+LINT_INVALID_SESSION_ID = "invalid-session-id"
+LINT_ZERO_ID_COMPONENT = "zero-id-component"
+LINT_MALFORMED_HEADING = "malformed-heading"
+LINT_MISSING_ID_WHITESPACE = "missing-id-whitespace"
+LINT_MISSING_SESSION_ID = "missing-session-id"
+LINT_NON_NUMERIC_SESSION_ID = "non-numeric-session-id"
+LINT_SESSION_ID_SUFFIX = "session-id-suffix"
+LINT_DANGLING_TITLE_SEPARATOR = "dangling-title-separator"
+LINT_MALFORMED_TITLE = "malformed-title"
+LINT_PUNCTUATION_FREE_TITLE = "punctuation-free-title"
+LINT_UNSUPPORTED_TITLE_SEPARATOR = "unsupported-title-separator"
+LINT_DUPLICATE_SESSION_ID = "duplicate-session-id"
+
+#: Categories whose repair has exactly one correct rewrite, so the finding
+#: carries a ``suggested_line`` an agent may apply without asking. Every other
+#: category either invents an id or renumbers sessions, which changes what the
+#: plan means, so it is deliberately left for a human decision.
+LINT_SUGGESTABLE_CATEGORIES = frozenset(
+    (
+        LINT_PUNCTUATION_FREE_TITLE,
+        LINT_UNSUPPORTED_TITLE_SEPARATOR,
+    )
+)
+
+
+class SourceHeadingError(PlanError):
+    """A line-specific malformed source-heading diagnostic.
+
+    Subclasses :class:`PlanError` so existing handlers and message assertions
+    are unaffected; the extra attributes let ``asl split --check`` report a
+    stable ``category`` instead of forcing callers to match on prose.
+    """
+
+    def __init__(
+        self, *, line_number: int, category: str, source_line: str, reason: str
+    ) -> None:
+        self.line_number = line_number
+        self.category = category
+        self.source_line = source_line
+        self.reason = reason
+        super().__init__(
+            f"line {line_number}: {reason}; source line: {source_line!r}"
+        )
 
 CONTEXT_REFERENCE_LINE = (
     "> **Before starting**: Read `context.md` in this directory for shared "
@@ -353,6 +400,39 @@ class ParsedPlan:
         return tuple(session.session_id.value for session in self.sessions)
 
 
+@dataclass(frozen=True)
+class PlanLintFinding:
+    """One malformed source heading reported by :func:`lint_plan_document`.
+
+    ``suggested_line`` is non-``None`` exactly when the damage has a single
+    correct rewrite, so a caller may apply it without asking; a ``None``
+    suggestion means the repair changes meaning and needs a human decision.
+    """
+
+    line: int
+    category: str
+    message: str
+    source_line: str
+    suggested_line: str | None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "line": self.line,
+            "category": self.category,
+            "message": self.message,
+            "source_line": self.source_line,
+            "suggested_line": self.suggested_line,
+        }
+
+
+@dataclass(frozen=True)
+class PlanLintResult:
+    """Every heading diagnostic in a plan plus the ids that did parse."""
+
+    findings: tuple[PlanLintFinding, ...]
+    session_ids: tuple[str, ...]
+
+
 def _fence_delimiter(line: str) -> str | None:
     match = _FENCE_RE.match(line)
     if match is None:
@@ -360,9 +440,13 @@ def _fence_delimiter(line: str) -> str | None:
     return match.group(1)[0] * 3  # normalize to the 3-char family marker
 
 
-def _source_heading_error(line_number: int, reason: str, line: str) -> PlanError:
+def _source_heading_error(
+    line_number: int, reason: str, line: str, *, category: str
+) -> SourceHeadingError:
     """Build a line-specific malformed source-heading error."""
-    return PlanError(f"line {line_number}: {reason}; source line: {line!r}")
+    return SourceHeadingError(
+        line_number=line_number, category=category, source_line=line, reason=reason
+    )
 
 
 def _canonicalize_source_session_id(
@@ -374,6 +458,7 @@ def _canonicalize_source_session_id(
             line_number,
             f"invalid session id {raw_id!r}; expected dotted decimal components",
             line,
+            category=LINT_INVALID_SESSION_ID,
         )
 
     components = tuple(int(component) for component in raw_id.split("."))
@@ -382,6 +467,7 @@ def _canonicalize_source_session_id(
             line_number,
             f"zero-valued session id component in {raw_id!r}; components must be positive",
             line,
+            category=LINT_ZERO_ID_COMPONENT,
         )
     return SessionId(components)
 
@@ -392,7 +478,10 @@ def _raise_malformed_session_heading(line: str, line_number: int) -> None:
     prefix = _SESSION_HEADING_PREFIX_RE.match(without_closing_marker)
     if prefix is None:  # Defensive: callers first use the candidate detector.
         raise _source_heading_error(
-            line_number, "malformed session heading", line
+            line_number,
+            "malformed session heading",
+            line,
+            category=LINT_MALFORMED_HEADING,
         )
 
     after_token = prefix.group("rest")
@@ -401,12 +490,16 @@ def _raise_malformed_session_heading(line: str, line_number: int) -> None:
             line_number,
             "invalid session id; expected whitespace and a positive dotted decimal id",
             line,
+            category=LINT_MISSING_ID_WHITESPACE,
         )
 
     payload = after_token.lstrip(" \t")
     if not payload:
         raise _source_heading_error(
-            line_number, "invalid session id; session id is missing", line
+            line_number,
+            "invalid session id; session id is missing",
+            line,
+            category=LINT_MISSING_SESSION_ID,
         )
 
     numeric_prefix = re.match(r"[0-9.]+", payload)
@@ -416,6 +509,7 @@ def _raise_malformed_session_heading(line: str, line_number: int) -> None:
             line_number,
             f"invalid session id {raw_id!r}; expected dotted decimal components",
             line,
+            category=LINT_NON_NUMERIC_SESSION_ID,
         )
 
     raw_id = numeric_prefix.group(0)
@@ -426,6 +520,7 @@ def _raise_malformed_session_heading(line: str, line_number: int) -> None:
             line_number,
             f"invalid session id {malformed_token!r}; expected dotted decimal components",
             line,
+            category=LINT_SESSION_ID_SUFFIX,
         )
 
     _canonicalize_source_session_id(
@@ -437,7 +532,10 @@ def _raise_malformed_session_heading(line: str, line_number: int) -> None:
         # defensive completeness if the valid matcher and diagnostic parser
         # diverge.
         raise _source_heading_error(
-            line_number, "malformed session heading after session id", line
+            line_number,
+            "malformed session heading after session id",
+            line,
+            category=LINT_MALFORMED_HEADING,
         )
 
     separator = suffix[0]
@@ -447,9 +545,13 @@ def _raise_malformed_session_heading(line: str, line_number: int) -> None:
                 line_number,
                 f"dangling title separator {separator!r}; a non-empty title is required",
                 line,
+                category=LINT_DANGLING_TITLE_SEPARATOR,
             )
         raise _source_heading_error(
-            line_number, "malformed session title", line
+            line_number,
+            "malformed session title",
+            line,
+            category=LINT_MALFORMED_TITLE,
         )
 
     if separator.isalnum():
@@ -457,11 +559,13 @@ def _raise_malformed_session_heading(line: str, line_number: int) -> None:
             line_number,
             "punctuation-free title suffix; use ':', '-', '–', or '—' before the title",
             line,
+            category=LINT_PUNCTUATION_FREE_TITLE,
         )
     raise _source_heading_error(
         line_number,
         f"unsupported title separator {separator!r}; use ':', '-', '–', or '—'",
         line,
+        category=LINT_UNSUPPORTED_TITLE_SEPARATOR,
     )
 
 
@@ -489,9 +593,35 @@ def _parse_source_session_heading(
             line_number,
             f"dangling title separator {separator!r}; a non-empty title is required",
             line,
+            category=LINT_DANGLING_TITLE_SEPARATOR,
         )
     title = (raw_title or "").strip(" \t") or None
     return session_id, title, len(heading.group("hashes"))
+
+
+def _iter_structural_lines(
+    lines: Sequence[str],
+) -> Iterator[tuple[int, str, bool]]:
+    """Yield ``(line_number, line, is_session_candidate)`` fence-aware.
+
+    Sole owner of fenced-code bookkeeping for source plans, so the fail-fast
+    parser and the accumulating linter can never disagree about which lines are
+    structure and which are content.
+    """
+    fence: str | None = None
+    for index, line in enumerate(lines):
+        delimiter = _fence_delimiter(line)
+        if delimiter is not None:
+            if fence is None:
+                fence = delimiter
+            elif fence == delimiter:
+                fence = None
+            # A different fence family inside an open fence is content; ignore.
+
+        is_candidate = (
+            fence is None and _SESSION_HEADING_CANDIDATE_RE.match(line) is not None
+        )
+        yield index + 1, line, is_candidate
 
 
 def parse_plan_document(text: str) -> ParsedPlan:
@@ -507,7 +637,6 @@ def parse_plan_document(text: str) -> ParsedPlan:
     sessions: list[ParsedSession] = []
 
     current: dict | None = None
-    fence: str | None = None
     first_id_lines: dict[str, int] = {}
 
     def _flush(end: int) -> None:
@@ -523,19 +652,12 @@ def parse_plan_document(text: str) -> ParsedPlan:
             )
         )
 
-    for index, line in enumerate(lines):
-        delimiter = _fence_delimiter(line)
-        if delimiter is not None:
-            if fence is None:
-                fence = delimiter
-            elif fence == delimiter:
-                fence = None
-            # A different fence family inside an open fence is content; ignore.
-
+    for line_number, line, is_candidate in _iter_structural_lines(lines):
+        index = line_number - 1
         heading = (
-            None
-            if fence is not None
-            else _parse_source_session_heading(line, index + 1)
+            _parse_source_session_heading(line, line_number)
+            if is_candidate
+            else None
         )
         if heading is None:
             if current is None:
@@ -546,19 +668,20 @@ def parse_plan_document(text: str) -> ParsedPlan:
         first_line = first_id_lines.get(session_id.value)
         if first_line is not None:
             raise _source_heading_error(
-                index + 1,
+                line_number,
                 f"duplicate canonical session id {session_id.value!r}; "
                 f"first defined on line {first_line}",
                 line,
+                category=LINT_DUPLICATE_SESSION_ID,
             )
-        first_id_lines[session_id.value] = index + 1
+        first_id_lines[session_id.value] = line_number
 
         _flush(index)
         current = {
             "session_id": session_id,
             "title": title,
             "heading_level": heading_level,
-            "body_start": index + 1,
+            "body_start": line_number,
         }
 
     _flush(len(lines))
@@ -566,6 +689,103 @@ def parse_plan_document(text: str) -> ParsedPlan:
     return ParsedPlan(
         context_lines=tuple(context),
         sessions=tuple(sessions),
+    )
+
+
+def _suggest_heading_repair(error: SourceHeadingError) -> str | None:
+    """Rebuild a canonical heading when exactly one rewrite is correct."""
+    if error.category not in LINT_SUGGESTABLE_CATEGORIES:
+        return None
+
+    line = error.source_line
+    without_closing_marker = _ATX_CLOSING_MARKER_RE.sub("", line)
+    closing_marker = line[len(without_closing_marker) :]
+    prefix = _SESSION_HEADING_PREFIX_RE.match(without_closing_marker)
+    if prefix is None:
+        return None
+
+    head = without_closing_marker[: prefix.start("rest")]
+    after_token = prefix.group("rest")
+    payload = after_token.lstrip(" \t")
+    gap = after_token[: len(after_token) - len(payload)]
+    numeric_prefix = re.match(r"[0-9.]+", payload)
+    if numeric_prefix is None:
+        return None
+
+    raw_id = numeric_prefix.group(0)
+    title = payload[numeric_prefix.end() :].lstrip(" \t")
+    if error.category == LINT_UNSUPPORTED_TITLE_SEPARATOR:
+        title = title[1:]
+    title = title.strip(" \t")
+    if not title:
+        return None
+
+    suggestion = f"{head}{gap}{raw_id}: {title}{closing_marker}"
+    try:
+        _parse_source_session_heading(suggestion, error.line_number)
+    except PlanError:
+        return None
+    return suggestion
+
+
+def lint_plan_document(text: str) -> PlanLintResult:
+    """Collect every malformed source heading instead of stopping at the first.
+
+    :func:`parse_plan_document` fails fast, so repairing a plan through it costs
+    one round trip per broken heading. This walks the same fence-aware grammar
+    and the same per-heading parser, but accumulates diagnostics so a caller can
+    repair a whole plan in one pass.
+    """
+    findings: list[PlanLintFinding] = []
+    session_ids: list[str] = []
+    first_id_lines: dict[str, int] = {}
+
+    for line_number, line, is_candidate in _iter_structural_lines(text.splitlines()):
+        if not is_candidate:
+            continue
+
+        try:
+            heading = _parse_source_session_heading(line, line_number)
+        except SourceHeadingError as error:
+            findings.append(
+                PlanLintFinding(
+                    line=line_number,
+                    category=error.category,
+                    message=str(error),
+                    source_line=line,
+                    suggested_line=_suggest_heading_repair(error),
+                )
+            )
+            continue
+        if heading is None:
+            continue
+
+        session_id = heading[0]
+        first_line = first_id_lines.get(session_id.value)
+        if first_line is not None:
+            duplicate = _source_heading_error(
+                line_number,
+                f"duplicate canonical session id {session_id.value!r}; "
+                f"first defined on line {first_line}",
+                line,
+                category=LINT_DUPLICATE_SESSION_ID,
+            )
+            findings.append(
+                PlanLintFinding(
+                    line=line_number,
+                    category=duplicate.category,
+                    message=str(duplicate),
+                    source_line=line,
+                    suggested_line=None,
+                )
+            )
+            continue
+
+        first_id_lines[session_id.value] = line_number
+        session_ids.append(session_id.value)
+
+    return PlanLintResult(
+        findings=tuple(findings), session_ids=tuple(session_ids)
     )
 
 
@@ -1502,6 +1722,111 @@ def _resolve_skill_prefix(
     return prefix, None
 
 
+def _emit_split_error(
+    reason: str, error: str, *, want_json: bool, **fields: Any
+) -> int:
+    if want_json:
+        responses.print_json(
+            responses.error_payload(
+                "split", reason=reason, error=error, paused=False, **fields
+            )
+        )
+    else:
+        print(f"agent-session-loop split: {error}", file=sys.stderr)
+    return 1
+
+
+def check_from_args(args: Any) -> int:
+    """Run ``asl split --check``: lint a source plan and write nothing.
+
+    Deliberately skips ``capture_inline_plan`` so a repair loop can re-check the
+    same plan repeatedly without persisting a source file per attempt.
+    """
+    want_json = bool(args.json)
+
+    if args.inline_stdin:
+        source_path = "<stdin>"
+        try:
+            text = extract_inline_plan(sys.stdin.read())
+        except ValueError as error:
+            return _emit_split_error(
+                SPLIT_REASON_INPUT_ERROR, str(error), want_json=want_json
+            )
+    else:
+        source_path = os.path.expanduser(str(args.plan_file))
+        if not Path(source_path).is_file():
+            return _emit_split_error(
+                SPLIT_REASON_INPUT_ERROR,
+                f"source plan file does not exist: {args.plan_file}",
+                want_json=want_json,
+            )
+        try:
+            text = Path(source_path).read_text(encoding="utf-8")
+        except OSError as error:
+            return _emit_split_error(
+                SPLIT_REASON_INPUT_ERROR,
+                f"cannot read source plan {source_path}: {error}",
+                want_json=want_json,
+                source_path=source_path,
+            )
+
+    result = lint_plan_document(text)
+
+    if result.findings:
+        if want_json:
+            responses.print_json(
+                responses.error_payload(
+                    "split",
+                    reason=SPLIT_REASON_MALFORMED_PLAN,
+                    error=result.findings[0].message,
+                    paused=False,
+                    checked=True,
+                    source_path=source_path,
+                    session_ids=list(result.session_ids),
+                    findings=[finding.as_dict() for finding in result.findings],
+                )
+            )
+        else:
+            print(
+                f"agent-session-loop split --check: {len(result.findings)} "
+                f"malformed session heading(s) in {source_path}",
+                file=sys.stderr,
+            )
+            for finding in result.findings:
+                print(f"  {finding.message}", file=sys.stderr)
+                if finding.suggested_line is not None:
+                    print(
+                        f"    suggested: {finding.suggested_line}", file=sys.stderr
+                    )
+        return 1
+
+    if len(result.session_ids) < 2:
+        return _emit_split_error(
+            SPLIT_REASON_SINGLE_SESSION,
+            str(SingleSessionError(len(result.session_ids))),
+            want_json=want_json,
+            checked=True,
+            source_path=source_path,
+            session_ids=list(result.session_ids),
+        )
+
+    if want_json:
+        responses.print_json(
+            responses.success_payload(
+                "split",
+                checked=True,
+                source_path=source_path,
+                session_ids=list(result.session_ids),
+                session_count=len(result.session_ids),
+            )
+        )
+    else:
+        print(f"Checked {len(result.session_ids)} sessions in {source_path}")
+        for session_id in result.session_ids:
+            print(f"  Session {session_id}")
+    return 0
+
+
 def split_from_args(args: Any) -> int:
     """Run the ``split`` subcommand from CLI arguments."""
     want_json = bool(args.json)
@@ -1509,19 +1834,18 @@ def split_from_args(args: Any) -> int:
     common_fields: dict[str, Any] = {}
 
     def _emit_error(reason: str, error: str, **fields: Any) -> int:
-        if want_json:
-            responses.print_json(
-                responses.error_payload(
-                    "split",
-                    reason=reason,
-                    error=error,
-                    paused=False,
-                    **{**common_fields, **fields},
-                )
-            )
-        else:
-            print(f"agent-session-loop split: {error}", file=sys.stderr)
-        return 1
+        return _emit_split_error(
+            reason, error, want_json=want_json, **{**common_fields, **fields}
+        )
+
+    if args.check:
+        return check_from_args(args)
+
+    if args.contracts_file is None:
+        return _emit_error(
+            SPLIT_REASON_INPUT_ERROR,
+            "--contracts-file is required unless --check is given",
+        )
 
     prefix, prefix_error = _resolve_skill_prefix(args.skill_prefix)
     if prefix_error is not None:

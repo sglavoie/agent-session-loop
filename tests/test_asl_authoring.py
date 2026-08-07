@@ -327,6 +327,170 @@ class PlanAuthoringTests(unittest.TestCase):
         self.assertEqual((), parsed.sessions)
         self.assertEqual(lines, parsed.context_lines)
 
+    # -- source-plan linting -------------------------------------------------
+
+    def test_lint_plan_document_accepts_a_clean_plan(self) -> None:
+        result = authoring.lint_plan_document(
+            "# Plan\n\n## Session 1: A\n\nx\n\n## Session 2: B\n\ny\n"
+        )
+        self.assertEqual((), result.findings)
+        self.assertEqual(("1", "2"), result.session_ids)
+
+    def test_lint_plan_document_categorizes_every_malformed_heading(self) -> None:
+        cases = (
+            ("## Session nope: Bad id", authoring.LINT_NON_NUMERIC_SESSION_ID),
+            ("## Session 1..2: Bad id", authoring.LINT_INVALID_SESSION_ID),
+            ("## Session 0: Zero", authoring.LINT_ZERO_ID_COMPONENT),
+            ("## Session 1.0: Zero", authoring.LINT_ZERO_ID_COMPONENT),
+            ("## Session 1a: Glued", authoring.LINT_SESSION_ID_SUFFIX),
+            ("## Session: No id", authoring.LINT_MISSING_ID_WHITESPACE),
+            ("## Session ", authoring.LINT_MISSING_SESSION_ID),
+            ("## Session 1:", authoring.LINT_DANGLING_TITLE_SEPARATOR),
+            ("## Session 1 -   ###", authoring.LINT_DANGLING_TITLE_SEPARATOR),
+            (
+                "## Session 1 / Unsupported",
+                authoring.LINT_UNSUPPORTED_TITLE_SEPARATOR,
+            ),
+            (
+                "## Session 1 Missing punctuation",
+                authoring.LINT_PUNCTUATION_FREE_TITLE,
+            ),
+        )
+        for source, category in cases:
+            with self.subTest(source=source):
+                result = authoring.lint_plan_document("context\n" + source + "\n")
+                self.assertEqual(1, len(result.findings))
+                finding = result.findings[0]
+                self.assertEqual(category, finding.category)
+                self.assertEqual(2, finding.line)
+                self.assertEqual(source, finding.source_line)
+                self.assertIn("line 2", finding.message)
+
+    def test_lint_plan_document_accumulates_instead_of_failing_fast(self) -> None:
+        text = (
+            "# Plan\n\n"
+            "## Session 1 No colon\n\none\n\n"
+            "### Session 2 / Bad sep\n\ntwo\n\n"
+            "## Session 3a: Glued\n\nthree\n"
+        )
+        with self.assertRaises(plans.PlanError):
+            authoring.parse_plan_document(text)
+
+        result = authoring.lint_plan_document(text)
+        self.assertEqual(
+            [
+                (3, authoring.LINT_PUNCTUATION_FREE_TITLE),
+                (7, authoring.LINT_UNSUPPORTED_TITLE_SEPARATOR),
+                (11, authoring.LINT_SESSION_ID_SUFFIX),
+            ],
+            [(finding.line, finding.category) for finding in result.findings],
+        )
+        self.assertEqual((), result.session_ids)
+
+    def test_lint_plan_document_reports_duplicate_ids_as_findings(self) -> None:
+        result = authoring.lint_plan_document(
+            "## Session 1: First\n\nx\n\n## Session 01: Padded dup\n\ny\n"
+        )
+        self.assertEqual(1, len(result.findings))
+        finding = result.findings[0]
+        self.assertEqual(authoring.LINT_DUPLICATE_SESSION_ID, finding.category)
+        self.assertEqual(5, finding.line)
+        self.assertIn("first defined on line 1", finding.message)
+        self.assertIsNone(finding.suggested_line)
+        self.assertEqual(("1",), result.session_ids)
+
+    def test_lint_plan_document_ignores_headings_in_code_fences(self) -> None:
+        result = authoring.lint_plan_document(
+            "## Session 1: A\n\n```\n## Session 2 Broken\n```\n\n"
+            "## Session 2: B\n\ny\n"
+        )
+        self.assertEqual((), result.findings)
+        self.assertEqual(("1", "2"), result.session_ids)
+
+    def test_lint_suggestions_only_cover_unambiguous_repairs(self) -> None:
+        suggestable = {
+            "## Session 1 Missing punctuation": "## Session 1: Missing punctuation",
+            "## Session 2 / Unsupported": "## Session 2: Unsupported",
+            # Original spacing and any ATX closing marker are preserved.
+            "##  Session   3 No colon ##": "##  Session   3: No colon ##",
+        }
+        for source, expected in suggestable.items():
+            with self.subTest(source=source):
+                finding = authoring.lint_plan_document(source + "\n").findings[0]
+                self.assertEqual(expected, finding.suggested_line)
+
+        # A repair that would invent an id, renumber, or drop a title is left
+        # to a human decision, so no suggestion is offered.
+        for source in (
+            "## Session 1a: Glued",
+            "## Session 1.0: Zero",
+            "## Session 1:",
+            "## Session nope: Bad id",
+            "## Session 1 /",
+        ):
+            with self.subTest(source=source):
+                finding = authoring.lint_plan_document(source + "\n").findings[0]
+                self.assertIsNone(finding.suggested_line)
+
+    def test_lint_suggestions_parse_when_applied(self) -> None:
+        text = "## Session 1 No colon\n\none\n\n### Session 2 | Bad sep\n\ntwo\n"
+        lines = text.splitlines()
+        for finding in authoring.lint_plan_document(text).findings:
+            self.assertIsNotNone(finding.suggested_line)
+            lines[finding.line - 1] = str(finding.suggested_line)
+
+        repaired = "\n".join(lines) + "\n"
+        self.assertEqual((), authoring.lint_plan_document(repaired).findings)
+        self.assertEqual(
+            ("1", "2"), authoring.parse_plan_document(repaired).session_ids
+        )
+
+    def test_lint_reveals_duplicates_masked_by_an_earlier_malformed_heading(
+        self,
+    ) -> None:
+        # A duplicate id is invisible while the first heading fails to parse, so
+        # a repair round can legitimately surface a new finding.
+        text = "## Session 1 No colon\n\none\n\n## Session 1: Dup\n\ntwo\n"
+        first = authoring.lint_plan_document(text)
+        self.assertEqual(
+            [authoring.LINT_PUNCTUATION_FREE_TITLE],
+            [finding.category for finding in first.findings],
+        )
+
+        lines = text.splitlines()
+        lines[0] = str(first.findings[0].suggested_line)
+        second = authoring.lint_plan_document("\n".join(lines) + "\n")
+        self.assertEqual(
+            [authoring.LINT_DUPLICATE_SESSION_ID],
+            [finding.category for finding in second.findings],
+        )
+
+    def test_lint_and_parse_agree_on_every_corpus_document(self) -> None:
+        corpus = (
+            "## Session 1: A\n\nx\n\n## Session 2: B\n\ny\n",
+            "no sessions at all\n",
+            "## Session 1: Only\n\nx\n",
+            "## Session 1 No colon\n\nx\n\n## Session 2: B\n\ny\n",
+            "## Session 1: A\n\nx\n\n## Session 1: Dup\n\ny\n",
+            "## Session 1: A\n\n```\n## Session 2 Broken\n```\n\n"
+            "## Session 2: B\n\ny\n",
+            "## Session 0: Zero\n\nx\n",
+        )
+        for text in corpus:
+            with self.subTest(text=text):
+                result = authoring.lint_plan_document(text)
+                try:
+                    parsed = authoring.parse_plan_document(text)
+                except plans.PlanError as error:
+                    self.assertTrue(result.findings)
+                    self.assertIn(
+                        f"line {result.findings[0].line}:", str(error)
+                    )
+                    self.assertEqual(result.findings[0].message, str(error))
+                else:
+                    self.assertEqual((), result.findings)
+                    self.assertEqual(parsed.session_ids, result.session_ids)
+
     # -- heading normalization ----------------------------------------------
 
     def test_normalize_heading_levels_promotes_level_three(self) -> None:
