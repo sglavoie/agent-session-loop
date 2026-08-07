@@ -1774,6 +1774,153 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(list(range(1, 81)), [m.seq for m in view.messages])
         self.assertEqual(80, len(self.mailbox_path().read_bytes().splitlines()))
 
+    def test_mailbox_transactions_are_synced_but_lease_heartbeats_are_not(
+        self,
+    ) -> None:
+        real_fsync = os.fsync
+        with mock.patch.object(mailbox.os, "fsync", wraps=real_fsync) as fsync:
+            mailbox.append_guidance(
+                self.plan_dir,
+                "durable guidance",
+                state_dir=self.state_dir,
+                created_at=self.timestamp(),
+            )
+            fsync.assert_called_once()
+
+            fsync.reset_mock()
+            mailbox.append_wait_question(
+                self.plan_dir,
+                "durable wait",
+                state_dir=self.state_dir,
+                run_id="run-A",
+                session_id="1",
+                turn_index=1,
+                waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
+                created_at=self.timestamp(),
+            )
+            fsync.assert_called_once()
+
+            fsync.reset_mock()
+            mailbox.write_lease(
+                self.plan_dir,
+                self.message_id(),
+                state_dir=self.state_dir,
+                updated_at=self.timestamp(),
+            )
+            fsync.assert_not_called()
+
+    def test_reply_timeout_race_is_consistent_across_processes(self) -> None:
+        question, wait_start = mailbox.append_wait_question(
+            self.plan_dir,
+            "Reply before timeout?",
+            state_dir=self.state_dir,
+            run_id="run-A",
+            session_id="1",
+            turn_index=1,
+            waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
+            created_at=self.timestamp(),
+        )
+        start_path = self.tmp / "start-race"
+        script = """
+import json
+from pathlib import Path
+import sys
+import time
+
+from agent_session_loop import mailbox
+
+mode, plan_dir, state_dir, question_id, wait_id, start_path = sys.argv[1:]
+deadline = time.monotonic() + 10
+while not Path(start_path).exists():
+    if time.monotonic() >= deadline:
+        raise SystemExit("race start timed out")
+    time.sleep(0.005)
+try:
+    if mode == "reply":
+        result = mailbox.append_reply(
+            plan_dir,
+            question_id,
+            "process reply",
+            state_dir=state_dir,
+        )
+        payload = {"ok": True, "kind": result.kind}
+    else:
+        result = mailbox.finish_wait(
+            plan_dir,
+            question_id,
+            wait_id,
+            reason=mailbox.WAIT_END_REASON_TIMEOUT,
+            state_dir=state_dir,
+        )
+        payload = {
+            "ok": True,
+            "kind": "finish",
+            "consumed": result.consumed,
+        }
+except mailbox.MailboxError as error:
+    payload = {"ok": False, "reason": error.reason}
+print(json.dumps(payload))
+"""
+
+        common = (
+            str(self.plan_dir),
+            str(self.state_dir),
+            question.id,
+            wait_start.id,
+            str(start_path),
+        )
+        processes = [
+            subprocess.Popen(
+                [sys.executable, "-c", script, mode, *common],
+                cwd=Path(__file__).resolve().parents[1],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for mode in ("reply", "timeout")
+        ]
+        start_path.write_text("go\n", encoding="utf-8")
+        outputs: list[dict[str, object]] = []
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=15)
+            self.assertEqual(0, process.returncode, msg=stderr)
+            outputs.append(json.loads(stdout))
+
+        view = mailbox.read_mailbox(
+            self.plan_dir,
+            state_dir=self.state_dir,
+        )
+        self.assertEqual((), view.rejected)
+        self.assertIsNone(view.active_wait_for(question.id))
+        wait_ends = [
+            message
+            for message in view.messages
+            if message.kind == mailbox.KIND_WAIT_END
+            and message.to == question.id
+        ]
+        self.assertEqual(1, len(wait_ends))
+
+        closure = view.closure_for(question.id)
+        if closure is None:
+            self.assertEqual(
+                mailbox.WAIT_END_REASON_TIMEOUT,
+                wait_ends[0].wait_end_reason,
+            )
+            self.assertIn(
+                {
+                    "ok": False,
+                    "reason": mailbox.REJECT_QUESTION_NOT_WAITING,
+                },
+                outputs,
+            )
+        else:
+            self.assertEqual(mailbox.KIND_REPLY, closure.kind)
+            self.assertEqual(
+                mailbox.WAIT_END_REASON_CLOSURE,
+                wait_ends[0].wait_end_reason,
+            )
+            self.assertIsNotNone(view.receipt_for_closure(closure.id))
+
     def test_size_cap_rejects_without_partial_write(self) -> None:
         path = self.mailbox_path()
         path.parent.mkdir(parents=True, exist_ok=True)

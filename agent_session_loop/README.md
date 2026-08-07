@@ -27,6 +27,6 @@ flowchart TD
     P --> S
 ```
 
-The mailbox is an append-only history; the first reply or resolution closes a question, and the worker records when it consumes that closure. The separate lease proves that a supervisor is still watching; if supervision disappears or mailbox waiting fails, ASL falls back to its normal pause-and-resume path.
+The mailbox is a durable, append-only history; the first reply or resolution closes a question, and the worker records when it consumes that closure. The separate lease proves that a supervisor is still watching; if supervision disappears or mailbox waiting fails, ASL falls back to its normal pause-and-resume path.
 
 > **Maintenance note:** Any work on ASL should include checking this README and updating it when behavior or architecture changes.
