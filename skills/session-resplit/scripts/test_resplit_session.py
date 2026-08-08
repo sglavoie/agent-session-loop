@@ -191,7 +191,73 @@ def write_resplit_plan(
     )
 
 
+def add_multi_repo_scopes(plan_dir: Path) -> None:
+    manifest_path = plan_dir / "manifest.md"
+    manifest = manifest_path.read_text(encoding="utf-8")
+    manifest_path.write_text(
+        manifest.replace(
+            "# Manifest\n\n",
+            "# Manifest\n\n## Repositories\n\n"
+            "| Alias | Path | Origin |\n"
+            "| --- | --- | --- |\n"
+            "| SVC | svc | https://example.com/svc.git |\n"
+            "| OAK | oak | https://example.com/oak.git |\n\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    scopes = {
+        "1": ("SVC", "(none)"),
+        "2": ("SVC, OAK", "SVC"),
+        "3": ("OAK", "(none)"),
+    }
+    for session_id, (reads, writes) in scopes.items():
+        path = plan_dir / f"session-{session_id}.md"
+        text = path.read_text(encoding="utf-8")
+        if session_id == "2":
+            text = text.replace(
+                '"type": "command",',
+                '"type": "command",\n      "repo": "SVC",',
+            )
+        path.write_text(
+            text.replace(
+                "\n\n",
+                "\n\n"
+                f"**Reads repositories**: {reads}\n"
+                f"**Writes repositories**: {writes}\n\n",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
+
 class ResplitSessionTest(unittest.TestCase):
+    def test_multi_repo_children_inherit_parent_scope_without_broadening(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_resplit_plan(plan_dir)
+            add_multi_repo_scopes(plan_dir)
+
+            result = resplit.resplit_session(
+                plan_dir,
+                session_id="2",
+                parts=2,
+                state_dir=Path(tmp) / "state",
+                skill_prefix="$",
+                now=datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc),
+            )
+
+            self.assertTrue(result["ok"])
+            for child_id in ("2.1", "2.2"):
+                child = (plan_dir / f"session-{child_id}.md").read_text(
+                    encoding="utf-8"
+                )
+                self.assertEqual(1, child.count("**Reads repositories**: SVC, OAK"))
+                self.assertEqual(1, child.count("**Writes repositories**: SVC"))
+                scope = plans.parse_session_scope(child, ("SVC", "OAK"))
+                self.assertEqual(("SVC", "OAK"), scope.reads)
+                self.assertEqual(("SVC",), scope.writes)
+
     def test_resplit_success_generates_nested_children_archive_and_ledgers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"

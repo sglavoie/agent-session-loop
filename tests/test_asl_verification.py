@@ -685,6 +685,7 @@ class VerificationExecutorTests(unittest.TestCase):
                         ),
                         timeout_seconds=10.0,
                         on_failure_of=("suite",),
+                        repo="OAK",
                     ),
                 )
             )
@@ -704,6 +705,7 @@ class VerificationExecutorTests(unittest.TestCase):
             self.assertEqual(1, len(skipped_events))
             self.assertEqual(("suite",), skipped_events[0].on_failure_of)
             self.assertEqual("condition-not-met", skipped_events[0].reason)
+            self.assertEqual("OAK", skipped_events[0].repo)
 
     def test_failing_gate_runs_conditional_diagnostic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -776,6 +778,7 @@ class VerificationExecutorTests(unittest.TestCase):
                 name="ok",
                 argv=("python3", "-c", "import sys; sys.exit(0)"),
                 timeout_seconds=10.0,
+                repo="SVC",
             )
             contract = self._contract(checks=(check,))
             observer, events = self._record_observer()
@@ -795,6 +798,7 @@ class VerificationExecutorTests(unittest.TestCase):
             self.assertEqual("ok", started.name)
             self.assertEqual("command", started.kind)
             self.assertEqual(check.argv, started.argv)
+            self.assertEqual("SVC", started.repo)
             self.assertEqual(
                 str(plans.canonicalize_path(repo_root)), started.cwd
             )
@@ -804,6 +808,7 @@ class VerificationExecutorTests(unittest.TestCase):
             self.assertEqual("pass", finished.result.status)
             self.assertEqual("command", finished.result.kind)
             self.assertEqual(0, finished.result.returncode)
+            self.assertEqual("SVC", finished.repo)
 
     def test_run_verification_emits_observer_events_for_failing_command(
         self,
@@ -2078,7 +2083,8 @@ class VerifyCliTests(unittest.TestCase):
             repo_root.mkdir()
             (repo_root / "target.txt").write_text("ok\n", encoding="utf-8")
             contract = _contract_block(
-                '{"type": "file_exists", "path": "target.txt", "name": "target"}'
+                '{"type": "file_exists", "path": "target.txt", '
+                '"name": "target", "repo": "SVC"}'
             )
             write_plan(
                 plan_dir, ("pending",), contracts_by_id={"1": contract}
@@ -2103,6 +2109,7 @@ class VerifyCliTests(unittest.TestCase):
             self.assertEqual(0, payload["recipe"]["diagnostic_count"])
             self.assertEqual(["file_exists"], payload["recipe"]["kinds"])
             self.assertEqual(["target"], payload["recipe"]["names"])
+            self.assertEqual(["SVC"], payload["recipe"]["repos"])
             self.assertEqual([], payload["skipped_checks"])
             self.assertEqual([], payload["diagnostic_failures"])
             self.assertEqual(1, len(payload["checks"]))
@@ -2973,6 +2980,31 @@ class ContractCheckCliTests(unittest.TestCase):
             self.assertEqual(
                 {"ok"}, {row["status"] for row in payload["checks"]}
             )
+            self.assertEqual([None, None], [row["repo"] for row in payload["checks"]])
+
+    def test_static_contract_row_reports_repository_alias(self) -> None:
+        contract = contracts.CompletionContract(
+            session_id=plans.parse_session_id("1"),
+            done_when=("done",),
+            verify=contracts.VerifyRecipe(
+                checks=(
+                    contracts.CommandCheck(
+                        name="c",
+                        argv=("true",),
+                        timeout_seconds=5,
+                        repo="SVC",
+                    ),
+                )
+            ),
+        )
+        with mock.patch.object(
+            verification, "read_completion_contract", return_value=contract
+        ):
+            rows = verification._contract_check_rows(
+                "/plan", plans.parse_session_id("1"), repo_root=Path(".")
+            )
+
+        self.assertEqual("SVC", rows[0]["repo"])
 
     def test_file_missing_is_factual_issue(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

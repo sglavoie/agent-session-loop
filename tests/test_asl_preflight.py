@@ -1236,6 +1236,22 @@ class PreflightCommandRunnabilityTests(unittest.TestCase):
             preflight._check_duplicate_verification_commands(contracts_by_session),
         )
 
+    def test_same_argv_in_different_repositories_is_not_duplicate(self) -> None:
+        command = ("python3", "-m", "unittest")
+        first = contracts.CommandCheck(
+            name="first", argv=command, timeout_seconds=300, repo="SVC"
+        )
+        second = contracts.CommandCheck(
+            name="second", argv=command, timeout_seconds=300, repo="OAK"
+        )
+
+        self.assertEqual(
+            (),
+            preflight._check_duplicate_verification_commands(
+                {"1": self._contract("1", first, second)}
+            ),
+        )
+
     def test_default_and_dot_cwd_are_duplicate(self) -> None:
         command = ("python3", "-m", "unittest")
         first = contracts.CommandCheck(

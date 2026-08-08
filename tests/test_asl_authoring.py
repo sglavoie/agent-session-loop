@@ -56,6 +56,7 @@ from agent_session_loop import (
     state,
     tail,
     verification,
+    workspaces,
     workbench,
     workbench_server,
 )
@@ -327,6 +328,112 @@ class PlanAuthoringTests(unittest.TestCase):
         self.assertEqual((), parsed.sessions)
         self.assertEqual(lines, parsed.context_lines)
 
+    def test_parse_plan_document_extracts_ordered_repository_registry(self) -> None:
+        text = (
+            "# Plan\n\n"
+            "## Repositories\n\n"
+            "| Alias | Path | Origin |\n"
+            "| --- | --- | --- |\n"
+            "| SVC | tundra_svc | git@github.com:tundra/SVC.git |\n"
+            "| OAK | tundra_OAK | https://github.com/tundra/OAK.git |\n\n"
+            "Shared context.\n\n"
+            "## Session 1: First\n\n"
+            "**Reads repositories**: SVC, OAK\n"
+            "**Writes repositories**: SVC\n\n"
+            "Do one.\n"
+        )
+
+        parsed = authoring.parse_plan_document(text)
+
+        self.assertIsNotNone(parsed.registry)
+        self.assertEqual(("SVC", "OAK"), parsed.registry.aliases)
+        self.assertEqual(("SVC", "OAK"), parsed.sessions[0].scope.reads)
+        self.assertEqual(("SVC",), parsed.sessions[0].scope.writes)
+        self.assertEqual(("Do one.",), parsed.sessions[0].instruction_lines)
+        self.assertEqual(
+            ("github.com/tundra/SVC", "github.com/tundra/OAK"),
+            tuple(repository.origin for repository in parsed.registry),
+        )
+        self.assertNotIn("## Repositories", parsed.context_lines)
+        self.assertNotIn("| Alias | Path | Origin |", parsed.context_lines)
+        self.assertEqual(("# Plan", "", "", "Shared context.", ""), parsed.context_lines)
+
+    def test_parse_plan_document_ignores_registry_shaped_content(
+        self,
+    ) -> None:
+        text = (
+            "# Plan\n\n```markdown\n## Repositories\n"
+            "| Alias | Path | Origin |\n| --- | --- | --- |\n"
+            "| Fake | fake | https://example.com/fake.git |\n```\n\n"
+            "## Session 1: First\n\n"
+            "| Alias | Path | Origin |\n| --- | --- | --- |\n"
+            "| Body | body | https://example.com/body.git |\n"
+        )
+
+        parsed = authoring.parse_plan_document(text)
+
+        self.assertIsNone(parsed.registry)
+        self.assertIn("## Repositories", parsed.context_lines)
+        self.assertIn(
+            "| Body | body | https://example.com/body.git |",
+            parsed.sessions[0].lines,
+        )
+
+    def test_parse_plan_document_reports_registry_errors_with_source_lines(self) -> None:
+        cases = (
+            (
+                "# Plan\n\n## Repositories\n\n| Path | Alias | Origin |\n| --- | --- | --- |\n",
+                5,
+                authoring.LINT_MALFORMED_REPOSITORIES,
+                "columns must be exactly",
+            ),
+            (
+                "## Repositories\n\n| Alias | Path | Origin |\n| --- | --- | --- |\n"
+                "| SVC |  | https://example.com/svc.git |\n",
+                5,
+                authoring.LINT_INVALID_REPOSITORY,
+                "must not be blank",
+            ),
+            (
+                "## Session 1: First\n\n## Repositories\n\n"
+                "| Alias | Path | Origin |\n| --- | --- | --- |\n"
+                "| SVC | svc | https://example.com/svc.git |\n",
+                3,
+                authoring.LINT_REPOSITORIES_PLACEMENT,
+                "before the first session",
+            ),
+            (
+                "### Repositories\n\n| Alias | Path | Origin |\n| --- | --- | --- |\n"
+                "| SVC | svc | https://example.com/svc.git |\n",
+                1,
+                authoring.LINT_REPOSITORIES_PLACEMENT,
+                "must be exactly",
+            ),
+            (
+                "## Repositories\n\n| Alias | Path | Origin |\n| --- | --- | --- |\n"
+                "| SVC | svc | https://example.com/svc.git |\n\n"
+                "## Repositories\n",
+                7,
+                authoring.LINT_DUPLICATE_REPOSITORIES,
+                "duplicate repository registry",
+            ),
+            (
+                "## Repositories\n\n| Alias | Path | Origin |\n| --- | --- | --- |\n"
+                "| SVC | svc | https://example.com/svc.git |\n"
+                "| svc | oak | https://example.com/oak.git |\n",
+                6,
+                authoring.LINT_INVALID_REPOSITORY,
+                "case-insensitively",
+            ),
+        )
+        for text, line, category, reason in cases:
+            with self.subTest(reason=reason):
+                with self.assertRaises(authoring.SourceRegistryError) as raised:
+                    authoring.parse_plan_document(text)
+                self.assertEqual(line, raised.exception.line_number)
+                self.assertEqual(category, raised.exception.category)
+                self.assertIn(reason, str(raised.exception))
+
     # -- source-plan linting -------------------------------------------------
 
     def test_lint_plan_document_accepts_a_clean_plan(self) -> None:
@@ -335,6 +442,56 @@ class PlanAuthoringTests(unittest.TestCase):
         )
         self.assertEqual((), result.findings)
         self.assertEqual(("1", "2"), result.session_ids)
+
+    def test_lint_plan_document_carries_valid_registry(self) -> None:
+        result = authoring.lint_plan_document(
+            "## Repositories\n\n| Alias | Path | Origin |\n| --- | --- | --- |\n"
+            "| SVC | svc | https://example.com/svc.git |\n\n"
+            "## Session 1: A\n\n**Reads repositories**: SVC\n"
+            "**Writes repositories**: SVC\n\nx\n\n"
+            "## Session 2: B\n\n**Reads repositories**: SVC\n"
+            "**Writes repositories**: (none)\n\ny\n"
+        )
+        self.assertEqual((), result.findings)
+        self.assertIsNotNone(result.registry)
+        self.assertEqual(("SVC",), result.registry.aliases)
+
+    def test_multi_repo_session_scope_errors_are_line_specific(self) -> None:
+        prefix = (
+            "## Repositories\n\n| Alias | Path | Origin |\n| --- | --- | --- |\n"
+            "| SVC | svc | https://example.com/svc.git |\n"
+            "| OAK | oak | https://example.com/oak.git |\n\n"
+            "## Session 1: A\n\n"
+        )
+        cases = (
+            ("**Writes repositories**: SVC\n", "missing exact 'Reads repositories'"),
+            (
+                "**Reads repositories**: SVC\n**Reads repositories**: OAK\n"
+                "**Writes repositories**: SVC\n",
+                "duplicate exact 'Reads repositories'",
+            ),
+            (
+                "**Reads repositories**: (none)\n**Writes repositories**: (none)\n",
+                "allowed only by itself for writes",
+            ),
+            (
+                "**Reads repositories**: SVC\n**Writes repositories**: OAK\n",
+                "must be a subset",
+            ),
+            (
+                "**Reads repositories**: Missing\n**Writes repositories**: (none)\n",
+                "unknown repository aliases",
+            ),
+        )
+        for body, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaises(authoring.SourceScopeError) as raised:
+                    authoring.parse_plan_document(prefix + body)
+                self.assertEqual(
+                    authoring.LINT_INVALID_SESSION_SCOPE,
+                    raised.exception.category,
+                )
+                self.assertIn(message, str(raised.exception))
 
     def test_lint_plan_document_categorizes_every_malformed_heading(self) -> None:
         cases = (
@@ -549,6 +706,37 @@ class PlanAuthoringTests(unittest.TestCase):
         )
         self.assertEqual("pass", parsed.verify.checks[0].baseline_expectation)
 
+    def test_render_completion_contract_round_trips_repository_alias(self) -> None:
+        contract = contracts.CompletionContract(
+            session_id=plans.parse_session_id("2"),
+            done_when=("done",),
+            verify=contracts.VerifyRecipe(
+                checks=(
+                    contracts.CommandCheck(
+                        name="c1",
+                        argv=("python3", "-V"),
+                        timeout_seconds=10,
+                        repo="SVC",
+                    ),
+                    contracts.FileExistsCheck(
+                        name="f1", path="README.md", repo="OAK"
+                    ),
+                    contracts.RegexInFileCheck(
+                        name="r1", path="main.py", pattern="main", repo="SVC"
+                    ),
+                )
+            ),
+        )
+
+        rendered = authoring.render_completion_contract(contract)
+        reparsed = contracts.parse_completion_contract(rendered, session_id="2")
+
+        self.assertEqual(
+            ["SVC", "OAK", "SVC"],
+            [check.repo for check in reparsed.verify.checks],
+        )
+        self.assertEqual(3, rendered.count('"repo"'))
+
     # -- session-file rendering ----------------------------------------------
 
     def test_render_session_file_requires_contract_by_default(self) -> None:
@@ -584,6 +772,28 @@ class PlanAuthoringTests(unittest.TestCase):
         self.assertTrue(rendered.rstrip().endswith("-->"))
         self.assertIn(plans.DISCOVERED_FACTS_HEADING, rendered)
         self.assertIn(plans.OPEN_QUESTIONS_HEADING, rendered)
+
+    def test_render_session_file_places_scope_before_instruction_separator(self) -> None:
+        scope = plans.SessionScope(reads=("SVC", "OAK"), writes=("SVC",))
+        rendered = authoring.render_session_file(
+            session_id="1",
+            title="First",
+            instruction_lines=["Do the first thing."],
+            is_first=True,
+            contract=self._command_contract("1"),
+            scope=scope,
+        )
+
+        self.assertIn(
+            authoring.CONTEXT_REFERENCE_LINE
+            + "\n\n**Reads repositories**: SVC, OAK\n"
+            + "**Writes repositories**: SVC\n\n---",
+            rendered,
+        )
+        self.assertEqual(
+            scope,
+            plans.parse_session_scope(rendered, ("SVC", "OAK")),
+        )
 
     def test_handoff_template_documentation_comment_is_ignored_by_parser(
         self,
@@ -723,6 +933,29 @@ class PlanAuthoringTests(unittest.TestCase):
         readiness = plans.parse_readiness_metadata(rendered)
         self.assertIsNotNone(readiness)
         self.assertEqual("draft", readiness.state)
+
+    def test_render_manifest_includes_registry_only_when_declared(self) -> None:
+        registry = workspaces.RepositoryRegistry(
+            (
+                workspaces.Repository(
+                    "SVC", "tundra_svc", "git@github.com:tundra/SVC.git"
+                ),
+                workspaces.Repository(
+                    "OAK", "tundra_OAK", "https://github.com/tundra/OAK.git"
+                ),
+            )
+        )
+        rendered = authoring.render_manifest(
+            dataclasses.replace(self._manifest_spec(), registry=registry)
+        )
+
+        self.assertIn("## Repositories", rendered)
+        self.assertIn("| Alias | Path | Origin |", rendered)
+        self.assertLess(rendered.index("| SVC |"), rendered.index("| OAK |"))
+        self.assertIn("| SVC | tundra_svc | github.com/tundra/SVC |", rendered)
+        self.assertNotIn(
+            "## Repositories", authoring.render_manifest(self._manifest_spec())
+        )
 
     def test_add_manifest_session_row_appends(self) -> None:
         rendered = authoring.render_manifest(self._manifest_spec())
@@ -883,6 +1116,37 @@ class PlanAuthoringTests(unittest.TestCase):
                     plan_dir, session.session_id
                 )
                 self.assertIsNotNone(contract)
+
+    def test_registry_order_changes_content_and_readiness_hashes(self) -> None:
+        repositories = (
+            workspaces.Repository("SVC", "svc", "https://example.com/svc.git"),
+            workspaces.Repository("OAK", "oak", "https://example.com/oak.git"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            left = self._author_plan(Path(tmp) / "left")
+            right = self._author_plan(Path(tmp) / "right")
+            left_spec = dataclasses.replace(
+                self._manifest_spec(),
+                registry=workspaces.RepositoryRegistry(repositories),
+            )
+            right_spec = dataclasses.replace(
+                self._manifest_spec(),
+                registry=workspaces.RepositoryRegistry(tuple(reversed(repositories))),
+            )
+            (left / "manifest.md").write_text(
+                authoring.render_manifest(left_spec), encoding="utf-8"
+            )
+            (right / "manifest.md").write_text(
+                authoring.render_manifest(right_spec), encoding="utf-8"
+            )
+
+            self.assertNotEqual(
+                plans.plan_content_sha256(left), plans.plan_content_sha256(right)
+            )
+            self.assertNotEqual(
+                plans.stable_readiness_sha256(left),
+                plans.stable_readiness_sha256(right),
+            )
 
     def test_authoring_is_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as first_tmp, tempfile.TemporaryDirectory() as second_tmp:

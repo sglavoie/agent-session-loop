@@ -1521,7 +1521,9 @@ def _structure_blockers(
     for session in parsed.sessions:
         try:
             contract = contracts.parse_completion_contract(
-                "\n".join(session.lines), session_id=session.session_id
+                "\n".join(session.lines),
+                session_id=session.session_id,
+                repository_registry=parsed.registry,
             )
         except PlanError as error:
             blockers.append(
@@ -1605,6 +1607,7 @@ def _author_plan_directory(
                     readiness_sha256="pending",
                     checked_at="pending",
                 ),
+                registry=parsed.registry,
             )
         ),
     )

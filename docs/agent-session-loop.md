@@ -254,7 +254,11 @@ shapes. Required and optional fields:
   rather than indefinitely, and an abandoned check still publishes no result,
   artifact, or event.
 - Each check object has `name` (string), `type` (one of `command`,
-  `file_exists`, `regex_in_file`), and type-specific fields.
+  `file_exists`, `regex_in_file`), an optional repository alias in `repo`, and
+  type-specific fields. In a registered plan, every check must resolve to a
+  known alias: registries with multiple entries require `repo`, while a
+  one-entry registry supplies its sole alias when omitted. Plans without a
+  registry may omit `repo` and retain the legacy model.
 - Every check accepts optional `on_failure_of`, a non-empty array of check
   names. Without it, the check is an authoritative gate and contributes to the
   contract's pass/fail decision. With it, the check is a diagnostic: it runs
@@ -264,10 +268,13 @@ shapes. Required and optional fields:
   contain at least one gate.
 - `command`: `argv` (non-empty array of strings, no shell), optional
   `timeout_seconds` (defaults to 60, max 3600), optional `cwd`.
-- `file_exists`: `path` (string; repo-root-relative or absolute).
-- `regex_in_file`: `path` (string; repo-root-relative or absolute), `pattern`
-  (regex string). Relative file and regex paths containing `..` are rejected
-  by preflight; use a path beneath `--cwd` or an explicit absolute path.
+- `file_exists`: `path` (string).
+- `regex_in_file`: `path` (string), `pattern` (regex string).
+  In a registered plan, every `path` and `cwd` is relative to its selected
+  repository and cannot be absolute, use Windows path syntax, or contain an
+  upward-traversing `..` segment. Without a registry, file and regex paths and
+  command working directories retain the legacy absolute-path behavior;
+  preflight still rejects unsafe relative file paths as before.
 - Every check also accepts an optional `baseline_expectation` (one of `skip`,
   `pass`, `fail`; defaults to `skip`). `pass`/`fail` declare how the check must
   behave on the *unmodified* repository; `asl baseline` records the evidence
@@ -323,6 +330,10 @@ frequently unavailable where `python3` exists — use `python3`; versioned
 `python3 -c`/`python3 -m`/script invocations are fine). Exit 0 only when every
 row is `ok`; otherwise exit 1 with
 `reason: contract-issues` and the full `checks` list plus an `issue_count`.
+Static check rows include `repo` (`null` for legacy checks), and verification
+observer start, finish, and skip events carry the same alias. This schema
+session records repository identity only; repository-aware check dispatch is
+implemented by the later workspace verification layer.
 
 ## Migration From Older Split Plans
 
@@ -363,6 +374,11 @@ on disk untouched. `session-resplit` keeps the explicit `--session <ID>`
 selector because it is plan maintenance; `session-run` does not. After
 expansion is regenerated, `asl status` and `asl run --dry-run` should show the
 first child as the next pending session.
+
+For a registered multi-repository plan, every generated child inherits the
+parent's read and write scope exactly. Resplitting never broadens authority;
+an explicit later plan edit may narrow a child's scope before fresh readiness
+validation.
 
 Optional auto-commit modes require the resolved working directory to be a clean
 git worktree before the first harness turn starts, and require `spec` on
@@ -1448,6 +1464,8 @@ skill invocations (erroring when detection is ambiguous); `--analysis-file` is
 appended verbatim to the manifest execution note. The `--json` payload reports
 `output_dir`, `plan_id`, `source_path`, `session_ids`, `files`, `readiness`,
 `next_steps` (per-harness `session-expand` invocations), and `skill_prefix`.
+For a multi-repository source, the payload also reports ordered `repositories`
+rows and `registry_digest`; those keys remain absent for legacy sources.
 Stable failure reasons: `single-session` (splitting is not needed),
 `malformed-plan` (the parser's line-specific `PlanError` verbatim),
 `missing-contract:<id>`, `invalid-contract:<id>` (a present contract entry that
@@ -1471,7 +1489,10 @@ categories: `invalid-session-id`, `zero-id-component`, `malformed-heading`,
 a single correct rewrite (`punctuation-free-title` and
 `unsupported-title-separator`), and any suggestion emitted is guaranteed to
 parse; every other category would invent an id, renumber sessions, or drop a
-title, so it is left for a human decision. A clean check exits `0` with
+title, so it is left for a human decision. Repository declarations add
+`repositories-placement`, `duplicate-repositories`,
+`malformed-repositories`, `invalid-repository`, and `invalid-session-scope`. A
+clean check exits `0` with
 `ok: true`, `checked: true`, `session_ids`, and `session_count` — the canonical
 ids a caller should key contracts by. Findings exit `1` with
 `reason: malformed-plan` and `error` set to the first finding's message; fewer
@@ -1481,6 +1502,36 @@ canonical id is only visible once both headings parse), callers re-check after
 each repair round; the `session-split` skill drives that loop for at most three
 rounds and splits the repaired text through `--inline-stdin`, leaving the user's
 original plan file untouched.
+
+Multi-repository sources may declare exactly one top-level `## Repositories`
+section before the first session. Its Markdown table has the exact ordered
+columns `Alias`, `Path`, and `Origin`, at least one row, and no blank values.
+The parser preserves declaration order, validates aliases, workspace-relative
+paths, non-overlap, and credential-free origin identities, and ignores
+registry-shaped tables inside code fences or session bodies. Both the
+fail-fast parser and `split --check` report malformed tables, duplicate
+declarations or rows, and unsupported placement with source line numbers.
+Authoring removes only that registry block from shared context and writes the
+normalized authoritative table to `manifest.md`; it is not duplicated in
+`context.md`. The registry therefore participates in both plan-content and
+stable-readiness hashes. Sources without the section keep their historical
+manifest, context, and JSON response structure.
+
+Each session in a multi-repository source must contain these exact fields:
+
+```markdown
+**Reads repositories**: SVC, OAK
+**Writes repositories**: SVC
+```
+
+Reads must contain at least one known alias. Writes may be `(none)`, otherwise
+every write alias must also appear in reads. Missing or duplicate fields,
+unknown aliases, empty lists, and mixed `(none)` values fail closed during
+`split --check` and authoring. The canonical fields are rendered near the top
+of each session file and participate in readiness hashing. A completed
+multi-repository handoff lists modified files as comma-separated qualified
+paths such as `SVC:internal/foo.go`; unqualified, unknown, or out-of-write-scope
+entries are rejected. Single-repository plans keep their existing syntax.
 
 `prepare` runs the whole preparation pipeline in one deterministic command:
 structure gate (at least two session headings, each with a parseable inline

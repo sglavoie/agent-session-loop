@@ -51,6 +51,7 @@ from .plans import (
     stable_readiness_sha256,
     write_readiness_metadata,
 )
+from .workspaces import Repository, RepositoryRegistry, WorkspaceError
 
 
 DEFAULT_AGENT_PLANS_DIR_NAME = "agent-plans"
@@ -99,6 +100,18 @@ LINT_MALFORMED_TITLE = "malformed-title"
 LINT_PUNCTUATION_FREE_TITLE = "punctuation-free-title"
 LINT_UNSUPPORTED_TITLE_SEPARATOR = "unsupported-title-separator"
 LINT_DUPLICATE_SESSION_ID = "duplicate-session-id"
+LINT_REPOSITORIES_PLACEMENT = "repositories-placement"
+LINT_DUPLICATE_REPOSITORIES = "duplicate-repositories"
+LINT_MALFORMED_REPOSITORIES = "malformed-repositories"
+LINT_INVALID_REPOSITORY = "invalid-repository"
+LINT_INVALID_SESSION_SCOPE = "invalid-session-scope"
+
+_REPOSITORIES_HEADING_CANDIDATE_RE = re.compile(
+    r"^ {0,3}#{1,6}[ \t]+Repositories\b.*$",
+    re.IGNORECASE,
+)
+_REPOSITORIES_HEADING = "## Repositories"
+_REPOSITORY_HEADERS = ("Alias", "Path", "Origin")
 
 #: Categories whose repair has exactly one correct rewrite, so the finding
 #: carries a ``suggested_line`` an agent may apply without asking. Every other
@@ -130,6 +143,15 @@ class SourceHeadingError(PlanError):
         super().__init__(
             f"line {line_number}: {reason}; source line: {source_line!r}"
         )
+
+
+class SourceRegistryError(SourceHeadingError):
+    """A line-specific malformed source repository-registry diagnostic."""
+
+
+class SourceScopeError(SourceHeadingError):
+    """A line-specific malformed multi-repository session-scope diagnostic."""
+
 
 CONTEXT_REFERENCE_LINE = (
     "> **Before starting**: Read `context.md` in this directory for shared "
@@ -381,11 +403,17 @@ class ParsedSession:
     title: str | None
     heading_level: int
     lines: tuple[str, ...]
+    scope: plans.SessionScope | None = None
 
     @property
     def instruction_lines(self) -> tuple[str, ...]:
         """Body lines with leading/trailing blank lines and ``---`` rules trimmed."""
-        return tuple(_trim_body(list(self.lines)))
+        lines = (
+            plans.strip_session_scope_lines(self.lines)
+            if self.scope is not None
+            else self.lines
+        )
+        return tuple(_trim_body(list(lines)))
 
 
 @dataclass(frozen=True)
@@ -394,6 +422,7 @@ class ParsedPlan:
 
     context_lines: tuple[str, ...]
     sessions: tuple[ParsedSession, ...]
+    registry: RepositoryRegistry | None = None
 
     @property
     def session_ids(self) -> tuple[str, ...]:
@@ -431,6 +460,7 @@ class PlanLintResult:
 
     findings: tuple[PlanLintFinding, ...]
     session_ids: tuple[str, ...]
+    registry: RepositoryRegistry | None = None
 
 
 def _fence_delimiter(line: str) -> str | None:
@@ -601,8 +631,8 @@ def _parse_source_session_heading(
 
 def _iter_structural_lines(
     lines: Sequence[str],
-) -> Iterator[tuple[int, str, bool]]:
-    """Yield ``(line_number, line, is_session_candidate)`` fence-aware.
+) -> Iterator[tuple[int, str, bool, bool]]:
+    """Yield source lines with fence-aware structural-candidate flags.
 
     Sole owner of fenced-code bookkeeping for source plans, so the fail-fast
     parser and the accumulating linter can never disagree about which lines are
@@ -621,7 +651,161 @@ def _iter_structural_lines(
         is_candidate = (
             fence is None and _SESSION_HEADING_CANDIDATE_RE.match(line) is not None
         )
-        yield index + 1, line, is_candidate
+        is_repositories = (
+            fence is None
+            and _REPOSITORIES_HEADING_CANDIDATE_RE.fullmatch(line) is not None
+        )
+        yield index + 1, line, is_candidate, is_repositories
+
+
+def _source_registry_error(
+    line_number: int, reason: str, line: str, *, category: str
+) -> SourceRegistryError:
+    return SourceRegistryError(
+        line_number=line_number,
+        category=category,
+        source_line=line,
+        reason=reason,
+    )
+
+
+def _parse_repository_registry(
+    lines: Sequence[str],
+    structural_lines: Sequence[tuple[int, str, bool, bool]],
+) -> tuple[RepositoryRegistry | None, frozenset[int]]:
+    """Parse and locate the optional source registry.
+
+    Returned indices identify only the authoritative registry block. Callers
+    remove those lines from shared context while preserving every other source
+    line verbatim.
+    """
+    first_session_line = next(
+        (
+            line_number
+            for line_number, _, candidate, _ in structural_lines
+            if candidate
+        ),
+        None,
+    )
+    headings = [
+        (line_number, line)
+        for line_number, line, _, candidate in structural_lines
+        if candidate
+    ]
+    if not headings:
+        return None, frozenset()
+
+    first_heading_line, first_heading = headings[0]
+    if first_session_line is not None and first_heading_line > first_session_line:
+        raise _source_registry_error(
+            first_heading_line,
+            "the top-level ## Repositories table must appear before the first session",
+            first_heading,
+            category=LINT_REPOSITORIES_PLACEMENT,
+        )
+    if first_heading != _REPOSITORIES_HEADING:
+        raise _source_registry_error(
+            first_heading_line,
+            "repository registry heading must be exactly '## Repositories'",
+            first_heading,
+            category=LINT_REPOSITORIES_PLACEMENT,
+        )
+    if len(headings) > 1:
+        duplicate_line, duplicate_heading = headings[1]
+        raise _source_registry_error(
+            duplicate_line,
+            f"duplicate repository registry; first defined on line {first_heading_line}",
+            duplicate_heading,
+            category=LINT_DUPLICATE_REPOSITORIES,
+        )
+
+    heading_index = first_heading_line - 1
+    table_index = heading_index + 1
+    while table_index < len(lines) and not lines[table_index].strip():
+        table_index += 1
+    if table_index >= len(lines):
+        raise _source_registry_error(
+            first_heading_line,
+            "repository registry table is missing",
+            first_heading,
+            category=LINT_MALFORMED_REPOSITORIES,
+        )
+
+    header = plans._split_table_row(lines[table_index])
+    if header is None or tuple(cell.strip() for cell in header[1]) != _REPOSITORY_HEADERS:
+        raise _source_registry_error(
+            table_index + 1,
+            "repository registry columns must be exactly Alias, Path, and Origin",
+            lines[table_index],
+            category=LINT_MALFORMED_REPOSITORIES,
+        )
+
+    separator_index = table_index + 1
+    if separator_index >= len(lines):
+        raise _source_registry_error(
+            table_index + 1,
+            "repository registry separator row is missing",
+            lines[table_index],
+            category=LINT_MALFORMED_REPOSITORIES,
+        )
+    separator = plans._split_table_row(lines[separator_index])
+    if (
+        separator is None
+        or len(separator[1]) != len(_REPOSITORY_HEADERS)
+        or not plans._is_separator_row(separator[1])
+    ):
+        raise _source_registry_error(
+            separator_index + 1,
+            "repository registry requires a three-column Markdown separator row",
+            lines[separator_index],
+            category=LINT_MALFORMED_REPOSITORIES,
+        )
+
+    repositories: list[Repository] = []
+    row_index = separator_index + 1
+    while row_index < len(lines):
+        parsed_row = plans._split_table_row(lines[row_index])
+        if parsed_row is None:
+            break
+        cells = tuple(cell.strip() for cell in parsed_row[1])
+        if len(cells) != len(_REPOSITORY_HEADERS):
+            raise _source_registry_error(
+                row_index + 1,
+                "repository registry rows must contain exactly three cells",
+                lines[row_index],
+                category=LINT_MALFORMED_REPOSITORIES,
+            )
+        if any(not cell for cell in cells):
+            raise _source_registry_error(
+                row_index + 1,
+                "repository registry Alias, Path, and Origin values must not be blank",
+                lines[row_index],
+                category=LINT_INVALID_REPOSITORY,
+            )
+        try:
+            repository = Repository(alias=cells[0], path=cells[1], origin=cells[2])
+            RepositoryRegistry(tuple((*repositories, repository)))
+        except WorkspaceError as error:
+            raise _source_registry_error(
+                row_index + 1,
+                str(error),
+                lines[row_index],
+                category=LINT_INVALID_REPOSITORY,
+            ) from error
+        repositories.append(repository)
+        row_index += 1
+
+    if not repositories:
+        raise _source_registry_error(
+            separator_index + 1,
+            "repository registry must contain at least one repository row",
+            lines[separator_index],
+            category=LINT_MALFORMED_REPOSITORIES,
+        )
+
+    registry = RepositoryRegistry(tuple(repositories))
+    excluded = frozenset(range(heading_index, row_index))
+    return registry, excluded
 
 
 def parse_plan_document(text: str) -> ParsedPlan:
@@ -635,6 +819,10 @@ def parse_plan_document(text: str) -> ParsedPlan:
     lines = text.splitlines()
     context: list[str] = []
     sessions: list[ParsedSession] = []
+    structural_lines = tuple(_iter_structural_lines(lines))
+    registry, registry_line_indices = _parse_repository_registry(
+        lines, structural_lines
+    )
 
     current: dict | None = None
     first_id_lines: dict[str, int] = {}
@@ -643,16 +831,32 @@ def parse_plan_document(text: str) -> ParsedPlan:
         if current is None:
             return
         body = lines[current["body_start"] : end]
+        scope: plans.SessionScope | None = None
+        if registry is not None:
+            try:
+                scope = plans.parse_session_scope_lines(
+                    body,
+                    registry.aliases,
+                    start_line=current["body_start"] + 1,
+                )
+            except plans.SessionScopeError as error:
+                raise SourceScopeError(
+                    line_number=error.line_number,
+                    category=LINT_INVALID_SESSION_SCOPE,
+                    source_line=error.source_line,
+                    reason=error.reason,
+                ) from error
         sessions.append(
             ParsedSession(
                 session_id=current["session_id"],
                 title=current["title"],
                 heading_level=current["heading_level"],
                 lines=tuple(body),
+                scope=scope,
             )
         )
 
-    for line_number, line, is_candidate in _iter_structural_lines(lines):
+    for line_number, line, is_candidate, _ in structural_lines:
         index = line_number - 1
         heading = (
             _parse_source_session_heading(line, line_number)
@@ -660,7 +864,7 @@ def parse_plan_document(text: str) -> ParsedPlan:
             else None
         )
         if heading is None:
-            if current is None:
+            if current is None and index not in registry_line_indices:
                 context.append(line)
             continue
 
@@ -689,6 +893,7 @@ def parse_plan_document(text: str) -> ParsedPlan:
     return ParsedPlan(
         context_lines=tuple(context),
         sessions=tuple(sessions),
+        registry=registry,
     )
 
 
@@ -740,7 +945,23 @@ def lint_plan_document(text: str) -> PlanLintResult:
     session_ids: list[str] = []
     first_id_lines: dict[str, int] = {}
 
-    for line_number, line, is_candidate in _iter_structural_lines(text.splitlines()):
+    lines = text.splitlines()
+    structural_lines = tuple(_iter_structural_lines(lines))
+    try:
+        registry, _ = _parse_repository_registry(lines, structural_lines)
+    except SourceRegistryError as error:
+        findings.append(
+            PlanLintFinding(
+                line=error.line_number,
+                category=error.category,
+                message=str(error),
+                source_line=error.source_line,
+                suggested_line=None,
+            )
+        )
+        registry = None
+
+    for line_number, line, is_candidate, _ in structural_lines:
         if not is_candidate:
             continue
 
@@ -784,8 +1005,24 @@ def lint_plan_document(text: str) -> PlanLintResult:
         first_id_lines[session_id.value] = line_number
         session_ids.append(session_id.value)
 
+    if not findings and registry is not None:
+        try:
+            parse_plan_document(text)
+        except SourceScopeError as error:
+            findings.append(
+                PlanLintFinding(
+                    line=error.line_number,
+                    category=error.category,
+                    message=str(error),
+                    source_line=error.source_line,
+                    suggested_line=None,
+                )
+            )
+
     return PlanLintResult(
-        findings=tuple(findings), session_ids=tuple(session_ids)
+        findings=tuple(sorted(findings, key=lambda finding: finding.line)),
+        session_ids=tuple(session_ids),
+        registry=registry,
     )
 
 
@@ -862,6 +1099,8 @@ def _heading_level(line: str) -> int:
 
 def _check_to_json(check: _contracts.VerificationCheck) -> dict[str, object]:
     payload: dict[str, object] = {"name": check.name, "type": check.kind}
+    if check.repo is not None:
+        payload["repo"] = check.repo
     if isinstance(check, _contracts.CommandCheck):
         payload["argv"] = list(check.argv)
         payload["timeout_seconds"] = _render_number(check.timeout_seconds)
@@ -887,6 +1126,8 @@ def contract_from_payload(
     session_id: int | str | SessionId,
     done_when: tuple[str, ...] | list[str],
     verify_payload: dict,
+    *,
+    repository_registry: RepositoryRegistry | None = None,
 ) -> _contracts.CompletionContract:
     """Build a validated :class:`CompletionContract` from JSON-shaped inputs.
 
@@ -907,7 +1148,11 @@ def contract_from_payload(
             f"session {canonical_id.value} contract requires at least one "
             "'Done when' bullet"
         )
-    recipe = _contracts._parse_verify_payload(verify_payload, session_id=canonical_id)
+    recipe = _contracts._parse_verify_payload(
+        verify_payload,
+        session_id=canonical_id,
+        repository_registry=repository_registry,
+    )
     return _contracts.CompletionContract(
         session_id=canonical_id, done_when=bullets, verify=recipe
     )
@@ -984,6 +1229,7 @@ def render_session_file(
     previous_session_id: int | str | SessionId | None = None,
     contract: _contracts.CompletionContract | None = None,
     require_contract: bool = True,
+    scope: plans.SessionScope | None = None,
 ) -> str:
     """Render a full ``session-<id>.md`` file.
 
@@ -1014,6 +1260,9 @@ def render_session_file(
     parts: list[str] = [heading, "", CONTEXT_REFERENCE_LINE]
     if not is_first and previous_session_id is not None:
         parts.append(previous_session_reference_line(previous_session_id))
+    if scope is not None:
+        parts.append("")
+        parts.extend(plans.render_session_scope(scope).rstrip("\n").splitlines())
     parts.append("")
     parts.append("---")
     parts.append("")
@@ -1075,6 +1324,19 @@ def render_manifest_sessions_table(sessions: tuple[ManifestSession, ...]) -> str
     return "\n".join(lines) + "\n"
 
 
+def render_repository_registry_table(registry: RepositoryRegistry) -> str:
+    """Render the authoritative ordered repository registry as Markdown."""
+    lines = [
+        "| Alias | Path | Origin |",
+        "| --- | --- | --- |",
+    ]
+    lines.extend(
+        f"| {repository.alias} | {repository.path} | {repository.origin} |"
+        for repository in registry
+    )
+    return "\n".join(lines) + "\n"
+
+
 @dataclass(frozen=True)
 class ManifestSpec:
     """Inputs for deterministic ``manifest.md`` rendering."""
@@ -1090,6 +1352,7 @@ class ManifestSpec:
     readiness: ReadinessMetadata
     skill_prefix: str = "/"
     execution_note: str | None = None
+    registry: RepositoryRegistry | None = None
 
 
 def render_manifest(spec: ManifestSpec) -> str:
@@ -1109,30 +1372,43 @@ def render_manifest(spec: ManifestSpec) -> str:
         f"**Readiness**: {spec.readiness.state}",
         f"**Readiness SHA-256**: `{spec.readiness.readiness_sha256}`",
         f"**Readiness checked at**: {spec.readiness.checked_at}",
-        "",
-        "## Sessions",
-        "",
-        render_manifest_sessions_table(spec.sessions).rstrip("\n"),
-        "",
-        "## Execution",
-        "",
-        (
-            f"Run `{prefix}session-run` once per session, preferably in a fresh "
-            "harness conversation for each:"
-        ),
-        "",
-        "```text",
-        run_command,
-        "```",
-        "",
-        f"Example rendered command: `{run_command}`",
-        "",
-        (
-            f"`{prefix}session-run` auto-advances through pending sessions in "
-            "dotted numeric order. Session handoff statuses are authoritative; "
-            "this manifest table is derived bookkeeping."
-        ),
     ]
+    if spec.registry is not None:
+        lines.extend(
+            [
+                "",
+                "## Repositories",
+                "",
+                render_repository_registry_table(spec.registry).rstrip("\n"),
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "## Sessions",
+            "",
+            render_manifest_sessions_table(spec.sessions).rstrip("\n"),
+            "",
+            "## Execution",
+            "",
+            (
+                f"Run `{prefix}session-run` once per session, preferably in a fresh "
+                "harness conversation for each:"
+            ),
+            "",
+            "```text",
+            run_command,
+            "```",
+            "",
+            f"Example rendered command: `{run_command}`",
+            "",
+            (
+                f"`{prefix}session-run` auto-advances through pending sessions in "
+                "dotted numeric order. Session handoff statuses are authoritative; "
+                "this manifest table is derived bookkeeping."
+            ),
+        ]
+    )
     if spec.execution_note:
         lines.extend(["", spec.execution_note.rstrip("\n")])
     return "\n".join(lines) + "\n"
@@ -1543,6 +1819,7 @@ class SplitResult:
     files: tuple[Path, ...]
     readiness: ReadinessMetadata
     skill_prefix: str
+    registry: RepositoryRegistry | None = None
 
 
 def split_plan(
@@ -1605,7 +1882,10 @@ def split_plan(
                 f"missing required field(s): {', '.join(missing)}",
             )
         contracts[session_id] = contract_from_payload(
-            session_id, spec["done_when"], spec["verify"]
+            session_id,
+            spec["done_when"],
+            spec["verify"],
+            repository_registry=parsed.registry,
         )
 
     resolver = resolve_plan_output(canonical_source, base_dir)
@@ -1633,6 +1913,7 @@ def split_plan(
                     parsed.sessions[index - 1].session_id if index else None
                 ),
                 contract=contracts[session_id],
+                scope=session.scope,
             ),
         )
         manifest_sessions.append(
@@ -1660,6 +1941,7 @@ def split_plan(
                     readiness_sha256="pending",
                     checked_at="pending",
                 ),
+                registry=parsed.registry,
                 skill_prefix=skill_prefix,
                 execution_note=analysis_note,
             )
@@ -1676,6 +1958,7 @@ def split_plan(
         files=written,
         readiness=metadata,
         skill_prefix=skill_prefix,
+        registry=parsed.registry,
     )
 
 
@@ -1684,6 +1967,15 @@ def _readiness_payload(metadata: ReadinessMetadata) -> dict[str, Any]:
         "state": metadata.state,
         "readiness_sha256": metadata.readiness_sha256,
         "checked_at": metadata.checked_at,
+    }
+
+
+def _registry_payload(registry: RepositoryRegistry | None) -> dict[str, Any]:
+    if registry is None:
+        return {}
+    return {
+        "repositories": [repository.to_dict() for repository in registry],
+        "registry_digest": registry.digest,
     }
 
 
@@ -1784,6 +2076,7 @@ def check_from_args(args: Any) -> int:
                     source_path=source_path,
                     session_ids=list(result.session_ids),
                     findings=[finding.as_dict() for finding in result.findings],
+                    **_registry_payload(result.registry),
                 )
             )
         else:
@@ -1808,6 +2101,7 @@ def check_from_args(args: Any) -> int:
             checked=True,
             source_path=source_path,
             session_ids=list(result.session_ids),
+            **_registry_payload(result.registry),
         )
 
     if want_json:
@@ -1818,10 +2112,13 @@ def check_from_args(args: Any) -> int:
                 source_path=source_path,
                 session_ids=list(result.session_ids),
                 session_count=len(result.session_ids),
+                **_registry_payload(result.registry),
             )
         )
     else:
         print(f"Checked {len(result.session_ids)} sessions in {source_path}")
+        if result.registry is not None:
+            print(f"  Repositories: {', '.join(result.registry.aliases)}")
         for session_id in result.session_ids:
             print(f"  Session {session_id}")
     return 0
@@ -1933,6 +2230,7 @@ def split_from_args(args: Any) -> int:
         "readiness": _readiness_payload(result.readiness),
         "next_steps": _split_next_steps(result.output_dir),
         "skill_prefix": result.skill_prefix,
+        **_registry_payload(result.registry),
     }
     if want_json:
         responses.print_json(responses.success_payload("split", **payload))
@@ -1940,6 +2238,8 @@ def split_from_args(args: Any) -> int:
         print(f"Split {len(result.session_ids)} sessions from {result.source_path}")
         print(f"Output directory: {result.output_dir}")
         print(f"Plan ID: {result.plan_id}")
+        if result.registry is not None:
+            print(f"Repositories: {', '.join(result.registry.aliases)}")
         for path in result.files:
             print(f"  {path}")
         print(f"Readiness: {result.readiness.state}")

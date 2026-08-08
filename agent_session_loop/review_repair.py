@@ -270,7 +270,7 @@ def _merge_verification_checks(
     aliases: dict[str, str] = {}
     validation_session_id = parse_session_id("1")
     commands_by_identity: dict[
-        tuple[tuple[str, ...], str], contracts.CommandCheck
+        tuple[str | None, tuple[str, ...], str], contracts.CommandCheck
     ] = {}
     for index, payload in enumerate(named_checks):
         parsed = contracts._parse_check(
@@ -281,7 +281,7 @@ def _merge_verification_checks(
         if not isinstance(parsed, contracts.CommandCheck):
             merged.append(payload)
             continue
-        identity = (parsed.argv, parsed.cwd or ".")
+        identity = (parsed.repo, parsed.argv, parsed.cwd or ".")
         previous = commands_by_identity.get(identity)
         if previous is None:
             commands_by_identity[identity] = parsed
@@ -289,12 +289,14 @@ def _merge_verification_checks(
             continue
         settings = (
             parsed.timeout_seconds,
+            parsed.repo,
             parsed.cwd or ".",
             parsed.baseline_expectation,
             parsed.on_failure_of,
         )
         previous_settings = (
             previous.timeout_seconds,
+            previous.repo,
             previous.cwd or ".",
             previous.baseline_expectation,
             previous.on_failure_of,

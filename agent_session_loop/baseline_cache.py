@@ -63,6 +63,7 @@ def _normalized_check(check: object) -> dict:
     """
     data: dict[str, object] = {
         "type": getattr(check, "kind"),
+        "repo": getattr(check, "repo", None),
         "baseline_expectation": getattr(
             check, "baseline_expectation", contracts.DEFAULT_BASELINE_EXPECTATION
         ),

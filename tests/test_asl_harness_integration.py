@@ -4208,6 +4208,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 check_count=2,
                 check_names=("readme", "regex"),
                 check_kinds=("file_exists", "regex_in_file"),
+                check_repos=("SVC", "OAK"),
                 heartbeat_interval=60,
             )
 
@@ -4219,6 +4220,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 ["file_exists", "regex_in_file"], after_start_state["check_kinds"]
             )
+            self.assertEqual(["SVC", "OAK"], after_start_state["check_repos"])
             self.assertIsNone(after_start_state["current_check_index"])
 
             live_verification.check_started(
@@ -4227,6 +4229,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 kind="file_exists",
                 argv=None,
                 cwd=None,
+                repo="SVC",
             )
             mid_state = json.loads(
                 state_path.read_text(encoding="utf-8")
@@ -4244,6 +4247,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 duration_seconds=0.0,
                 failure_reason="file-missing",
                 returncode=None,
+                repo="SVC",
             )
             after_check_state = json.loads(
                 state_path.read_text(encoding="utf-8")
@@ -4269,6 +4273,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertEqual("fail", failed_check["status"])
             self.assertEqual("file-missing", failed_check["failure_reason"])
             self.assertIsNone(failed_check["returncode"])
+            self.assertEqual("SVC", failed_check["repo"])
             self.assertNotIn("argv", failed_check)
 
             finished = next(
@@ -4286,6 +4291,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             )
             self.assertIsNone(check_started["argv"])
             self.assertIsNone(check_started["cwd"])
+            self.assertEqual("SVC", check_started["repo"])
 
     def test_live_verification_background_finish_keeps_running_check_displayed(
         self,

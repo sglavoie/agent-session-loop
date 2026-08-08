@@ -63,6 +63,7 @@ from agent_session_loop import (
     workbench,
     workbench_server,
 )
+from agent_session_loop.workspaces import Repository, RepositoryRegistry
 from agent_session_loop.formatting import (
     format_duration_seconds,
     format_turn_finished_message,
@@ -673,6 +674,113 @@ class ParserAndStateTests(unittest.TestCase):
             session_id=plans.parse_session_id(session_id),
             path=plan_dir / f"session-{session_id}.md",
         )
+
+    def test_session_scope_and_qualified_paths_are_canonical(self) -> None:
+        scope = plans.parse_session_scope(
+            "**Reads repositories**: SVC, OAK\n"
+            "**Writes repositories**: SVC\n"
+            "```markdown\n"
+            "**Reads repositories**: Example\n"
+            "**Writes repositories**: Example\n"
+            "```\n",
+            ("SVC", "OAK"),
+        )
+
+        self.assertEqual(("SVC", "OAK"), scope.reads)
+        self.assertEqual(("SVC",), scope.writes)
+        self.assertEqual(
+            "**Reads repositories**: SVC, OAK\n"
+            "**Writes repositories**: SVC\n",
+            plans.render_session_scope(scope),
+        )
+        qualified = plans.parse_qualified_path("SVC:internal/foo.go", scope.reads)
+        self.assertEqual("SVC", qualified.alias)
+        self.assertEqual("internal/foo.go", qualified.path)
+        self.assertEqual("SVC:internal/foo.go", plans.render_qualified_path(qualified))
+        for invalid in (
+            "internal/foo.go",
+            "SVC:/tmp/foo",
+            "SVC:../foo",
+            "OAK:./foo",
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    plans.parse_qualified_path(invalid, ("SVC",))
+
+    def test_completed_multi_repo_handoff_requires_qualified_write_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            (plan_dir / "manifest.md").write_text(
+                "# Manifest\n\n## Repositories\n\n"
+                "| Alias | Path | Origin |\n"
+                "| --- | --- | --- |\n"
+                "| SVC | svc | https://example.com/svc.git |\n"
+                "| OAK | oak | https://example.com/oak.git |\n",
+                encoding="utf-8",
+            )
+            session_path = plan_dir / "session-1.md"
+            template = (
+                "# Session 1\n\n"
+                "**Reads repositories**: SVC, OAK\n"
+                "**Writes repositories**: SVC\n\n"
+                "Do work.\n\n## Handoff\n\n"
+                "- **Status**: complete\n"
+                "- **Files modified**: {files}\n"
+                "- **Key decisions**: none\n"
+                "- **Blockers for next session**: none\n"
+                "- **Notes**:\n"
+            )
+            session_path.write_text(
+                template.format(files="internal/foo.go"), encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(plans.PlanError, "Alias:path"):
+                plans.read_session_handoff(self._session_file(plan_dir))
+
+            session_path.write_text(
+                template.format(files="OAK:internal/foo.go"), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                plans.PlanError, "outside Writes repositories"
+            ):
+                plans.read_session_handoff(self._session_file(plan_dir))
+
+            session_path.write_text(
+                template.format(files="SVC:internal/foo.go, SVC:README.md"),
+                encoding="utf-8",
+            )
+            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+            self.assertEqual(
+                ("SVC:internal/foo.go, SVC:README.md",),
+                handoff.files_modified,
+            )
+
+    def test_session_scope_participates_in_readiness_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            roots = (Path(tmp) / "left", Path(tmp) / "right")
+            for root, writes in zip(roots, ("SVC", "(none)"), strict=True):
+                root.mkdir()
+                (root / "context.md").write_text("# Context\n", encoding="utf-8")
+                (root / "manifest.md").write_text(
+                    "# Manifest\n\n## Repositories\n\n"
+                    "| Alias | Path | Origin |\n"
+                    "| --- | --- | --- |\n"
+                    "| SVC | svc | https://example.com/svc.git |\n",
+                    encoding="utf-8",
+                )
+                (root / "session-1.md").write_text(
+                    "# Session 1\n\n"
+                    "**Reads repositories**: SVC\n"
+                    f"**Writes repositories**: {writes}\n\n"
+                    "Do work.\n\n## Handoff\n\n- **Status**: pending\n",
+                    encoding="utf-8",
+                )
+
+            self.assertNotEqual(
+                plans.stable_readiness_sha256(roots[0]),
+                plans.stable_readiness_sha256(roots[1]),
+            )
 
     def test_read_session_handoff_round_trip_captures_all_bullets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1891,6 +1999,128 @@ class ParserAndStateTests(unittest.TestCase):
         self.assertIsNone(command_check.cwd)
         self.assertEqual("check-3", regex_check.name)
         self.assertEqual("^def parse_completion_contract", regex_check.pattern)
+
+    def test_repository_aware_contract_parses_every_check_kind(self) -> None:
+        registry = RepositoryRegistry(
+            (
+                Repository("SVC", "svc", "https://example.com/svc.git"),
+                Repository("OAK", "oak", "git@example.com:org/oak.git"),
+            )
+        )
+        payload = {
+            "checks": [
+                {
+                    "name": "command",
+                    "type": "command",
+                    "repo": "SVC",
+                    "argv": ["python3", "-V"],
+                    "cwd": "tools",
+                },
+                {
+                    "name": "file",
+                    "type": "file_exists",
+                    "repo": "OAK",
+                    "path": "README.md",
+                },
+                {
+                    "name": "regex",
+                    "type": "regex_in_file",
+                    "repo": "SVC",
+                    "path": "src/main.py",
+                    "pattern": "main",
+                },
+            ]
+        }
+        text = (
+            "## Completion Contract\n\n### Done when\n\n- done\n\n"
+            "### Verify\n\n```json\n"
+            + json.dumps(payload)
+            + "\n```\n"
+        )
+
+        contract = contracts.parse_completion_contract(
+            text, session_id="1", repository_registry=registry
+        )
+
+        self.assertEqual(
+            ["SVC", "OAK", "SVC"],
+            [check.repo for check in contract.verify.checks],
+        )
+
+    def test_repository_aware_contract_requires_known_repo_in_multi_registry(
+        self,
+    ) -> None:
+        registry = RepositoryRegistry(
+            (
+                Repository("SVC", "svc", "https://example.com/svc.git"),
+                Repository("OAK", "oak", "https://example.com/oak.git"),
+            )
+        )
+        base = {
+            "type": "file_exists",
+            "path": "README.md",
+        }
+        for label, check, pattern in (
+            ("missing", base, "repo.*required"),
+            ("unknown", {**base, "repo": "OWL"}, "unknown repository alias"),
+            ("malformed", {**base, "repo": "bad alias"}, "repo.*invalid"),
+        ):
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(plans.PlanError, pattern):
+                    contracts._parse_verify_payload(
+                        {"checks": [check]},
+                        session_id=plans.parse_session_id("1"),
+                        repository_registry=registry,
+                    )
+
+    def test_single_repository_contract_resolves_omitted_repo(self) -> None:
+        registry = RepositoryRegistry(
+            (Repository("SVC", "svc", "https://example.com/svc.git"),)
+        )
+        recipe = contracts._parse_verify_payload(
+            {
+                "checks": [
+                    {"type": "file_exists", "path": "README.md"},
+                    {"type": "command", "argv": ["true"]},
+                ]
+            },
+            session_id=plans.parse_session_id("1"),
+            repository_registry=registry,
+        )
+
+        self.assertEqual(["SVC", "SVC"], [check.repo for check in recipe.checks])
+
+    def test_repository_aware_contract_rejects_escaping_paths_and_cwds(self) -> None:
+        registry = RepositoryRegistry(
+            (Repository("SVC", "svc", "https://example.com/svc.git"),)
+        )
+        cases = (
+            ({"type": "file_exists", "path": "/tmp/x"}, "path"),
+            ({"type": "regex_in_file", "path": "../x", "pattern": "x"}, "path"),
+            ({"type": "command", "argv": ["true"], "cwd": "a/../../b"}, "cwd"),
+            ({"type": "command", "argv": ["true"], "cwd": "C:\\tmp"}, "cwd"),
+        )
+        for check, field in cases:
+            with self.subTest(check=check):
+                with self.assertRaisesRegex(plans.PlanError, field + ".*beneath"):
+                    contracts._parse_verify_payload(
+                        {"checks": [check]},
+                        session_id=plans.parse_session_id("1"),
+                        repository_registry=registry,
+                    )
+
+    def test_legacy_contract_keeps_absolute_paths_and_omitted_repo(self) -> None:
+        recipe = contracts._parse_verify_payload(
+            {
+                "checks": [
+                    {"type": "file_exists", "path": "/tmp/legacy"},
+                    {"type": "command", "argv": ["true"], "cwd": "/tmp"},
+                ]
+            },
+            session_id=plans.parse_session_id("1"),
+        )
+
+        self.assertEqual([None, None], [check.repo for check in recipe.checks])
 
     def test_parse_completion_contract_requires_done_when_bullets(self) -> None:
         text = "\n".join(

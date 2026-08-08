@@ -276,6 +276,25 @@ class BaselineCacheTests(unittest.TestCase):
             baseline_cache.normalize_recipe(recipe_pass),
         )
 
+    def test_repository_alias_participates_in_normalized_recipe(self) -> None:
+        def recipe(repo: str) -> contracts.VerifyRecipe:
+            return contracts.VerifyRecipe(
+                checks=(
+                    contracts.CommandCheck(
+                        name="c",
+                        argv=("true",),
+                        timeout_seconds=5.0,
+                        repo=repo,
+                    ),
+                )
+            )
+
+        normalized = baseline_cache.normalize_recipe(recipe("SVC"))
+        self.assertIn('"repo":"SVC"', normalized)
+        self.assertNotEqual(
+            normalized, baseline_cache.normalize_recipe(recipe("OAK"))
+        )
+
     def test_cwd_executable_and_environment_change_the_key(self) -> None:
         recipe = self._command_recipe("c")
         base = baseline_cache.cache_key(

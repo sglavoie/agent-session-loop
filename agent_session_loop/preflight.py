@@ -68,6 +68,7 @@ from .plans import (
     parse_readiness_metadata,
     progress_path,
     read_progress_entries,
+    read_repository_registry,
     stable_readiness_sha256,
     write_readiness_metadata,
 )
@@ -1142,6 +1143,7 @@ def _check_session_contracts(
 ) -> tuple[tuple[PreflightFinding, ...], dict[str, CompletionContract]]:
     findings: list[PreflightFinding] = []
     contracts: dict[str, CompletionContract] = {}
+    registry = read_repository_registry(snapshot.plan_dir)
 
     for status in snapshot.sessions:
         session = status.session
@@ -1159,7 +1161,11 @@ def _check_session_contracts(
             continue
 
         try:
-            contract = parse_completion_contract(text, session_id=session.session_id)
+            contract = parse_completion_contract(
+                text,
+                session_id=session.session_id,
+                repository_registry=registry,
+            )
         except PlanError as error:
             findings.append(
                 _finding(
@@ -1338,11 +1344,13 @@ def _check_duplicate_verification_commands(
     findings: list[PreflightFinding] = []
     for session_id in sorted(contracts_by_session):
         contract = contracts_by_session[session_id]
-        first_by_identity: dict[tuple[tuple[str, ...], str], CommandCheck] = {}
+        first_by_identity: dict[
+            tuple[str | None, tuple[str, ...], str], CommandCheck
+        ] = {}
         for check in contract.verify.checks:
             if not isinstance(check, CommandCheck):
                 continue
-            identity = (check.argv, check.cwd or ".")
+            identity = (check.repo, check.argv, check.cwd or ".")
             first = first_by_identity.get(identity)
             if first is None:
                 first_by_identity[identity] = check

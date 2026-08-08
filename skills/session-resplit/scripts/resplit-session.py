@@ -46,6 +46,7 @@ from agent_session_loop import (  # noqa: E402
     responses,
     state,
 )
+from agent_session_loop.workspaces import RepositoryRegistry  # noqa: E402
 
 
 MIN_PARTS = 2
@@ -146,6 +147,8 @@ class ParentDetails:
     had_expansion: bool
     prior_session_file: str | None
     contract: contracts.CompletionContract | None
+    scope: plans.SessionScope | None
+    registry: RepositoryRegistry | None
 
 
 def _read_text(path: Path) -> str:
@@ -301,6 +304,13 @@ def _extract_instruction_body(before_handoff: str) -> str:
     ):
         index += 1
 
+    while index < len(lines) and (
+        not lines[index].strip()
+        or lines[index].startswith(plans.READS_REPOSITORIES_PREFIX)
+        or lines[index].startswith(plans.WRITES_REPOSITORIES_PREFIX)
+    ):
+        index += 1
+
     while index < len(lines):
         line = lines[index]
         if line.strip() == "## Parallel Metadata":
@@ -341,14 +351,29 @@ def _parse_parent_details(
             f"{parent_status.session.filename} has no implementation instructions above handoff",
         )
 
+    registry = plans.read_repository_registry(parent_status.path.parent)
     try:
         contract = contracts.parse_completion_contract(
-            parent_text, session_id=parent_status.session_id
+            parent_text,
+            session_id=parent_status.session_id,
+            repository_registry=registry,
         )
     except plans.PlanError as error:
         raise ResplitError(
             "malformed-plan",
             f"{parent_status.session.filename} has a malformed completion contract: {error}",
+        ) from error
+
+    try:
+        scope = (
+            plans.parse_session_scope(parent_text, registry.aliases)
+            if registry is not None
+            else None
+        )
+    except plans.PlanError as error:
+        raise ResplitError(
+            "malformed-plan",
+            f"{parent_status.session.filename} has a malformed repository scope: {error}",
         ) from error
 
     return ParentDetails(
@@ -357,6 +382,8 @@ def _parse_parent_details(
         had_expansion=parent_expansion_path.exists(),
         prior_session_file=_extract_previous_session_file(before_handoff),
         contract=contract,
+        scope=scope,
+        registry=registry,
     )
 
 
@@ -625,6 +652,7 @@ def _allocate_explicit_contract(
     parent_checks: dict[str, contracts.VerificationCheck],
     *,
     index: int,
+    repository_registry: RepositoryRegistry | None = None,
 ) -> contracts.CompletionContract:
     check_payloads: list[dict[str, object]] = []
     for name in spec["inherit_checks"]:
@@ -642,6 +670,7 @@ def _allocate_explicit_contract(
             child_session_id,
             spec["done_when"],
             {"session": child_session_id.value, "checks": check_payloads},
+            repository_registry=repository_registry,
         )
     except plans.PlanError as error:
         raise ResplitError(
@@ -765,7 +794,11 @@ def _build_child_specs(
             )
         else:
             contract = _allocate_explicit_contract(
-                child_session_id, raw, parent_checks, index=index
+                child_session_id,
+                raw,
+                parent_checks,
+                index=index,
+                repository_registry=parent_details.registry,
             )
         previous_session_id = (
             _previous_session_id_from_filename(first_previous_session_file)
@@ -881,6 +914,7 @@ def _render_child_session(
         is_first=False,
         previous_session_id=child.previous_session_id,
         contract=child.contract,
+        scope=parent_details.scope,
     )
 
 

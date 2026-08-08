@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 from typing import Literal, Union
 
@@ -25,7 +25,13 @@ from .plans import (
     SessionId,
     canonicalize_path,
     parse_session_id,
+    read_repository_registry,
     session_id_to_filename,
+)
+from .workspaces import (
+    RepositoryRegistry,
+    WorkspaceError,
+    validate_repository_alias,
 )
 
 
@@ -66,6 +72,7 @@ class CommandCheck:
     baseline_expectation: BaselineExpectation = DEFAULT_BASELINE_EXPECTATION
     kind: CommandKind = "command"
     on_failure_of: tuple[str, ...] = ()
+    repo: str | None = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +87,7 @@ class FileExistsCheck:
     baseline_expectation: BaselineExpectation = DEFAULT_BASELINE_EXPECTATION
     kind: FileExistsKind = "file_exists"
     on_failure_of: tuple[str, ...] = ()
+    repo: str | None = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +103,7 @@ class RegexInFileCheck:
     baseline_expectation: BaselineExpectation = DEFAULT_BASELINE_EXPECTATION
     kind: RegexInFileKind = "regex_in_file"
     on_failure_of: tuple[str, ...] = ()
+    repo: str | None = None
 
 
 VerificationCheck = Union[CommandCheck, FileExistsCheck, RegexInFileCheck]
@@ -291,8 +300,67 @@ def _on_failure_of(
     return tuple(names)
 
 
+def _repository_alias(
+    payload: dict,
+    *,
+    index: int,
+    session_id: SessionId,
+    repository_registry: RepositoryRegistry | None,
+) -> str | None:
+    raw = payload.get("repo")
+    if raw is None:
+        if repository_registry is None:
+            return None
+        if len(repository_registry) == 1:
+            return repository_registry.aliases[0]
+        raise PlanError(
+            f"session {session_id.value} contract check #{index + 1} "
+            "'repo' is required when the repository registry has multiple entries"
+        )
+    if not isinstance(raw, str) or not raw:
+        raise PlanError(
+            f"session {session_id.value} contract check #{index + 1} "
+            "'repo' must be a non-empty repository alias when provided"
+        )
+    try:
+        alias = validate_repository_alias(raw)
+        if repository_registry is not None:
+            repository_registry.get(alias)
+    except WorkspaceError as error:
+        raise PlanError(
+            f"session {session_id.value} contract check #{index + 1} "
+            f"'repo' is invalid: {error}"
+        ) from error
+    return alias
+
+
+def _validate_repository_relative_value(
+    value: str,
+    *,
+    field: str,
+    index: int,
+    session_id: SessionId,
+) -> None:
+    """Reject values that could escape a registry-selected repository root."""
+    if (
+        "\\" in value
+        or PureWindowsPath(value).is_absolute()
+        or PurePosixPath(value).is_absolute()
+        or ".." in PurePosixPath(value).parts
+    ):
+        raise PlanError(
+            f"session {session_id.value} contract check #{index + 1} "
+            f"'{field}' must stay beneath the selected repository and cannot "
+            "be absolute or traverse upward"
+        )
+
+
 def _parse_command_check(
-    payload: dict, *, index: int, session_id: SessionId
+    payload: dict,
+    *,
+    index: int,
+    session_id: SessionId,
+    repository_registry: RepositoryRegistry | None = None,
 ) -> CommandCheck:
     raw_argv = payload.get("argv")
     if not isinstance(raw_argv, list) or len(raw_argv) == 0:
@@ -326,6 +394,17 @@ def _parse_command_check(
             "'cwd' must be a non-empty string when provided"
         )
 
+    repo = _repository_alias(
+        payload,
+        index=index,
+        session_id=session_id,
+        repository_registry=repository_registry,
+    )
+    if repository_registry is not None and raw_cwd is not None:
+        _validate_repository_relative_value(
+            raw_cwd, field="cwd", index=index, session_id=session_id
+        )
+
     name = _check_name(payload.get("name"), index=index, session_id=session_id)
     baseline = _baseline_expectation(payload, index=index, session_id=session_id)
     on_failure_of = _on_failure_of(payload, index=index, session_id=session_id)
@@ -336,13 +415,28 @@ def _parse_command_check(
         cwd=raw_cwd,
         baseline_expectation=baseline,
         on_failure_of=on_failure_of,
+        repo=repo,
     )
 
 
 def _parse_file_exists_check(
-    payload: dict, *, index: int, session_id: SessionId
+    payload: dict,
+    *,
+    index: int,
+    session_id: SessionId,
+    repository_registry: RepositoryRegistry | None = None,
 ) -> FileExistsCheck:
     path = _require_str(payload.get("path"), label="path", session_id=session_id)
+    repo = _repository_alias(
+        payload,
+        index=index,
+        session_id=session_id,
+        repository_registry=repository_registry,
+    )
+    if repository_registry is not None:
+        _validate_repository_relative_value(
+            path, field="path", index=index, session_id=session_id
+        )
     name = _check_name(payload.get("name"), index=index, session_id=session_id)
     baseline = _baseline_expectation(payload, index=index, session_id=session_id)
     on_failure_of = _on_failure_of(payload, index=index, session_id=session_id)
@@ -351,13 +445,28 @@ def _parse_file_exists_check(
         path=path,
         baseline_expectation=baseline,
         on_failure_of=on_failure_of,
+        repo=repo,
     )
 
 
 def _parse_regex_in_file_check(
-    payload: dict, *, index: int, session_id: SessionId
+    payload: dict,
+    *,
+    index: int,
+    session_id: SessionId,
+    repository_registry: RepositoryRegistry | None = None,
 ) -> RegexInFileCheck:
     path = _require_str(payload.get("path"), label="path", session_id=session_id)
+    repo = _repository_alias(
+        payload,
+        index=index,
+        session_id=session_id,
+        repository_registry=repository_registry,
+    )
+    if repository_registry is not None:
+        _validate_repository_relative_value(
+            path, field="path", index=index, session_id=session_id
+        )
     pattern = _require_str(
         payload.get("pattern"), label="pattern", session_id=session_id
     )
@@ -377,6 +486,7 @@ def _parse_regex_in_file_check(
         pattern=pattern,
         baseline_expectation=baseline,
         on_failure_of=on_failure_of,
+        repo=repo,
     )
 
 
@@ -388,7 +498,11 @@ CHECK_PARSERS = {
 
 
 def _parse_check(
-    payload: object, *, index: int, session_id: SessionId
+    payload: object,
+    *,
+    index: int,
+    session_id: SessionId,
+    repository_registry: RepositoryRegistry | None = None,
 ) -> VerificationCheck:
     if not isinstance(payload, dict):
         raise PlanError(
@@ -402,10 +516,20 @@ def _parse_check(
             f"session {session_id.value} contract check #{index + 1} "
             f"'type' must be one of: {allowed}; got {raw_type!r}"
         )
-    return CHECK_PARSERS[raw_type](payload, index=index, session_id=session_id)
+    return CHECK_PARSERS[raw_type](
+        payload,
+        index=index,
+        session_id=session_id,
+        repository_registry=repository_registry,
+    )
 
 
-def _parse_verify_payload(payload: object, *, session_id: SessionId) -> VerifyRecipe:
+def _parse_verify_payload(
+    payload: object,
+    *,
+    session_id: SessionId,
+    repository_registry: RepositoryRegistry | None = None,
+) -> VerifyRecipe:
     if not isinstance(payload, dict):
         raise PlanError(
             f"session {session_id.value} Verify JSON must be a top-level object"
@@ -443,7 +567,12 @@ def _parse_verify_payload(payload: object, *, session_id: SessionId) -> VerifyRe
     checks: list[VerificationCheck] = []
     seen_names: set[str] = set()
     for index, raw_check in enumerate(raw_checks):
-        check = _parse_check(raw_check, index=index, session_id=session_id)
+        check = _parse_check(
+            raw_check,
+            index=index,
+            session_id=session_id,
+            repository_registry=repository_registry,
+        )
         if check.name in seen_names:
             raise PlanError(
                 f"session {session_id.value} contract check name "
@@ -485,7 +614,10 @@ def _parse_verify_payload(payload: object, *, session_id: SessionId) -> VerifyRe
 
 
 def parse_completion_contract(
-    text: str, *, session_id: int | str | SessionId
+    text: str,
+    *,
+    session_id: int | str | SessionId,
+    repository_registry: RepositoryRegistry | None = None,
 ) -> CompletionContract | None:
     """Parse a session file body and return its completion contract, if any.
 
@@ -538,7 +670,11 @@ def parse_completion_contract(
             f"at line {error.lineno} column {error.colno}"
         ) from error
 
-    recipe = _parse_verify_payload(payload, session_id=canonical_id)
+    recipe = _parse_verify_payload(
+        payload,
+        session_id=canonical_id,
+        repository_registry=repository_registry,
+    )
     return CompletionContract(
         session_id=canonical_id,
         done_when=done_when,
@@ -582,4 +718,9 @@ def read_completion_contract(
         ) from error
     except OSError as error:
         raise PlanError(f"cannot read {session_path}: {error}") from error
-    return parse_completion_contract(text, session_id=canonical_id)
+    registry = read_repository_registry(canonical_dir)
+    return parse_completion_contract(
+        text,
+        session_id=canonical_id,
+        repository_registry=registry,
+    )

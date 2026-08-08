@@ -165,6 +165,7 @@ class CheckStartedEvent:
     kind: str
     argv: tuple[str, ...] | None = None
     cwd: str | None = None
+    repo: str | None = None
 
 
 @dataclass(frozen=True)
@@ -177,6 +178,7 @@ class CheckFinishedEvent:
     name: str
     kind: str
     result: CheckResult
+    repo: str | None = None
 
 
 @dataclass(frozen=True)
@@ -190,6 +192,7 @@ class CheckSkippedEvent:
     kind: str
     on_failure_of: tuple[str, ...]
     reason: str
+    repo: str | None = None
 
 
 CheckStartedCallback = Callable[[CheckStartedEvent], None]
@@ -240,6 +243,7 @@ def _make_check_started_event(
         kind=check.kind,
         argv=argv,
         cwd=cwd,
+        repo=check.repo,
     )
 
 
@@ -1121,6 +1125,7 @@ def run_verification(
                     name=check.name,
                     kind=check.kind,
                     result=check_result,
+                    repo=check.repo,
                 )
             )
         return check_result
@@ -1188,6 +1193,7 @@ def run_verification(
                     kind=check.kind,
                     on_failure_of=check.on_failure_of,
                     reason=skipped.reason,
+                    repo=check.repo,
                 )
             )
 
@@ -1225,6 +1231,7 @@ def _recipe_summary(contract: CompletionContract) -> dict[str, Any]:
         "diagnostic_count": diagnostic_count,
         "kinds": [check.kind for check in contract.verify.checks],
         "names": [check.name for check in contract.verify.checks],
+        "repos": [check.repo for check in contract.verify.checks],
     }
 
 
@@ -1538,6 +1545,7 @@ def _contract_check_session_row(
         "session": session,
         "name": None,
         "type": None,
+        "repo": None,
         "status": status,
         "reason": None,
         "detail": detail,
@@ -1655,6 +1663,7 @@ def _contract_check_rows(
                 "session": session_id.value,
                 "name": check.name,
                 "type": check.kind,
+                "repo": check.repo,
                 "status": status,
                 "reason": reason,
                 "detail": detail,

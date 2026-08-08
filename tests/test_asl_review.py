@@ -93,6 +93,20 @@ class StructuredReviewArtifactTests(unittest.TestCase):
         payload.update(overrides)
         return payload
 
+    def test_verification_checks_preserve_repository_alias(self) -> None:
+        checks = [
+            {
+                "type": "command",
+                "name": "verify",
+                "repo": "SVC",
+                "argv": ["python3", "-V"],
+            }
+        ]
+
+        self.assertEqual(
+            checks, review._validate_verification_checks("F1", checks)
+        )
+
     def test_parse_review_artifact_accepts_complete_findings(self) -> None:
         artifact = review.parse_review_artifact(json.dumps(self._artifact()))
 
@@ -1485,6 +1499,37 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
             review_repair.REVIEW_REPAIR_REASON_MALFORMED, result.reason
         )
         self.assertIn("conflicting settings", result.error)
+
+    def test_merge_keeps_identical_commands_for_distinct_repositories(self) -> None:
+        findings = [
+            {
+                "id": "F1",
+                "verification_checks": [
+                    {
+                        "type": "command",
+                        "name": "svc-check",
+                        "repo": "SVC",
+                        "argv": ["python3", "-m", "unittest"],
+                    }
+                ],
+            },
+            {
+                "id": "F2",
+                "verification_checks": [
+                    {
+                        "type": "command",
+                        "name": "oak-check",
+                        "repo": "OAK",
+                        "argv": ["python3", "-m", "unittest"],
+                    }
+                ],
+            },
+        ]
+
+        merged = review_repair._merge_verification_checks("runner", findings)
+
+        self.assertEqual(["SVC", "OAK"], [check["repo"] for check in merged])
+        self.assertEqual(2, len(merged))
 
     def test_no_finding_is_omitted_or_assigned_twice(self) -> None:
         findings = [

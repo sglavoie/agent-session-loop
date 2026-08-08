@@ -2927,6 +2927,21 @@ class SplitCliTests(unittest.TestCase):
         "## Session 1: First\n\nDo one.\n\n"
         "## Session 2: Second\n\nDo two.\n"
     )
+    _MULTI_REPO_PLAN = (
+        "# My Plan\n\n"
+        "## Repositories\n\n"
+        "| Alias | Path | Origin |\n"
+        "| --- | --- | --- |\n"
+        "| SVC | tundra_svc | git@github.com:tundra/SVC.git |\n"
+        "| OAK | tundra_OAK | https://github.com/tundra/OAK.git |\n\n"
+        "Shared context.\n\n"
+        "## Session 1: First\n\n"
+        "**Reads repositories**: SVC, OAK\n"
+        "**Writes repositories**: SVC\n\nDo one.\n\n"
+        "## Session 2: Second\n\n"
+        "**Reads repositories**: OAK\n"
+        "**Writes repositories**: (none)\n\nDo two.\n"
+    )
 
     def _split_args(self, **overrides: object) -> argparse.Namespace:
         args = argparse.Namespace(
@@ -3395,6 +3410,75 @@ class SplitCliTests(unittest.TestCase):
             self.assertTrue(payload["checked"])
             self.assertEqual(["1", "2"], payload["session_ids"])
             self.assertEqual(2, payload["session_count"])
+            self.assertNotIn("repositories", payload)
+            self.assertNotIn("registry_digest", payload)
+
+    def test_check_multi_repo_plan_reports_ordered_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = Path(tmp) / "PLAN.md"
+            plan.write_text(self._MULTI_REPO_PLAN, encoding="utf-8")
+
+            code, out, err = self._run_split(
+                self._split_args(plan_file=str(plan), check=True)
+            )
+
+            self.assertEqual(0, code, err)
+            payload = json.loads(out)
+            self.assertEqual(
+                ["SVC", "OAK"],
+                [repo["alias"] for repo in payload["repositories"]],
+            )
+            self.assertEqual(64, len(payload["registry_digest"]))
+
+    def test_split_multi_repo_plan_authors_registry_only_in_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan = tmp_dir / "PLAN.md"
+            plan.write_text(self._MULTI_REPO_PLAN, encoding="utf-8")
+            contracts_file = tmp_dir / "contracts.json"
+            self._write_contracts(contracts_file, ("1", "2"))
+            contract_payload = json.loads(contracts_file.read_text(encoding="utf-8"))
+            contract_payload["1"]["verify"]["checks"][0]["repo"] = "SVC"
+            contract_payload["2"]["verify"]["checks"][0]["repo"] = "OAK"
+            contracts_file.write_text(
+                json.dumps(contract_payload), encoding="utf-8"
+            )
+
+            code, out, err = self._run_split(
+                self._split_args(
+                    plan_file=str(plan),
+                    contracts_file=str(contracts_file),
+                    base_dir=str(tmp_dir / "out"),
+                )
+            )
+
+            self.assertEqual(0, code, err)
+            payload = json.loads(out)
+            self.assertEqual(
+                ["SVC", "OAK"],
+                [repo["alias"] for repo in payload["repositories"]],
+            )
+            output_dir = Path(payload["output_dir"])
+            manifest = (output_dir / "manifest.md").read_text(encoding="utf-8")
+            context = (output_dir / "context.md").read_text(encoding="utf-8")
+            first_session = (output_dir / "session-1.md").read_text(encoding="utf-8")
+            second_session = (output_dir / "session-2.md").read_text(encoding="utf-8")
+            self.assertIn("## Repositories", manifest)
+            self.assertIn("| SVC | tundra_svc | github.com/tundra/SVC |", manifest)
+            self.assertNotIn("## Repositories", context)
+            self.assertNotIn("| Alias | Path | Origin |", context)
+            self.assertEqual(
+                1, first_session.count("**Reads repositories**: SVC, OAK")
+            )
+            self.assertEqual(1, first_session.count("**Writes repositories**: SVC"))
+            self.assertEqual(1, second_session.count("**Reads repositories**: OAK"))
+            self.assertEqual(
+                1, second_session.count("**Writes repositories**: (none)")
+            )
+            self.assertEqual(
+                plans.stable_readiness_sha256(output_dir),
+                payload["readiness"]["readiness_sha256"],
+            )
 
     def test_check_single_session_reports_not_needed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -314,6 +314,35 @@ def init_git_repo(repo_dir: Path) -> None:
     )
 
 
+DEFAULT_MULTI_REPO_SPECS: tuple[tuple[str, str, str], ...] = (
+    ("SVC", "tundra_svc", "git@github.com:tundra/SVC.git"),
+    ("OAK", "tundra_OAK", "git@github.com:tundra/OAK.git"),
+    ("OWL", "tundra_OWL_J", "git@github.com:tundra/OWL.J.git"),
+    ("Kiln", "tundra_Kiln", "git@github.com:tundra/Kiln.git"),
+)
+
+
+def init_multi_repo_workspace(
+    workspace_dir: Path,
+    specs: tuple[tuple[str, str, str], ...] = DEFAULT_MULTI_REPO_SPECS,
+) -> dict[str, Path]:
+    """Create a non-Git workspace with sibling Git repositories and origins."""
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    repositories: dict[str, Path] = {}
+    for alias, relative_path, origin in specs:
+        repository = workspace_dir / relative_path
+        init_git_repo(repository)
+        subprocess.run(
+            ["git", "remote", "add", "origin", origin],
+            cwd=repository,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        repositories[alias] = repository
+    return repositories
+
+
 def git_stdout(repo_dir: Path, *args: str) -> str:
     completed = subprocess.run(
         ["git", *args],
