@@ -836,6 +836,9 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         normalized = " ".join(docs.split())
 
         for marker in (
+            "`AgentSessionLoopMailboxQuestion` Agent Mux handoff",
+            "`<run-id>:mailbox-question:<question-sequence>` source event ID",
+            "Closed/history-only records never emit the marker",
             "`AgentSessionLoopMailboxResolution` with `run_id`, `state_path`, "
             "`question_id`",
             "`<run-id>:mailbox-resolution:<resolution-sequence>` source "

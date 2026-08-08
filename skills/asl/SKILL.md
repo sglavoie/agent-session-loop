@@ -83,6 +83,11 @@ asl outbox wait <plan-dir> --include all --since <next_since> --timeout 550 [--s
   before reissuing.
 - The wait returns on a five-second internal cadence, so a question surfaces
   within seconds rather than at the next poll boundary.
+- A returned question that is still open also refreshes the body-free
+  supervisor lease projection and makes a best-effort
+  `AgentSessionLoopMailboxQuestion` handoff to AgentMux. This applies to the
+  explicit `asl outbox wait` command, not the helper's internal watcher;
+  notification failure never changes the wait result or its JSON schema.
 - Cap `--timeout` below the supervising harness's own tool-call ceiling (550 is
   safe for a 600-second cap) and loop, rather than spending the 1800-second
   maximum in a single call.
@@ -135,11 +140,12 @@ actually observed an accepted closure.
 
 One-shot supervisor commands do not displace a live helper. When the on-disk
 lease is fresh and carries a question projection, `asl inbox guidance`,
-`asl inbox reply`, and `asl outbox wait` heartbeat it — the helper's
-supervisor identity and projection survive with only the lease timestamp
-refreshed. Only a missing, stale, or unprojected lease is taken over with a
-fresh supervisor identity, so a human stepping into an unsupervised plan
-still registers as its supervisor.
+`asl inbox reply`, and `asl outbox wait` heartbeat it — the helper's supervisor
+identity and projection survive with only the lease timestamp refreshed during
+that initial heartbeat. A wait that returns an actionable open set then
+refreshes that same identity with its exact latest projection. Only a missing,
+stale, or unprojected lease is taken over with a fresh supervisor identity, so a
+human stepping into an unsupervised plan still registers as its supervisor.
 
 #### Send live guidance or future-turn controls
 

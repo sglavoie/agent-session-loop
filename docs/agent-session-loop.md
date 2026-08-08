@@ -578,6 +578,18 @@ The seven mailbox commands share normal plan-reference, `--state-dir`, and
   acknowledgements, and malformed records cannot replay.
   It polls mailbox metadata every five seconds and likewise re-parses only
   after the log changes.
+  When a returned question is still open, the command persists the exact
+  run-scoped open set in the v2 supervisor lease and emits one best-effort,
+  body-free `AgentSessionLoopMailboxQuestion` Agent Mux handoff for that
+  actionable set. Its public fields are `run_id`, `state_path`, latest
+  `question_id`, `question_created_at`, `unanswered_questions`,
+  `delivery_state: open`, the latest question's physical `source_sequence`,
+  `mailbox_projection_sequence`, `emitted_time`, and the stable
+  `<run-id>:mailbox-question:<question-sequence>` source event ID. It carries
+  no question, reply, resolution-note, or notice body. Closed/history-only
+  records never emit the marker. Projection-write, Agent Mux discovery,
+  delivery, timeout, or acknowledgement failure is fail-open: the normal text
+  and JSON results are unchanged, including the JSON schema.
   Text-mode notice output renders at most the newest 20 selected notices under
   a 65,536-byte complete-section budget; omitted records are identified by
   sequence and message ID, while JSON remains complete.

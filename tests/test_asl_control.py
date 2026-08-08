@@ -4660,6 +4660,124 @@ class MailboxCliTests(unittest.TestCase):
         self.assert_heartbeat(original, after)
         self.assertEqual(supervisor_id, after.supervisor_id)
 
+    def test_outbox_wait_projects_and_notifies_one_actionable_open_set(
+        self,
+    ) -> None:
+        self.write_active_turn(run_id="run-live")
+        first = mailbox.append_question(
+            self.plan_dir,
+            "First private question",
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+        second = mailbox.append_question(
+            self.plan_dir,
+            "Second private question",
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+
+        with (
+            patched_env(KITTY_WINDOW_ID="42"),
+            mock.patch.object(
+                agent_mux_delivery,
+                "notify",
+                return_value={"final_status": "accepted"},
+            ) as notify,
+        ):
+            code, payload = self.payload_from(
+                mailbox_cli.outbox_wait_from_args,
+                self.args(timeout=0),
+            )
+
+        self.assertEqual(0, code)
+        self.assertNotIn("agent_mux", payload)
+        notify.assert_called_once()
+        event_name, hook_payload = notify.call_args.args
+        kwargs = notify.call_args.kwargs
+        self.assertEqual(
+            agent_mux_delivery.MAILBOX_QUESTION_EVENT,
+            event_name,
+        )
+        self.assertEqual("run-live", hook_payload["run_id"])
+        self.assertEqual(42, hook_payload["kitty_window_id"])
+        self.assertEqual(
+            agent_mux_delivery.MAILBOX_QUESTION_REASON,
+            kwargs["reason"],
+        )
+        self.assertEqual(second.id, kwargs["extra"]["question_id"])
+        self.assertEqual(2, kwargs["extra"]["unanswered_questions"])
+        self.assertEqual("open", kwargs["extra"]["delivery_state"])
+        self.assertEqual(
+            str(second.seq),
+            kwargs["extra"]["mailbox_projection_sequence"],
+        )
+        self.assertEqual(second.seq, kwargs["allocate_sequence"]())
+        self.assertEqual(
+            f"run-live:mailbox-question:{second.seq}",
+            kwargs["extra"]["source_event_id"],
+        )
+        lease = self._lease_on_disk()
+        self.assertEqual(payload["supervisor_id"], lease.supervisor_id)
+        self.assertEqual("run-live", lease.run_id)
+        self.assertEqual(second.seq, lease.projection_seq)
+        self.assertEqual(2, lease.unanswered_questions)
+        self.assertEqual(second.id, lease.latest_unanswered_question_id)
+        delivery_shape = repr((hook_payload, kwargs["extra"]))
+        self.assertNotIn(first.text, delivery_shape)
+        self.assertNotIn(second.text, delivery_shape)
+
+    def test_outbox_wait_does_not_notify_closed_question_history(self) -> None:
+        self.write_active_turn(run_id="run-live")
+        question = mailbox.append_question(
+            self.plan_dir,
+            "Already handled",
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+        mailbox.append_reply(
+            self.plan_dir,
+            question.id,
+            "done",
+            state_dir=self.state_dir,
+        )
+
+        with mock.patch.object(agent_mux_delivery, "notify") as notify:
+            code, payload = self.payload_from(
+                mailbox_cli.outbox_wait_from_args,
+                self.args(timeout=0),
+            )
+
+        self.assertEqual(0, code)
+        self.assertEqual([question.id], [q["id"] for q in payload["questions"]])
+        notify.assert_not_called()
+        self.assertIsNone(self._lease_on_disk().run_id)
+
+    def test_outbox_wait_question_notification_is_fail_open(self) -> None:
+        self.write_active_turn(run_id="run-live")
+        question = mailbox.append_question(
+            self.plan_dir,
+            "Proceed?",
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+
+        with mock.patch.object(
+            agent_mux_delivery,
+            "notify",
+            side_effect=RuntimeError("AgentMux unavailable"),
+        ):
+            code, payload = self.payload_from(
+                mailbox_cli.outbox_wait_from_args,
+                self.args(timeout=0),
+            )
+
+        self.assertEqual(0, code)
+        self.assertEqual([question.id], [q["id"] for q in payload["questions"]])
+        lease = self._lease_on_disk()
+        self.assertEqual("run-live", lease.run_id)
+        self.assertEqual(1, lease.unanswered_questions)
+
     def test_stale_projected_lease_is_taken_over_without_projection(
         self,
     ) -> None:
@@ -7631,12 +7749,20 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
 
     def test_mailbox_resolution_delivery_constants_are_distinct(self) -> None:
         self.assertEqual(
+            "AgentSessionLoopMailboxQuestion",
+            agent_mux_delivery.MAILBOX_QUESTION_EVENT,
+        )
+        self.assertEqual(
             "AgentSessionLoopMailboxReply",
             agent_mux_delivery.MAILBOX_REPLY_EVENT,
         )
         self.assertEqual(
             "AgentSessionLoopMailboxResolution",
             agent_mux_delivery.MAILBOX_RESOLUTION_EVENT,
+        )
+        self.assertEqual(
+            "mailbox_question_surfaced",
+            agent_mux_delivery.MAILBOX_QUESTION_REASON,
         )
         self.assertEqual(
             "mailbox_reply_appended",

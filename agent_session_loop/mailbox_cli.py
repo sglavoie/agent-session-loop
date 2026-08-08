@@ -82,6 +82,7 @@ class _OutboxWaitResult:
     next_since: int
     timed_out: bool
     lease_supervision: _LeaseSupervision
+    mailbox_view: mailbox.MailboxView | None = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,16 @@ class _MailboxReplyProjection:
     projection_seq: int
     question_id: str
     lease_predates_question: bool = False
+
+
+@dataclass(frozen=True)
+class _MailboxQuestionProjection:
+    """Body-free actionable question set surfaced by one outbox wait."""
+
+    run_id: str
+    projection_seq: int
+    open_questions: tuple[mailbox.MailboxMessage, ...]
+    latest_question: mailbox.MailboxMessage
 
 
 def _message_payload(message: mailbox.MailboxMessage) -> dict[str, Any]:
@@ -1015,6 +1026,161 @@ def _notify_agent_mux_mailbox_resolution(
         return None
 
 
+def _outbox_question_projection(
+    context: cli_common.PlanCommandContext,
+    args: argparse.Namespace,
+    wait_result: _OutboxWaitResult,
+) -> _MailboxQuestionProjection | None:
+    """Persist and return the actionable question set surfaced by the wait.
+
+    ``outbox wait`` deliberately returns physical question records even when
+    they have already closed.  AgentMux notification is narrower: at least one
+    returned question must still be open for one unambiguous live run.  Once a
+    lease already carries a run projection, later waits keep that projection
+    current (including a zero count) without turning a notice-only wait into a
+    new positive handoff.
+    """
+    view = wait_result.mailbox_view
+    if view is None:
+        return None
+
+    selected_ids = {question.id for question in wait_result.questions}
+    selected_run_ids = {
+        question.run_id
+        for question in wait_result.questions
+        if isinstance(question.run_id, str) and question.run_id
+    }
+    active_run_id = _active_status_run_id(context)
+
+    projected_run_id: str | None = None
+    try:
+        lease_view = mailbox.read_lease(
+            context.snapshot.plan_dir,
+            state_dir=args.state_dir,
+        )
+    except (OSError, mailbox.MailboxError):
+        lease_view = None
+    if (
+        lease_view is not None
+        and lease_view.fresh
+        and lease_view.lease is not None
+        and lease_view.lease.version == mailbox.MAILBOX_LEASE_VERSION
+        and isinstance(lease_view.lease.run_id, str)
+        and lease_view.lease.run_id
+    ):
+        projected_run_id = lease_view.lease.run_id
+
+    candidate_run_id: str | None = None
+    if active_run_id in selected_run_ids:
+        candidate_run_id = active_run_id
+    elif projected_run_id in selected_run_ids:
+        candidate_run_id = projected_run_id
+    elif len(selected_run_ids) == 1:
+        candidate_run_id = next(iter(selected_run_ids))
+
+    # An existing projected supervisor stays authoritative even when this wait
+    # returns no new question; refreshing its exact open set lets a later zero
+    # projection provide the compatibility clear.  An unprojected wait only
+    # acquires a run identity after it actually surfaces an actionable question.
+    run_id = candidate_run_id or projected_run_id
+    if run_id is None:
+        return None
+    open_questions = view.open_questions(run_id)
+    actionable = tuple(
+        question for question in open_questions if question.id in selected_ids
+    )
+    if projected_run_id is None and not actionable:
+        return None
+
+    projection_kwargs: dict[str, Any] = {
+        "run_id": run_id,
+        "projection_seq": view.last_seq,
+        "unanswered_questions": len(open_questions),
+    }
+    if open_questions:
+        latest = max(open_questions, key=lambda question: question.seq)
+        projection_kwargs.update(
+            latest_unanswered_question_id=latest.id,
+            latest_unanswered_question_created_at=latest.created_at,
+        )
+    try:
+        mailbox.write_lease(
+            context.snapshot.plan_dir,
+            wait_result.supervisor_id,
+            state_dir=args.state_dir,
+            **projection_kwargs,
+        )
+    except (OSError, mailbox.MailboxError):
+        # Observation and AgentMux delivery remain fail-open after the initial
+        # lease establishment; the returned question is still authoritative.
+        pass
+
+    if not actionable or not open_questions:
+        return None
+    latest_question = max(open_questions, key=lambda question: question.seq)
+    return _MailboxQuestionProjection(
+        run_id=run_id,
+        projection_seq=view.last_seq,
+        open_questions=open_questions,
+        latest_question=latest_question,
+    )
+
+
+def _notify_agent_mux_mailbox_question(
+    context: cli_common.PlanCommandContext,
+    projection: _MailboxQuestionProjection | None,
+) -> dict[str, Any] | None:
+    """Best-effort push notification for one surfaced actionable open set."""
+    if projection is None:
+        return None
+    try:
+        runner_state = context.status.get("runner_state")
+        harness = (
+            runner_state.get("harness")
+            if isinstance(runner_state, dict)
+            and isinstance(runner_state.get("harness"), str)
+            else None
+        )
+        payload: dict[str, Any] = {
+            "run_id": projection.run_id,
+            "plan_dir": str(context.snapshot.plan_dir),
+            "cwd": os.getcwd(),
+            "state_path": context.status.get("state_path"),
+            "harness": harness,
+        }
+        kitty_window_id = _kitty_window_id()
+        if kitty_window_id is not None:
+            payload["kitty_window_id"] = kitty_window_id
+        latest = projection.latest_question
+        return agent_mux_delivery.notify(
+            agent_mux_delivery.MAILBOX_QUESTION_EVENT,
+            payload,
+            reason=agent_mux_delivery.MAILBOX_QUESTION_REASON,
+            active_turn=None,
+            extra={
+                "question_id": latest.id,
+                "question_created_at": latest.created_at,
+                "unanswered_questions": len(projection.open_questions),
+                "delivery_state": "open",
+                "mailbox_projection_sequence": str(
+                    projection.projection_seq
+                ),
+                "source_event_id": (
+                    f"{projection.run_id}:mailbox-question:{latest.seq}"
+                ),
+            },
+            enabled=agent_mux_delivery.notify_enabled(),
+            timeout=agent_mux_delivery.notify_timeout(),
+            allocate_sequence=lambda: latest.seq,
+            record_outcome=lambda _outcome: None,
+            resolve_binary=shutil.which,
+            run_command=subprocess.run,
+            emitted_at=lambda: datetime.now(timezone.utc),
+        )
+    except Exception:  # noqa: BLE001 - outbox delivery never depends on AgentMux
+        return None
+
+
 def _record_notice_published_event(
     context: cli_common.PlanCommandContext,
     message: mailbox.MailboxMessage,
@@ -1921,6 +2087,7 @@ def _wait_for_questions(
                             renewal_failures=lease_renewal_failures,
                             renewal_recoveries=lease_renewal_recoveries,
                         ),
+                        mailbox_view=view,
                     )
 
         now = time.monotonic()
@@ -1945,6 +2112,7 @@ def _wait_for_questions(
                     renewal_failures=lease_renewal_failures,
                     renewal_recoveries=lease_renewal_recoveries,
                 ),
+                mailbox_view=last_successful_view,
             )
 
         if now >= next_lease_at:
@@ -2022,6 +2190,13 @@ def outbox_wait_from_args(args: argparse.Namespace) -> int:
             error=error,
         )
         return 1
+
+    question_projection = _outbox_question_projection(
+        context,
+        args,
+        wait_result,
+    )
+    _notify_agent_mux_mailbox_question(context, question_projection)
 
     payload = responses.success_payload(
         COMMAND_OUTBOX_WAIT,
