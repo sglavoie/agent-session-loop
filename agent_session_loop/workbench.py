@@ -46,7 +46,106 @@ from . import (
 
 
 FINAL_REVIEW_FILE_NAME = "final-review.md"
+FINAL_REVIEW_ARTIFACT_FILE_NAME = "final-review.json"
 LAST_MESSAGE_PREVIEW_CHARS = 280
+
+
+def _repository_rows(value: Any) -> tuple[dict[str, Any], ...]:
+    """Return well-formed repository rows without changing their order."""
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return ()
+    return tuple(dict(row) for row in value if isinstance(row, Mapping))
+
+
+def _workspace_projection(
+    plan_dir: str | Path,
+    *,
+    runtime: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Project a plan's exact workspace binding for operator-facing APIs.
+
+    Runtime state wins because it records the resolved vector used by the run.
+    Before the first run, prepared v2 metadata plus the manifest registry gives
+    the same ordered, credential-free projection without probing Git. Legacy
+    plans intentionally return an empty mapping so their payloads stay additive.
+    """
+    runtime_payload = runtime or {}
+    workspace_root = runtime_payload.get("workspace_root")
+    repositories = _repository_rows(runtime_payload.get("repositories"))
+    if isinstance(workspace_root, str) and workspace_root and repositories:
+        return {
+            "workspace_root": workspace_root,
+            "registry_digest": runtime_payload.get("registry_digest"),
+            "repositories": [dict(row) for row in repositories],
+            "repository_count": len(repositories),
+        }
+
+    registry = plans.read_repository_registry(plan_dir)
+    metadata = plans.load_plan_metadata(plan_dir)
+    if registry is None or not isinstance(metadata, plans.WorkspacePlanMetadata):
+        return {}
+    root = plans.canonicalize_path(metadata.workspace_root)
+    rows = [
+        {
+            "alias": repository.alias,
+            "path": repository.path,
+            "origin": repository.origin,
+            "resolved_root": str(plans.canonicalize_path(root / repository.path)),
+        }
+        for repository in registry.repositories
+    ]
+    return {
+        "workspace_root": str(root),
+        "registry_digest": metadata.registry_digest,
+        "repositories": rows,
+        "repository_count": len(rows),
+    }
+
+
+def _workspace_payload(
+    workspace: Mapping[str, Any],
+    *,
+    cwd: str | None = None,
+) -> dict[str, Any]:
+    """Return the compatibility and structured workspace API fields."""
+    workspace_root = workspace.get("workspace_root")
+    return {
+        "cwd": cwd if cwd is not None else workspace_root,
+        "workspace_root": workspace_root,
+        "registry_digest": workspace.get("registry_digest"),
+        "repositories": [
+            dict(row)
+            for row in _repository_rows(workspace.get("repositories"))
+        ],
+        "repository_count": int(workspace.get("repository_count") or 0),
+    }
+
+
+def _workspace_launch_profile(
+    plan_dir: Path, profile: "LaunchProfile"
+) -> tuple["LaunchProfile", dict[str, Any]]:
+    """Bind a registered Workbench launch to its prepared workspace root."""
+    workspace = _workspace_projection(plan_dir)
+    bound_root = workspace.get("workspace_root")
+    if not isinstance(bound_root, str) or not bound_root:
+        return profile, workspace
+    if profile.cwd is not None:
+        try:
+            requested = plans.canonicalize_path(profile.cwd)
+            bound = plans.canonicalize_path(bound_root)
+        except (OSError, ValueError) as error:
+            raise LaunchError(
+                LAUNCH_REASON_INVALID_PROFILE,
+                f"invalid workspace root in launch profile: {error}",
+            ) from error
+        if requested != bound:
+            raise LaunchError(
+                LAUNCH_REASON_INVALID_PROFILE,
+                "launch cwd does not match the prepared workspace binding; "
+                "use `asl prepare PLAN_DIR --resume --cwd NEW_WORKSPACE "
+                "--rebind-workspace` to change it atomically",
+            )
+    return replace(profile, cwd=bound_root), workspace
 
 
 PrimaryState = Literal[
@@ -299,9 +398,20 @@ class WorkbenchRegistry:
     warnings: tuple[str, ...] = ()
 
     def to_payload(self) -> dict[str, Any]:
+        pins_payload: list[dict[str, Any]] = []
+        for pin in self.pins:
+            payload = pin.to_payload()
+            try:
+                workspace = _workspace_projection(pin.plan_dir)
+            except (plans.PlanError, OSError, ValueError):
+                workspace = {}
+            if workspace:
+                payload.update(workspace)
+                payload["workspace"] = dict(workspace)
+            pins_payload.append(payload)
         return {
             "schema_version": self.schema_version,
-            "pins": [pin.to_payload() for pin in self.pins],
+            "pins": pins_payload,
             "plan_roots": list(self.plan_roots),
             "archive_retention_days": self.archive_retention_days,
             "path": str(self.path) if self.path is not None else None,
@@ -2043,6 +2153,11 @@ class WorkbenchSummary:
     result_path: Path | None
     run_id: str | None
     harness: str | None
+    cwd: str | None
+    workspace_root: str | None
+    registry_digest: str | None
+    repositories: tuple[dict[str, Any], ...]
+    repository_count: int
     pause_reason: str | None
     pause_message: str | None
     last_message_preview: str | None
@@ -2107,6 +2222,15 @@ class WorkbenchSummary:
             "result_path": str(self.result_path) if self.result_path else None,
             "run_id": self.run_id,
             "harness": self.harness,
+            **_workspace_payload(
+                {
+                    "workspace_root": self.workspace_root,
+                    "registry_digest": self.registry_digest,
+                    "repositories": self.repositories,
+                    "repository_count": self.repository_count,
+                },
+                cwd=self.cwd,
+            ),
             "pause_reason": self.pause_reason,
             "pause_message": self.pause_message,
             "last_message_preview": self.last_message_preview,
@@ -2176,6 +2300,12 @@ GENERIC_RECOVERY_PAUSE_REASONS: tuple[str, ...] = (
     # The guard's git probes failed, so the review needs a working repository
     # before it can be relaunched — inspect, do not reply.
     "review-guard-unavailable",
+    # Registered implementation turns remain unavailable until the workspace
+    # write guard is installed — inspect or upgrade, do not request a reply.
+    "workspace-write-guard-unavailable",
+    # The retained repository changes need a durable scope repair plus fresh
+    # expansion/preflight, not an operator reply to the paused harness turn.
+    "workspace-write-scope-violation",
     # Review repair-cycle materialization failed closed (Session 18); the
     # review artifacts or plan structure need inspection, not a reply.
     "malformed-review-repair",
@@ -2345,6 +2475,8 @@ class WorkbenchRecovery:
     warnings: tuple[str, ...] = ()
     warning_details: tuple[RecoveryWarning, ...] = ()
     review_resume: Mapping[str, Any] = field(default_factory=dict)
+    workspace: Mapping[str, Any] = field(default_factory=dict)
+    commit_groups: tuple[Mapping[str, Any], ...] = ()
 
     def compact_payload(self) -> dict[str, Any]:
         primary_action = self.actions[0] if self.actions else None
@@ -2363,6 +2495,11 @@ class WorkbenchRecovery:
             "command_count": len(self.commands),
             "warning_count": len(self.warnings),
             "review_resume": dict(self.review_resume),
+            "workspace_root": self.workspace.get("workspace_root"),
+            "repository_count": int(self.workspace.get("repository_count") or 0),
+            "pending_commit_group_count": sum(
+                row.get("status") != "complete" for row in self.commit_groups
+            ),
         }
 
     def to_payload(self) -> dict[str, Any]:
@@ -2386,6 +2523,9 @@ class WorkbenchRecovery:
                 warning.to_payload() for warning in self.warning_details
             ],
             "review_resume": dict(self.review_resume),
+            "workspace": dict(self.workspace),
+            **_workspace_payload(self.workspace),
+            "commit_groups": [dict(group) for group in self.commit_groups],
             "compact": self.compact_payload(),
         }
 
@@ -2641,6 +2781,10 @@ def _build_recovery_context(
         lock_info=lock_info,
     )
     raw_state, warnings, warning_details = _read_recovery_state_payload(state_path)
+    workspace = _workspace_projection(
+        snapshot.plan_dir,
+        runtime=raw_state if raw_state.get("workspace_root") else runner_state,
+    )
     stale_unfinished, stale_reason = state._stale_runner_state(
         runner_state, lock_info
     )
@@ -2666,7 +2810,13 @@ def _build_recovery_context(
         pause_details=_pause_details(raw_state),
         pause_message=_pause_message(raw_state) or reason or "Paused",
         base_artifacts=base_artifacts,
-        plan_dir_payload={"plan_dir": str(snapshot.plan_dir)},
+        plan_dir_payload={
+            "plan_dir": str(snapshot.plan_dir),
+            "cwd": workspace.get("workspace_root"),
+            "workspace_root": workspace.get("workspace_root"),
+            "registry_digest": workspace.get("registry_digest"),
+            "repositories": workspace.get("repositories", []),
+        },
         stale_unfinished=stale_unfinished,
         stale_reason=stale_reason,
         warnings=warnings,
@@ -3155,10 +3305,11 @@ def _verification_check_evidence(
     for check in failed_checks[:5]:
         name = _payload_str(check, "name") or "check"
         failure_reason = _payload_str(check, "failure_reason")
+        repository = _payload_str(check, "repo")
         rows.append(
             RecoveryEvidenceRow(
                 label="Failed check",
-                value=name,
+                value=(f"{repository}:{name}" if repository else name),
                 detail=failure_reason,
                 severity="error",
             )
@@ -3427,7 +3578,12 @@ def _commit_failed_evidence(
         if failed_commit is not None
         else None
     )
-    return (
+    repository = (
+        _payload_str(failed_commit, "repository_alias")
+        if failed_commit is not None
+        else None
+    )
+    rows = [
         RecoveryEvidenceRow(
             label="Pause reason",
             value="commit-failed",
@@ -3443,7 +3599,118 @@ def _commit_failed_evidence(
             ),
             severity="error",
         ),
-    )
+    ]
+    if repository is not None:
+        rows.append(
+            RecoveryEvidenceRow(
+                label="Failed repository",
+                value=repository,
+                severity="error",
+            )
+        )
+    return tuple(rows)
+
+
+def _commit_group_evidence(
+    raw_state: Mapping[str, Any],
+) -> tuple[RecoveryEvidenceRow, ...]:
+    rows: list[RecoveryEvidenceRow] = []
+    groups = raw_state.get("commit_groups")
+    if not isinstance(groups, Sequence) or isinstance(groups, (str, bytes)):
+        return ()
+    unresolved = [
+        group
+        for group in groups
+        if isinstance(group, Mapping) and group.get("status") != "complete"
+    ]
+    for group in unresolved[:3]:
+        successful = group.get("successful_repositories")
+        shas = [
+            f"{row.get('alias') or row.get('key')}={row.get('commit_sha')}"
+            for row in successful
+            if isinstance(row, Mapping) and row.get("commit_sha")
+        ] if isinstance(successful, Sequence) else []
+        remaining = group.get("remaining_aliases")
+        remaining_text = (
+            ", ".join(str(alias) for alias in remaining[:6])
+            if isinstance(remaining, list)
+            else None
+        )
+        detail_parts = []
+        if shas:
+            detail_parts.append("committed " + ", ".join(shas[:4]))
+        if remaining_text:
+            detail_parts.append("remaining " + remaining_text)
+        rows.append(
+            RecoveryEvidenceRow(
+                label="Pending commit group",
+                value=str(group.get("failed_alias") or group.get("status") or "pending"),
+                detail="; ".join(detail_parts) or None,
+                severity="error" if group.get("failed_alias") else "warning",
+            )
+        )
+    if len(unresolved) > 3:
+        rows.append(
+            RecoveryEvidenceRow(
+                label="Additional pending commit groups",
+                value=str(len(unresolved) - 3),
+                severity="warning",
+            )
+        )
+    return tuple(rows)
+
+
+def _workspace_guard_recovery_evidence(
+    details: Mapping[str, Any],
+) -> tuple[RecoveryEvidenceRow, ...]:
+    guard = _payload_mapping(details, "workspace_write_guard")
+    if guard is None:
+        return ()
+    rows: list[RecoveryEvidenceRow] = []
+    for violation in _payload_mappings(guard, "violations")[:5]:
+        alias = _payload_str(violation, "alias") or _payload_str(
+            violation, "repository"
+        )
+        qualified = violation.get("qualified_paths")
+        paths = (
+            ", ".join(str(path) for path in qualified[:4])
+            if isinstance(qualified, list)
+            else None
+        )
+        rows.append(
+            RecoveryEvidenceRow(
+                label="Scope violation",
+                value=alias,
+                detail=paths,
+                severity="error",
+            )
+        )
+    unavailable = guard.get("unavailable")
+    if isinstance(unavailable, Mapping):
+        for repository, evidence in list(unavailable.items())[:5]:
+            rows.append(
+                RecoveryEvidenceRow(
+                    label="Repository evidence unavailable",
+                    value=str(repository),
+                    detail=json.dumps(evidence, sort_keys=True)[:280],
+                    severity="error",
+                )
+            )
+    repair = guard.get("repair_required")
+    if isinstance(repair, Mapping) and any(repair.values()):
+        rows.append(
+            RecoveryEvidenceRow(
+                label="Rebind and scope guidance",
+                value="durable scope + fresh expansion + preflight required",
+                detail=(
+                    "Workspace changes require `asl prepare PLAN_DIR --resume "
+                    "--cwd NEW_WORKSPACE --rebind-workspace`; write authority "
+                    "requires a plan edit and fresh preflight."
+                ),
+                severity="warning",
+            )
+        )
+    return tuple(rows)
 
 
 def _build_recovery_payload(
@@ -3490,6 +3757,12 @@ def _build_recovery_payload(
         warnings=warnings,
         warning_details=warning_details,
         review_resume=review_resume or {},
+        workspace=_workspace_projection(plan_dir, runtime=raw_state),
+        commit_groups=tuple(
+            dict(group)
+            for group in raw_state.get("commit_groups", ())
+            if isinstance(group, Mapping)
+        ),
     )
 
 
@@ -3704,7 +3977,10 @@ def _build_commit_failed_recovery(
         recoverable=True,
         selected_commit=failed_commit,
         artifacts=artifacts,
-        evidence=_commit_failed_evidence(failed_commit),
+        evidence=(
+            _commit_failed_evidence(failed_commit)
+            + _commit_group_evidence(context.raw_state)
+        ),
         actions=(
             _inspect_action("Open the failed commit logs and result JSON."),
             _retry_run_action(context.plan_dir_payload),
@@ -3941,7 +4217,9 @@ def _build_failed_finished_recovery(
                 value=context.pause_message,
                 severity="error",
             ),
-        ),
+        )
+        + _workspace_guard_recovery_evidence(context.pause_details)
+        + _commit_group_evidence(context.raw_state),
         actions=(
             _inspect_action("Open the latest relevant logs and result JSON."),
             _retry_run_action(context.plan_dir_payload),
@@ -4201,7 +4479,32 @@ def build_workbench_recovery(
             ),
         )
 
-    context = _build_recovery_context(snapshot, state_dir)
+    try:
+        context = _build_recovery_context(snapshot, state_dir)
+    except (plans.PlanError, OSError, ValueError) as error:
+        state_path, events_path, progress_path = _summary_base_paths(
+            snapshot.plan_dir, state_dir
+        )
+        return WorkbenchRecovery(
+            plan_dir=snapshot.plan_dir,
+            kind="generic",
+            title="Workspace metadata cannot be inspected",
+            summary=str(error),
+            severity="error",
+            recoverable=True,
+            evidence=(
+                RecoveryEvidenceRow(
+                    label="Workspace metadata error",
+                    value=str(error),
+                    severity="error",
+                ),
+            ),
+            artifacts=_recovery_base_artifacts(
+                state_path=state_path,
+                events_path=events_path,
+                progress_path=progress_path,
+            ),
+        )
     expired_wait_context = _expired_wait_qna_context(
         snapshot,
         context.runner_state,
@@ -4301,6 +4604,10 @@ def _build_invalid_summary(
     state_paths: tuple[Path, Path, Path] | None = None,
     state_dir: str | Path | None = None,
 ) -> WorkbenchSummary:
+    try:
+        workspace = _workspace_projection(plan.plan_dir) if exists else {}
+    except (plans.PlanError, OSError, ValueError):
+        workspace = {}
     if state_paths is not None:
         state_path, events_path, progress_path = state_paths
     else:
@@ -4355,6 +4662,15 @@ def _build_invalid_summary(
         result_path=None,
         run_id=None,
         harness=None,
+        cwd=(
+            str(workspace.get("workspace_root"))
+            if workspace.get("workspace_root") is not None
+            else (plan.profile.cwd if plan.profile is not None else None)
+        ),
+        workspace_root=workspace.get("workspace_root"),
+        registry_digest=workspace.get("registry_digest"),
+        repositories=_repository_rows(workspace.get("repositories")),
+        repository_count=int(workspace.get("repository_count") or 0),
         pause_reason=None,
         pause_message=None,
         last_message_preview=None,
@@ -4424,6 +4740,23 @@ def build_workbench_summary(
     runner_state = state._runner_state_payload(
         state_path,
         lock_info=lock_info,
+    )
+    try:
+        workspace = _workspace_projection(
+            snapshot.plan_dir, runtime=runner_state
+        )
+    except (plans.PlanError, OSError, ValueError) as error:
+        return _build_invalid_summary(
+            replace(plan, plan_dir=snapshot.plan_dir, exists=True),
+            detail=f"workspace metadata unreadable: {error}",
+            exists=True,
+            state_paths=(state_path, events_path, progress_path),
+            state_dir=state_dir,
+        )
+    summary_cwd = (
+        runner_state.get("cwd")
+        or workspace.get("workspace_root")
+        or (plan.profile.cwd if plan.profile is not None else None)
     )
     expired_wait_context = _expired_wait_qna_context(
         snapshot,
@@ -4538,6 +4871,11 @@ def build_workbench_summary(
             result_path=result_path,
             run_id=run_id,
             harness=harness,
+            cwd=str(summary_cwd) if summary_cwd is not None else None,
+            workspace_root=workspace.get("workspace_root"),
+            registry_digest=workspace.get("registry_digest"),
+            repositories=_repository_rows(workspace.get("repositories")),
+            repository_count=int(workspace.get("repository_count") or 0),
             pause_reason=pause_reason,
             pause_message=pause_message,
             last_message_preview=last_message_preview,
@@ -4936,6 +5274,10 @@ class LaunchResult:
     reply_length: int | None
     reply_origin: str | None
     state_dir: Path | None
+    cwd: str | None = None
+    workspace_root: str | None = None
+    registry_digest: str | None = None
+    repositories: tuple[dict[str, Any], ...] = ()
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -4947,6 +5289,10 @@ class LaunchResult:
             "reply_length": self.reply_length,
             "reply_origin": self.reply_origin,
             "state_dir": str(self.state_dir) if self.state_dir is not None else None,
+            "cwd": self.cwd,
+            "workspace_root": self.workspace_root,
+            "registry_digest": self.registry_digest,
+            "repositories": [dict(row) for row in self.repositories],
         }
 
 
@@ -5050,6 +5396,7 @@ def build_launch_argv(
     """
     canonical = _validate_launch_plan_dir(plan_dir)
     validated = _validate_launch_profile(profile)
+    validated, _workspace = _workspace_launch_profile(canonical, validated)
     interpreter = python_executable or sys.executable
     argv: list[str] = [interpreter, "-m", "agent_session_loop", "run", str(canonical)]
 
@@ -5118,6 +5465,7 @@ def launch_plan(
     """
     canonical = _validate_launch_plan_dir(plan_dir)
     validated = _validate_launch_profile(profile)
+    validated, workspace = _workspace_launch_profile(canonical, validated)
     reply_via_stdin = reply_text is not None
     reply_length: int | None = None
     if reply_via_stdin:
@@ -5189,6 +5537,10 @@ def launch_plan(
         reply_length=reply_length,
         reply_origin="stdin" if reply_via_stdin else None,
         state_dir=canonical_state_dir,
+        cwd=validated.cwd,
+        workspace_root=workspace.get("workspace_root"),
+        registry_digest=workspace.get("registry_digest"),
+        repositories=_repository_rows(workspace.get("repositories")),
     )
 
 

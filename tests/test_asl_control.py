@@ -1777,17 +1777,16 @@ class MailboxTests(unittest.TestCase):
     def test_mailbox_transactions_are_synced_but_lease_heartbeats_are_not(
         self,
     ) -> None:
-        real_fsync = os.fsync
-        with mock.patch.object(mailbox.os, "fsync", wraps=real_fsync) as fsync:
+        with mock.patch.object(mailbox.durability, "fullsync") as fullsync:
             mailbox.append_guidance(
                 self.plan_dir,
                 "durable guidance",
                 state_dir=self.state_dir,
                 created_at=self.timestamp(),
             )
-            fsync.assert_called_once()
+            fullsync.assert_called_once()
 
-            fsync.reset_mock()
+            fullsync.reset_mock()
             mailbox.append_wait_question(
                 self.plan_dir,
                 "durable wait",
@@ -1798,16 +1797,16 @@ class MailboxTests(unittest.TestCase):
                 waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
                 created_at=self.timestamp(),
             )
-            fsync.assert_called_once()
+            fullsync.assert_called_once()
 
-            fsync.reset_mock()
+            fullsync.reset_mock()
             mailbox.write_lease(
                 self.plan_dir,
                 self.message_id(),
                 state_dir=self.state_dir,
                 updated_at=self.timestamp(),
             )
-            fsync.assert_not_called()
+            fullsync.assert_not_called()
 
     def test_reply_timeout_race_is_consistent_across_processes(self) -> None:
         question, wait_start = mailbox.append_wait_question(

@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Literal
 import uuid
 
-from . import state
+from . import durability, state
 
 
 MAILBOX_FILE_NAME = "mailbox.jsonl"
@@ -1413,7 +1413,7 @@ def _write_locked_records(
         # Mailbox records carry durable decisions. Flush the completed
         # transaction before releasing its lock so a sudden shutdown cannot
         # acknowledge a reply, resolution, or receipt that never reached disk.
-        os.fsync(fd)
+        durability.fullsync(fd)
     except OSError:
         try:
             os.ftruncate(fd, original_size)
@@ -1946,7 +1946,7 @@ def _append_record(
                     f"short mailbox append: wrote {written} of "
                     f"{len(append_bytes)} bytes"
                 )
-            os.fsync(fd)
+            durability.fullsync(fd)
         except OSError:
             # A regular-file write should be all-or-error, but restoring the
             # original length also fails safe on an observable short write.

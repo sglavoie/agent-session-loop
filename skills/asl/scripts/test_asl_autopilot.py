@@ -23,6 +23,10 @@ autopilot = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(autopilot)
 
+# Loading the helper installs the repository root on ``sys.path`` so this test
+# remains directly executable from an arbitrary working directory.
+from agent_session_loop import runner  # noqa: E402
+
 
 class ArgParserTest(unittest.TestCase):
     def test_parser_exposes_stable_option_surface(self) -> None:
@@ -94,6 +98,12 @@ class MainTest(unittest.TestCase):
 
 
 class ParseCommandTest(unittest.TestCase):
+    def test_review_cycle_default_matches_runner(self) -> None:
+        self.assertEqual(
+            runner.DEFAULT_MAX_REVIEW_FIX_CYCLES,
+            autopilot.DEFAULT_MAX_REVIEW_FIX_CYCLES,
+        )
+
     def test_parses_minimal_run_and_appends_json(self) -> None:
         result = autopilot.parse_command("asl run /tmp/plan")
         self.assertTrue(result["ok"])
@@ -162,6 +172,43 @@ class ParseCommandTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["cwd"], os.path.join(home, "repo"))
         self.assertEqual(result["state_dir"], os.path.join(home, "state"))
+
+    def test_status_workspace_is_added_when_registered_command_omits_cwd(self) -> None:
+        parsed = autopilot.parse_command("asl run /tmp/plan")
+        status = {
+            "ok": True,
+            "workspace_root": "/tmp/workspace",
+            "registry_digest": "a" * 64,
+            "repositories": [
+                {"alias": "SVC", "resolved_root": "/tmp/workspace/svc"},
+                {"alias": "OAK", "resolved_root": "/tmp/workspace/oak"},
+            ],
+        }
+
+        bound = autopilot._parsed_with_status_workspace(parsed, status)
+
+        self.assertEqual("/tmp/workspace", bound["cwd"])
+        self.assertEqual(
+            "/tmp/workspace", bound["argv"][bound["argv"].index("--cwd") + 1]
+        )
+        self.assertEqual(["SVC", "OAK"], [row["alias"] for row in bound["repositories"]])
+
+    def test_status_workspace_mismatch_requires_explicit_rebind(self) -> None:
+        parsed = autopilot.parse_command(
+            "asl run /tmp/plan --cwd /tmp/workspace/svc"
+        )
+        status = {
+            "ok": True,
+            "workspace_root": "/tmp/workspace",
+            "repositories": [
+                {"alias": "SVC", "resolved_root": "/tmp/workspace/svc"}
+            ],
+        }
+
+        error = autopilot._workspace_launch_error(parsed, status)
+
+        self.assertIsNotNone(error)
+        self.assertIn("--rebind-workspace", error)
 
     def test_supported_flags_are_preserved(self) -> None:
         result = autopilot.parse_command(
@@ -1058,6 +1105,27 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         result = self._supervise(status, run, parsed=parsed)
         self.assertTrue(result["ok"], result)
         self.assertEqual(run.chunks, [1])
+
+    def test_default_cap_launches_materialization_requiring_three_or_four(
+        self,
+    ) -> None:
+        parsed = autopilot.parse_command(
+            "asl run /tmp/plan --review-harness codex"
+        )
+        self.assertTrue(parsed["ok"], parsed)
+        for minimum_cap in (3, 4):
+            with self.subTest(minimum_cap=minimum_cap):
+                status = _status_payload(0)
+                status["review_resume"] = _review_resume(
+                    "materialize-repairs",
+                    eligible=False,
+                    blocker="higher-cap-required",
+                    minimum_required_cap=minimum_cap,
+                    source_disposition="cycle-cap-exhausted",
+                )
+                self.assertTrue(
+                    autopilot._should_launch_for_status(parsed, status, 0)
+                )
 
     def test_unchanged_insufficient_cap_returns_guidance_without_launch(self) -> None:
         blocked = _status_payload(0)

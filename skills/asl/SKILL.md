@@ -54,6 +54,18 @@ completion (there is no per-chunk restarting). See Step 4 for how a budget stop
 is reported. A run can also be stopped gracefully **without** a budget — see
 *Request a graceful stop mid-run* below.
 
+For a registered multi-repository plan, `--cwd` is the common workspace root,
+not one child checkout. Prefer the authoritative `workspace_root`,
+`registry_digest`, and ordered `repositories` projection from `asl status
+--json`; an omitted root may be filled from that binding, but a conflicting
+root is `user_required`. Autopilot never infers a parent from one repository or
+grants itself `--rebind-workspace` authority. A deliberate move is a separate
+operator action:
+
+```text
+asl prepare PLAN_DIR --resume --cwd NEW_WORKSPACE --rebind-workspace
+```
+
 ## Instructions
 
 ### Step 1: Run the bundled helper
@@ -267,6 +279,22 @@ paused run may also cite a `command-not-runnable` readiness finding (an
 unresolved `argv[0]`, or a non-importable `python -m <module>`); surface it
 rather than resuming.
 
+Registered workspace guard and commit-group failures are also operator-visible,
+not generic retry candidates:
+
+- `workspace-write-scope-violation` retains the worker's changes, restores the
+  handoff to pending, and reports qualified `Alias:path` evidence for writes in
+  read-only, out-of-scope, or unregistered repositories and for added/removed
+  worktrees. Do not revert or adopt that delta; the operator must restore it or
+  durably repair scope and refresh preparation evidence.
+- `workspace-write-guard-unavailable` means complete Git evidence could not be
+  captured. Treat it fail-closed and surface the affected aliases/topology.
+- `commit-failed` may represent a partial multi-repository commit group. Read
+  the unresolved group, successful per-repository SHAs, failed alias, remaining
+  aliases, and qualified artifacts from status/recovery output. Never undo or
+  recommit recorded successes; after the failing repository is repaired,
+  rerunning the same command resumes the durable group before another worker.
+
 #### Optional: sleep through a quota reset
 
 A `quota-exhausted` pause is fail-closed by default — the helper stops
@@ -343,6 +371,13 @@ follow-up fix plan. Instead:
    include its minimum cap or artifact-remediation detail so the user can resume
    the same plan.
 
+Registered review is one combined read-only review across the ordered registry.
+Every finding, evidence path, and completion check is repository-attributed;
+repair children read the full registry but write only finding-derived aliases,
+and every review or repair turn passes the same workspace mutation guard. Keep
+aliases on findings and report qualified paths—never collapse the review to one
+repository or treat a mutation from the read-only review harness as a finding.
+
 ### Step 4: Report
 
 Summarize the outcome: which run was supervised, whether it completed or paused,
@@ -374,6 +409,10 @@ the pending review when the stop landed after the last session.
   `asl run --max-review-fix-cycles` (default 4; `--max-review-fix-plans` is a
   deprecated alias). Corrected artifacts and higher caps resume the same plan;
   this skill never creates follow-up fix plans.
+- Preserve registered workspace semantics across launch, attach, replies,
+  combined review, and recovery: use the bound workspace root, retain ordered
+  repository aliases and qualified paths, never rebind automatically, and
+  preserve partial commit SHAs.
 - `asl outbox wait` is the supervision loop; tailing the helper's background
   output is the fallback for when the mailbox is unavailable.
 - Keep the mailbox discipline: continue only plainly nonblocking messages,

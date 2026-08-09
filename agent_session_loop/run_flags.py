@@ -70,7 +70,8 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
         option_strings=("--cwd",),
         cli_default=".",
         help=(
-            "Repository root where the harness should run "
+            "Repository root for a legacy plan or workspace root for a "
+            "registered plan "
             "(default: current directory)"
         ),
     ),
@@ -133,7 +134,7 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
         type=int,
         help=(
             "Maximum automatic repair/rereview cycles after a findings "
-            "review (default: 2). 0 still runs the review but creates no "
+            "review (default: 4). 0 still runs the review but creates no "
             "repair sessions"
         ),
     ),

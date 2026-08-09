@@ -13,6 +13,8 @@ from pathlib import Path
 import threading
 from typing import Any
 
+from . import durability
+
 
 # Schema version stamped on every event record. Readers must treat the
 # absence of a ``version`` key as v1 and accept v2 records that carry it.
@@ -32,12 +34,16 @@ TURN_HANG_CLEARED_EVENT = "turn_hang_cleared"
 ACTION_REQUIRED_EVENT = "action_required"
 COMMIT_STARTED_EVENT = "commit_started"
 COMMIT_FINISHED_EVENT = "commit_finished"
+COMMIT_GROUP_STARTED_EVENT = "commit_group_started"
+COMMIT_GROUP_UPDATED_EVENT = "commit_group_updated"
+COMMIT_GROUP_FINISHED_EVENT = "commit_group_finished"
 RUN_CONTROL_EVENT = "run_control"
 MAILBOX_EVENT = "mailbox"
 REVIEW_SESSION_CREATED_EVENT = "review_session_created"
 REVIEW_SCOPE_EVENT = "review_scope_selected"
 REVIEW_CYCLE_EVENT = "review_cycle"
 REVIEW_REPAIR_REOPENED_EVENT = "review_repair_reopened"
+WORKSPACE_WRITE_SCOPE_REPAIR_EVENT = "workspace_write_scope_repair"
 # Appended when a review turn produced a verdict that failed validation and the
 # runner re-ran the same review session in-run instead of pausing. The
 # exhausted case keeps the ``verify-failed`` pause and carries a
@@ -107,6 +113,18 @@ PAUSE_REASON_MALFORMED_REVIEW_REPAIR = "malformed-review-repair"
 # A git probe the review mutation guard depends on failed, so the guard cannot
 # prove the review turn left the worktree alone.
 PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE = "review-guard-unavailable"
+# Registered implementation turns stay disabled until their write guard can
+# prove mutations remained inside the selected session's writable aliases.
+PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE = (
+    "workspace-write-guard-unavailable"
+)
+# A registered implementation turn changed a repository outside the selected
+# session's authoritative write aliases. Contents are deliberately retained;
+# the session is returned to pending so an operator can repair the durable
+# scope and refresh expansion/preflight evidence.
+PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION = (
+    "workspace-write-scope-violation"
+)
 
 # The subset of harness-failure categories that a supervisor may safely retry
 # by relaunching the same session. Quota, authentication, invalid-model, and
@@ -141,6 +159,8 @@ PAUSE_REASONS: tuple[str, ...] = (
     "review-harness-required",
     "review-mutated-worktree",
     PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,
+    PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+    PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
     PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
     PAUSE_REASON_QUOTA_EXHAUSTED,
     PAUSE_REASON_AUTH_FAILED,
@@ -171,10 +191,12 @@ class Event:
 
 
 def append_event(path: str | Path, event: Event) -> None:
-    """Append one event record as a JSON line."""
+    """Append one event record and issue a platform device-level fullsync."""
     event_path = Path(path)
     event_path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(event.to_dict(), sort_keys=True) + "\n"
     with _EVENT_WRITE_LOCK:
         with event_path.open("a", encoding="utf-8") as event_file:
             event_file.write(line)
+            event_file.flush()
+            durability.fullsync(event_file.fileno())

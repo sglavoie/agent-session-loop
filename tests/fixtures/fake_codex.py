@@ -3,17 +3,20 @@
 
 from __future__ import annotations
 
+import json
 import os
-from pathlib import Path
 import re
+import subprocess
 import sys
 import time
+from pathlib import Path
 
 
 STATUS_PENDING = "- **Status**: pending"
 STATUS_COMPLETE = "- **Status**: complete"
 HANDOFF_HEADING = "## Handoff"
 SESSION_FILE_RE = re.compile(r"^session-([1-9][0-9]*(?:\.[1-9][0-9]*)*)\.md$")
+VALIDATION_PACKET_PREFIX = "# ASL preparation validation packet"
 
 
 def _arg_value(flag: str) -> str | None:
@@ -93,6 +96,19 @@ def _handoff_status_line(path: Path) -> str | None:
 def _mark_complete(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines()
+    session_label = _session_label(path)
+    handoff_files_json = os.environ.get("FAKE_CODEX_HANDOFF_FILES_JSON")
+    handoff_files: list[str] = []
+    if handoff_files_json:
+        payload = json.loads(handoff_files_json)
+        if not isinstance(payload, dict):
+            raise RuntimeError("FAKE_CODEX_HANDOFF_FILES_JSON must contain an object")
+        raw_files = payload.get(session_label, [])
+        if not isinstance(raw_files, list) or not all(
+            isinstance(value, str) for value in raw_files
+        ):
+            raise RuntimeError("fake Codex handoff file entries must be string lists")
+        handoff_files = raw_files
     for index in range(len(lines) - 1, -1, -1):
         if lines[index].strip() != HANDOFF_HEADING:
             continue
@@ -101,10 +117,109 @@ def _mark_complete(path: Path) -> None:
                 break
             if lines[status_index] == STATUS_PENDING:
                 lines[status_index] = STATUS_COMPLETE
+                for handoff_index in range(status_index + 1, len(lines)):
+                    if lines[handoff_index].startswith("## "):
+                        break
+                    if lines[handoff_index] == "- **Files modified**: (none yet)":
+                        rendered_files = ", ".join(handoff_files) or "(none)"
+                        lines[handoff_index] = f"- **Files modified**: {rendered_files}"
+                    elif lines[handoff_index] == "- **Key decisions**: (none yet)":
+                        lines[handoff_index] = (
+                            "- **Key decisions**: Fake harness applied "
+                            "deterministic fixture work."
+                        )
                 suffix = "\n" if text.endswith("\n") else ""
                 path.write_text("\n".join(lines) + suffix, encoding="utf-8")
                 return
         return
+
+
+def _apply_workspace_mutation() -> None:
+    """Apply an opt-in repository mutation for runner guard integration tests."""
+    mutations_json = os.environ.get("FAKE_CODEX_MUTATIONS_JSON")
+    if mutations_json:
+        mutations = json.loads(mutations_json)
+        if not isinstance(mutations, list):
+            raise RuntimeError("FAKE_CODEX_MUTATIONS_JSON must contain a list")
+        for mutation in mutations:
+            if not isinstance(mutation, dict) or not isinstance(
+                mutation.get("path"), str
+            ):
+                raise RuntimeError("fake Codex mutation entries need a path")
+            _apply_workspace_mutation_record(mutation)
+        return
+    target_value = os.environ.get("FAKE_CODEX_MUTATION_PATH")
+    if not target_value:
+        return
+    _apply_workspace_mutation_record(
+        {
+            "path": target_value,
+            "action": os.environ.get("FAKE_CODEX_MUTATION_ACTION", "write"),
+            "text": os.environ.get("FAKE_CODEX_MUTATION_TEXT", "mutated\n"),
+            "destination": os.environ.get("FAKE_CODEX_MUTATION_DESTINATION"),
+        }
+    )
+
+
+def _apply_workspace_mutation_record(mutation: dict[str, object]) -> None:
+    target = Path(str(mutation["path"]))
+    action = str(mutation.get("action", "write"))
+    if action == "write":
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            str(mutation.get("text", "mutated\n")),
+            encoding="utf-8",
+        )
+        return
+    if action == "delete":
+        target.unlink()
+        return
+    if action == "rename":
+        destination = mutation.get("destination")
+        if not destination:
+            raise RuntimeError("rename mutation needs a destination")
+        target.rename(Path(str(destination)))
+        return
+    if action == "stage":
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            str(mutation.get("text", "staged mutation\n")),
+            encoding="utf-8",
+        )
+        repository = subprocess.run(
+            ["git", "-C", str(target.parent), "rev-parse", "--show-toplevel"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "-C", repository, "add", str(target)],
+            capture_output=True,
+            check=True,
+        )
+        return
+    if action == "git-init":
+        target.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "init", str(target)], capture_output=True, check=True
+        )
+        return
+    if action == "commit-head":
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(target),
+                "commit",
+                "--allow-empty",
+                "-m",
+                "harness commit",
+            ],
+            capture_output=True,
+            check=True,
+        )
+        return
+    raise RuntimeError(f"unsupported workspace mutation action: {action}")
 
 
 def _append_future_note(path: Path, *, source_session_id: str) -> None:
@@ -279,7 +394,11 @@ def _invalid_review_artifacts(variant: str) -> tuple[str, str]:
 
 
 def _write_review_outcome(
-    plan_dir: Path, outcome: str, *, write_artifact: bool = True
+    plan_dir: Path,
+    outcome: str,
+    *,
+    write_artifact: bool = True,
+    repository_aware: bool = False,
 ) -> None:
     """Write review artifacts for one scripted review outcome.
 
@@ -311,6 +430,16 @@ def _write_review_outcome(
         review_json = '{"version": 2, "outcome": "all-clear", "findings": []}\n'
     else:
         review_body, review_json = _findings_review_artifacts(outcome)
+    if repository_aware and review_json:
+        artifact = json.loads(review_json)
+        artifact["version"] = 3
+        for finding in artifact.get("findings", []):
+            finding["repo"] = "SVC"
+            for evidence in finding.get("evidence", []):
+                evidence["path"] = "SVC:" + evidence["path"]
+            for check in finding.get("verification_checks", []):
+                check["repo"] = "SVC"
+        review_json = json.dumps(artifact) + "\n"
     (plan_dir / "final-review.md").write_text(review_body, encoding="utf-8")
     if write_artifact and review_json:
         (plan_dir / "final-review.json").write_text(
@@ -344,6 +473,70 @@ def _write_last_message(text: str) -> None:
     path = Path(last_message)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _validation_prompt() -> str | None:
+    return next(
+        (value for value in sys.argv[1:] if value.startswith(VALIDATION_PACKET_PREFIX)),
+        None,
+    )
+
+
+def _run_prepare_validator(plan_dir: Path, prompt: str) -> int:
+    """Return a real packet-derived validation aggregate for prepare E2E tests."""
+    mode = os.environ.get("FAKE_CODEX_VALIDATOR_MODE", "success")
+    if mode == "failure":
+        print("fake validator failure", file=sys.stderr)
+        return 29
+    if mode == "malformed":
+        _write_last_message("not-json\n")
+        return 0
+
+    from agent_session_loop import prepare
+
+    heading = prompt.splitlines()[0]
+    _prefix, _separator, raw_ids = heading.partition(" — sessions ")
+    session_ids = tuple(token.strip() for token in raw_ids.split(",") if token.strip())
+    packet = prepare.build_validation_packet(
+        plan_dir,
+        session_ids,
+        codebase_root=Path.cwd(),
+    )
+    sessions: list[dict[str, object]] = []
+    for session_id, session_path in zip(packet.session_ids, packet.session_paths):
+        title = f"Session {session_id}"
+        for line in Path(session_path).read_text(encoding="utf-8").splitlines():
+            match = re.match(r"^#+\s+Session\s+[^:]+:\s*(.+)$", line)
+            if match:
+                title = match.group(1).strip()
+                break
+        sessions.append(
+            {
+                "session_id": session_id,
+                "title": title,
+                "claims": [],
+                "issues": [],
+                "details": [],
+                "patterns": [],
+                "dependencies": [],
+                "contract_checked": True,
+                "contract_problems": [],
+                "corrections": [],
+            }
+        )
+    payload: dict[str, object] = {
+        "version": packet.version,
+        "sessions": sessions,
+    }
+    if packet.version == prepare.PREPARE_VALIDATION_VERSION:
+        payload["workspace_root"] = packet.codebase_root
+        payload["repositories"] = [
+            repository.to_dict() for repository in packet.repositories
+        ]
+    else:
+        payload["codebase_root"] = packet.codebase_root
+    _write_last_message(json.dumps(payload, sort_keys=True) + "\n")
+    return 0
 
 
 def _step_sleep() -> None:
@@ -397,6 +590,10 @@ def main() -> int:
     mode = os.environ.get("FAKE_CODEX_MODE", "success")
     plan_dir = Path(plan_dir_arg)
 
+    validation_prompt = _validation_prompt()
+    if validation_prompt is not None:
+        return _run_prepare_validator(plan_dir, validation_prompt)
+
     _write_last_message(f"fake codex mode: {mode}\n")
     stdout_text = os.environ.get("FAKE_CODEX_STDOUT_TEXT")
     if stdout_text is not None:
@@ -405,6 +602,7 @@ def main() -> int:
     if stderr_text is not None:
         print(stderr_text, end="", file=sys.stderr, flush=True)
 
+    _apply_workspace_mutation()
     if mode == "timeout":
         time.sleep(float(os.environ.get("FAKE_CODEX_SLEEP", "5")))
         return 0
@@ -507,6 +705,24 @@ def main() -> int:
             # ``final-review.json`` artifact.
             body = target.read_text(encoding="utf-8")
             if REVIEW_SESSION_MARKER in body:
+                review_mutation = os.environ.get(
+                    "FAKE_CODEX_REVIEW_MUTATION_PATH"
+                )
+                if review_mutation:
+                    _apply_workspace_mutation_record(
+                        {
+                            "path": review_mutation,
+                            "action": os.environ.get(
+                                "FAKE_CODEX_REVIEW_MUTATION_ACTION", "write"
+                            ),
+                            "text": os.environ.get(
+                                "FAKE_CODEX_REVIEW_MUTATION_TEXT", "mutated\n"
+                            ),
+                            "destination": os.environ.get(
+                                "FAKE_CODEX_REVIEW_MUTATION_DESTINATION"
+                            ),
+                        }
+                    )
                 outcomes_env = os.environ.get("FAKE_CODEX_REVIEW_OUTCOMES")
                 if outcomes_env:
                     # Scripted per-review outcomes for repair/rereview cycle
@@ -529,6 +745,9 @@ def main() -> int:
                         write_artifact=(
                             "asl:generated-review-session version=" in body
                         ),
+                        repository_aware=(
+                            "asl:generated-review-session version=4" in body
+                        ),
                     )
                 else:
                     review_body = os.environ.get(
@@ -550,7 +769,13 @@ def main() -> int:
                     if "asl:generated-review-session version=" in body:
                         review_json = os.environ.get(
                             "FAKE_CODEX_REVIEW_JSON",
-                            '{"version": 2, "outcome": "all-clear", "findings": []}\n',
+                            (
+                                '{"version": 3, "outcome": "all-clear", '
+                                '"findings": []}\n'
+                                if "asl:generated-review-session version=4" in body
+                                else '{"version": 2, "outcome": "all-clear", '
+                                '"findings": []}\n'
+                            ),
                         )
                         (plan_dir / "final-review.json").write_text(
                             review_json, encoding="utf-8"

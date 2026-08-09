@@ -67,11 +67,14 @@ from agent_session_loop.formatting import (
     format_turn_started_message,
 )
 from tests.support import (
+    DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,
     assert_marked_pids_alive,
     assert_marked_pids_exited,
     kill_marked_pids,
+    init_multi_repo_workspace,
     write_plan,
+    write_multi_repo_plan,
     write_process_tree_scripts,
     _contract_block,
 )
@@ -1548,6 +1551,126 @@ class VerificationExecutorTests(unittest.TestCase):
             self.assertEqual(reference.truncated, result.stdout_truncated)
 
 
+class MultiRepositoryVerificationTests(unittest.TestCase):
+    def test_dispatches_checks_and_reports_qualified_locations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace_root = root / "workspace"
+            specs = DEFAULT_MULTI_REPO_SPECS[:2]
+            repositories = init_multi_repo_workspace(workspace_root, specs)
+            plan_dir = root / "plan"
+            write_multi_repo_plan(plan_dir, ("pending",), specs=specs)
+            (repositories["SVC"] / "target.txt").write_text(
+                "svc\n", encoding="utf-8"
+            )
+            nested = repositories["OAK"] / "nested"
+            nested.mkdir()
+            contract = contracts.CompletionContract(
+                session_id=plans.parse_session_id("1"),
+                done_when=("done",),
+                verify=contracts.VerifyRecipe(
+                    checks=(
+                        contracts.FileExistsCheck(
+                            name="svc-file", path="target.txt", repo="SVC"
+                        ),
+                        contracts.CommandCheck(
+                            name="oak-command",
+                            argv=(
+                                sys.executable,
+                                "-c",
+                                "import pathlib; assert pathlib.Path.cwd().name == 'nested'",
+                            ),
+                            cwd="nested",
+                            timeout_seconds=10.0,
+                            repo="OAK",
+                        ),
+                    )
+                ),
+            )
+            context = verification.verification_context_from_plan(
+                plan_dir, workspace_root
+            )
+            started: list[verification.CheckStartedEvent] = []
+
+            result = verification.run_verification(
+                contract,
+                context=context,
+                observer=verification.VerificationObserver(
+                    on_check_started=started.append
+                ),
+            )
+
+            self.assertTrue(result.passed)
+            self.assertEqual(["svc-file", "oak-command"], [r.name for r in result.checks])
+            self.assertEqual("SVC:target.txt", result.checks[0].qualified_path)
+            self.assertEqual(str(repositories["SVC"].resolve()), result.checks[0].resolved_root)
+            self.assertEqual("OAK:nested", result.checks[1].qualified_cwd)
+            self.assertEqual(str(nested.resolve()), result.checks[1].cwd)
+            self.assertEqual("OAK:nested", started[1].qualified_cwd)
+
+    def test_registered_context_rejects_programmatic_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace_root = root / "workspace"
+            specs = DEFAULT_MULTI_REPO_SPECS[:1]
+            init_multi_repo_workspace(workspace_root, specs)
+            plan_dir = root / "plan"
+            write_multi_repo_plan(plan_dir, ("pending",), specs=specs)
+            context = verification.verification_context_from_plan(
+                plan_dir, workspace_root
+            )
+            check = contracts.FileExistsCheck(
+                name="escape", path="../outside", repo="SVC"
+            )
+
+            with self.assertRaisesRegex(plans.PlanError, "stay beneath"):
+                verification.run_check(check, context=context)
+
+    def test_parallel_repository_results_stay_in_declared_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace_root = root / "workspace"
+            specs = DEFAULT_MULTI_REPO_SPECS[:2]
+            repositories = init_multi_repo_workspace(workspace_root, specs)
+            plan_dir = root / "plan"
+            write_multi_repo_plan(plan_dir, ("pending",), specs=specs)
+            checks = (
+                contracts.CommandCheck(
+                    name="slow-svc",
+                    argv=(sys.executable, "-c", "import time; time.sleep(0.05)"),
+                    timeout_seconds=10.0,
+                    repo="SVC",
+                ),
+                contracts.CommandCheck(
+                    name="fast-oak",
+                    argv=(sys.executable, "-c", "pass"),
+                    timeout_seconds=10.0,
+                    repo="OAK",
+                ),
+            )
+            contract = contracts.CompletionContract(
+                session_id=plans.parse_session_id("1"),
+                done_when=("done",),
+                verify=contracts.VerifyRecipe(checks=checks, parallel=True),
+            )
+            context = verification.verification_context_from_plan(
+                plan_dir, workspace_root
+            )
+
+            result = verification.run_verification(contract, context=context)
+
+            self.assertEqual(
+                ["slow-svc", "fast-oak"], [check.name for check in result.checks]
+            )
+            self.assertEqual(
+                [
+                    str(repositories["SVC"].resolve()),
+                    str(repositories["OAK"].resolve()),
+                ],
+                [check.resolved_root for check in result.checks],
+            )
+
+
 class ParallelVerificationTests(unittest.TestCase):
     """Opt-in `parallel` recipes stay observationally identical to sequential ones."""
 
@@ -2084,7 +2207,7 @@ class VerifyCliTests(unittest.TestCase):
             (repo_root / "target.txt").write_text("ok\n", encoding="utf-8")
             contract = _contract_block(
                 '{"type": "file_exists", "path": "target.txt", '
-                '"name": "target", "repo": "SVC"}'
+                '"name": "target"}'
             )
             write_plan(
                 plan_dir, ("pending",), contracts_by_id={"1": contract}
@@ -2109,7 +2232,7 @@ class VerifyCliTests(unittest.TestCase):
             self.assertEqual(0, payload["recipe"]["diagnostic_count"])
             self.assertEqual(["file_exists"], payload["recipe"]["kinds"])
             self.assertEqual(["target"], payload["recipe"]["names"])
-            self.assertEqual(["SVC"], payload["recipe"]["repos"])
+            self.assertEqual([None], payload["recipe"]["repos"])
             self.assertEqual([], payload["skipped_checks"])
             self.assertEqual([], payload["diagnostic_failures"])
             self.assertEqual(1, len(payload["checks"]))
@@ -2118,6 +2241,86 @@ class VerifyCliTests(unittest.TestCase):
             self.assertEqual("file_exists", check["kind"])
             self.assertEqual("pass", check["status"])
             self.assertIsNone(check["failure_reason"])
+
+    def test_verify_json_reports_registered_symlink_escape_without_traceback(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace_root = root / "workspace"
+            specs = DEFAULT_MULTI_REPO_SPECS[:1]
+            repositories = init_multi_repo_workspace(workspace_root, specs)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "target.txt").write_text("outside\n", encoding="utf-8")
+            (repositories["SVC"] / "escape").symlink_to(
+                outside, target_is_directory=True
+            )
+            plan_dir = root / "plan"
+            contract = _contract_block(
+                '{"type": "file_exists", "path": "escape/target.txt", '
+                '"name": "escape", "repo": "SVC"}'
+            )
+            write_multi_repo_plan(
+                plan_dir,
+                ("pending",),
+                contracts_by_id={"1": contract},
+                specs=specs,
+            )
+
+            completed = self._run_verify(
+                plan_dir, session="1", cwd=workspace_root
+            )
+
+            self.assertEqual(1, completed.returncode)
+            self.assertEqual("", completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("malformed-contract", payload["reason"])
+            self.assertEqual("escape", payload["check"])
+            self.assertEqual("SVC", payload["repo"])
+            self.assertEqual("escape", payload["checks"][0]["name"])
+            self.assertEqual("SVC", payload["checks"][0]["repo"])
+            self.assertIn("escapes repository SVC", payload["error"])
+
+    def test_verify_json_interprets_cwd_as_registered_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace_root = root / "workspace"
+            specs = DEFAULT_MULTI_REPO_SPECS[:2]
+            repositories = init_multi_repo_workspace(workspace_root, specs)
+            (repositories["OAK"] / "target.txt").write_text(
+                "ok\n", encoding="utf-8"
+            )
+            plan_dir = root / "plan"
+            contract = _contract_block(
+                '{"type": "file_exists", "path": "target.txt", '
+                '"name": "target", "repo": "OAK"}'
+            )
+            write_multi_repo_plan(
+                plan_dir,
+                ("pending",),
+                contracts_by_id={"1": contract},
+                specs=specs,
+            )
+
+            completed = self._run_verify(
+                plan_dir, session="1", cwd=workspace_root
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertEqual(str(workspace_root.resolve()), payload["workspace_root"])
+            self.assertEqual(
+                ["SVC", "OAK"],
+                [repository["alias"] for repository in payload["repositories"]],
+            )
+            check = payload["checks"][0]
+            self.assertEqual("OAK", check["repo"])
+            self.assertEqual("OAK:target.txt", check["qualified_path"])
+            self.assertEqual(
+                str(repositories["OAK"].resolve()), check["resolved_root"]
+            )
 
     def test_verify_json_failure_reports_check_results(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2958,6 +3161,72 @@ class ContractCheckCliTests(unittest.TestCase):
         self.assertEqual(".", args.cwd)
         self.assertFalse(args.json)
 
+    def test_registered_checks_resolve_static_paths_by_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace_root = root / "workspace"
+            specs = DEFAULT_MULTI_REPO_SPECS[:2]
+            repositories = init_multi_repo_workspace(workspace_root, specs)
+            (repositories["SVC"] / "only-svc.txt").write_text(
+                "hello\n", encoding="utf-8"
+            )
+            plan_dir = root / "plan"
+            contract = _contract_block(
+                '{"type": "file_exists", "path": "only-svc.txt", '
+                '"name": "selected", "repo": "SVC"}'
+            )
+            write_multi_repo_plan(
+                plan_dir,
+                ("pending",),
+                contracts_by_id={"1": contract},
+                specs=specs,
+            )
+
+            code, payload = self._run(plan_dir, workspace_root)
+
+            self.assertEqual(0, code)
+            row = payload["checks"][0]
+            self.assertEqual("SVC:only-svc.txt", row["qualified_path"])
+            self.assertEqual(
+                str(repositories["SVC"].resolve()), row["resolved_root"]
+            )
+
+    def test_registered_symlink_escape_is_a_structured_check_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace_root = root / "workspace"
+            specs = DEFAULT_MULTI_REPO_SPECS[:1]
+            repositories = init_multi_repo_workspace(workspace_root, specs)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "target.txt").write_text("outside\n", encoding="utf-8")
+            (repositories["SVC"] / "escape").symlink_to(
+                outside, target_is_directory=True
+            )
+            plan_dir = root / "plan"
+            contract = _contract_block(
+                '{"type": "file_exists", "path": "escape/target.txt", '
+                '"name": "escape", "repo": "SVC"}'
+            )
+            write_multi_repo_plan(
+                plan_dir,
+                ("pending",),
+                contracts_by_id={"1": contract},
+                specs=specs,
+            )
+
+            code, payload = self._run(plan_dir, workspace_root)
+
+            self.assertEqual(1, code)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("contract-issues", payload["reason"])
+            row = payload["checks"][0]
+            self.assertEqual("schema-error", row["status"])
+            self.assertEqual("repository-contract", row["reason"])
+            self.assertEqual("escape", row["name"])
+            self.assertEqual("SVC", row["repo"])
+            self.assertIn("escapes repository SVC", row["detail"])
+
     def test_all_ok_exits_zero(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -3143,6 +3412,35 @@ class ContractCheckCliTests(unittest.TestCase):
             self.assertEqual(1, code)
             row = payload["checks"][0]
             self.assertEqual("schema-error", row["status"])
+
+    def test_contract_check_rows_have_uniform_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            repo_root = tmp_dir / "repo"
+            repo_root.mkdir()
+            valid = _contract_block(
+                '{"type": "command", "name": "ok", "argv": ["true"]}',
+                session="1",
+            )
+            malformed = _contract_block(
+                '{"type": "command", "name": "bad"}', session="3"
+            )
+            write_plan(
+                plan_dir,
+                ("pending", "pending", "pending"),
+                contracts_by_id={"1": valid, "3": malformed},
+            )
+
+            code, payload = self._run(plan_dir, repo_root)
+
+            self.assertEqual(1, code)
+            rows_by_status = {row["status"]: row for row in payload["checks"]}
+            self.assertEqual(
+                {"ok", "missing-contract", "schema-error"}, set(rows_by_status)
+            )
+            shapes = {frozenset(row) for row in payload["checks"]}
+            self.assertEqual(1, len(shapes), [sorted(shape) for shape in shapes])
 
     def test_session_flag_narrows_to_single_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -41,6 +41,7 @@ from agent_session_loop import (
     config,
     contracts,
     control_queue,
+    durability,
     events,
     harnesses,
     install_verify,
@@ -131,6 +132,58 @@ class PlanMetadataTests(unittest.TestCase):
 
 
 class EventPersistenceTests(unittest.TestCase):
+    def test_durable_atomic_write_fullsyncs_file_and_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "state.json"
+            with (
+                mock.patch.object(artifacts.durability, "fullsync") as fullsync,
+            ):
+                artifacts.atomic_write_bytes(target, b"{}\n", durable=True)
+
+            self.assertEqual(b"{}\n", target.read_bytes())
+            self.assertEqual(2, fullsync.call_count)
+
+    def test_fullsync_uses_device_barrier_on_darwin(self) -> None:
+        with (
+            mock.patch.object(durability.sys, "platform", "darwin"),
+            mock.patch.object(durability.fcntl, "F_FULLFSYNC", 123, create=True),
+            mock.patch.object(durability.fcntl, "fcntl") as full_fsync,
+            mock.patch.object(durability.os, "fsync") as fsync,
+        ):
+            durability.fullsync(17)
+
+        full_fsync.assert_called_once_with(17, 123)
+        fsync.assert_not_called()
+
+    def test_fullsync_falls_back_for_unsupported_darwin_filesystem(self) -> None:
+        def unsupported(_fd: int, _command: int) -> None:
+            raise OSError(errno.ENOTSUP, "Operation not supported")
+
+        original_fsync = os.fsync
+        with tempfile.TemporaryDirectory() as tmp:
+            event_path = Path(tmp) / events.EVENTS_FILE_NAME
+            artifact_path = Path(tmp) / "artifact.json"
+            with (
+                mock.patch.object(durability.sys, "platform", "darwin"),
+                mock.patch.object(
+                    durability.fcntl, "F_FULLFSYNC", 123, create=True
+                ),
+                mock.patch.object(durability.fcntl, "fcntl", side_effect=unsupported),
+                mock.patch.object(
+                    durability.os, "fsync", wraps=original_fsync
+                ) as fsync,
+            ):
+                events.append_event(
+                    event_path, events.Event(name="probe", payload={})
+                )
+                artifacts.atomic_write_bytes(
+                    artifact_path, b"{}\n", durable=True
+                )
+
+            self.assertTrue(event_path.read_text(encoding="utf-8").strip())
+            self.assertEqual(b"{}\n", artifact_path.read_bytes())
+            self.assertEqual(3, fsync.call_count)
+
     def test_append_event_writes_complete_json_lines_under_concurrency(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             event_path = Path(tmp) / events.EVENTS_FILE_NAME
@@ -152,7 +205,9 @@ class EventPersistenceTests(unittest.TestCase):
             for thread in threads:
                 thread.start()
             for thread in threads:
-                thread.join(timeout=2)
+                # Darwin uses one device-level F_FULLFSYNC per record; 400
+                # serialized barriers can legitimately exceed two seconds.
+                thread.join(timeout=10)
                 self.assertFalse(thread.is_alive())
 
             lines = event_path.read_text(encoding="utf-8").splitlines()
@@ -674,6 +729,47 @@ class ParserAndStateTests(unittest.TestCase):
             session_id=plans.parse_session_id(session_id),
             path=plan_dir / f"session-{session_id}.md",
         )
+
+    def test_manifest_registry_parser_ignores_fenced_example_for_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("complete",))
+            (plan_dir / "manifest.md").write_text(
+                "# Manifest\n\n```markdown\n## Repositories\n\n"
+                "| Alias | Path | Origin |\n"
+                "| --- | --- | --- |\n"
+                "| Example | example | https://example.com/example.git |\n"
+                "```\n",
+                encoding="utf-8",
+            )
+
+            registry = plans.read_repository_registry(plan_dir)
+            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+
+            self.assertIsNone(registry)
+            self.assertEqual("complete", handoff.status)
+
+    def test_manifest_registry_parser_preserves_legacy_repositories_prose(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+            (plan_dir / "manifest.md").write_text(
+                "# Plan\n\n## Sessions\n\n"
+                "| Session | Title | Status |\n"
+                "| --- | --- | --- |\n"
+                "| 1 | First | pending |\n\n"
+                "## Repositories\n\n"
+                "We touch SVC and OAK by hand.\n",
+                encoding="utf-8",
+            )
+
+            registry = plans.read_repository_registry(plan_dir)
+            snapshot = plans.inspect_plan(plan_dir)
+
+            self.assertIsNone(registry)
+            self.assertEqual(["1"], [session.id for session in snapshot.sessions])
 
     def test_session_scope_and_qualified_paths_are_canonical(self) -> None:
         scope = plans.parse_session_scope(

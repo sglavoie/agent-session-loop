@@ -15,6 +15,7 @@ import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import subprocess
+import unicodedata
 import urllib.parse
 
 
@@ -23,8 +24,19 @@ REGISTRY_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _SCP_ORIGIN_RE = re.compile(
     r"^(?:[^/@:\s]+@)?(?P<host>\[[^\]]+\]|[^/:@\s]+):(?P<path>.+)$"
 )
+_CANONICAL_ORIGIN_RE = re.compile(
+    r"^(?P<host>\[[^\]]+\]|[^/:@\s]+)(?::(?P<port>[0-9]+))?/(?P<path>.+)$"
+)
+_WINDOWS_LOCAL_ORIGIN_RE = re.compile(r"^[A-Za-z]:[\\/]")
 _URL_ORIGIN_SCHEMES = frozenset({"git", "http", "https", "ssh"})
 _DEFAULT_ORIGIN_PORTS = {"git": 9418, "http": 80, "https": 443, "ssh": 22}
+OPERATOR_REPOSITORY_DISPLAY_LIMIT = 20
+
+
+def bounded_repository_rows(rows, *, limit: int = OPERATOR_REPOSITORY_DISPLAY_LIMIT):
+    """Return a bounded ordered prefix and the number of omitted rows."""
+    ordered = tuple(rows)
+    return ordered[:limit], max(0, len(ordered) - limit)
 
 
 class WorkspaceError(ValueError):
@@ -50,6 +62,8 @@ def normalize_repository_path(path: str | PurePosixPath) -> str:
     value = os.fspath(path)
     if not isinstance(value, str) or not value or value != value.strip():
         raise WorkspaceError("repository path must be a non-empty relative path")
+    if any(unicodedata.category(character) == "Cc" for character in value):
+        raise WorkspaceError("repository path must not contain control characters")
     if "\\" in value or PureWindowsPath(value).is_absolute():
         raise WorkspaceError("repository path must use relative POSIX syntax")
     pure = PurePosixPath(value)
@@ -63,17 +77,24 @@ def normalize_repository_path(path: str | PurePosixPath) -> str:
     return normalized
 
 
-def canonicalize_origin(origin: str) -> str:
+def _canonicalize_origin(origin: str, *, prefer_scp: bool) -> str:
     """Return a credential-free, transport-neutral Git origin identity.
 
     SSH scp syntax and the common ``ssh``, ``git``, ``http``, and ``https``
-    URL transports all canonicalize to ``host/path``.  User information is
+    URL transports all canonicalize to ``host[:port]/path``. ``prefer_scp``
+    distinguishes source/Git-remote values from durable canonical identities
+    when userless scp syntax starts with a numeric path segment and therefore
+    has the same surface grammar as ``host:port/path``. User information is
     intentionally discarded and never included in validation errors.
     """
     if not isinstance(origin, str) or not origin or origin != origin.strip():
         raise WorkspaceError("repository origin must be a non-empty Git URL")
     if any(character.isspace() or ord(character) < 32 for character in origin):
         raise WorkspaceError("repository origin contains invalid characters")
+    if _WINDOWS_LOCAL_ORIGIN_RE.match(origin) is not None:
+        raise WorkspaceError(
+            "repository origin must be a Git URL, not a Windows local path"
+        )
 
     if "://" in origin:
         parsed = urllib.parse.urlsplit(origin)
@@ -87,17 +108,37 @@ def canonicalize_origin(origin: str) -> str:
             raise WorkspaceError(
                 "repository origin has an invalid host or port"
             ) from error
+        if port is not None and not 1 <= port <= 65535:
+            raise WorkspaceError("repository origin has an invalid host or port")
         scheme = parsed.scheme.lower()
         host = _canonical_origin_host(parsed.hostname)
-        if port is not None and port != _DEFAULT_ORIGIN_PORTS[scheme]:
-            host = f"{host}:{port}"
+        authority = _canonical_origin_authority(
+            host,
+            port if port != _DEFAULT_ORIGIN_PORTS[scheme] else None,
+        )
         path = parsed.path
     else:
-        match = _SCP_ORIGIN_RE.fullmatch(origin)
-        if match is None:
-            raise WorkspaceError("repository origin must be an absolute Git URL")
-        host = _canonical_origin_host(match.group("host").strip("[]"))
-        path = match.group("path")
+        scp_match = _SCP_ORIGIN_RE.fullmatch(origin)
+        canonical_match = _CANONICAL_ORIGIN_RE.fullmatch(origin)
+        source_scp = scp_match is not None and (
+            prefer_scp or "@" in origin or origin.lower().endswith(".git")
+        )
+        if canonical_match is not None and not source_scp:
+            host = _canonical_origin_host(
+                canonical_match.group("host").strip("[]")
+            )
+            port_text = canonical_match.group("port")
+            port = int(port_text) if port_text is not None else None
+            if port is not None and not 1 <= port <= 65535:
+                raise WorkspaceError("repository origin has an invalid host or port")
+            authority = _canonical_origin_authority(host, port)
+            path = canonical_match.group("path")
+        else:
+            if scp_match is None:
+                raise WorkspaceError("repository origin must be an absolute Git URL")
+            host = _canonical_origin_host(scp_match.group("host").strip("[]"))
+            authority = _canonical_origin_authority(host, None)
+            path = scp_match.group("path")
 
     decoded_path = urllib.parse.unquote(path).replace("\\", "/")
     if any(character.isspace() or ord(character) < 32 for character in decoded_path):
@@ -112,13 +153,40 @@ def canonicalize_origin(origin: str) -> str:
         final = final[:-4]
     if not final:
         raise WorkspaceError("repository origin must name a repository")
-    canonical_path = "/".join((*parts[:-1], final))
-    return f"{host}/{canonical_path}"
+    canonical_path = urllib.parse.quote(
+        "/".join((*parts[:-1], final)),
+        safe="/",
+    )
+    return f"{authority}/{canonical_path}"
+
+
+def canonicalize_origin(origin: str) -> str:
+    """Return a credential-free, transport-neutral Git origin identity."""
+    return _canonicalize_origin(origin, prefer_scp=False)
+
+
+def canonicalize_declared_origin(origin: str) -> str:
+    """Canonicalize a source-plan origin while requiring a Git transport."""
+    if not isinstance(origin, str) or (
+        "://" not in origin and _SCP_ORIGIN_RE.fullmatch(origin) is None
+    ):
+        raise WorkspaceError("repository origin must be an absolute Git URL")
+    if "|" in origin:
+        raise WorkspaceError(
+            "repository origin must not contain Markdown table delimiters"
+        )
+    return _canonicalize_origin(origin, prefer_scp=True)
 
 
 def origins_equal(first: str, second: str) -> bool:
     """Compare Git origins without transport or credentials."""
-    return canonicalize_origin(first) == canonicalize_origin(second)
+    prefer_scp = any(
+        isinstance(value, str) and "://" not in value and "@" in value
+        for value in (first, second)
+    )
+    return _canonicalize_origin(
+        first, prefer_scp=prefer_scp
+    ) == _canonicalize_origin(second, prefer_scp=prefer_scp)
 
 
 def _canonical_origin_host(host: str) -> str:
@@ -129,6 +197,11 @@ def _canonical_origin_host(host: str) -> str:
     if not canonical or "/" in canonical or "\\" in canonical:
         raise WorkspaceError("repository origin has an invalid host")
     return canonical
+
+
+def _canonical_origin_authority(host: str, port: int | None) -> str:
+    authority = f"[{host}]" if ":" in host else host
+    return f"{authority}:{port}" if port is not None else authority
 
 
 @dataclass(frozen=True)
@@ -357,7 +430,17 @@ def resolve_workspace(
 
     resolved: list[ResolvedRepository] = []
     for repository in registry:
-        candidate = canonicalize_filesystem_path(root / repository.path)
+        declared_candidate = root / repository.path
+        traversed = root
+        for part in PurePosixPath(repository.path).parts:
+            traversed /= part
+            if traversed.is_symlink():
+                raise WorkspaceError(
+                    f"repository {repository.alias} path must not traverse "
+                    "a symlink because its declared location may resolve "
+                    f"outside the workspace: {repository.path}"
+                )
+        candidate = canonicalize_filesystem_path(declared_candidate)
         if not is_descendant(candidate, root):
             raise WorkspaceError(
                 f"repository {repository.alias} resolves outside the workspace"
@@ -374,7 +457,7 @@ def resolve_workspace(
                 f"repository {repository.alias} path is not an exact Git top-level"
             )
         try:
-            actual_origin = canonicalize_origin(
+            actual_origin = canonicalize_declared_origin(
                 _git_stdout(candidate, "remote", "get-url", "origin")
             )
         except WorkspaceError as error:

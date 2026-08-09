@@ -3481,6 +3481,136 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 (plan_dir / "session-2.md").read_text(encoding="utf-8"),
             )
 
+    def test_legacy_failed_commit_is_retried_before_next_session_on_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+                statuses=("pending", "pending")
+            )
+            subprocess.run(
+                ["git", "init"], cwd=plan_dir, capture_output=True, check=True
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"],
+                cwd=plan_dir,
+                capture_output=True,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Test User"],
+                cwd=plan_dir,
+                capture_output=True,
+                check=True,
+            )
+            progress_repair.repair_progress_journal(plan_dir)
+            plans.write_readiness_metadata(
+                plan_dir,
+                plans.ReadinessMetadata(
+                    state="loop-ready",
+                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    checked_at="2026-08-08T00:00:00Z",
+                ),
+            )
+            plans.save_plan_metadata(plan_dir, plan_dir)
+            subprocess.run(
+                ["git", "add", "-A"], cwd=plan_dir, capture_output=True, check=True
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "initial plan"],
+                cwd=plan_dir,
+                capture_output=True,
+                check=True,
+            )
+            _fake_spec, spec_log, failing_env = self.setup_fake_spec(
+                tmp_dir, mode="failure"
+            )
+            first, first_payload = self.run_loop_command(
+                mode="success",
+                plan_dir=plan_dir,
+                state_dir=state_dir,
+                config_home=config_home,
+                cwd=plan_dir,
+                commit_mode=runner.COMMIT_MODE_PER_SESSION,
+                extra_env=failing_env,
+            )
+            self.assertEqual(1, first.returncode, first.stderr)
+            self.assertEqual("commit-failed", first_payload["pause_reason"])
+
+            env = os.environ.copy()
+            env.update(
+                {
+                    "XDG_CONFIG_HOME": str(config_home),
+                    "FAKE_CODEX_MODE": "success",
+                    "FAKE_SPEC_LOG": str(spec_log),
+                    "PATH": str(tmp_dir)
+                    + os.pathsep
+                    + os.environ.get("PATH", ""),
+                    "PYTHONPATH": str(REPO_ROOT)
+                    + os.pathsep
+                    + os.environ.get("PYTHONPATH", ""),
+                }
+            )
+            env.pop("FAKE_SPEC_MODE", None)
+            dry_run = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_session_loop",
+                    "run",
+                    str(plan_dir),
+                    "--resume",
+                    "--dry-run",
+                    "--state-dir",
+                    str(state_dir),
+                    "--json",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, dry_run.returncode, dry_run.stderr)
+            dry_payload = json.loads(dry_run.stdout)
+            self.assertTrue(dry_payload["commit_group_recovery"]["pending"])
+            self.assertEqual(1, len(read_jsonl(spec_log)))
+
+            second = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_session_loop",
+                    "run",
+                    str(plan_dir),
+                    "--resume",
+                    "--state-dir",
+                    str(state_dir),
+                    "--json",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(0, second.returncode, second.stderr)
+            second_payload = json.loads(second.stdout)
+            self.assertTrue(second_payload["commit_group_recovery"]["success"])
+            self.assertEqual([2], second_payload["completed_sessions"])
+            self.assertEqual(3, len(read_jsonl(spec_log)))
+            event_records = read_jsonl(Path(second_payload["events_path"]))
+            recovery_commit = [
+                index
+                for index, record in enumerate(event_records)
+                if record["name"] == events.COMMIT_FINISHED_EVENT
+                and record["payload"].get("session") == 1
+            ][-1]
+            turn_2_started = self.event_index(
+                event_records, "turn_started", session=2
+            )
+            self.assertLess(recovery_commit, turn_2_started)
+
     def test_unchanged_head_commit_pauses_with_commit_failed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -5063,7 +5193,12 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             thread_errors: list[BaseException] = []
             original_write_json = runner._write_json_file
 
-            def delayed_write_json(path: Path, payload_arg: dict[str, object]) -> None:
+            def delayed_write_json(
+                path: Path,
+                payload_arg: dict[str, object],
+                *,
+                durable: bool = False,
+            ) -> None:
                 nonlocal delayed_once
                 path = Path(path)
                 active = payload_arg.get("active_turn")
@@ -5085,7 +5220,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     temporary_path.write_text(serialized, encoding="utf-8")
                     os.replace(temporary_path, path)
                     return
-                original_write_json(path, payload_arg)
+                original_write_json(path, payload_arg, durable=durable)
 
             def record_activity() -> None:
                 try:
@@ -5867,6 +6002,13 @@ class HarnessProcessGroupSweepTests(unittest.TestCase):
             (self.root / "grandchildren" / "turn").read_text(encoding="utf-8")
         )
 
+    def _wait_for_grandchild_on_spawn(self, _pid: int) -> None:
+        """Start the turn timeout only after the synthetic tree is live."""
+        wait_until(
+            (self.root / "grandchildren" / "turn").exists,
+            timeout=30,
+        )
+
     def test_lingering_in_group_child_is_swept_after_a_successful_turn(
         self,
     ) -> None:
@@ -5907,13 +6049,19 @@ class HarnessProcessGroupSweepTests(unittest.TestCase):
         )
         spawn_pids: list[int] = []
 
+        def on_spawn(pid: int) -> None:
+            spawn_pids.append(pid)
+            self._wait_for_grandchild_on_spawn(pid)
+
         result = harnesses.CopilotAdapter(executable=str(fake_harness)).run(
             cwd=self.tmp_dir,
             plan_dir=self.tmp_dir,
             prompt="noop",
-            # Ample time for both processes to spawn, far below their sleeps.
+            # Keep process startup outside the timeout: heavily parallel suite
+            # runs can otherwise expire before the synthetic tree publishes
+            # its PID, leaving the timeout/sweep behavior unexercised.
             timeout=2,
-            on_spawn=spawn_pids.append,
+            on_spawn=on_spawn,
         )
 
         self.assertTrue(result.timed_out)
@@ -5950,6 +6098,7 @@ class HarnessProcessGroupSweepTests(unittest.TestCase):
             plan_dir=self.tmp_dir,
             prompt="noop",
             timeout=2,
+            on_spawn=self._wait_for_grandchild_on_spawn,
         )
 
         self.assertTrue(result.timed_out)

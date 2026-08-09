@@ -738,6 +738,10 @@ class BuildSessionsPayloadTests(unittest.TestCase):
                     "check_count",
                     "check_name",
                     "check_kind",
+                    "cwd",
+                    "workspace_root",
+                    "registry_digest",
+                    "repositories",
                 },
                 set(payload["running"][0].keys()),
             )
@@ -754,6 +758,10 @@ class BuildSessionsPayloadTests(unittest.TestCase):
                     "duration_seconds",
                     "artifact_dir",
                     "session_kind",
+                    "cwd",
+                    "workspace_root",
+                    "registry_digest",
+                    "repositories",
                 },
                 set(payload["recent"][0].keys()),
             )

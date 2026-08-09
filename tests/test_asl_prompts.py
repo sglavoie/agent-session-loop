@@ -59,6 +59,7 @@ from agent_session_loop import (
     verification,
     workbench,
     workbench_server,
+    workspaces,
 )
 from agent_session_loop.formatting import (
     format_duration_seconds,
@@ -826,6 +827,46 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertEqual(runner._prompt_plan_dir(plan_dir), first_argv[1])
         self.assertEqual(runner.RUNNER_MANAGED_SESSION_ARG, first_argv[2])
         self.assertIn(runner.MAILBOX_PROTOCOL_HEADING, prompt)
+
+
+class MultiRepositoryTaskPacketTests(unittest.TestCase):
+    def test_packet_renders_registry_scope_and_only_read_roots(self) -> None:
+        svc = workspaces.Repository(
+            "SVC", "svc", "git@github.com:example/svc.git"
+        )
+        oak = workspaces.Repository(
+            "OAK", "oak", "git@github.com:example/oak.git"
+        )
+        workspace = workspaces.ResolvedWorkspace(
+            root=Path("/tmp/workspace"),
+            repositories=(
+                workspaces.ResolvedRepository(
+                    repository=svc,
+                    root=Path("/tmp/workspace/svc"),
+                    origin=svc.origin,
+                ),
+                workspaces.ResolvedRepository(
+                    repository=oak,
+                    root=Path("/tmp/workspace/oak"),
+                    origin=oak.origin,
+                ),
+            ),
+        )
+
+        rendered = runner.build_task_packet(
+            "codex",
+            "/tmp/plan",
+            session_id="1",
+            workspace=workspace,
+            session_scope=plans.SessionScope(reads=("SVC",), writes=("SVC",)),
+        ).render()
+
+        self.assertIn("Expected read aliases: SVC", rendered)
+        self.assertIn("Writable aliases: SVC", rendered)
+        self.assertIn("OAK: path=oak", rendered)
+        self.assertIn(str(workspace.get("SVC").root), rendered)
+        self.assertNotIn(str(workspace.get("OAK").root), rendered)
+        self.assertIn("Alias:path/to/file", rendered)
 
 
 class ReplyPromptBuilderTests(unittest.TestCase):

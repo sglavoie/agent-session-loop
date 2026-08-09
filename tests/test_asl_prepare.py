@@ -5,7 +5,7 @@ Split from tests/test_agent_session_loop.py."""
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
 import dataclasses
 from datetime import datetime, timezone
 import errno
@@ -65,7 +65,10 @@ from agent_session_loop.formatting import (
     format_turn_started_message,
 )
 from tests.support import (
+    DEFAULT_MULTI_REPO_SPECS,
     init_git_repo,
+    init_multi_repo_workspace,
+    write_multi_repo_plan,
     _write_prepare_plan,
     _validator_payload,
     _write_prepare_source_plan,
@@ -76,6 +79,20 @@ from tests.support import (
 
 class PrepareValidatorSchemaTests(unittest.TestCase):
     """Versioned validator result schema (`agent_session_loop.prepare`)."""
+
+    @staticmethod
+    def _write_registered_plan(
+        plan_dir: Path,
+        specs: tuple[tuple[str, str, str], ...],
+    ) -> None:
+        write_multi_repo_plan(plan_dir, ("pending", "pending"), specs=specs)
+        for session_path in sorted(plan_dir.glob("session-*.md")):
+            text = session_path.read_text(encoding="utf-8")
+            heading, remainder = text.split("\n", 1)
+            session_path.write_text(
+                f"{heading}\n{authoring.CONTEXT_REFERENCE_LINE}\n{remainder}",
+                encoding="utf-8",
+            )
 
     # -- fail-closed parsing -------------------------------------------------
 
@@ -106,7 +123,9 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
 
         validation = prepare.parse_validator_output(payload)
 
-        self.assertEqual(prepare.PREPARE_VALIDATION_VERSION, validation.version)
+        self.assertEqual(
+            prepare.LEGACY_PREPARE_VALIDATION_VERSION, validation.version
+        )
         self.assertEqual("/repo", validation.codebase_root)
         self.assertEqual(("1",), validation.session_ids)
         session = validation.sessions[0]
@@ -117,9 +136,239 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
 
     def test_rejects_wrong_version(self) -> None:
         payload = _validator_payload()
-        payload["version"] = 2
+        payload["version"] = 99
         with self.assertRaisesRegex(plans.PlanError, "unsupported version"):
             prepare.parse_validator_output(payload)
+
+    def test_v2_requires_repo_attribution_on_every_finding_kind(self) -> None:
+        payload = {
+            "version": prepare.PREPARE_VALIDATION_VERSION,
+            "workspace_root": "/workspace",
+            "repositories": [
+                {
+                    "alias": "SVC",
+                    "path": "svc",
+                    "origin": "github.com/org/svc",
+                    "root": "/workspace/svc",
+                }
+            ],
+            "sessions": _validator_payload()["sessions"],
+        }
+        with self.assertRaisesRegex(plans.PlanError, "claim #1 'repo'"):
+            prepare.parse_validator_output(payload)
+
+    def test_registered_packet_contains_exact_roots_and_declared_reads(self) -> None:
+        specs = DEFAULT_MULTI_REPO_SPECS[:2]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            init_multi_repo_workspace(workspace, specs)
+            plan_dir = root / "plan"
+            self._write_registered_plan(plan_dir, specs)
+
+            packet = prepare.build_validation_packet(
+                plan_dir, ("1", "2"), codebase_root=workspace
+            )
+            rendered = packet.render()
+
+            self.assertEqual(prepare.PREPARE_VALIDATION_VERSION, packet.version)
+            self.assertEqual(("SVC", "OAK"), tuple(r.alias for r in packet.repositories))
+            self.assertIn(str((workspace / specs[0][1]).resolve()), rendered)
+            self.assertIn("declared reads", rendered)
+            self.assertIn("not filesystem isolation", rendered)
+            self.assertIn("repository-ambiguous", rendered)
+
+    def test_registered_ingest_binds_and_renders_qualified_evidence(self) -> None:
+        specs = DEFAULT_MULTI_REPO_SPECS[:2]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            init_multi_repo_workspace(workspace, specs)
+            plan_dir = root / "plan"
+            self._write_registered_plan(plan_dir, specs)
+            packet = prepare.build_validation_packet(
+                plan_dir, ("1",), codebase_root=workspace
+            )
+            payload = _prepare_pipeline_payload(
+                packet.codebase_root,
+                packet.session_ids,
+                version=packet.version,
+                repositories=packet.repositories,
+                session_repositories=packet.session_read_repositories,
+                corrections_by_id={
+                    "1": [
+                        {
+                            "expected_text": "Instructions.",
+                            "replacement_text": "Updated instructions.",
+                            "reason": "renamed helper",
+                        }
+                    ]
+                },
+            )
+
+            result = prepare.ingest_expand_batch(plan_dir, payload, expanded="2026-08-08")
+
+            metadata = plans.load_plan_metadata(plan_dir)
+            self.assertIsInstance(metadata, plans.WorkspacePlanMetadata)
+            self.assertEqual(("1",), result.batch_session_ids)
+            expansion = (plan_dir / "session-1.expand.md").read_text(encoding="utf-8")
+            self.assertIn("**Workspace root**", expansion)
+            self.assertIn("`SVC:demo/module.py`", expansion)
+            self.assertIn(
+                "Updated instructions.",
+                (plan_dir / "session-1.md").read_text(encoding="utf-8"),
+            )
+
+    def test_registered_ingest_rejects_authority_mismatches_without_mutation(self) -> None:
+        specs = DEFAULT_MULTI_REPO_SPECS[:2]
+        mutations = (
+            ("workspace", lambda payload: payload.__setitem__("workspace_root", "/wrong")),
+            (
+                "registry",
+                lambda payload: payload["repositories"][0].__setitem__(
+                    "root", "/wrong/svc"
+                ),
+            ),
+            (
+                "session",
+                lambda payload: payload["sessions"][0].__setitem__(
+                    "session_id", "9"
+                ),
+            ),
+            (
+                "repo",
+                lambda payload: payload["sessions"][0]["claims"][0].__setitem__(
+                    "repo", "UNKNOWN"
+                ),
+            ),
+            (
+                "dependency-session",
+                lambda payload: payload["sessions"][0].__setitem__(
+                    "dependencies",
+                    [
+                        {
+                            "direction": "provides",
+                            "session_id": "9",
+                            "description": "unknown target",
+                            "repo": "SVC",
+                        }
+                    ],
+                ),
+            ),
+            (
+                "correction-repository",
+                lambda payload: payload["sessions"][0].__setitem__(
+                    "corrections",
+                    [
+                        {
+                            "expected_text": "`OAK:old.py`",
+                            "replacement_text": "`OAK:new.py`",
+                            "reason": "crossed repository",
+                            "repo": "SVC",
+                        }
+                    ],
+                ),
+            ),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                workspace = root / "workspace"
+                init_multi_repo_workspace(workspace, specs)
+                plan_dir = root / "plan"
+                self._write_registered_plan(plan_dir, specs)
+                packet = prepare.build_validation_packet(
+                    plan_dir, ("1",), codebase_root=workspace
+                )
+                payload = _prepare_pipeline_payload(
+                    packet.codebase_root,
+                    packet.session_ids,
+                    version=packet.version,
+                    repositories=packet.repositories,
+                    session_repositories=packet.session_read_repositories,
+                )
+                mutate(payload)
+                before = {
+                    path.name: path.read_bytes()
+                    for path in plan_dir.iterdir()
+                    if path.is_file()
+                }
+
+                with self.assertRaises(plans.PlanError):
+                    prepare.ingest_expand_batch(plan_dir, payload)
+
+                after = {
+                    path.name: path.read_bytes()
+                    for path in plan_dir.iterdir()
+                    if path.is_file()
+                }
+                self.assertEqual(before, after)
+
+    def test_registered_plan_rejects_legacy_validator_output(self) -> None:
+        specs = DEFAULT_MULTI_REPO_SPECS[:1]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            init_multi_repo_workspace(workspace, specs)
+            plan_dir = root / "plan"
+            self._write_registered_plan(plan_dir, specs)
+            before = {
+                path.name: path.read_bytes()
+                for path in plan_dir.iterdir()
+                if path.is_file()
+            }
+
+            with self.assertRaisesRegex(plans.PlanError, "require validator output"):
+                prepare.ingest_expand_batch(plan_dir, _validator_payload())
+
+            after = {
+                path.name: path.read_bytes()
+                for path in plan_dir.iterdir()
+                if path.is_file()
+            }
+            self.assertEqual(before, after)
+
+    def test_registered_first_binding_is_atomic_with_late_render_failure(self) -> None:
+        specs = DEFAULT_MULTI_REPO_SPECS[:1]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            init_multi_repo_workspace(workspace, specs)
+            plan_dir = root / "plan"
+            self._write_registered_plan(plan_dir, specs)
+            packet = prepare.build_validation_packet(
+                plan_dir, ("1",), codebase_root=workspace
+            )
+            payload = _prepare_pipeline_payload(
+                packet.codebase_root,
+                packet.session_ids,
+                version=packet.version,
+                repositories=packet.repositories,
+                session_repositories=packet.session_read_repositories,
+            )
+            session_path = plan_dir / "session-1.md"
+            session_path.write_text(
+                session_path.read_text(encoding="utf-8").replace(
+                    authoring.CONTEXT_REFERENCE_LINE + "\n", ""
+                ),
+                encoding="utf-8",
+            )
+            before = {
+                path.name: path.read_bytes()
+                for path in plan_dir.iterdir()
+                if path.is_file()
+            }
+
+            with self.assertRaisesRegex(plans.PlanError, "Before starting"):
+                prepare.ingest_expand_batch(plan_dir, payload)
+
+            after = {
+                path.name: path.read_bytes()
+                for path in plan_dir.iterdir()
+                if path.is_file()
+            }
+            self.assertEqual(before, after)
+            self.assertFalse((plan_dir / plans.PLAN_METADATA_FILE_NAME).exists())
 
     def test_rejects_unknown_top_level_keys(self) -> None:
         payload = _validator_payload()
@@ -260,7 +509,10 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             )
             self.assertIn(str(plan_dir.resolve() / "session-1.md"), rendered)
             self.assertIn(str(plan_dir.resolve() / "context.md"), rendered)
-            self.assertIn('"version": 1', rendered)
+            self.assertIn(
+                f'"version": {prepare.LEGACY_PREPARE_VALIDATION_VERSION}',
+                rendered,
+            )
             # Plan file contents are referenced, never inlined.
             self.assertNotIn("Update the retry helper", rendered)
             for issue_type in prepare.ISSUE_TYPES:
@@ -709,6 +961,7 @@ class PrepareCliTests(unittest.TestCase):
         self.assertIs(prepare.prepare_from_args, cli.resolve_handler(args))
         self.assertEqual("plan.md", args.plan)
         self.assertFalse(args.resume)
+        self.assertFalse(args.rebind_workspace)
         self.assertEqual(".", args.cwd)
         self.assertEqual("codex", args.harness)
         self.assertIsNone(args.harness_model)
@@ -739,6 +992,64 @@ class PrepareCliTests(unittest.TestCase):
         self.assertEqual("prepare", payload["command"])
         self.assertEqual("input-error", payload["reason"])
         self.assertIn("must differ", payload["error"])
+
+    def test_rebind_workspace_requires_resume(self) -> None:
+        source = self._write_source()
+        code, stdout, _stderr = self._run_cli(
+            str(source),
+            "--cwd",
+            str(self.repo),
+            "--rebind-workspace",
+            "--json",
+        )
+
+        self.assertEqual(1, code)
+        payload = json.loads(stdout)
+        self.assertEqual("input-error", payload["reason"])
+        self.assertTrue(payload["rebind_workspace"])
+        self.assertIn("requires --resume", payload["error"])
+
+    def test_rebind_concurrency_error_has_distinct_reason_and_context(self) -> None:
+        plan_dir = self.tmp_path / "plan"
+        plan_dir.mkdir()
+        (plan_dir / "manifest.md").write_text("# Plan\n", encoding="utf-8")
+        (plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
+        rebind_error = prepare._WorkspaceRebindConcurrencyError(
+            "cannot lock plan for workspace rebind: busy",
+            old_workspace={"workspace_root": "/old"},
+            new_workspace={"workspace_root": "/new"},
+            stage=prepare.PREPARE_STAGE_WORKSPACE,
+        )
+
+        with mock.patch.object(prepare, "prepare_plan", side_effect=rebind_error):
+            code, stdout, _stderr = self._run_cli(
+                str(plan_dir),
+                "--resume",
+                "--rebind-workspace",
+                "--cwd",
+                str(self.repo),
+                "--json",
+            )
+
+        self.assertEqual(1, code)
+        payload = json.loads(stdout)
+        self.assertEqual("workspace-rebind-failed", payload["reason"])
+        self.assertTrue(payload["rebind_workspace"])
+        self.assertEqual(
+            prepare.PREPARE_STAGE_WORKSPACE,
+            payload["workspace_rebind"]["failure_stage"],
+        )
+        self.assertEqual("/old", payload["workspace_rebind"]["old"]["workspace_root"])
+        self.assertEqual("/new", payload["workspace_rebind"]["new"]["workspace_root"])
+
+    def test_run_parser_rejects_rebind_workspace(self) -> None:
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            cli.build_parser().parse_args(
+                ["run", "/tmp/plan", "--rebind-workspace"]
+            )
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("unrecognized arguments", stderr.getvalue())
 
     def test_review_harness_model_requires_review_harness(self) -> None:
         source = self._write_source()
@@ -1036,6 +1347,63 @@ class PrepareEndToEndTests(unittest.TestCase):
         options.update(kwargs)
         return prepare.prepare_plan(source, **options)
 
+    def _write_registered_source(
+        self,
+        specs: tuple[tuple[str, str, str], ...],
+    ) -> Path:
+        lines = [
+            "# Registered Prepare Demo",
+            "",
+            "## Repositories",
+            "",
+            "| Alias | Path | Origin |",
+            "| --- | --- | --- |",
+        ]
+        lines.extend(f"| {alias} | {path} | {origin} |" for alias, path, origin in specs)
+        aliases = ", ".join(alias for alias, _path, _origin in specs)
+        for number, (alias, relative_path, _origin) in enumerate(specs, start=1):
+            check = {
+                "name": f"check-{number}",
+                "type": "command",
+                "repo": alias,
+                "argv": [
+                    "python3",
+                    "-c",
+                    (
+                        "from pathlib import Path; "
+                        f"raise SystemExit(Path.cwd().name != {relative_path!r})"
+                    ),
+                ],
+                "timeout_seconds": 30,
+                "baseline_expectation": "pass",
+            }
+            lines.extend(
+                [
+                    "",
+                    f"## Session {number}: Step {number}",
+                    "",
+                    f"**Reads repositories**: {aliases}",
+                    f"**Writes repositories**: {alias}",
+                    "",
+                    f"Implement `{alias}:demo/module.py`.",
+                    "",
+                    "## Completion Contract",
+                    "",
+                    "### Done when",
+                    "",
+                    f"- Step {number} is complete.",
+                    "",
+                    "### Verify",
+                    "",
+                    "```json",
+                    json.dumps({"session": str(number), "checks": [check]}),
+                    "```",
+                ]
+            )
+        source = self.tmp_path / "registered-plan.md"
+        source.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return source
+
     def test_clean_source_plan_produces_loop_ready_directory(self) -> None:
         source = self._write_source()
         calls: list[prepare.ValidationTaskPacket] = []
@@ -1105,6 +1473,537 @@ class PrepareEndToEndTests(unittest.TestCase):
             ["ok", "ok", "ok", "ok", "ok", "ok"],
             [step.status for step in result.steps],
         )
+
+    def test_registered_prepare_uses_v2_and_repository_aware_baselines(self) -> None:
+        specs = DEFAULT_MULTI_REPO_SPECS[:2]
+        workspace = self.tmp_path / "workspace"
+        repositories = init_multi_repo_workspace(workspace, specs)
+        source = self._write_registered_source(specs)
+        calls: list[prepare.ValidationTaskPacket] = []
+
+        result = self._prepare(
+            source,
+            _recording_validator(calls),
+            cwd=workspace,
+        )
+
+        self.assertTrue(result.ok, result)
+        self.assertEqual(1, len(calls))
+        self.assertEqual(prepare.PREPARE_VALIDATION_VERSION, calls[0].version)
+        assert result.plan_dir is not None
+        metadata = plans.load_plan_metadata(result.plan_dir)
+        self.assertIsInstance(metadata, plans.WorkspacePlanMetadata)
+        validation = prepare.load_prepare_validation(result.plan_dir)
+        assert validation is not None
+        self.assertEqual(prepare.PREPARE_VALIDATION_VERSION, validation.version)
+        self.assertEqual(("SVC", "OAK"), tuple(r.alias for r in validation.repositories))
+        assert result.baseline is not None
+        self.assertEqual(2, result.baseline["check_count"])
+        self.assertEqual(
+            {str(path.resolve()) for path in repositories.values()},
+            {entry["resolved_root"] for entry in result.baseline["checks"]},
+        )
+
+    def test_registered_cached_baselines_capture_fingerprint_once(self) -> None:
+        specs = DEFAULT_MULTI_REPO_SPECS[:2]
+        workspace = self.tmp_path / "workspace"
+        init_multi_repo_workspace(workspace, specs)
+        source = self._write_registered_source(specs)
+        result = self._prepare(
+            source,
+            _recording_validator([]),
+            cwd=workspace,
+        )
+        self.assertTrue(result.ok, result)
+        assert result.plan_dir is not None
+        context = verification.verification_context_from_plan(
+            result.plan_dir, workspace
+        )
+        collected = baseline.collect_baseline_checks(
+            {
+                session.id: contracts.read_completion_contract(
+                    result.plan_dir, plans.parse_session_id(session.id)
+                )
+                for session in plans.inspect_plan(result.plan_dir).sessions
+            }
+        )
+        unique_checks = [
+            (
+                baseline.baseline_identity_key(
+                    check, context.root, context=context
+                ),
+                session_id,
+                check,
+            )
+            for session_id, check in collected
+        ]
+        original = baseline.capture_baseline_repository_evidence
+
+        with mock.patch.object(
+            baseline,
+            "capture_baseline_repository_evidence",
+            wraps=original,
+        ) as capture:
+            entries = prepare._cached_baseline_entries(
+                result.plan_dir, context, unique_checks
+            )
+
+        self.assertIsNotNone(entries)
+        self.assertEqual(2, len(entries))
+        capture.assert_called_once()
+
+    @staticmethod
+    def _plan_file_bytes(plan_dir: Path) -> dict[str, bytes]:
+        return {
+            path.relative_to(plan_dir).as_posix(): path.read_bytes()
+            for path in sorted(plan_dir.rglob("*"))
+            if path.is_file()
+        }
+
+    def test_registered_resume_rebinds_all_workspace_evidence_atomically(self) -> None:
+        specs = DEFAULT_MULTI_REPO_SPECS[:2]
+        old_workspace = self.tmp_path / "old-workspace"
+        new_workspace = self.tmp_path / "new-workspace"
+        init_multi_repo_workspace(old_workspace, specs)
+        new_repositories = init_multi_repo_workspace(new_workspace, specs)
+        source = self._write_registered_source(specs)
+        first = self._prepare(
+            source,
+            _recording_validator([]),
+            cwd=old_workspace,
+        )
+        self.assertTrue(first.ok, first)
+        assert first.plan_dir is not None
+
+        calls: list[prepare.ValidationTaskPacket] = []
+        rebound = self._prepare(
+            None,
+            _recording_validator(calls),
+            cwd=new_workspace,
+            resume_plan_dir=first.plan_dir,
+            rebind_workspace=True,
+        )
+
+        self.assertTrue(rebound.ok, rebound)
+        self.assertEqual(1, len(calls))
+        self.assertEqual(("1", "2"), calls[0].session_ids)
+        metadata = plans.load_plan_metadata(first.plan_dir)
+        self.assertIsInstance(metadata, plans.WorkspacePlanMetadata)
+        assert isinstance(metadata, plans.WorkspacePlanMetadata)
+        self.assertEqual(str(new_workspace.resolve()), metadata.workspace_root)
+        aggregate = prepare.load_prepare_validation(first.plan_dir)
+        assert aggregate is not None
+        self.assertEqual(str(new_workspace.resolve()), aggregate.workspace_root)
+        self.assertEqual(
+            {str(path.resolve()) for path in new_repositories.values()},
+            {repository.root for repository in aggregate.repositories},
+        )
+        expansion = (first.plan_dir / "session-1.expand.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(str(new_workspace.resolve()), expansion)
+        self.assertNotIn(str(old_workspace.resolve()), expansion)
+        cache_text = (
+            first.plan_dir / baseline_cache.BASELINE_RESULTS_FILENAME
+        ).read_text(encoding="utf-8")
+        self.assertIn(str(new_workspace.resolve()), cache_text)
+        self.assertNotIn(str(old_workspace.resolve()), cache_text)
+        manifest = (first.plan_dir / "manifest.md").read_text(encoding="utf-8")
+        self.assertIn("**Readiness**: loop-ready", manifest)
+        assert rebound.workspace_rebind is not None
+        self.assertEqual(
+            str(old_workspace.resolve()),
+            rebound.workspace_rebind["old"]["workspace_root"],
+        )
+        self.assertEqual(
+            str(new_workspace.resolve()),
+            rebound.workspace_rebind["new"]["workspace_root"],
+        )
+        self.assertIsNone(rebound.workspace_rebind["failure_stage"])
+        self.assertNotIn("git@", json.dumps(rebound.workspace_rebind))
+        self.assertIn("--cwd " + str(new_workspace.resolve()), rebound.run_command)
+        self.assertIn("--rebind-workspace", rebound.resume_command)
+        self.assertIsNone(state.inspect_lock_info(first.plan_dir, self.state_dir))
+
+    def test_interrupted_rebind_publication_rolls_forward_on_next_read(self) -> None:
+        specs = DEFAULT_MULTI_REPO_SPECS[:2]
+        old_workspace = self.tmp_path / "old-workspace"
+        new_workspace = self.tmp_path / "new-workspace"
+        init_multi_repo_workspace(old_workspace, specs)
+        init_multi_repo_workspace(new_workspace, specs)
+        source = self._write_registered_source(specs)
+        first = self._prepare(
+            source,
+            _recording_validator([]),
+            cwd=old_workspace,
+        )
+        self.assertTrue(first.ok, first)
+        assert first.plan_dir is not None
+
+        original_replace = os.replace
+
+        def interrupt_publication(source_path, destination):
+            target = Path(destination)
+            if (
+                target.parent == first.plan_dir
+                and target.name == plans.PLAN_METADATA_FILE_NAME
+            ):
+                raise KeyboardInterrupt("injected publication interruption")
+            return original_replace(source_path, destination)
+
+        with mock.patch.object(
+            authoring.os, "replace", side_effect=interrupt_publication
+        ), self.assertRaisesRegex(KeyboardInterrupt, "publication interruption"):
+            self._prepare(
+                None,
+                _recording_validator([]),
+                cwd=new_workspace,
+                resume_plan_dir=first.plan_dir,
+                rebind_workspace=True,
+            )
+
+        self.assertTrue(
+            (first.plan_dir / plans.PLAN_TRANSACTION_DIR_NAME).is_dir()
+        )
+        metadata = plans.load_plan_metadata(first.plan_dir)
+        self.assertIsInstance(metadata, plans.WorkspacePlanMetadata)
+        assert isinstance(metadata, plans.WorkspacePlanMetadata)
+        self.assertEqual(str(new_workspace.resolve()), metadata.workspace_root)
+        validation = prepare.load_prepare_validation(first.plan_dir)
+        assert validation is not None
+        self.assertEqual(str(new_workspace.resolve()), validation.workspace_root)
+        self.assertFalse(
+            (first.plan_dir / plans.PLAN_TRANSACTION_DIR_NAME).exists()
+        )
+        self.assertIsNone(state.inspect_lock_info(first.plan_dir, self.state_dir))
+
+    def test_rebind_staging_is_external_preserves_symlinks_and_rebases_paths(self) -> None:
+        specs = DEFAULT_MULTI_REPO_SPECS[:2]
+        old_workspace = self.tmp_path / "old-workspace"
+        new_workspace = self.tmp_path / "new-workspace"
+        init_multi_repo_workspace(old_workspace, specs)
+        init_multi_repo_workspace(new_workspace, specs)
+        source = self._write_registered_source(specs)
+        first = self._prepare(
+            source,
+            _recording_validator([]),
+            cwd=old_workspace,
+        )
+        self.assertTrue(first.ok, first)
+        assert first.plan_dir is not None
+        external_file = self.tmp_path / "operator-note.md"
+        external_file.write_text("operator note\n", encoding="utf-8")
+        (first.plan_dir / "operator-link.md").symlink_to(external_file)
+        staged_paths: list[Path] = []
+
+        def failing_validator(packet: prepare.ValidationTaskPacket) -> object:
+            staged_plan_dir = Path(packet.plan_dir)
+            staged_paths.append(staged_plan_dir)
+            self.assertFalse(staged_plan_dir.is_relative_to(self.base_dir))
+            self.assertTrue((staged_plan_dir / "operator-link.md").is_symlink())
+            raise plans.PlanError(
+                f"injected staged failure at {staged_plan_dir}/session-1.md"
+            )
+
+        result = self._prepare(
+            None,
+            failing_validator,
+            cwd=new_workspace,
+            resume_plan_dir=first.plan_dir,
+            rebind_workspace=True,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertTrue(staged_paths)
+        self.assertFalse(staged_paths[0].exists())
+        diagnostics = "\n".join(
+            [step.detail for step in result.steps]
+            + [blocker.message for blocker in result.blockers]
+        )
+        self.assertIn(str(first.plan_dir / "session-1.md"), diagnostics)
+        self.assertNotIn(str(staged_paths[0]), diagnostics)
+
+    def test_rebind_stage_failures_preserve_ready_plan_byte_for_byte(self) -> None:
+        specs = DEFAULT_MULTI_REPO_SPECS[:2]
+        old_workspace = self.tmp_path / "old-workspace"
+        new_workspace = self.tmp_path / "new-workspace"
+        init_multi_repo_workspace(old_workspace, specs)
+        init_multi_repo_workspace(new_workspace, specs)
+        source = self._write_registered_source(specs)
+        first = self._prepare(
+            source,
+            _recording_validator([]),
+            cwd=old_workspace,
+        )
+        self.assertTrue(first.ok, first)
+        assert first.plan_dir is not None
+        before = self._plan_file_bytes(first.plan_dir)
+
+        invalid = self._prepare(
+            None,
+            _recording_validator([]),
+            cwd=self.tmp_path / "missing-workspace",
+            resume_plan_dir=first.plan_dir,
+            rebind_workspace=True,
+        )
+        self.assertFalse(invalid.ok)
+        assert invalid.workspace_rebind is not None
+        self.assertEqual(
+            prepare.PREPARE_STAGE_WORKSPACE,
+            invalid.workspace_rebind["failure_stage"],
+        )
+        self.assertEqual(before, self._plan_file_bytes(first.plan_dir))
+
+        def run_rebind(validator=None) -> prepare.PrepareResult:
+            return self._prepare(
+                None,
+                validator or _recording_validator([]),
+                cwd=new_workspace,
+                resume_plan_dir=first.plan_dir,
+                rebind_workspace=True,
+            )
+
+        injections = []
+        injections.append(
+            (
+                "metadata",
+                mock.patch.object(
+                    plans,
+                    "save_workspace_plan_metadata",
+                    side_effect=plans.PlanError("injected metadata failure"),
+                ),
+                _recording_validator([]),
+                prepare.PREPARE_STAGE_METADATA,
+            )
+        )
+        injections.append(
+            (
+                "validation",
+                nullcontext(),
+                lambda _packet: (_ for _ in ()).throw(
+                    plans.PlanError("injected validation failure")
+                ),
+                prepare.PREPARE_STAGE_VALIDATION,
+            )
+        )
+        injections.append(
+            (
+                "expansion",
+                mock.patch.object(
+                    prepare,
+                    "render_expansion",
+                    side_effect=plans.PlanError("injected expansion failure"),
+                ),
+                _recording_validator([]),
+                prepare.PREPARE_STAGE_VALIDATION,
+            )
+        )
+        injections.append(
+            (
+                "correction",
+                mock.patch.object(
+                    prepare,
+                    "_apply_one_correction",
+                    side_effect=plans.PlanError("injected correction failure"),
+                ),
+                _recording_validator(
+                    [],
+                    corrections_by_id={
+                        "1": [
+                            {
+                                "expected_text": "Implement `SVC:demo/module.py`.",
+                                "replacement_text": "Implement `SVC:demo/new.py`.",
+                                "reason": "injected",
+                            }
+                        ]
+                    },
+                ),
+                prepare.PREPARE_STAGE_VALIDATION,
+            )
+        )
+        unsatisfied = {
+            "check_count": 1,
+            "reused": False,
+            "checks": [
+                {
+                    "session_id": "1",
+                    "name": "injected",
+                    "expectation": "pass",
+                    "status": "fail",
+                    "satisfied": False,
+                    "detail": "injected baseline failure",
+                }
+            ],
+        }
+        unsatisfied["unsatisfied"] = list(unsatisfied["checks"])
+        injections.append(
+            (
+                "baseline",
+                mock.patch.object(
+                    prepare, "_run_baseline_stage", return_value=unsatisfied
+                ),
+                _recording_validator([]),
+                prepare.PREPARE_STAGE_BASELINE,
+            )
+        )
+        injections.append(
+            (
+                "preflight",
+                mock.patch.object(
+                    preflight,
+                    "_mark_loop_ready",
+                    return_value=(False, "injected preflight failure"),
+                ),
+                _recording_validator([]),
+                prepare.PREPARE_STAGE_PREFLIGHT,
+            )
+        )
+
+        original_replace = os.replace
+
+        def fail_publication(source, destination):
+            target = Path(destination)
+            if (
+                target.parent == first.plan_dir
+                and target.name == plans.PLAN_METADATA_FILE_NAME
+            ):
+                raise OSError("injected publication failure")
+            return original_replace(source, destination)
+
+        injections.append(
+            (
+                "publication",
+                mock.patch.object(
+                    authoring.os, "replace", side_effect=fail_publication
+                ),
+                _recording_validator([]),
+                prepare.PREPARE_STAGE_PUBLICATION,
+            )
+        )
+
+        for name, injection, validator, expected_stage in injections:
+            with self.subTest(stage=name), injection:
+                result = run_rebind(validator)
+                self.assertFalse(result.ok)
+                assert result.workspace_rebind is not None
+                self.assertEqual(
+                    expected_stage, result.workspace_rebind["failure_stage"]
+                )
+                self.assertEqual(before, self._plan_file_bytes(first.plan_dir))
+                self.assertIsNone(
+                    state.inspect_lock_info(first.plan_dir, self.state_dir)
+                )
+
+    def test_rebind_rejects_unchanged_legacy_and_active_bindings(self) -> None:
+        legacy_source = self._write_source()
+        legacy = self._prepare(legacy_source, _recording_validator([]))
+        assert legacy.plan_dir is not None
+        with self.assertRaisesRegex(plans.PlanError, "registered plan"):
+            self._prepare(
+                None,
+                _recording_validator([]),
+                cwd=self.repo,
+                resume_plan_dir=legacy.plan_dir,
+                rebind_workspace=True,
+            )
+
+        specs = DEFAULT_MULTI_REPO_SPECS[:2]
+        old_workspace = self.tmp_path / "old-workspace"
+        new_workspace = self.tmp_path / "new-workspace"
+        init_multi_repo_workspace(old_workspace, specs)
+        init_multi_repo_workspace(new_workspace, specs)
+        registered_source = self._write_registered_source(specs)
+        registered = self._prepare(
+            registered_source,
+            _recording_validator([]),
+            cwd=old_workspace,
+        )
+        assert registered.plan_dir is not None
+        with self.assertRaisesRegex(plans.PlanError, "changed workspace"):
+            self._prepare(
+                None,
+                _recording_validator([]),
+                cwd=old_workspace,
+                resume_plan_dir=registered.plan_dir,
+                rebind_workspace=True,
+            )
+
+        before = self._plan_file_bytes(registered.plan_dir)
+        state.acquire_lock(registered.plan_dir, self.state_dir, owner="test")
+        try:
+            with self.assertRaisesRegex(plans.PlanError, "active lock"):
+                self._prepare(
+                    None,
+                    _recording_validator([]),
+                    cwd=new_workspace,
+                    resume_plan_dir=registered.plan_dir,
+                    rebind_workspace=True,
+                )
+        finally:
+            state.release_lock(registered.plan_dir, self.state_dir)
+        self.assertEqual(before, self._plan_file_bytes(registered.plan_dir))
+
+    def test_repository_ambiguity_issue_prevents_loop_ready(self) -> None:
+        specs = DEFAULT_MULTI_REPO_SPECS[:2]
+        workspace = self.tmp_path / "workspace"
+        init_multi_repo_workspace(workspace, specs)
+        source = self._write_registered_source(specs)
+
+        def ambiguous_validator(packet: prepare.ValidationTaskPacket) -> object:
+            payload = _prepare_pipeline_payload(
+                packet.codebase_root,
+                packet.session_ids,
+                version=packet.version,
+                repositories=packet.repositories,
+                session_repositories=packet.session_read_repositories,
+            )
+            payload["sessions"][0]["issues"] = [
+                {
+                    "issue_type": prepare.REPOSITORY_AMBIGUITY_ISSUE,
+                    "summary": "`demo/module.py` is not repository-qualified",
+                    "session_ref": "`demo/module.py`",
+                    "actual": "the path exists in more than one read repository",
+                    "fix": "qualify the path as SVC:demo/module.py",
+                    "repo": "SVC",
+                }
+            ]
+            return payload
+
+        result = self._prepare(source, ambiguous_validator, cwd=workspace)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(prepare.PREPARE_EXIT_REASON_VALIDATION_FAILED, result.reason)
+        self.assertFalse(result.marked_loop_ready)
+        self.assertEqual(
+            prepare.REPOSITORY_AMBIGUITY_ISSUE, result.blockers[0].category
+        )
+        assert result.plan_dir is not None
+        self.assertIn(
+            "**Readiness**: draft",
+            (result.plan_dir / "manifest.md").read_text(encoding="utf-8"),
+        )
+
+    def test_malformed_v2_output_does_not_bind_registered_plan(self) -> None:
+        specs = DEFAULT_MULTI_REPO_SPECS[:2]
+        workspace = self.tmp_path / "workspace"
+        init_multi_repo_workspace(workspace, specs)
+        source = self._write_registered_source(specs)
+
+        result = self._prepare(
+            source,
+            _recording_validator([], payload_override={"bogus": True}),
+            cwd=workspace,
+        )
+
+        self.assertFalse(result.ok)
+        assert result.plan_dir is not None
+        self.assertFalse(
+            (result.plan_dir / plans.PLAN_METADATA_FILE_NAME).exists()
+        )
+        self.assertFalse(
+            (result.plan_dir / prepare.PREPARE_VALIDATION_FILENAME).exists()
+        )
+        self.assertEqual([], list(result.plan_dir.glob("*.expand.md")))
 
     def test_tolerant_headings_author_canonical_plan_artifacts(self) -> None:
         source = self._write_source(

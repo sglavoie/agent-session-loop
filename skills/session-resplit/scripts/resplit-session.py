@@ -662,7 +662,14 @@ def _allocate_explicit_contract(
                 "ambiguous-contract",
                 f"child spec {index} inherits unknown parent check {name!r}",
             )
-        check_payloads.append(authoring._check_to_json(parent_check))
+        check_payloads.append(
+            authoring._check_to_json(
+                parent_check,
+                repository_registry=repository_registry,
+                session_id=child_session_id,
+                index=len(check_payloads),
+            )
+        )
     check_payloads.extend(spec["checks"])
 
     try:
@@ -915,6 +922,7 @@ def _render_child_session(
         previous_session_id=child.previous_session_id,
         contract=child.contract,
         scope=parent_details.scope,
+        repository_registry=parent_details.registry,
     )
 
 

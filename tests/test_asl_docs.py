@@ -96,9 +96,14 @@ class SkillInstructionTests(unittest.TestCase):
         self.assertIn("upward-traversing `..` segment", docs)
         self.assertIn("relative to its selected", docs)
         self.assertIn("repository and cannot be absolute", docs)
-        self.assertIn("repo-relative or absolute paths", split_skill)
-        self.assertIn("Relative paths must not contain `..` traversal", split_skill)
-        self.assertIn("replace it with an explicit absolute path", repair_skill)
+        self.assertIn(
+            "repo-relative or absolute `path` / `cwd` behavior", split_skill
+        )
+        self.assertIn("free of upward `..` traversal", split_skill)
+        self.assertIn("For a legacy plan", repair_skill)
+        self.assertIn("use an explicit absolute path", repair_skill)
+        self.assertIn("For a registered plan", repair_skill)
+        self.assertIn("every check needs a valid `repo`", repair_skill)
 
     def test_session_expand_auto_marks_loop_ready_before_session_run(self) -> None:
         text = (REPO_ROOT / "skills/session-expand/SKILL.md").read_text(
@@ -106,7 +111,7 @@ class SkillInstructionTests(unittest.TestCase):
         )
 
         self.assertIn(
-            "asl preflight <plan-dir> --cwd <codebase-root> --json --mark-loop-ready",
+            "asl preflight <plan-dir> --cwd <root> --json --mark-loop-ready",
             text,
         )
         self.assertIn("marked_loop_ready", text)
@@ -118,11 +123,48 @@ class SkillInstructionTests(unittest.TestCase):
         # Contract validation and validator ingestion delegate to the `asl`
         # subcommands rather than inlining `python3 -` heredocs.
         self.assertIn(
-            "asl contract-check <plan-dir> --cwd <codebase-root> --json",
+            "asl contract-check <plan-dir> --cwd <root> --json",
             text,
         )
         self.assertIn("asl expand-ingest <plan-dir> --batch-file", text)
         self.assertNotIn("<<'PY'", text)
+
+    def test_multi_repository_skill_contracts_stay_synchronized(self) -> None:
+        surfaces = {
+            name: (REPO_ROOT / path).read_text(encoding="utf-8")
+            for name, path in {
+                "split": "skills/session-split/SKILL.md",
+                "expand": "skills/session-expand/SKILL.md",
+                "run": "skills/session-run/SKILL.md",
+                "resplit": "skills/session-resplit/SKILL.md",
+                "preflight": "skills/plan-preflight-iterate/SKILL.md",
+                "asl": "skills/asl/SKILL.md",
+            }.items()
+        }
+
+        self.assertIn('put `"repo": "Alias"` on every check', surfaces["split"])
+        self.assertIn("`Alias:path`", surfaces["split"])
+        self.assertIn(
+            f"`prepare.PREPARE_VALIDATION_VERSION` = "
+            f"{prepare.PREPARE_VALIDATION_VERSION}",
+            surfaces["expand"],
+        )
+        self.assertIn("`repository-ambiguous`", surfaces["expand"])
+        self.assertIn("canonical `Alias:path` entries", surfaces["run"])
+        self.assertIn("complete mutation authority", surfaces["run"])
+        self.assertIn("never broadens repository authority", surfaces["resplit"])
+        self.assertIn(
+            "common workspace root for a registered plan", surfaces["preflight"]
+        )
+        self.assertIn("--rebind-workspace", surfaces["preflight"])
+        for reason in (
+            "workspace-write-scope-violation",
+            "workspace-write-guard-unavailable",
+            "commit-failed",
+        ):
+            self.assertIn(reason, surfaces["asl"])
+        self.assertIn("one combined read-only review", surfaces["asl"])
+        self.assertIn("preserve partial commit SHAs", surfaces["asl"])
 
     def test_session_split_names_current_contract_categories(self) -> None:
         text = (REPO_ROOT / "skills/session-split/SKILL.md").read_text(
@@ -1373,7 +1415,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
         readme = self._read("README.md")
         self.assertIn("asl workbench [serve]", readme)
         self.assertIn(
-            "asl workbench pin PLAN_DIR [--cwd REPO_ROOT] [--label LABEL]",
+            "asl workbench pin PLAN_DIR [--cwd ROOT] [--label LABEL]",
             readme,
         )
         self.assertIn("asl workbench unpin PLAN_DIR", readme)
@@ -1402,6 +1444,46 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
         self.assertIn("asl workbench pin /path/to/plan-dir", docs)
         self.assertIn("asl workbench unpin /path/to/plan-dir", docs)
         self.assertIn("asl workbench registry --json", docs)
+
+    def test_workspace_compatibility_claim_matches_payload_key_sets(self) -> None:
+        workspace = {
+            "workspace_root": "/workspace",
+            "registry_digest": "digest",
+            "repositories": [{"alias": "API", "path": "api"}],
+            "repository_count": 1,
+        }
+        recovery_payload = workbench.WorkbenchRecovery(
+            plan_dir=Path("/plan"),
+            kind="none",
+            title="No recovery needed",
+            summary="Ready",
+            severity="none",
+            recoverable=False,
+            workspace=workspace,
+        ).to_payload()
+        final_review_workspace_payload = workbench._workspace_payload(workspace)
+        expected_keys = {
+            "cwd",
+            "workspace_root",
+            "registry_digest",
+            "repositories",
+            "repository_count",
+        }
+
+        self.assertLessEqual(expected_keys, recovery_payload.keys())
+        self.assertLessEqual(expected_keys, final_review_workspace_payload.keys())
+        for relative in (
+            "docs/agent-session-loop.md",
+            "agent_session_loop/README.md",
+        ):
+            text = self._read(relative)
+            normalized = " ".join(text.split())
+            self.assertIn("final-review responses", normalized)
+            self.assertTrue(
+                "retain `cwd`" in normalized
+                or "retaining `cwd`" in normalized
+            )
+            self.assertIn("`formatRepositoryAliases`", text)
 
     def test_docs_describe_workbench_cleanup_archive_workflow(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
@@ -1967,6 +2049,88 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
         self.assertIn("[--artifact-dir DIR]", self.docs)
         self.assertIn("asl prepare --resume PLAN_DIR", self.docs)
         self.assertIn("[--max-review-fix-cycles N]", self.docs)
+
+    def test_run_help_default_matches_authoritative_review_cycle_default(
+        self,
+    ) -> None:
+        parser = cli.build_parser()
+        subparsers = next(
+            action
+            for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        run_help = subparsers.choices["run"].format_help()
+        self.assertIn(
+            f"review (default: {runner.DEFAULT_MAX_REVIEW_FIX_CYCLES}).",
+            run_help,
+        )
+
+    def test_multi_repository_docs_include_executable_four_repo_example(
+        self,
+    ) -> None:
+        agent_readme = (
+            REPO_ROOT / "agent_session_loop" / "README.md"
+        ).read_text(encoding="utf-8")
+        for text in (self.readme, agent_readme, self.docs):
+            self.assertIn("workspace root", text.lower())
+            self.assertIn("Alias:path", text)
+
+        self.assertIn("| Alias | Path | Origin |", self.docs)
+        expected_rows = (
+            "| SVC | tundra_svc | git@github.com:tundra/SVC.git |",
+            "| OAK | tundra_OAK | git@github.com:tundra/OAK.git |",
+            "| OWL | tundra_OWL_J | git@github.com:tundra/OWL.J.git |",
+            "| Kiln | tundra_Kiln | git@github.com:tundra/Kiln.git |",
+        )
+        for row in expected_rows:
+            self.assertIn(row, self.docs)
+        self.assertIn("non-Git common parent", self.docs)
+        self.assertIn("does not opt it into\nworkspace behavior", self.docs)
+
+    def test_metadata_and_validator_version_compatibility_is_documented(
+        self,
+    ) -> None:
+        self.assertEqual(1, prepare.LEGACY_PREPARE_VALIDATION_VERSION)
+        self.assertEqual(2, prepare.PREPARE_VALIDATION_VERSION)
+        for text in (self.readme, self.docs):
+            self.assertIn("version 1", text)
+            self.assertIn("version 2", text)
+            self.assertIn("workspace_root", text)
+            self.assertIn("--rebind-workspace", text)
+        self.assertNotIn(
+            "non-dry-run `asl run` refreshes/backfills the association",
+            self.readme,
+        )
+
+    def test_preflight_categories_and_pause_reasons_match_authoritative_tables(
+        self,
+    ) -> None:
+        for category in preflight.PREFLIGHT_CATEGORIES:
+            self.assertIn(
+                f"`{category}`",
+                self.docs,
+                f"docs omit preflight category {category!r}",
+            )
+        for reason in events.PAUSE_REASONS:
+            self.assertIn(
+                f"`{reason}`",
+                self.docs,
+                f"docs omit pause reason {reason!r}",
+            )
+
+    def test_repository_aware_review_schema_versions_are_documented(
+        self,
+    ) -> None:
+        self.assertIn(
+            f"review session version "
+            f"{review.REPOSITORY_AWARE_GENERATED_REVIEW_SESSION_VERSION}",
+            self.docs,
+        )
+        self.assertIn(
+            f"structured artifact\nversion "
+            f"{review.REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION}",
+            self.docs,
+        )
 
     def test_docs_pin_gc_retention_contract(self) -> None:
         self.assertIn(

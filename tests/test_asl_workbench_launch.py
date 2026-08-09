@@ -65,7 +65,10 @@ from agent_session_loop.formatting import (
     format_turn_started_message,
 )
 from tests.support import (
+    DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,
+    init_multi_repo_workspace,
+    write_multi_repo_plan,
     write_plan,
     install_fake_codex,
     _FakePopen,
@@ -198,6 +201,58 @@ class WorkbenchLaunchTests(unittest.TestCase):
             ):
                 self.assertNotIn(unexpected, argv)
             self.assertIn("--json", argv)
+
+    def test_registered_launch_uses_prepared_workspace_and_projects_repositories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            specs = DEFAULT_MULTI_REPO_SPECS[:2]
+            workspace_root = tmp_path / "workspace"
+            init_multi_repo_workspace(workspace_root, specs)
+            plan_dir = tmp_path / "plan"
+            write_multi_repo_plan(plan_dir, ("pending",), specs=specs)
+            registry = plans.read_repository_registry(plan_dir)
+            assert registry is not None
+            plans.save_workspace_plan_metadata(
+                plan_dir, workspace_root, registry.digest
+            )
+
+            argv = workbench.build_launch_argv(plan_dir)
+
+            self.assertEqual(
+                str(workspace_root.resolve()), argv[argv.index("--cwd") + 1]
+            )
+            captured: list[_FakePopen] = []
+
+            def factory(child_argv, **kwargs):
+                process = _FakePopen(child_argv, **kwargs)
+                captured.append(process)
+                return process
+
+            launched = workbench.launch_plan(plan_dir, popen_factory=factory)
+            payload = launched.to_payload()
+            self.assertEqual(str(workspace_root.resolve()), payload["cwd"])
+            self.assertEqual(str(workspace_root.resolve()), payload["workspace_root"])
+            self.assertEqual(["SVC", "OAK"], [row["alias"] for row in payload["repositories"]])
+
+    def test_registered_launch_rejects_child_repository_as_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            specs = DEFAULT_MULTI_REPO_SPECS[:2]
+            workspace_root = tmp_path / "workspace"
+            repositories = init_multi_repo_workspace(workspace_root, specs)
+            plan_dir = tmp_path / "plan"
+            write_multi_repo_plan(plan_dir, ("pending",), specs=specs)
+            registry = plans.read_repository_registry(plan_dir)
+            assert registry is not None
+            plans.save_workspace_plan_metadata(plan_dir, workspace_root, registry.digest)
+
+            with self.assertRaises(workbench.LaunchError) as caught:
+                workbench.build_launch_argv(
+                    plan_dir, profile=workbench.LaunchProfile(cwd=str(repositories["SVC"]))
+                )
+
+            self.assertEqual(workbench.LAUNCH_REASON_INVALID_PROFILE, caught.exception.reason)
+            self.assertIn("--rebind-workspace", caught.exception.message)
 
     def test_invalid_plan_dir_missing_raises_invalid_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

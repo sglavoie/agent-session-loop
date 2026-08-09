@@ -674,6 +674,9 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             "events_path": summary.events_path,
             "progress_path": summary.progress_path,
             "final_review_path": summary.final_review_path,
+            "final_review_artifact_path": (
+                canonical / workbench.FINAL_REVIEW_ARTIFACT_FILE_NAME
+            ),
             "artifact_dir": summary.artifact_dir,
             "stdout_path": summary.stdout_path,
             "stderr_path": summary.stderr_path,
@@ -712,6 +715,12 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             state_path,
             lock_info=lock_info,
         )
+        try:
+            workspace = workbench._workspace_projection(
+                canonical, runtime=payload
+            )
+        except (plans.PlanError, OSError, ValueError):
+            workspace = {}
         next_pending = snapshot.next_pending
         self._send_success(
             reason="ok",
@@ -723,6 +732,11 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             ],
             counts=state._status_counts(snapshot),
             next_pending_id=next_pending.id if next_pending is not None else None,
+            workspace=workspace,
+            **workbench._workspace_payload(
+                workspace,
+                cwd=payload.get("cwd"),
+            ),
         )
 
     def _handle_events(self, *, query: Mapping[str, list[str]]) -> None:
@@ -1027,9 +1041,31 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
                 details={"path": str(path)},
             )
             return
+        artifact_path = canonical / workbench.FINAL_REVIEW_ARTIFACT_FILE_NAME
+        structured_review = None
+        structured_error = None
+        try:
+            if artifact_path.is_file() and artifact_path.stat().st_size <= max_bytes:
+                decoded = json.loads(artifact_path.read_text(encoding="utf-8"))
+                if isinstance(decoded, dict):
+                    structured_review = decoded
+                else:
+                    structured_error = "final-review.json did not contain an object"
+        except (OSError, json.JSONDecodeError) as error:
+            structured_error = str(error)
+        try:
+            workspace = workbench._workspace_projection(canonical)
+        except (plans.PlanError, OSError, ValueError):
+            workspace = {}
         self._send_success(
             reason="ok",
             plan_dir=str(canonical),
+            artifact_path=str(artifact_path),
+            structured_review=structured_review,
+            structured_error=structured_error,
+            review_resume=summary.review_resume,
+            workspace=workspace,
+            **workbench._workspace_payload(workspace, cwd=summary.cwd),
             **payload,
         )
 

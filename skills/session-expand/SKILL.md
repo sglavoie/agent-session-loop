@@ -29,8 +29,8 @@ Session IDs use `[1-9][0-9]*(\.[1-9][0-9]*)*`; session files are named `session-
 
 **Directory mode**:
 
-1. Read `context.md` for the project scope, target repository, and files listed.
-2. Read `manifest.md` for the session list and titles. Ignore any legacy `## Parallel Execution`, `### Dependency Waves`, `### Session Ownership`, `### Parallel Worker Commands`, `### Worker Prompts`, or `### Serial Blockers` sections — this skill is sequential-by-design and these blocks are no longer authoritative scheduling guidance.
+1. Read `context.md` for the project scope and referenced files.
+2. Read `manifest.md` for the session list, titles, and optional authoritative ordered `## Repositories` table. When a registry exists, also read each session's exact `Reads repositories` / `Writes repositories` scope and preserve case-sensitive aliases. Ignore any legacy `## Parallel Execution`, `### Dependency Waves`, `### Session Ownership`, `### Parallel Worker Commands`, `### Worker Prompts`, or `### Serial Blockers` sections — this skill is sequential-by-design and these blocks are no longer authoritative scheduling guidance.
 3. Collect session files whose basename matches `session-<ID>.md` with `<ID>` matching `[1-9][0-9]*(\.[1-9][0-9]*)*`. Exclude `.expand.md` files.
 4. Sort by dotted numeric order: compare dot-separated components as integers; when all compared components are equal, the shorter ID sorts first (`2` before `2.1`; `2.10` after `2.2`).
 
@@ -40,7 +40,7 @@ Session IDs use `[1-9][0-9]*(\.[1-9][0-9]*)*`; session files are named `session-
 2. Verify the basename matches exactly `session-<ID>.md`.
 3. Process only that file and write the corresponding `session-<ID>.expand.md`.
 
-**Determine the codebase root** from `context.md` — explicit paths (`internal/replay/`, `src/`, `pkg/`, `cmd/`) or repository/build references that reveal the project root. If the paths are relative and match the current working directory, use it. If they clearly reference a different repository, inform the user and ask for the codebase root before proceeding. If ambiguous, default to the current working directory (and `cd` to a different repo root before Glob/Grep/Read if needed).
+**Determine the validation root by plan mode.** Without a registry, use the legacy codebase root: derive it from `context.md` and repository/build references, use the current working directory when it matches, and ask for the repository root when a different root is required or the choice is ambiguous. With a registry, use one canonical workspace root containing every declared repository path. Prefer a version 2 `plan-metadata.json` binding when present; otherwise use the current directory only when every registry row resolves beneath it as the exact Git top-level with the expected credential-free origin. Ask for the workspace root when that cannot be established uniquely. The workspace root itself may be a non-Git directory. Never infer it from one child checkout, silently rebind an existing plan, or follow a repository path through a symlink escape.
 
 ### Step 2: Extract Claims from Each Session
 
@@ -58,7 +58,7 @@ For each session file, scan all content **above** the `## Handoff` section for v
 
 **N — Naming claims**: variable/constant/enum/command names referenced as already existing.
 
-For each claim, record the type (P/S/F/D/B/N), the exact text from the session, and the section it appears in. Ignore any legacy `## Parallel Metadata` block — do not extract, validate, or surface its fields.
+For each claim, record the type (P/S/F/D/B/N), the exact text from the session, and the section it appears in. In registered mode, also record its `repo` alias from the qualified `Alias:path` claim or session context and require it to be in that session's declared read scope; do not guess an alias for ambiguous unqualified prose. Ignore any legacy `## Parallel Metadata` block — do not extract, validate, or surface its fields.
 
 Separately collect each session's `## Completion Contract` section when present: the `### Done when` bullets, the `### Verify` fenced ```json``` block, and any top-level `"session"` field. Treat the contract as its own structural artifact, validated in Step 3 under "Contract claims (C)"; do not double-report `argv`/`path`/`pattern` references from inside it as P/S/F/D/B/N claims.
 
@@ -80,8 +80,13 @@ Verify each claim using the most efficient tool:
 Do not re-implement the contract schema. Run the authoritative static checker, which wraps `agent_session_loop.contracts.parse_completion_contract` and resolves every check against the codebase without executing any command:
 
 ```bash
-asl contract-check <plan-dir> --cwd <codebase-root> --json
+asl contract-check <plan-dir> --cwd <root> --json
 ```
+
+Here `<root>` is the legacy repository root or registered workspace root. In
+registered mode, use the returned `workspace_root`, `registry_digest`, and
+ordered resolved `repositories` projection as a cross-check before emitting
+validator output; each contract row must resolve through its declared `repo`.
 
 (In single-file mode add `--session <ID>`.) Each check produces a row with `status` (`ok`, `schema-error`, `missing-contract`, or `factual-issue`), a `reason` (`command-not-runnable`, `file-missing`, `regex-not-matched`, or `bare-python`), and a human-readable `detail`. For every non-`ok` row, copy its `detail` verbatim into that session's `contract_problems` (Step 6) with `contract_checked: true`:
 
@@ -128,7 +133,7 @@ Include the file path and line range for each. Prefer `Grep` with `output_mode: 
 
 Do not hand-write `session-<ID>.expand.md` files and do not hand-edit session files to apply corrections. All validation, rendering, and plan mutation flow through `agent_session_loop.prepare` behind `asl expand-ingest`: the LLM researches (Steps 2–5) and supplies structured findings; Python validates them fail-closed and owns every file write.
 
-Assemble the findings for each session into a validator result JSON payload (schema version `prepare.PREPARE_VALIDATION_VERSION` = 1):
+Assemble the findings for each session into a validator result JSON payload. Legacy plans use `prepare.LEGACY_PREPARE_VALIDATION_VERSION` = 1 with `codebase_root`. Registered plans must use `prepare.PREPARE_VALIDATION_VERSION` = 2 with the canonical `workspace_root` and the exact ordered repository vector echoed from the authoritative registry and resolved roots:
 
 ```json
 {
@@ -151,6 +156,39 @@ Assemble the findings for each session into a validator result JSON payload (sch
 }
 ```
 
+Registered top-level shape:
+
+```json
+{
+  "version": 2,
+  "workspace_root": "/canonical/workspace",
+  "repositories": [
+    {"alias": "SVC", "path": "tundra_svc", "origin": "github.com/tundra/SVC", "root": "/canonical/workspace/tundra_svc"}
+  ],
+  "sessions": [
+    {
+      "session_id": "1",
+      "title": "Example",
+      "claims": [],
+      "issues": [],
+      "details": [],
+      "patterns": [],
+      "dependencies": [],
+      "contract_checked": false,
+      "contract_problems": [],
+      "corrections": []
+    }
+  ]
+}
+```
+
+For version 2, every object in `claims`, `issues`, `details`, `patterns`,
+`dependencies`, and `corrections` must also carry a `repo` alias from that
+session's read scope, and all locations are repository-relative or qualified
+when rendered. Report ambiguous unqualified path prose as a
+`repository-ambiguous` issue instead of selecting an alias. Version 1 rejects
+repository fields and remains valid only for plans without a registry.
+
 The parser rejects (fail-closed, `PlanError`, nothing written) unknown keys, empty required strings, unknown `claim_type`/`issue_type`/`direction`, invalid/duplicate session ids, and more than 3 `patterns` per session. Claims about code to be _created_ set `"to_be_created": true` (no `line`) and render as "N/A — to be created" instead of being flagged as issues. `contract_problems` requires `contract_checked: true` and takes the Step 3 findings verbatim. `corrections` are exact factual text replacements only (`expected_text != replacement_text`) — never design changes, plan restructuring, or contract-body edits; report those as `issues` or `contract_problems`.
 
 Process sessions in bounded batches (`prepare.DEFAULT_VALIDATION_BATCH_SIZE` = 4 sessions per payload; `prepare.batch_sessions` semantics). Write each batch payload to a JSON file and ingest it:
@@ -168,10 +206,10 @@ The renderer emits one bullet per contract problem as `<session-id>: <issue>: <s
 In **directory mode**, after every other check is complete and corrections have been ingested, invoke final preflight once with `Bash`:
 
 ```text
-asl preflight <plan-dir> --cwd <codebase-root> --json --mark-loop-ready
+asl preflight <plan-dir> --cwd <root> --json --mark-loop-ready
 ```
 
-Use the codebase root resolved in Step 1; if it is unknown, omit `--cwd` and say so in the summary. Treat the JSON response as the authoritative cross-cutting finding set and readiness gate — do not re-implement preflight rules. It repairs manifest-readiness-only findings (missing readiness lines, stale SHA, `draft`/`reviewed` state) **and** auto-backfills stale/missing `progress.md` (force semantics, surfaced in the payload's `auto_repairs` array with `action: "rewrite"`) when the only non-readiness blockers are `progress-journal-missing` findings, then marks the plan `loop-ready` when no other red/yellow findings remain. Drive the ready-to-run gate off the payload's `reason` (e.g. `preflight-red`, `preflight-yellow`, `ok`, `loop-ready-marked`), `marked_loop_ready`, `readiness.state`, `next_steps`, and `findings_by_severity` (red/yellow/green counts). Skip this invocation in single-file mode, and say that plan-level finding counts and auto-marking require directory-mode expansion.
+Use the legacy repository root or registered workspace root resolved in Step 1; if it is unknown, omit `--cwd` and say so in the summary. Treat the JSON response as the authoritative cross-cutting finding set and readiness gate — do not re-implement preflight rules. In registered mode, require its ordered workspace projection to match the registry and surface root, origin, overlap, scope, or repository-ambiguous findings rather than weakening them. It repairs manifest-readiness-only findings (missing readiness lines, stale SHA, `draft`/`reviewed` state) **and** auto-backfills stale/missing `progress.md` (force semantics, surfaced in the payload's `auto_repairs` array with `action: "rewrite"`) when the only non-readiness blockers are `progress-journal-missing` findings, then marks the plan `loop-ready` when no other red/yellow findings remain. Drive the ready-to-run gate off the payload's `reason` (e.g. `preflight-red`, `preflight-yellow`, `ok`, `loop-ready-marked`), `marked_loop_ready`, `readiness.state`, `next_steps`, and `findings_by_severity` (red/yellow/green counts). Skip this invocation in single-file mode, and say that plan-level finding counts and auto-marking require directory-mode expansion.
 
 Print a concise summary:
 
@@ -200,6 +238,7 @@ Otherwise (the command exits non-zero, `marked_loop_ready` is false, or the fina
 - New code claims (files or functions to be created) are valid and should not be flagged unless they conflict with existing code.
 - This skill is sequential-by-design: it does not extract or validate `## Parallel Metadata`, emit `## Parallel Safety` sections, or write `parallel-validation.md`. Read any legacy parallel blocks only as context, never as authoritative scheduling guidance, and never regenerate them.
 - All expansion writes, reference-line insertions, and factual fixes flow through `asl expand-ingest` (`agent_session_loop.prepare`) — never hand-write `.expand.md` files or `Edit` session files directly. `prepare-validation.json` is a derived, regenerable aggregate excluded from the stable readiness hash, never authoritative over the session files themselves.
+- Registered expansion output is fail-closed validator v2 evidence: its workspace root and exact ordered repositories must match the plan, every factual entry is repository-attributed within the session read scope, and every rendered location is qualified. Legacy validator v1 remains accepted only for plans without a registry.
 - Contract validation is owned by `asl contract-check` (`agent_session_loop.contracts.parse_completion_contract`); surface its `detail` verbatim under "Contract Issues" so the wording stays aligned with `asl preflight` and `asl verify`. Contract issues are advisory — do not auto-edit contract bodies or skeleton placeholders.
 - The readiness SHA and manifest-readiness finding are owned by the final `asl preflight` (`agent_session_loop.plans.stable_readiness_sha256`); hash divergence at expansion time almost always means a session file was edited between `session-split` and `session-expand`. The hash ignores legacy `parallel-validation.md`, manifest `## Parallel Execution` blocks, and per-session `## Parallel Metadata` blocks.
 - The `asl preflight --json --mark-loop-ready` invocation ending directory-mode expansion is the readiness gate for `session-run`; red/yellow findings block the ready-to-run command, while green findings (`env-amx`, `env-lock`, `env-turn-budget`) are informational.

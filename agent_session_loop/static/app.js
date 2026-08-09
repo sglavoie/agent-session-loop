@@ -1289,6 +1289,8 @@
       setField(facts, "counts", formatCounts(plan.counts));
       setField(facts, "harness", plan.harness || null);
       setField(facts, "run", plan.run_id || null);
+      setField(facts, "workspace", plan.workspace_root || plan.cwd || null);
+      setField(facts, "repositories", formatRepositoryAliases(plan.repositories));
       setField(facts, "activity", formatLastActivity(plan.last_activity_at));
       setField(facts, "completed", formatCompletedAt(plan));
     }
@@ -1655,6 +1657,20 @@
       parts.push("u" + counts.unknown);
     }
     return parts.length ? parts.join(" / ") : "-";
+  }
+
+  function formatRepositoryAliases(repositories) {
+    if (!Array.isArray(repositories) || repositories.length === 0) return null;
+    const limit = 12;
+    const aliases = repositories
+      .slice(0, limit)
+      .map((repository) => repository && repository.alias)
+      .filter(Boolean)
+      .map(String);
+    if (repositories.length > limit) {
+      aliases.push("+" + String(repositories.length - limit) + " more");
+    }
+    return aliases.length ? aliases.join(", ") : null;
   }
 
   function describeAction(action) {
@@ -2532,12 +2548,20 @@
   function renderDetailHeader(plan) {
     const labelEl = document.getElementById("wb-detail-label");
     const pathEl = document.getElementById("wb-detail-path");
+    const workspaceEl = document.getElementById("wb-detail-workspace");
     const stateEl = document.getElementById("wb-detail-state");
     const actionEl = document.getElementById("wb-detail-action-hint");
     const hintEl = document.getElementById("wb-detail-hint");
     if (!plan) return;
     if (labelEl) labelEl.textContent = plan.label || displayName(plan.plan_dir);
     if (pathEl) pathEl.textContent = plan.plan_dir || "";
+    if (workspaceEl) {
+      const aliases = formatRepositoryAliases(plan.repositories);
+      const root = plan.workspace_root || plan.cwd || "";
+      workspaceEl.textContent = root
+        ? "workspace: " + root + (aliases ? " · repositories: " + aliases : "")
+        : "";
+    }
     if (stateEl) {
       stateEl.textContent = plan.primary_state || "unknown";
       stateEl.setAttribute("data-state", plan.primary_state || "unknown");
@@ -3444,6 +3468,7 @@
       ["events_path", "events.jsonl"],
       ["progress_path", "progress.md"],
       ["final_review_path", "final-review.md"],
+      ["final_review_artifact_path", "final-review.json"],
       ["artifact_dir", "artifact dir"],
       ["stdout_path", "stdout"],
       ["stderr_path", "stderr"],
@@ -3548,7 +3573,7 @@
     const pin = findPin(plan.plan_dir);
     const profile = (pin && pin.profile) || plan.profile || {};
     setInputValue(form, "label", pin ? pin.label || "" : plan.label || "");
-    setInputValue(form, "cwd", profile.cwd || "");
+    setInputValue(form, "cwd", plan.workspace_root || profile.cwd || plan.cwd || "");
     setInputValue(form, "harness", profile.harness || "");
     setInputValue(form, "harness_model", profile.harness_model || "");
     setInputValue(form, "effort", profile.effort || "");
@@ -3680,7 +3705,9 @@
 
   function validateLaunchPayload(payload) {
     const errors = validateProfilePayload(payload);
-    if (!payload.profile.cwd) errors.push("cwd is required to launch");
+    if (!payload.profile.cwd) {
+      errors.push("repository or workspace root is required to launch");
+    }
     if (!payload.profile.harness) {
       errors.push("harness is required to launch");
     } else if (HARNESS_NAMES.indexOf(payload.profile.harness) === -1) {

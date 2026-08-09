@@ -65,10 +65,13 @@ from agent_session_loop.formatting import (
     format_turn_started_message,
 )
 from tests.support import (
+    DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,
     write_plan,
     init_git_repo,
+    init_multi_repo_workspace,
     git_stdout,
+    write_multi_repo_plan,
     _baseline_contract_text,
     _command_contract,
     _contract_block,
@@ -177,6 +180,24 @@ class BaselineContractTests(unittest.TestCase):
         self.assertEqual(30.0, check.timeout_seconds)
         self.assertEqual("skip", check.baseline_expectation)
 
+    def test_legacy_contract_rejects_repository_alias(self) -> None:
+        text = _baseline_contract_text(
+            json.dumps(
+                {
+                    "checks": [
+                        {
+                            "type": "file_exists",
+                            "path": "README.md",
+                            "repo": "SVC",
+                        }
+                    ]
+                }
+            )
+        )
+
+        with self.assertRaisesRegex(plans.PlanError, "repository registry"):
+            contracts.parse_completion_contract(text, session_id="1")
+
     def test_baseline_budget_constants(self) -> None:
         self.assertEqual(120.0, contracts.DEFAULT_BASELINE_CHECK_BUDGET_SECONDS)
         self.assertEqual(600.0, contracts.DEFAULT_BASELINE_TOTAL_BUDGET_SECONDS)
@@ -240,6 +261,45 @@ class BaselineCacheTests(unittest.TestCase):
             environment="env",
         )
         self.assertEqual(key_a, key_b)
+
+    def test_legacy_cache_keys_match_pre_repository_projection(self) -> None:
+        checks_and_keys = (
+            (
+                contracts.CommandCheck(
+                    name="unit",
+                    argv=("python3", "-m", "pytest"),
+                    cwd=None,
+                    timeout_seconds=60,
+                ),
+                "4c8fc237db277db393f707fef15286459435024190c3bf798f3bd170b5d4d136",
+            ),
+            (
+                contracts.FileExistsCheck(name="file", path="README.md"),
+                "71c4ca53d6089aa7d63ca523f5955234ea39b3feb8dfe20384b3bc69149d8cd7",
+            ),
+            (
+                contracts.RegexInFileCheck(
+                    name="regex", path="README.md", pattern="^#"
+                ),
+                "f8c0078387ecae59c89f456c0a04d42d9ed121d775c6a372bd840f4ad6aec8b5",
+            ),
+        )
+
+        for check, expected in checks_and_keys:
+            with self.subTest(kind=check.kind):
+                recipe = contracts.VerifyRecipe(checks=(check,))
+                normalized = json.loads(baseline_cache.normalize_recipe(recipe))
+                self.assertNotIn("repo", normalized["checks"][0])
+                self.assertEqual(
+                    expected,
+                    baseline_cache.cache_key(
+                        recipe=recipe,
+                        cwd="/tmp/asl-legacy-cache-key",
+                        repo_fingerprint="fp",
+                        executable="exe",
+                        environment="env",
+                    ),
+                )
 
     def test_cache_deduplicates_equivalent_recipes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -579,6 +639,192 @@ class BaselineTotalBudgetTests(unittest.TestCase):
             self.assertEqual("skip", skipped.status)
             self.assertFalse(skipped.satisfied)
             self.assertTrue(skipped.total_budget_exceeded)
+
+
+class MultiRepositoryBaselineTests(unittest.TestCase):
+    def test_non_git_registered_repository_is_unavailable_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace_root = root / "workspace"
+            specs = DEFAULT_MULTI_REPO_SPECS[:1]
+            repositories = init_multi_repo_workspace(workspace_root, specs)
+            plan_dir = root / "plan"
+            contract = _contract_block(
+                json.dumps(
+                    {
+                        "type": "file_exists",
+                        "path": "README.md",
+                        "name": "readme",
+                        "repo": "SVC",
+                        "baseline_expectation": "pass",
+                    }
+                )
+            )
+            write_multi_repo_plan(
+                plan_dir,
+                ("pending",),
+                contracts_by_id={"1": contract},
+                specs=specs,
+            )
+            context = verification.verification_context_from_plan(
+                plan_dir, workspace_root
+            )
+            shutil.rmtree(repositories["SVC"] / ".git")
+
+            _digest, available = baseline._registered_repository_fingerprint(
+                context, plan_dir
+            )
+            run = baseline.run_baseline(
+                plan_dir, workspace_root, context=context
+            )
+
+            self.assertFalse(available)
+            self.assertFalse(run.all_satisfied)
+            self.assertEqual("pass", run.outcomes[0].status)
+            self.assertFalse(run.outcomes[0].satisfied)
+            self.assertFalse(run.outcomes[0].repository_evidence_available)
+
+    def test_resolves_all_checks_before_executing_baseline_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace_root = root / "workspace"
+            specs = DEFAULT_MULTI_REPO_SPECS[:1]
+            repositories = init_multi_repo_workspace(workspace_root, specs)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "file.txt").write_text("outside\n", encoding="utf-8")
+            os.symlink(outside, repositories["SVC"] / "link")
+            marker = root / "marker.txt"
+            plan_dir = root / "plan"
+            command = _contract_block(
+                json.dumps(
+                    {
+                        "type": "command",
+                        "argv": [
+                            sys.executable,
+                            "-c",
+                            f"open({str(marker)!r}, 'a').write('x')",
+                        ],
+                        "name": "side-effect",
+                        "repo": "SVC",
+                        "baseline_expectation": "pass",
+                    }
+                ),
+                session="1",
+            )
+            escaping = _contract_block(
+                json.dumps(
+                    {
+                        "type": "file_exists",
+                        "path": "link/file.txt",
+                        "name": "escapes",
+                        "repo": "SVC",
+                        "baseline_expectation": "pass",
+                    }
+                ),
+                session="2",
+            )
+            write_multi_repo_plan(
+                plan_dir,
+                ("pending", "pending"),
+                contracts_by_id={"1": command, "2": escaping},
+                specs=specs,
+            )
+
+            for _attempt in range(2):
+                with self.assertRaisesRegex(plans.PlanError, "escapes repository"):
+                    baseline.run_baseline(plan_dir, workspace_root)
+
+            self.assertFalse(marker.exists())
+            results_path = plan_dir / baseline_cache.BASELINE_RESULTS_FILENAME
+            self.assertTrue(results_path.is_file())
+            self.assertEqual(0, len(baseline_cache.BaselineCache.load(results_path)))
+
+    def test_aggregate_refuses_unavailable_repository_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace_root = root / "workspace"
+            specs = DEFAULT_MULTI_REPO_SPECS[:1]
+            init_multi_repo_workspace(workspace_root, specs)
+            plan_dir = root / "plan"
+            write_multi_repo_plan(plan_dir, ("pending",), specs=specs)
+            context = verification.verification_context_from_plan(
+                plan_dir, workspace_root
+            )
+
+            with mock.patch.object(
+                baseline,
+                "_registered_repository_fingerprint",
+                return_value=("same-digest", True),
+            ):
+                self.assertEqual(
+                    "same-digest",
+                    baseline.aggregate_repository_fingerprint(context, plan_dir),
+                )
+            with mock.patch.object(
+                baseline,
+                "_registered_repository_fingerprint",
+                return_value=("same-digest", False),
+            ):
+                with self.assertRaisesRegex(plans.PlanError, "unavailable"):
+                    baseline.aggregate_repository_fingerprint(context, plan_dir)
+
+    def test_records_registry_aggregate_and_invalidates_on_other_repo_change(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace_root = root / "workspace"
+            specs = DEFAULT_MULTI_REPO_SPECS[:2]
+            repositories = init_multi_repo_workspace(workspace_root, specs)
+            (repositories["SVC"] / "baseline.txt").write_text(
+                "present\n", encoding="utf-8"
+            )
+            plan_dir = root / "plan"
+            contract = _contract_block(
+                '{"type": "file_exists", "path": "baseline.txt", '
+                '"name": "baseline", "repo": "SVC", '
+                '"baseline_expectation": "pass"}'
+            )
+            write_multi_repo_plan(
+                plan_dir,
+                ("pending",),
+                contracts_by_id={"1": contract},
+                specs=specs,
+            )
+
+            run = baseline.run_baseline(plan_dir, workspace_root)
+
+            self.assertTrue(run.all_satisfied)
+            outcome = run.outcomes[0]
+            self.assertEqual("SVC", outcome.repo)
+            self.assertEqual("SVC:baseline.txt", outcome.qualified_path)
+            self.assertEqual(run.registry_digest, outcome.registry_digest)
+            self.assertEqual(
+                run.aggregate_repository_fingerprint,
+                outcome.aggregate_repository_fingerprint,
+            )
+            cache = baseline_cache.BaselineCache.load(run.results_path)
+            record = cache.get(outcome.key)
+            assert record is not None
+            context = verification.verification_context_from_plan(
+                plan_dir, workspace_root
+            )
+            self.assertTrue(
+                baseline.baseline_evidence_is_current(
+                    record.result, context, plan_dir
+                )
+            )
+
+            (repositories["OAK"] / "untracked.txt").write_text(
+                "changed\n", encoding="utf-8"
+            )
+
+            self.assertFalse(
+                baseline.baseline_evidence_is_current(
+                    record.result, context, plan_dir
+                )
+            )
 
 
 class BaselineCliTests(unittest.TestCase):

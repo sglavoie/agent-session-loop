@@ -627,6 +627,10 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             set(workbench.PAUSE_REASON_RECOVERY_KIND_BY_REASON.values()),
             set(workbench.RECOVERY_KINDS) - {"generic"},
         )
+        self.assertIn(
+            events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+            generic_reasons,
+        )
 
     def test_generic_pause_reason_allowlist_uses_generic_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

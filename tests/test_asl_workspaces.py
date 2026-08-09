@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import unittest
 
-from agent_session_loop import plans, workspaces
+from agent_session_loop import authoring, plans, workspaces
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     init_git_repo,
@@ -59,6 +59,8 @@ class RepositoryValueTests(unittest.TestCase):
             "/repo",
             "C:\\repo",
             "repo\\nested",
+            "repo\x00nested",
+            "group/repo\nother",
         ):
             with self.subTest(path=invalid):
                 with self.assertRaises(workspaces.WorkspaceError):
@@ -78,19 +80,101 @@ class RepositoryValueTests(unittest.TestCase):
         self.assertNotIn("token", identity)
         self.assertNotIn("secret", identity)
 
+    def test_origin_identity_is_idempotent_with_non_default_ports(self) -> None:
+        expected = {
+            "ssh://git@code.internal:2222/tundra/SVC.git": (
+                "code.internal:2222/tundra/SVC"
+            ),
+            "https://host:8443/a/b.git": "host:8443/a/b",
+            "git@github.com:t/SVC.git": "github.com/t/SVC",
+            "ssh://git@host/a/b.git": "host/a/b",
+        }
+        for origin, identity in expected.items():
+            with self.subTest(origin=origin):
+                self.assertEqual(identity, workspaces.canonicalize_origin(origin))
+                self.assertEqual(
+                    identity, workspaces.canonicalize_origin(identity)
+                )
+
+    def test_origin_identity_quotes_markdown_metacharacters_idempotently(self) -> None:
+        identity = workspaces.canonicalize_origin(
+            "ssh://git@github.com/tundra/a@b/pipe|name.git"
+        )
+
+        self.assertEqual(
+            "github.com/tundra/a%40b/pipe%7Cname",
+            identity,
+        )
+        self.assertEqual(identity, workspaces.canonicalize_origin(identity))
+        self.assertNotIn("|", identity)
+        with self.assertRaisesRegex(
+            workspaces.WorkspaceError, "Markdown table delimiters"
+        ):
+            workspaces.canonicalize_declared_origin(
+                "https://github.com/tundra/pipe|name.git"
+            )
+
+    def test_userless_scp_numeric_path_is_not_treated_as_a_port(self) -> None:
+        user_bearing = "git@github.com:22/tundra/SVC.git"
+        userless = "github.com:22/tundra/SVC.git"
+
+        self.assertEqual(
+            "github.com/22/tundra/SVC",
+            workspaces.canonicalize_origin(userless),
+        )
+        self.assertTrue(workspaces.origins_equal(user_bearing, userless))
+        self.assertEqual(
+            "github.com/22/tundra/SVC",
+            workspaces.canonicalize_declared_origin(
+                "github.com:22/tundra/SVC"
+            ),
+        )
+        self.assertTrue(
+            workspaces.origins_equal(
+                "git@github.com:22/tundra/SVC",
+                "github.com:22/tundra/SVC",
+            )
+        )
+        self.assertEqual(
+            "code.internal:2222/tundra/SVC",
+            workspaces.canonicalize_origin(
+                "code.internal:2222/tundra/SVC"
+            ),
+        )
+
     def test_origin_rejects_local_traversing_and_unsupported_values(self) -> None:
         for invalid in (
             "../repo",
             "file:///tmp/repo",
             "https://github.com/org/../repo.git",
             "https://github.com",
+            "C:\\repo",
+            "C:/repo",
         ):
             with self.subTest(origin=invalid):
                 with self.assertRaises(workspaces.WorkspaceError):
                     workspaces.canonicalize_origin(invalid)
 
+        with self.assertRaisesRegex(workspaces.WorkspaceError, "absolute Git URL"):
+            workspaces.canonicalize_declared_origin("github.com/org/repo")
+
 
 class RepositoryRegistryTests(unittest.TestCase):
+    def test_port_bearing_registry_round_trips_through_manifest(self) -> None:
+        registry = _registry(
+            (("SVC", "svc", "ssh://git@code.internal:2222/org/svc.git"),)
+        )
+        manifest = (
+            "# Manifest\n\n## Repositories\n\n"
+            + authoring.render_repository_registry_table(registry)
+        )
+
+        parsed = plans.parse_repository_registry_manifest(manifest)
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(registry.digest, parsed.digest)
+        self.assertEqual("code.internal:2222/org/svc", parsed.get("SVC").origin)
+
     def test_registry_preserves_order_exact_lookup_and_stable_digest(self) -> None:
         registry = _registry()
         self.assertEqual(("SVC", "OAK", "OWL", "Kiln"), registry.aliases)
@@ -132,6 +216,28 @@ class RepositoryRegistryTests(unittest.TestCase):
 
 
 class WorkspaceResolutionTests(unittest.TestCase):
+    def test_resolution_accepts_matching_non_default_port_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_root = Path(tmp) / "workspace"
+            repository_root = workspace_root / "svc"
+            init_git_repo(repository_root)
+            origin = "ssh://git@code.internal:2222/org/svc.git"
+            subprocess.run(
+                ["git", "remote", "add", "origin", origin],
+                cwd=repository_root,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            resolved = workspaces.resolve_workspace(
+                workspace_root, _registry((("SVC", "svc", origin),))
+            )
+
+            self.assertEqual(
+                "code.internal:2222/org/svc", resolved.get("SVC").origin
+            )
+
     def test_resolves_sibling_repositories_and_builds_binding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace_root = Path(tmp) / "workspace"
@@ -223,6 +329,32 @@ class WorkspaceResolutionTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(workspaces.WorkspaceError, "outside"):
+                workspaces.resolve_workspace(workspace_root, registry)
+
+    def test_resolution_rejects_symlinked_repository_inside_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_root = Path(tmp) / "workspace"
+            repository_root = workspace_root / "real" / "repository"
+            init_git_repo(repository_root)
+            origin = "git@github.com:org/repository.git"
+            subprocess.run(
+                ["git", "remote", "add", "origin", origin],
+                cwd=repository_root,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            (workspace_root / "linked").symlink_to(
+                workspace_root / "real", target_is_directory=True
+            )
+            registry = _registry(
+                (("Repo", "linked/repository", origin),)
+            )
+
+            with self.assertRaisesRegex(
+                workspaces.WorkspaceError,
+                "repository Repo path must not traverse a symlink",
+            ):
                 workspaces.resolve_workspace(workspace_root, registry)
 
 

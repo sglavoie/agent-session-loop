@@ -54,6 +54,7 @@ from . import plans
 from . import preflight
 from . import review
 from . import state
+from . import workspaces
 from .authoring import ManifestSession, PlanTransaction
 from .plans import PlanError, SessionId, canonicalize_path, parse_session_id
 
@@ -72,6 +73,7 @@ _REVIEW_REPAIR_SESSION_MARKER_RE = re.compile(
     r"(?:\s+version=([0-9]+))?\s*-->"
 )
 GENERATED_REVIEW_REPAIR_SESSION_VERSION = 1
+REPOSITORY_AWARE_GENERATED_REVIEW_REPAIR_SESSION_VERSION = 2
 
 #: Maximum number of repair groups (child sessions) produced per cycle.
 MAX_REPAIR_GROUPS = 8
@@ -96,6 +98,8 @@ class RepairChild:
     title: str
     finding_ids: tuple[str, ...]
     path: Path
+    read_repositories: tuple[str, ...] = ()
+    write_repositories: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -132,6 +136,8 @@ class RepairGroupPlan:
     findings: tuple[dict[str, Any], ...]
     contract: contracts.CompletionContract
     rendered_text: str
+    read_repositories: tuple[str, ...] = ()
+    write_repositories: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -155,6 +161,7 @@ class ReviewRepairPlan:
     existing_child_ids: tuple[SessionId, ...] = ()
     review_output_sha256: str | None = None
     review_artifact_sha256: str | None = None
+    repository_bases: tuple[dict[str, Any], ...] = ()
     error: str | None = None
     detail: str | None = None
 
@@ -236,35 +243,88 @@ def _dedupe_preserving_order(items: Sequence[str]) -> list[str]:
 
 
 def _merge_verification_checks(
-    group: str, group_findings: Sequence[dict[str, Any]]
+    group: str,
+    group_findings: Sequence[dict[str, Any]],
+    *,
+    repository_registry: workspaces.RepositoryRegistry | None = None,
 ) -> list[dict[str, Any]]:
     """Merge a group's findings' verification checks without repeated work.
 
-    Named checks are kept verbatim; an unnamed check is given a stable,
-    finding-scoped synthetic name so cross-finding merges cannot collide on the
-    per-finding default names. Two checks that share a name but disagree on
-    payload are a genuine conflict and fail closed. Commands with different
-    names but the same effective argv/cwd are collapsed when their remaining
-    execution settings also agree. Conflicting settings for the same command
-    fail closed instead of materializing a contract that preflight would reject
-    as duplicate.
+    Named checks are kept verbatim unless the same name occurs in multiple
+    repositories, in which case each colliding name becomes ``Alias:name``.
+    Generated qualifications receive a numeric suffix when needed so they
+    cannot collide with a reviewer-supplied literal name. An unnamed check is
+    given a stable, finding-scoped synthetic name so cross-finding merges
+    cannot collide on the per-finding default names. Two
+    checks in the same repository that share a name but disagree on payload are
+    a genuine conflict and fail closed. Commands with different names but the
+    same effective argv/cwd are collapsed when their remaining execution
+    settings also agree. Conflicting settings for the same command fail closed
+    instead of materializing a contract that preflight would reject as
+    duplicate.
     """
     named_checks: list[dict[str, Any]] = []
-    by_name: dict[str, dict[str, Any]] = {}
+    by_name: dict[tuple[str | None, str], dict[str, Any]] = {}
+    repositories_by_name: dict[str, set[str | None]] = {}
     for finding in group_findings:
         for index, check in enumerate(finding["verification_checks"]):
             payload = dict(check)
             name = payload.get("name") or f"{finding['id']}-check-{index + 1}"
             payload["name"] = name
-            if name in by_name:
-                if by_name[name] != payload:
+            repository = (
+                payload.get("repo") if repository_registry is not None else None
+            )
+            scoped_name = (repository, name)
+            repositories_by_name.setdefault(name, set()).add(repository)
+            if scoped_name in by_name:
+                if by_name[scoped_name] != payload:
                     raise ReviewRepairError(
                         f"repair group {group!r} has conflicting definitions "
                         f"for verification check {name!r}"
                     )
                 continue
-            by_name[name] = payload
+            by_name[scoped_name] = payload
             named_checks.append(payload)
+
+    colliding_names = {
+        name
+        for name, repositories in repositories_by_name.items()
+        if len(repositories) > 1
+    }
+    emitted_names: dict[tuple[str | None, str], str] = {}
+    used_names = {
+        payload["name"]
+        for payload in named_checks
+        if payload["name"] not in colliding_names
+    }
+    for payload in named_checks:
+        original_name = payload["name"]
+        repository = (
+            payload.get("repo") if repository_registry is not None else None
+        )
+        emitted_name = original_name
+        if original_name in colliding_names:
+            base_name = f"{repository}:{original_name}"
+            emitted_name = base_name
+            suffix = 2
+            while emitted_name in used_names:
+                emitted_name = f"{base_name}#{suffix}"
+                suffix += 1
+            payload["name"] = emitted_name
+            used_names.add(emitted_name)
+        emitted_names[(repository, original_name)] = emitted_name
+
+    for payload in named_checks:
+        dependencies = payload.get("on_failure_of")
+        if not isinstance(dependencies, list):
+            continue
+        repository = (
+            payload.get("repo") if repository_registry is not None else None
+        )
+        payload["on_failure_of"] = [
+            emitted_names.get((repository, dependency), dependency)
+            for dependency in dependencies
+        ]
 
     merged: list[dict[str, Any]] = []
     aliases: dict[str, str] = {}
@@ -277,6 +337,7 @@ def _merge_verification_checks(
             payload,
             index=index,
             session_id=validation_session_id,
+            repository_registry=repository_registry,
         )
         if not isinstance(parsed, contracts.CommandCheck):
             merged.append(payload)
@@ -326,10 +387,11 @@ def _render_child_body(
     repair_group: str,
     finding_ids: Sequence[str],
     findings: Sequence[dict[str, Any]],
+    marker_version: int = GENERATED_REVIEW_REPAIR_SESSION_VERSION,
 ) -> list[str]:
     lines: list[str] = [
         REVIEW_REPAIR_SESSION_MARKER,
-        review_repair_session_version_marker(),
+        review_repair_session_version_marker(marker_version),
         "",
         "## Review repair scope",
         "",
@@ -384,6 +446,8 @@ def _render_child_body(
 def _build_repair_group_plans(
     review_id: SessionId,
     grouped: Sequence[tuple[str, tuple[dict[str, Any], ...]]],
+    *,
+    repository_registry: workspaces.RepositoryRegistry | None = None,
 ) -> list[RepairGroupPlan]:
     """Validate and fully render every proposed child without writing files."""
     group_plans: list[RepairGroupPlan] = []
@@ -401,19 +465,57 @@ def _build_repair_group_plans(
                 ]
             )
         )
-        checks = tuple(_merge_verification_checks(group, group_findings))
+        read_repositories: tuple[str, ...] = ()
+        write_repositories: tuple[str, ...] = ()
+        scope: plans.SessionScope | None = None
+        marker_version = GENERATED_REVIEW_REPAIR_SESSION_VERSION
+        if repository_registry is not None:
+            attributed = {finding.get("repo") for finding in group_findings}
+            if None in attributed or any(
+                not isinstance(alias, str) or not alias for alias in attributed
+            ):
+                raise ReviewRepairError(
+                    f"repair group {group!r} contains a finding without an "
+                    "explicit repository alias"
+                )
+            unknown = attributed.difference(repository_registry.aliases)
+            if unknown:
+                raise ReviewRepairError(
+                    f"repair group {group!r} references unknown repository "
+                    f"aliases: {', '.join(sorted(str(alias) for alias in unknown))}"
+                )
+            read_repositories = repository_registry.aliases
+            write_repositories = tuple(
+                alias for alias in repository_registry.aliases if alias in attributed
+            )
+            scope = plans.SessionScope(
+                reads=read_repositories,
+                writes=write_repositories,
+            )
+            marker_version = (
+                REPOSITORY_AWARE_GENERATED_REVIEW_REPAIR_SESSION_VERSION
+            )
+        checks = tuple(
+            _merge_verification_checks(
+                group,
+                group_findings,
+                repository_registry=repository_registry,
+            )
+        )
         body_lines = _render_child_body(
             child_id,
             review_id,
             repair_group=group,
             finding_ids=finding_ids,
             findings=group_findings,
+            marker_version=marker_version,
         )
         try:
             contract = authoring.contract_from_payload(
                 child_id,
                 done_when,
                 {"session": child_id.value, "checks": list(checks)},
+                repository_registry=repository_registry,
             )
             rendered_text = authoring.render_session_file(
                 session_id=child_id,
@@ -424,7 +526,15 @@ def _build_repair_group_plans(
                 previous_session_id=previous_id,
                 contract=contract,
                 require_contract=True,
+                scope=scope,
+                repository_registry=repository_registry,
             )
+            if repository_registry is not None:
+                rendered_text = rendered_text.replace(
+                    "- **Files modified**: (none yet)",
+                    "- **Files modified**: (none)",
+                    1,
+                )
         except PlanError as error:
             raise ReviewRepairError(
                 f"could not author repair child {child_id.value}: {error}"
@@ -440,6 +550,8 @@ def _build_repair_group_plans(
                 findings=tuple(group_findings),
                 contract=contract,
                 rendered_text=rendered_text,
+                read_repositories=read_repositories,
+                write_repositories=write_repositories,
             )
         )
         previous_id = child_id
@@ -493,6 +605,102 @@ def _immediate_successor(
     if not later:
         return None
     return min(later, key=lambda session: session.session_id.sort_key)
+
+
+_REPOSITORY_REVIEW_BASE_HEADING = "## Ordered repository review base"
+_REPOSITORY_REVIEW_BASE_RE = re.compile(
+    r"^- `(?P<alias>[^`]+)`: path `(?P<path>[^`]+)`; "
+    r"origin `(?P<origin>[^`]+)`; HEAD `(?P<head>[^`]+)`\.$"
+)
+
+
+def _read_repository_review_bases(
+    review_path: Path,
+    repository_registry: workspaces.RepositoryRegistry | None,
+) -> tuple[dict[str, Any], ...]:
+    """Recover the ordered review base embedded in a repository-aware session."""
+    if repository_registry is None:
+        return ()
+    try:
+        text = review_path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ReviewRepairError(
+            f"could not read repository-aware review session: {error}"
+        ) from error
+    version = review.review_session_marker_version(text)
+    if (
+        version is None
+        or version < review.REPOSITORY_AWARE_GENERATED_REVIEW_SESSION_VERSION
+    ):
+        # Historical review sessions can exist after a plan is migrated to a
+        # registry. They remain readable, but do not claim vector evidence.
+        return ()
+    lines = text.splitlines()
+    try:
+        start = lines.index(_REPOSITORY_REVIEW_BASE_HEADING) + 1
+    except ValueError as error:
+        raise ReviewRepairError(
+            "repository-aware review session is missing its ordered repository base"
+        ) from error
+    end = next(
+        (
+            index
+            for index in range(start, len(lines))
+            if lines[index].startswith("## ")
+        ),
+        len(lines),
+    )
+    rows: dict[str, dict[str, Any]] = {}
+    current: dict[str, Any] | None = None
+    for line in lines[start:end]:
+        match = _REPOSITORY_REVIEW_BASE_RE.fullmatch(line)
+        if match is not None:
+            alias = match.group("alias")
+            if alias in rows:
+                raise ReviewRepairError(
+                    f"repository-aware review base repeats alias {alias!r}"
+                )
+            head_text = match.group("head")
+            current = {
+                "alias": alias,
+                "path": match.group("path"),
+                "origin": match.group("origin"),
+                "head": None if head_text == "(unborn HEAD)" else head_text,
+                "worktree_dirty": False,
+                "dirty_paths": [],
+            }
+            rows[alias] = current
+            continue
+        dirty_match = re.fullmatch(r"    - `([^`]+)`", line)
+        if dirty_match is not None and current is not None:
+            current["worktree_dirty"] = True
+            current["dirty_paths"].append(dirty_match.group(1))
+    ordered: list[dict[str, Any]] = []
+    for repository in repository_registry.repositories:
+        row = rows.get(repository.alias)
+        if row is None:
+            raise ReviewRepairError(
+                f"repository-aware review base is missing alias {repository.alias!r}"
+            )
+        if row["path"] != repository.path or row["origin"] != repository.origin:
+            raise ReviewRepairError(
+                f"repository-aware review base identity changed for alias "
+                f"{repository.alias!r}"
+            )
+        prefix = f"{repository.alias}:"
+        if any(not path.startswith(prefix) for path in row["dirty_paths"]):
+            raise ReviewRepairError(
+                f"repository-aware review base has unqualified dirty paths for "
+                f"alias {repository.alias!r}"
+            )
+        ordered.append(row)
+    unknown = set(rows).difference(repository_registry.aliases)
+    if unknown:
+        raise ReviewRepairError(
+            "repository-aware review base contains unknown aliases: "
+            + ", ".join(sorted(unknown))
+        )
+    return tuple(ordered)
 
 
 # ---------------------------------------------------------------------------
@@ -654,6 +862,7 @@ def _invalid_plan(
     existing_child_ids: Sequence[SessionId] = (),
     review_output_sha256: str | None = None,
     review_artifact_sha256: str | None = None,
+    repository_bases: Sequence[dict[str, Any]] = (),
 ) -> ReviewRepairPlan:
     return ReviewRepairPlan(
         ok=False,
@@ -665,6 +874,7 @@ def _invalid_plan(
         existing_child_ids=tuple(existing_child_ids),
         review_output_sha256=review_output_sha256,
         review_artifact_sha256=review_artifact_sha256,
+        repository_bases=tuple(repository_bases),
         error=error,
         detail=detail,
     )
@@ -684,6 +894,7 @@ def plan_review_repair_sessions(
     in memory. It never acquires a lock or writes plan/state files.
     """
     canonical_dir = canonicalize_path(plan_dir)
+    repository_registry = plans.read_repository_registry(canonical_dir)
     output_sha256 = _artifact_sha256_or_none(
         review.final_review_output_sha256, canonical_dir
     )
@@ -737,6 +948,19 @@ def plan_review_repair_sessions(
             review_artifact_sha256=artifact_sha256,
         )
 
+    try:
+        repository_bases = _read_repository_review_bases(
+            canonical_dir / review_id.filename,
+            repository_registry,
+        )
+    except ReviewRepairError as error:
+        return _invalid_plan(
+            review_id,
+            str(error),
+            review_output_sha256=output_sha256,
+            review_artifact_sha256=artifact_sha256,
+        )
+
     findings = tuple(verdict.get("findings", ()))
     fingerprints = review.finding_fingerprints(list(findings)) or ()
     if not findings:
@@ -746,6 +970,7 @@ def plan_review_repair_sessions(
             review_session_id=review_id,
             review_output_sha256=output_sha256,
             review_artifact_sha256=artifact_sha256,
+            repository_bases=repository_bases,
         )
 
     sessions = plans.discover_session_files(canonical_dir)
@@ -768,6 +993,7 @@ def plan_review_repair_sessions(
             existing_child_ids=existing_child_ids,
             review_output_sha256=output_sha256,
             review_artifact_sha256=artifact_sha256,
+            repository_bases=repository_bases,
         )
 
     if len(grouped) > MAX_REPAIR_GROUPS:
@@ -781,10 +1007,17 @@ def plan_review_repair_sessions(
             proposed_child_ids=proposed_child_ids,
             review_output_sha256=output_sha256,
             review_artifact_sha256=artifact_sha256,
+            repository_bases=repository_bases,
         )
 
     try:
-        repair_groups = tuple(_build_repair_group_plans(review_id, grouped))
+        repair_groups = tuple(
+            _build_repair_group_plans(
+                review_id,
+                grouped,
+                repository_registry=repository_registry,
+            )
+        )
     except ReviewRepairError as error:
         return _invalid_plan(
             review_id,
@@ -794,6 +1027,7 @@ def plan_review_repair_sessions(
             proposed_child_ids=proposed_child_ids,
             review_output_sha256=output_sha256,
             review_artifact_sha256=artifact_sha256,
+            repository_bases=repository_bases,
         )
 
     return ReviewRepairPlan(
@@ -806,6 +1040,7 @@ def plan_review_repair_sessions(
         proposed_child_ids=proposed_child_ids,
         review_output_sha256=output_sha256,
         review_artifact_sha256=artifact_sha256,
+        repository_bases=repository_bases,
     )
 
 
@@ -914,6 +1149,8 @@ def _materialize(
                 title=group_plan.title,
                 finding_ids=group_plan.finding_ids,
                 path=canonical_dir / child_id.filename,
+                read_repositories=group_plan.read_repositories,
+                write_repositories=group_plan.write_repositories,
             )
         )
         manifest_rows.append(

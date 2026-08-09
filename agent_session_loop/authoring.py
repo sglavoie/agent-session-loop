@@ -37,11 +37,12 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 from typing import Any
 
 from . import contracts as _contracts
-from . import harnesses, plans, responses
+from . import durability, harnesses, plans, responses
 from .plans import (
     PlanError,
     ReadinessMetadata,
@@ -51,7 +52,12 @@ from .plans import (
     stable_readiness_sha256,
     write_readiness_metadata,
 )
-from .workspaces import Repository, RepositoryRegistry, WorkspaceError
+from .workspaces import (
+    Repository,
+    RepositoryRegistry,
+    WorkspaceError,
+    canonicalize_declared_origin,
+)
 
 
 DEFAULT_AGENT_PLANS_DIR_NAME = "agent-plans"
@@ -107,7 +113,7 @@ LINT_INVALID_REPOSITORY = "invalid-repository"
 LINT_INVALID_SESSION_SCOPE = "invalid-session-scope"
 
 _REPOSITORIES_HEADING_CANDIDATE_RE = re.compile(
-    r"^ {0,3}#{1,6}[ \t]+Repositories\b.*$",
+    r"^ {0,3}#{1,6}[ \t]+Repositories(?:[ \t]+#+)?[ \t]*$",
     re.IGNORECASE,
 )
 _REPOSITORIES_HEADING = "## Repositories"
@@ -669,6 +675,17 @@ def _source_registry_error(
     )
 
 
+def _redact_repository_row(_line: str) -> str:
+    """Return an opaque diagnostic marker for a repository table line.
+
+    Malformed tables cannot establish which cell is the Origin column, so no
+    cell is safe to echo: credential-bearing URLs may appear in the header,
+    separator, alias, or path position.  Keep the parameter to make every
+    call site explicitly identify the source line being redacted.
+    """
+    return "[repository row redacted]"
+
+
 def _parse_repository_registry(
     lines: Sequence[str],
     structural_lines: Sequence[tuple[int, str, bool, bool]],
@@ -736,7 +753,7 @@ def _parse_repository_registry(
         raise _source_registry_error(
             table_index + 1,
             "repository registry columns must be exactly Alias, Path, and Origin",
-            lines[table_index],
+            _redact_repository_row(lines[table_index]),
             category=LINT_MALFORMED_REPOSITORIES,
         )
 
@@ -745,7 +762,7 @@ def _parse_repository_registry(
         raise _source_registry_error(
             table_index + 1,
             "repository registry separator row is missing",
-            lines[table_index],
+            _redact_repository_row(lines[table_index]),
             category=LINT_MALFORMED_REPOSITORIES,
         )
     separator = plans._split_table_row(lines[separator_index])
@@ -757,7 +774,7 @@ def _parse_repository_registry(
         raise _source_registry_error(
             separator_index + 1,
             "repository registry requires a three-column Markdown separator row",
-            lines[separator_index],
+            _redact_repository_row(lines[separator_index]),
             category=LINT_MALFORMED_REPOSITORIES,
         )
 
@@ -767,29 +784,31 @@ def _parse_repository_registry(
         parsed_row = plans._split_table_row(lines[row_index])
         if parsed_row is None:
             break
+        safe_source_line = _redact_repository_row(lines[row_index])
         cells = tuple(cell.strip() for cell in parsed_row[1])
         if len(cells) != len(_REPOSITORY_HEADERS):
             raise _source_registry_error(
                 row_index + 1,
                 "repository registry rows must contain exactly three cells",
-                lines[row_index],
+                safe_source_line,
                 category=LINT_MALFORMED_REPOSITORIES,
             )
         if any(not cell for cell in cells):
             raise _source_registry_error(
                 row_index + 1,
                 "repository registry Alias, Path, and Origin values must not be blank",
-                lines[row_index],
+                safe_source_line,
                 category=LINT_INVALID_REPOSITORY,
             )
         try:
-            repository = Repository(alias=cells[0], path=cells[1], origin=cells[2])
+            origin = canonicalize_declared_origin(cells[2])
+            repository = Repository(alias=cells[0], path=cells[1], origin=origin)
             RepositoryRegistry(tuple((*repositories, repository)))
         except WorkspaceError as error:
             raise _source_registry_error(
                 row_index + 1,
                 str(error),
-                lines[row_index],
+                safe_source_line,
                 category=LINT_INVALID_REPOSITORY,
             ) from error
         repositories.append(repository)
@@ -799,7 +818,7 @@ def _parse_repository_registry(
         raise _source_registry_error(
             separator_index + 1,
             "repository registry must contain at least one repository row",
-            lines[separator_index],
+            _redact_repository_row(lines[separator_index]),
             category=LINT_MALFORMED_REPOSITORIES,
         )
 
@@ -1097,10 +1116,39 @@ def _heading_level(line: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _check_to_json(check: _contracts.VerificationCheck) -> dict[str, object]:
+def _check_to_json(
+    check: _contracts.VerificationCheck,
+    *,
+    repository_registry: RepositoryRegistry | None,
+    session_id: SessionId,
+    index: int,
+) -> dict[str, object]:
     payload: dict[str, object] = {"name": check.name, "type": check.kind}
-    if check.repo is not None:
-        payload["repo"] = check.repo
+    repository_alias = check.repo
+    if repository_registry is None:
+        if repository_alias is not None:
+            raise PlanError(
+                f"session {session_id.value} contract check #{index + 1} "
+                "cannot render 'repo' without a repository registry"
+            )
+    else:
+        if repository_alias is None:
+            if len(repository_registry) == 1:
+                repository_alias = repository_registry.aliases[0]
+            else:
+                raise PlanError(
+                    f"session {session_id.value} contract check #{index + 1} "
+                    "cannot render without 'repo' when the repository registry "
+                    "has multiple entries"
+                )
+        try:
+            repository_registry.get(repository_alias)
+        except WorkspaceError as error:
+            raise PlanError(
+                f"session {session_id.value} contract check #{index + 1} "
+                f"cannot render invalid 'repo': {error}"
+            ) from error
+        payload["repo"] = repository_alias
     if isinstance(check, _contracts.CommandCheck):
         payload["argv"] = list(check.argv)
         payload["timeout_seconds"] = _render_number(check.timeout_seconds)
@@ -1158,7 +1206,11 @@ def contract_from_payload(
     )
 
 
-def render_completion_contract(contract: _contracts.CompletionContract) -> str:
+def render_completion_contract(
+    contract: _contracts.CompletionContract,
+    *,
+    repository_registry: RepositoryRegistry | None = None,
+) -> str:
     """Render a ``## Completion Contract`` block that round-trips through the parser."""
     lines: list[str] = [
         _contracts.COMPLETION_CONTRACT_HEADING,
@@ -1174,7 +1226,15 @@ def render_completion_contract(contract: _contracts.CompletionContract) -> str:
 
     payload: dict[str, Any] = {
         "session": contract.session_id.value,
-        "checks": [_check_to_json(check) for check in contract.verify.checks],
+        "checks": [
+            _check_to_json(
+                check,
+                repository_registry=repository_registry,
+                session_id=contract.session_id,
+                index=index,
+            )
+            for index, check in enumerate(contract.verify.checks)
+        ],
     }
     if contract.verify.parallel:
         payload["parallel"] = True
@@ -1230,6 +1290,7 @@ def render_session_file(
     contract: _contracts.CompletionContract | None = None,
     require_contract: bool = True,
     scope: plans.SessionScope | None = None,
+    repository_registry: RepositoryRegistry | None = None,
 ) -> str:
     """Render a full ``session-<id>.md`` file.
 
@@ -1276,7 +1337,11 @@ def render_session_file(
     parts.append("")
 
     if contract is not None:
-        parts.append(render_completion_contract(contract).rstrip("\n"))
+        parts.append(
+            render_completion_contract(
+                contract, repository_registry=repository_registry
+            ).rstrip("\n")
+        )
         parts.append("")
         parts.append("---")
         parts.append("")
@@ -1671,17 +1736,15 @@ class _StagedFile:
 
 
 class PlanTransaction:
-    """Stage many plan files and commit them atomically.
+    """Stage many plan files and publish them as one recoverable transaction.
 
-    Files are first written to sibling ``.<name>.tmp`` temporaries; only once
-    every temporary is written successfully are they ``os.replace``-d into
-    place. A failure during the temp-write phase touches no destination at all,
-    and a failure during the replace phase restores every already-replaced
-    destination from an in-memory backup. Either way a failed multi-file write
-    leaves no partially authored plan.
+    Immutable payloads and a durable journal are written before any destination
+    changes. Ordinary I/O failures roll back immediately; process interruption
+    leaves the journal in place so the next authoritative plan read rolls the
+    complete publication forward instead of observing a mixed generation.
 
-    Intended to run while the plan lock is held (the transaction itself does not
-    acquire the lock).
+    Callers still hold the plan lock to serialize writers. The transaction also
+    holds a marker-scoped mutex shared with ordinary read-side recovery.
     """
 
     def __init__(self, plan_dir: str | os.PathLike[str]) -> None:
@@ -1698,31 +1761,126 @@ class PlanTransaction:
         return tuple(item.path for item in self._staged)
 
     def commit(self) -> tuple[Path, ...]:
-        """Write all staged files atomically; roll back fully on any failure."""
-        temp_paths: list[Path] = []
+        """Write all staged files, with durable roll-forward crash recovery."""
+        if not self._staged:
+            return ()
         try:
-            for item in self._staged:
-                item.path.parent.mkdir(parents=True, exist_ok=True)
-                tmp_path = item.path.with_name(f".{item.path.name}.tmp")
-                tmp_path.write_text(item.text, encoding="utf-8")
-                temp_paths.append(tmp_path)
+            self.plan_dir.mkdir(parents=True, exist_ok=True)
         except OSError as error:
-            for tmp_path in temp_paths:
-                _silent_unlink(tmp_path)
+            raise PlanError(f"failed to stage plan write: {error}") from error
+        plans.recover_pending_plan_transaction(self.plan_dir)
+        transaction_dir = self.plan_dir / plans.PLAN_TRANSACTION_DIR_NAME
+        staging_dir = self.plan_dir / plans.PLAN_TRANSACTION_STAGING_DIR_NAME
+        cleanup_dir = self.plan_dir / plans.PLAN_TRANSACTION_CLEANUP_DIR_NAME
+        try:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            shutil.rmtree(cleanup_dir, ignore_errors=True)
+            staging_dir.mkdir()
+            entries: list[dict[str, str]] = []
+            for index, item in enumerate(self._staged):
+                try:
+                    relative_path = item.path.relative_to(self.plan_dir).as_posix()
+                except ValueError as error:
+                    raise PlanError(
+                        f"staged plan path escapes the plan directory: {item.path}"
+                    ) from error
+                content = item.text.encode("utf-8")
+                payload_name = f"{index:06d}.bin"
+                payload_path = staging_dir / payload_name
+                with payload_path.open("wb") as handle:
+                    handle.write(content)
+                    handle.flush()
+                    durability.fullsync(handle.fileno())
+                entries.append(
+                    {
+                        "path": relative_path,
+                        "payload": payload_name,
+                        "sha256": hashlib.sha256(content).hexdigest(),
+                    }
+                )
+            journal_temp = staging_dir / f".{plans.PLAN_TRANSACTION_JOURNAL_NAME}.tmp"
+            with journal_temp.open("w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "version": plans.PLAN_TRANSACTION_SCHEMA_VERSION,
+                        "entries": entries,
+                    },
+                    handle,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                handle.write("\n")
+                handle.flush()
+                durability.fullsync(handle.fileno())
+            os.replace(
+                journal_temp,
+                staging_dir / plans.PLAN_TRANSACTION_JOURNAL_NAME,
+            )
+            plans._fsync_directory(staging_dir)
+        except (OSError, PlanError) as error:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            if isinstance(error, PlanError):
+                raise
+            raise PlanError(f"failed to stage plan write: {error}") from error
+
+        try:
+            with plans._plan_transaction_mutex(staging_dir):
+                return self._publish_staged_transaction(
+                    transaction_dir=transaction_dir,
+                    staging_dir=staging_dir,
+                )
+        except (OSError, PlanError) as error:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            if isinstance(error, PlanError):
+                raise
+            raise PlanError(f"failed to stage plan write: {error}") from error
+
+    def _publish_staged_transaction(
+        self, *, transaction_dir: Path, staging_dir: Path
+    ) -> tuple[Path, ...]:
+        """Publish prepared payloads while holding their transaction mutex."""
+        try:
+            os.replace(staging_dir, transaction_dir)
+            plans._fsync_directory(self.plan_dir)
+        except OSError as error:
+            shutil.rmtree(staging_dir, ignore_errors=True)
             raise PlanError(f"failed to stage plan write: {error}") from error
 
         backups: list[tuple[Path, bytes | None]] = []
         replaced: list[Path] = []
+        install_temps: list[Path] = []
         try:
-            for item, tmp_path in zip(self._staged, temp_paths):
+            for index, item in enumerate(self._staged):
                 original = _read_bytes_if_exists(item.path)
                 backups.append((item.path, original))
-                os.replace(tmp_path, item.path)
+                item.path.parent.mkdir(parents=True, exist_ok=True)
+                temp_path = item.path.with_name(
+                    f".{item.path.name}.asl-transaction-install.tmp"
+                )
+                install_temps.append(temp_path)
+                content = (transaction_dir / f"{index:06d}.bin").read_bytes()
+                with temp_path.open("wb") as handle:
+                    handle.write(content)
+                    handle.flush()
+                    durability.fullsync(handle.fileno())
+                os.replace(temp_path, item.path)
+                plans._fsync_directory(item.path.parent)
                 replaced.append(item.path)
         except OSError as error:
-            self._rollback(backups, replaced, temp_paths)
+            rolled_back = self._rollback(backups, replaced, install_temps)
+            if rolled_back:
+                try:
+                    plans._retire_plan_transaction(self.plan_dir, transaction_dir)
+                except OSError:
+                    pass
             raise PlanError(f"failed to commit plan write: {error}") from error
 
+        try:
+            plans._retire_plan_transaction(self.plan_dir, transaction_dir)
+        except OSError as error:
+            raise PlanError(
+                f"plan write committed but transaction cleanup failed: {error}"
+            ) from error
         return tuple(item.path for item in self._staged)
 
     @staticmethod
@@ -1730,7 +1888,8 @@ class PlanTransaction:
         backups: list[tuple[Path, bytes | None]],
         replaced: list[Path],
         temp_paths: list[Path],
-    ) -> None:
+    ) -> bool:
+        succeeded = True
         replaced_set = set(replaced)
         for path, original in backups:
             if path not in replaced_set:
@@ -1741,9 +1900,10 @@ class PlanTransaction:
                 try:
                     path.write_bytes(original)
                 except OSError:
-                    pass
+                    succeeded = False
         for tmp_path in temp_paths:
             _silent_unlink(tmp_path)
+        return succeeded
 
 
 def _read_bytes_if_exists(path: Path) -> bytes | None:
@@ -1914,6 +2074,7 @@ def split_plan(
                 ),
                 contract=contracts[session_id],
                 scope=session.scope,
+                repository_registry=parsed.registry,
             ),
         )
         manifest_sessions.append(

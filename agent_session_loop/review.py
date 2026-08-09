@@ -32,6 +32,7 @@ from typing import Any
 
 from . import contracts
 from . import plans
+from . import workspaces
 
 
 FINAL_REVIEW_FILENAME = "final-review.md"
@@ -55,6 +56,12 @@ _REVIEW_SESSION_VERSION_MARKER_RE = re.compile(
 )
 GENERATED_REVIEW_SESSION_VERSION = 3
 
+# Repository-aware reviews use independent additive versions so newly
+# generated single-repository review sessions keep their historical v3/v2
+# bytes.  Readers accept both artifact schemas; v3 is selected only when the
+# plan declares a repository registry.
+REPOSITORY_AWARE_GENERATED_REVIEW_SESSION_VERSION = 4
+
 # Lowest marker version that must produce ``final-review.json``. Pinned
 # independently of GENERATED_REVIEW_SESSION_VERSION: raising the generated
 # version must never drop artifact enforcement for review sessions already
@@ -64,6 +71,11 @@ STRUCTURED_REVIEW_MIN_VERSION = 2
 # Schema version stamped on ``final-review.json``. The parser fail-closes on
 # any other value so future schema changes cannot be half-read.
 REVIEW_ARTIFACT_VERSION = 2
+REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION = 3
+SUPPORTED_REVIEW_ARTIFACT_VERSIONS = (
+    REVIEW_ARTIFACT_VERSION,
+    REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION,
+)
 
 REVIEW_OUTCOME_ALL_CLEAR = "all-clear"
 REVIEW_OUTCOME_FINDINGS = "findings"
@@ -234,6 +246,40 @@ def _require_finding_str(finding_id: str, value: object, *, label: str) -> str:
 
 
 def _validate_evidence(finding_id: str, value: object) -> list[dict[str, Any]]:
+    return _validate_evidence_for_registry(
+        finding_id, value, repository_registry=None
+    )
+
+
+def _validate_repository_alias(
+    finding_id: str,
+    value: object,
+    *,
+    label: str,
+    repository_registry: workspaces.RepositoryRegistry,
+) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ReviewArtifactError(
+            f"finding {finding_id!r} field {label!r} must be a non-empty "
+            "repository alias"
+        )
+    alias = value.strip()
+    try:
+        repository_registry.get(alias)
+    except workspaces.WorkspaceError as error:
+        raise ReviewArtifactError(
+            f"finding {finding_id!r} field {label!r} names unknown "
+            f"repository alias {alias!r}"
+        ) from error
+    return alias
+
+
+def _validate_evidence_for_registry(
+    finding_id: str,
+    value: object,
+    *,
+    repository_registry: workspaces.RepositoryRegistry | None,
+) -> list[dict[str, Any]]:
     if not isinstance(value, list) or not value:
         raise ReviewArtifactError(
             f"finding {finding_id!r} field 'evidence' must be a non-empty list"
@@ -257,7 +303,20 @@ def _validate_evidence(finding_id: str, value: object) -> list[dict[str, Any]]:
                 f"finding {finding_id!r} evidence #{index + 1} 'path' must "
                 "be a non-empty string"
             )
-        entry: dict[str, Any] = {"path": path.strip()}
+        normalized_path = path.strip()
+        if repository_registry is not None:
+            try:
+                qualified = plans.parse_qualified_path(
+                    normalized_path, repository_registry.aliases
+                )
+            except (plans.PlanError, ValueError) as error:
+                raise ReviewArtifactError(
+                    f"finding {finding_id!r} evidence #{index + 1} 'path' "
+                    "must be a qualified Alias:path beneath a declared "
+                    f"repository: {error}"
+                ) from error
+            normalized_path = str(qualified)
+        entry: dict[str, Any] = {"path": normalized_path}
         if "symbol" in item:
             symbol = item["symbol"]
             if not isinstance(symbol, str) or not symbol.strip():
@@ -289,7 +348,10 @@ def _validate_string_list(
 
 
 def _validate_verification_checks(
-    finding_id: str, value: object
+    finding_id: str,
+    value: object,
+    *,
+    repository_registry: workspaces.RepositoryRegistry | None = None,
 ) -> list[dict[str, Any]]:
     if not isinstance(value, list) or not value:
         raise ReviewArtifactError(
@@ -298,9 +360,19 @@ def _validate_verification_checks(
         )
     seen_names: set[str] = set()
     for index, item in enumerate(value):
+        if repository_registry is not None and (
+            not isinstance(item, dict) or "repo" not in item
+        ):
+            raise ReviewArtifactError(
+                f"finding {finding_id!r} verification check #{index + 1} "
+                "must identify its repository with 'repo'"
+            )
         try:
             check = contracts._parse_check(
-                item, index=index, session_id=_CHECK_VALIDATION_SESSION_ID
+                item,
+                index=index,
+                session_id=_CHECK_VALIDATION_SESSION_ID,
+                repository_registry=repository_registry,
             )
         except plans.PlanError as error:
             detail = _CONTRACT_CHECK_MESSAGE_PREFIX_RE.sub("", str(error))
@@ -317,16 +389,24 @@ def _validate_verification_checks(
     return list(value)
 
 
-def _validate_finding(payload: object, *, index: int) -> dict[str, Any]:
+def _validate_finding(
+    payload: object,
+    *,
+    index: int,
+    repository_registry: workspaces.RepositoryRegistry | None = None,
+) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ReviewArtifactError(f"finding #{index + 1} must be a JSON object")
-    unknown = set(payload) - set(FINDING_REQUIRED_KEYS)
+    required_keys = FINDING_REQUIRED_KEYS + (
+        ("repo",) if repository_registry is not None else ()
+    )
+    unknown = set(payload) - set(required_keys)
     if unknown:
         raise ReviewArtifactError(
             f"finding #{index + 1} has unknown keys: "
             f"{', '.join(sorted(unknown))}"
         )
-    missing = [key for key in FINDING_REQUIRED_KEYS if key not in payload]
+    missing = [key for key in required_keys if key not in payload]
     if missing:
         raise ReviewArtifactError(
             f"finding #{index + 1} is incomplete; missing required keys: "
@@ -345,13 +425,17 @@ def _validate_finding(payload: object, *, index: int) -> dict[str, Any]:
             f"finding {finding_id!r} 'severity' must be one of: {allowed}; "
             f"got {severity!r}"
         )
-    return {
+    finding = {
         "id": finding_id,
         "severity": severity,
         "title": _require_finding_str(
             finding_id, payload.get("title"), label="title"
         ),
-        "evidence": _validate_evidence(finding_id, payload.get("evidence")),
+        "evidence": _validate_evidence_for_registry(
+            finding_id,
+            payload.get("evidence"),
+            repository_registry=repository_registry,
+        ),
         "explanation": _require_finding_str(
             finding_id, payload.get("explanation"), label="explanation"
         ),
@@ -362,12 +446,26 @@ def _validate_finding(payload: object, *, index: int) -> dict[str, Any]:
             finding_id, payload.get("done_criteria"), label="done_criteria"
         ),
         "verification_checks": _validate_verification_checks(
-            finding_id, payload.get("verification_checks")
+            finding_id,
+            payload.get("verification_checks"),
+            repository_registry=repository_registry,
         ),
     }
+    if repository_registry is not None:
+        finding["repo"] = _validate_repository_alias(
+            finding_id,
+            payload.get("repo"),
+            label="repo",
+            repository_registry=repository_registry,
+        )
+    return finding
 
 
-def parse_review_artifact(text: str) -> dict[str, Any]:
+def parse_review_artifact(
+    text: str,
+    *,
+    repository_registry: workspaces.RepositoryRegistry | None = None,
+) -> dict[str, Any]:
     """Parse ``final-review.json`` into a normalized structured payload.
 
     Fail-closed: raises :class:`ReviewArtifactError` for invalid JSON, an
@@ -396,11 +494,21 @@ def parse_review_artifact(text: str) -> dict[str, Any]:
             f"{', '.join(sorted(unknown))}"
         )
     version = payload.get("version")
-    if version != REVIEW_ARTIFACT_VERSION:
+    if version not in SUPPORTED_REVIEW_ARTIFACT_VERSIONS:
         raise ReviewArtifactError(
-            f"{FINAL_REVIEW_ARTIFACT_FILENAME} 'version' must be "
-            f"{REVIEW_ARTIFACT_VERSION}; got {version!r}"
+            f"{FINAL_REVIEW_ARTIFACT_FILENAME} 'version' must be one of "
+            f"{', '.join(str(item) for item in SUPPORTED_REVIEW_ARTIFACT_VERSIONS)}; "
+            f"got {version!r}"
         )
+    if version == REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION:
+        if repository_registry is None:
+            raise ReviewArtifactError(
+                f"{FINAL_REVIEW_ARTIFACT_FILENAME} version {version} requires "
+                "a declared repository registry"
+            )
+        finding_registry = repository_registry
+    else:
+        finding_registry = None
     outcome = payload.get("outcome")
     if outcome not in REVIEW_OUTCOMES:
         allowed = ", ".join(REVIEW_OUTCOMES)
@@ -418,7 +526,11 @@ def parse_review_artifact(text: str) -> dict[str, Any]:
     seen_ids: set[str] = set()
     tally = {"high": 0, "med": 0, "low": 0}
     for index, raw_finding in enumerate(raw_findings):
-        finding = _validate_finding(raw_finding, index=index)
+        finding = _validate_finding(
+            raw_finding,
+            index=index,
+            repository_registry=finding_registry,
+        )
         if finding["id"] in seen_ids:
             raise ReviewArtifactError(
                 f"finding id {finding['id']!r} is duplicated"
@@ -538,7 +650,11 @@ def load_review_verdict(
         }
 
     try:
-        artifact = parse_review_artifact(artifact_text)
+        repository_registry = plans.read_repository_registry(plan_dir)
+        artifact = parse_review_artifact(
+            artifact_text,
+            repository_registry=repository_registry,
+        )
         ensure_review_consistency(payload, artifact)
     except ReviewConsistencyError as error:
         return {
@@ -548,7 +664,7 @@ def load_review_verdict(
             "review_output_path": str(review_path),
             "review_artifact_path": str(artifact_path),
         }
-    except ReviewArtifactError as error:
+    except (ReviewArtifactError, plans.PlanError) as error:
         return {
             "ok": False,
             "reason": REVIEW_REASON_MALFORMED_ARTIFACT,
@@ -823,14 +939,17 @@ def _normalized_evidence_path(path: str) -> str:
 def finding_fingerprint(finding: dict[str, Any]) -> str:
     """Return the stable ``finding:<16hex>`` fingerprint for a finding.
 
-    Hashes the normalized severity, title (line references removed,
-    whitespace collapsed, lowercased), sorted unique evidence paths (trailing
-    ``:line`` suffixes removed), and sorted unique evidence symbols. Two
-    findings that differ only in id, explanation, repair grouping, or
-    line-number drift therefore share one fingerprint.
+    Hashes the repository alias when present, normalized severity, title (line
+    references removed, whitespace collapsed, lowercased), sorted unique
+    evidence paths (trailing ``:line`` suffixes removed), and sorted unique
+    evidence symbols. Findings without repository attribution retain the
+    pre-repository identity byte-for-byte. Two findings that differ only in id,
+    explanation, repair grouping, or line-number drift therefore share one
+    fingerprint.
     """
     severity = str(finding.get("severity", "")).strip().lower()
     title = _normalized_title(str(finding.get("title", "")))
+    repository = str(finding.get("repo", "")).strip()
     paths: set[str] = set()
     symbols: set[str] = set()
     evidence = finding.get("evidence")
@@ -844,15 +963,15 @@ def finding_fingerprint(finding: dict[str, Any]) -> str:
             symbol = entry.get("symbol")
             if isinstance(symbol, str) and symbol.strip():
                 symbols.add(symbol.strip())
-    identity = json.dumps(
-        {
-            "severity": severity,
-            "title": title,
-            "evidence_paths": sorted(paths),
-            "symbols": sorted(symbols),
-        },
-        sort_keys=True,
-    )
+    identity_fields: dict[str, Any] = {
+        "severity": severity,
+        "title": title,
+        "evidence_paths": sorted(paths),
+        "symbols": sorted(symbols),
+    }
+    if repository:
+        identity_fields["repository"] = repository
+    identity = json.dumps(identity_fields, sort_keys=True)
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
     return f"{FINDING_FINGERPRINT_PREFIX}:{digest}"
 

@@ -343,6 +343,37 @@ def init_multi_repo_workspace(
     return repositories
 
 
+def write_multi_repo_plan(
+    plan_dir: Path,
+    statuses: tuple[str, ...],
+    *,
+    contracts_by_id: dict[str, str] | None = None,
+    specs: tuple[tuple[str, str, str], ...] = DEFAULT_MULTI_REPO_SPECS,
+) -> None:
+    """Write a minimal registered plan with valid per-session scopes."""
+    write_plan(plan_dir, statuses, contracts_by_id=contracts_by_id)
+    registry_rows = "\n".join(
+        f"| {alias} | {path} | {origin} |" for alias, path, origin in specs
+    )
+    (plan_dir / "manifest.md").write_text(
+        "# Manifest\n\n## Repositories\n\n"
+        "| Alias | Path | Origin |\n"
+        "| --- | --- | --- |\n"
+        f"{registry_rows}\n",
+        encoding="utf-8",
+    )
+    aliases = ", ".join(alias for alias, _path, _origin in specs)
+    for number in range(1, len(statuses) + 1):
+        path = plan_dir / f"session-{number}.md"
+        text = path.read_text(encoding="utf-8")
+        heading, remainder = text.split("\n", 1)
+        path.write_text(
+            f"{heading}\n\n**Reads repositories**: {aliases}\n"
+            f"**Writes repositories**: {aliases}\n{remainder}",
+            encoding="utf-8",
+        )
+
+
 def git_stdout(repo_dir: Path, *args: str) -> str:
     completed = subprocess.run(
         ["git", *args],
@@ -1070,7 +1101,7 @@ def _validator_payload(**session_overrides: object) -> dict:
     }
     session.update(session_overrides)
     return {
-        "version": prepare.PREPARE_VALIDATION_VERSION,
+        "version": prepare.LEGACY_PREPARE_VALIDATION_VERSION,
         "codebase_root": "/repo",
         "sessions": [session],
     }
@@ -1133,37 +1164,54 @@ def _prepare_pipeline_payload(
     session_ids: tuple[str, ...],
     *,
     corrections_by_id: dict[str, list[dict]] | None = None,
+    version: int = prepare.LEGACY_PREPARE_VALIDATION_VERSION,
+    repositories: tuple[prepare.ValidatorRepository, ...] = (),
+    session_repositories: tuple[tuple[prepare.ValidatorRepository, ...], ...] = (),
 ) -> dict:
     """A schema-valid validator payload covering the given sessions."""
     sessions = []
-    for session_id in session_ids:
+    for index, session_id in enumerate(session_ids):
+        repo = (
+            session_repositories[index][0].alias
+            if version == prepare.PREPARE_VALIDATION_VERSION
+            else None
+        )
+        claim = {
+            "claim": "demo/module.py",
+            "claim_type": "P",
+            "location": "demo/module.py",
+            "line": 1,
+            "to_be_created": False,
+        }
+        corrections = [
+            dict(correction)
+            for correction in (corrections_by_id or {}).get(session_id, [])
+        ]
+        if repo is not None:
+            claim["repo"] = repo
+            for correction in corrections:
+                correction["repo"] = repo
         sessions.append(
             {
                 "session_id": session_id,
                 "title": f"Step {session_id}",
-                "claims": [
-                    {
-                        "claim": "demo/module.py",
-                        "claim_type": "P",
-                        "location": "demo/module.py",
-                        "line": 1,
-                        "to_be_created": False,
-                    }
-                ],
+                "claims": [claim],
                 "issues": [],
                 "details": [],
                 "patterns": [],
                 "dependencies": [],
                 "contract_checked": True,
                 "contract_problems": [],
-                "corrections": (corrections_by_id or {}).get(session_id, []),
+                "corrections": corrections,
             }
         )
-    return {
-        "version": prepare.PREPARE_VALIDATION_VERSION,
-        "codebase_root": codebase_root,
-        "sessions": sessions,
-    }
+    payload = {"version": version, "sessions": sessions}
+    if version == prepare.PREPARE_VALIDATION_VERSION:
+        payload["workspace_root"] = codebase_root
+        payload["repositories"] = [repo.to_dict() for repo in repositories]
+    else:
+        payload["codebase_root"] = codebase_root
+    return payload
 
 
 def _recording_validator(
@@ -1182,6 +1230,9 @@ def _recording_validator(
             packet.codebase_root,
             packet.session_ids,
             corrections_by_id=corrections_by_id,
+            version=packet.version,
+            repositories=packet.repositories,
+            session_repositories=packet.session_read_repositories,
         )
 
     return _validator

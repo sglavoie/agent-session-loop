@@ -9,12 +9,12 @@ This module provides:
 - :func:`normalize_recipe` — a deterministic, name-independent projection of a
   :class:`~agent_session_loop.contracts.VerifyRecipe` so equivalent recipes in
   different sessions hash to the same value (deduplication).
-- :func:`repository_fingerprint` — a git-aware fingerprint that changes when the
+- :func:`repository_fingerprint` — the legacy git-aware fingerprint that changes when the
   working tree is dirty, staged, or has untracked files, so stale cache entries
   are invalidated.
 - :func:`cache_key` / :func:`compute_cache_key` — a composite key over the
-  normalized recipe, working directory, repository fingerprint, executable
-  identity, and relevant environment.
+  normalized recipe, working directory, repository fingerprint, optional
+  registry digest, executable identity, and relevant environment.
 - :class:`BaselineCache` — a small JSON-backed store persisted to the derived
   ``baseline-results.json`` journal. The journal is *not* one of the files hashed
   by ``plan_content_sha256``/``stable_readiness_sha256`` (those hash only
@@ -63,11 +63,13 @@ def _normalized_check(check: object) -> dict:
     """
     data: dict[str, object] = {
         "type": getattr(check, "kind"),
-        "repo": getattr(check, "repo", None),
         "baseline_expectation": getattr(
             check, "baseline_expectation", contracts.DEFAULT_BASELINE_EXPECTATION
         ),
     }
+    repo = getattr(check, "repo", None)
+    if repo is not None:
+        data["repo"] = repo
     if isinstance(check, contracts.CommandCheck):
         data["argv"] = list(check.argv)
         data["cwd"] = check.cwd
@@ -165,18 +167,21 @@ def cache_key(
     repo_fingerprint: str,
     executable: str,
     environment: str,
+    registry_digest: str | None = None,
 ) -> str:
     """Return the composite cache key for a recipe execution."""
-    material = json.dumps(
-        {
-            "recipe": normalize_recipe(recipe),
-            "cwd": os.fspath(canonicalize_path(cwd)),
-            "repo": repo_fingerprint,
-            "exe": executable,
-            "env": environment,
-        },
-        sort_keys=True,
-    )
+    payload = {
+        "recipe": normalize_recipe(recipe),
+        "cwd": os.fspath(canonicalize_path(cwd)),
+        "repo": repo_fingerprint,
+        "exe": executable,
+        "env": environment,
+    }
+    # Omit the field for legacy plans so historical v1 keys remain byte-for-byte
+    # stable. Registered workspaces include the ordered registry identity.
+    if registry_digest is not None:
+        payload["registry_digest"] = registry_digest
+    material = json.dumps(payload, sort_keys=True)
     return _sha256(material)
 
 
@@ -186,14 +191,21 @@ def compute_cache_key(
     *,
     env: dict | None = None,
     environment_keys: tuple[str, ...] = DEFAULT_ENVIRONMENT_KEYS,
+    registry_digest: str | None = None,
+    aggregate_repository_fingerprint: str | None = None,
 ) -> str:
     """Compute the composite cache key from live repository/environment state."""
     return cache_key(
         recipe=recipe,
         cwd=cwd,
-        repo_fingerprint=repository_fingerprint(cwd),
+        repo_fingerprint=(
+            aggregate_repository_fingerprint
+            if aggregate_repository_fingerprint is not None
+            else repository_fingerprint(cwd)
+        ),
         executable=_recipe_executable_identity(recipe),
         environment=environment_signature(env, environment_keys),
+        registry_digest=registry_digest,
     )
 
 

@@ -36,6 +36,7 @@ FAST_MODULES = (
     "tests.test_asl_docs",
     "tests.test_asl_workspaces",
     "tests.test_asl_repository_evidence",
+    "tests.test_asl_commit_groups",
     "tests.test_asl_core",
     "tests.test_asl_qna",
     "tests.test_asl_prompts",

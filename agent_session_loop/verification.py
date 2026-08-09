@@ -1,7 +1,8 @@
 """Execute the ``Verify`` recipe for a session's completion contract.
 
 The executor consumes a parsed :class:`contracts.CompletionContract` and runs
-its authoritative gates against a caller-supplied repo root. Conditional
+its authoritative gates against either one legacy repository root or a resolved
+workspace registry. Conditional
 diagnostics run only when a named gate fails, returning structured executed and
 skipped results that the CLI and runner enforcement can serialize to JSON.
 
@@ -16,9 +17,9 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import shutil
 import signal
@@ -28,7 +29,7 @@ import threading
 import time
 from typing import Any, Callable, Literal, Mapping
 
-from . import plans, responses
+from . import plans, responses, workspaces
 from .artifacts import ArtifactError, StreamCapture
 from .contracts import (
     CommandCheck,
@@ -58,6 +59,147 @@ FailureReason = Literal[
     "file-error",
     "regex-not-matched",
 ]
+
+
+@dataclass(frozen=True)
+class ResolvedCheckContext:
+    """Filesystem and reporting locations selected for one check."""
+
+    repo: str | None
+    resolved_root: Path
+    cwd: Path | None = None
+    path: Path | None = None
+    qualified_cwd: str | None = None
+    qualified_path: str | None = None
+
+
+@dataclass(frozen=True)
+class VerificationContext:
+    """Resolve checks against either one legacy root or a workspace registry."""
+
+    root: Path
+    workspace: workspaces.ResolvedWorkspace | None = None
+
+    def __post_init__(self) -> None:
+        canonical_root = canonicalize_path(self.root)
+        if self.workspace is not None and canonical_root != self.workspace.root:
+            raise plans.PlanError(
+                "verification workspace root does not match the resolved workspace"
+            )
+        object.__setattr__(self, "root", canonical_root)
+
+    @classmethod
+    def legacy(cls, repo_root: str | Path) -> "VerificationContext":
+        return cls(root=canonicalize_path(repo_root))
+
+    @classmethod
+    def resolved_workspace(
+        cls, workspace: workspaces.ResolvedWorkspace
+    ) -> "VerificationContext":
+        return cls(root=workspace.root, workspace=workspace)
+
+    @classmethod
+    def from_plan(
+        cls, plan_dir: str | Path, cwd: str | Path
+    ) -> "VerificationContext":
+        """Interpret ``cwd`` as a repository root or workspace root by plan mode."""
+        registry = plans.read_repository_registry(plan_dir)
+        if registry is None:
+            return cls.legacy(cwd)
+        try:
+            workspace = workspaces.resolve_workspace(cwd, registry)
+        except workspaces.WorkspaceError as error:
+            raise plans.PlanError(f"invalid verification workspace: {error}") from error
+        return cls.resolved_workspace(workspace)
+
+    @property
+    def registry_digest(self) -> str | None:
+        if self.workspace is None:
+            return None
+        return self.workspace.registry.digest
+
+    def repository_root(self, repo: str | None) -> Path:
+        if self.workspace is None:
+            return self.root
+        if repo is None:
+            raise plans.PlanError(
+                "registered verification checks require a repository alias"
+            )
+        try:
+            return self.workspace.get(repo).root
+        except workspaces.WorkspaceError as error:
+            raise plans.PlanError(str(error)) from error
+
+    def resolve_check(self, check: VerificationCheck) -> ResolvedCheckContext:
+        selected_root = self.repository_root(check.repo)
+        registered = self.workspace is not None
+
+        def resolve(value: str) -> Path:
+            candidate = Path(value)
+            if registered and (
+                candidate.is_absolute()
+                or PureWindowsPath(value).is_absolute()
+                or "\\" in value
+                or ".." in candidate.parts
+            ):
+                raise plans.PlanError(
+                    f"check {check.name!r} location must stay beneath repository "
+                    f"{check.repo}"
+                )
+            resolved = _resolve_under_root(selected_root, value)
+            if registered:
+                canonical = canonicalize_path(resolved)
+                try:
+                    canonical.relative_to(selected_root)
+                except ValueError as error:
+                    raise plans.PlanError(
+                        f"check {check.name!r} location escapes repository "
+                        f"{check.repo}"
+                    ) from error
+                return canonical
+            return resolved
+
+        cwd: Path | None = None
+        path: Path | None = None
+        qualified_cwd: str | None = None
+        qualified_path: str | None = None
+        if isinstance(check, CommandCheck):
+            cwd = selected_root if check.cwd is None else resolve(check.cwd)
+            if registered:
+                qualified_cwd = f"{check.repo}:{check.cwd or '.'}"
+        elif isinstance(check, (FileExistsCheck, RegexInFileCheck)):
+            path = resolve(check.path)
+            if registered:
+                qualified_path = f"{check.repo}:{check.path}"
+        return ResolvedCheckContext(
+            repo=check.repo,
+            resolved_root=selected_root,
+            cwd=cwd,
+            path=path,
+            qualified_cwd=qualified_cwd,
+            qualified_path=qualified_path,
+        )
+
+
+def verification_context_from_plan(
+    plan_dir: str | Path, cwd: str | Path
+) -> VerificationContext:
+    """Public helper shared by verify, contract-check, and baseline callers."""
+    return VerificationContext.from_plan(plan_dir, cwd)
+
+
+def _coerce_verification_context(
+    *,
+    repo_root: str | Path | None,
+    context: VerificationContext | None,
+) -> VerificationContext:
+    if context is not None:
+        if repo_root is not None:
+            raise TypeError("pass either repo_root or context, not both")
+        return context
+    if repo_root is None:
+        raise TypeError("repo_root or context is required")
+    return VerificationContext.legacy(repo_root)
 
 
 @dataclass(frozen=True)
@@ -96,6 +238,12 @@ class CheckResult:
     stderr_truncated: bool = False
     stderr_artifact_path: str | None = None
     sweep: dict[str, Any] | None = None
+    repo: str | None = None
+    resolved_root: str | None = None
+    cwd: str | None = None
+    qualified_cwd: str | None = None
+    path: str | None = None
+    qualified_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +254,12 @@ class SkippedCheck:
     kind: str
     on_failure_of: tuple[str, ...]
     reason: str = "condition-not-met"
+    repo: str | None = None
+    resolved_root: str | None = None
+    cwd: str | None = None
+    qualified_cwd: str | None = None
+    path: str | None = None
+    qualified_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -166,6 +320,10 @@ class CheckStartedEvent:
     argv: tuple[str, ...] | None = None
     cwd: str | None = None
     repo: str | None = None
+    resolved_root: str | None = None
+    qualified_cwd: str | None = None
+    path: str | None = None
+    qualified_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -179,6 +337,11 @@ class CheckFinishedEvent:
     kind: str
     result: CheckResult
     repo: str | None = None
+    resolved_root: str | None = None
+    cwd: str | None = None
+    qualified_cwd: str | None = None
+    path: str | None = None
+    qualified_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -193,6 +356,11 @@ class CheckSkippedEvent:
     on_failure_of: tuple[str, ...]
     reason: str
     repo: str | None = None
+    resolved_root: str | None = None
+    cwd: str | None = None
+    qualified_cwd: str | None = None
+    path: str | None = None
+    qualified_path: str | None = None
 
 
 CheckStartedCallback = Callable[[CheckStartedEvent], None]
@@ -224,17 +392,13 @@ def _make_check_started_event(
     *,
     index: int,
     count: int,
-    repo_root: Path,
+    resolved: ResolvedCheckContext,
 ) -> CheckStartedEvent:
     argv: tuple[str, ...] | None = None
     cwd: str | None = None
     if isinstance(check, CommandCheck):
         argv = tuple(check.argv)
-        resolved = (
-            repo_root if check.cwd is None
-            else _resolve_under_root(repo_root, check.cwd)
-        )
-        cwd = str(resolved)
+        cwd = str(resolved.cwd)
     return CheckStartedEvent(
         session_id=session_id,
         check_index=index,
@@ -244,6 +408,10 @@ def _make_check_started_event(
         argv=argv,
         cwd=cwd,
         repo=check.repo,
+        resolved_root=str(resolved.resolved_root),
+        qualified_cwd=resolved.qualified_cwd,
+        path=str(resolved.path) if resolved.path is not None else None,
+        qualified_path=resolved.qualified_path,
     )
 
 
@@ -870,7 +1038,12 @@ def diagnose_command(
 
     if _is_module_invocation(argv) and resolved_interpreter is not None:
         module = argv[2]
-        outcome = module_probe(resolved_interpreter, module, cwd=repo_root)
+        probe_cwd = (
+            repo_root
+            if check.cwd is None
+            else _resolve_under_root(repo_root, check.cwd)
+        )
+        outcome = module_probe(resolved_interpreter, module, cwd=probe_cwd)
         if outcome is False:
             return CommandDiagnostic(
                 reason="module-not-importable",
@@ -1007,7 +1180,8 @@ def _run_regex_in_file_check(
 def run_check(
     check: VerificationCheck,
     *,
-    repo_root: str | Path,
+    repo_root: str | Path | None = None,
+    context: VerificationContext | None = None,
     artifact_dir: str | Path | None = None,
     cancellation: _ParallelCancellation | None = None,
 ) -> CheckResult:
@@ -1021,32 +1195,62 @@ def run_check(
     dispatch so an interrupt can kill this check's command process; file and
     regex checks ignore it.
     """
-    canonical_root = canonicalize_path(repo_root)
+    verification_context = _coerce_verification_context(
+        repo_root=repo_root, context=context
+    )
+    resolved = verification_context.resolve_check(check)
     resolved_artifact_dir = (
         None if artifact_dir is None else Path(artifact_dir)
     )
     if isinstance(check, CommandCheck):
-        return _run_command_check(
-            check,
-            repo_root=canonical_root,
+        result = _run_command_check(
+            replace(check, cwd=str(resolved.cwd)),
+            repo_root=resolved.resolved_root,
             artifact_dir=resolved_artifact_dir,
             cancellation=cancellation,
         )
-    if isinstance(check, FileExistsCheck):
-        return _run_file_exists_check(check, repo_root=canonical_root)
-    if isinstance(check, RegexInFileCheck):
-        return _run_regex_in_file_check(check, repo_root=canonical_root)
-    raise TypeError(f"unsupported verification check: {type(check).__name__}")
+    elif isinstance(check, FileExistsCheck):
+        file_check = (
+            replace(check, path=str(resolved.path))
+            if verification_context.workspace is not None
+            else check
+        )
+        result = _run_file_exists_check(
+            file_check,
+            repo_root=resolved.resolved_root,
+        )
+    elif isinstance(check, RegexInFileCheck):
+        regex_check = (
+            replace(check, path=str(resolved.path))
+            if verification_context.workspace is not None
+            else check
+        )
+        result = _run_regex_in_file_check(
+            regex_check,
+            repo_root=resolved.resolved_root,
+        )
+    else:
+        raise TypeError(f"unsupported verification check: {type(check).__name__}")
+    return replace(
+        result,
+        repo=resolved.repo,
+        resolved_root=str(resolved.resolved_root),
+        cwd=str(resolved.cwd) if resolved.cwd is not None else None,
+        qualified_cwd=resolved.qualified_cwd,
+        path=str(resolved.path) if resolved.path is not None else None,
+        qualified_path=resolved.qualified_path,
+    )
 
 
 def run_verification(
     contract: CompletionContract,
     *,
-    repo_root: str | Path,
+    repo_root: str | Path | None = None,
+    context: VerificationContext | None = None,
     observer: VerificationObserver | None = None,
     artifact_dir: str | Path | None = None,
 ) -> VerificationResult:
-    """Execute every check in ``contract.verify`` against ``repo_root``.
+    """Execute every check through a legacy root or resolved workspace context.
 
     When ``observer`` is provided, its ``on_check_started`` and
     ``on_check_finished`` callbacks are invoked synchronously around each
@@ -1077,7 +1281,9 @@ def run_verification(
     result, no artifact, and no ``on_check_finished`` callback can arrive after
     the exception reaches the caller.
     """
-    canonical_root = canonicalize_path(repo_root)
+    verification_context = _coerce_verification_context(
+        repo_root=repo_root, context=context
+    )
     resolved_artifact_dir = (
         None if artifact_dir is None else Path(artifact_dir)
     )
@@ -1096,6 +1302,7 @@ def run_verification(
 
     def execute(index: int) -> CheckResult:
         check = checks[index]
+        resolved = verification_context.resolve_check(check)
         if cancellation is not None and cancellation.cancelled:
             raise _VerificationCancelled(check.name)
         if on_started is not None:
@@ -1105,12 +1312,12 @@ def run_verification(
                     check,
                     index=index,
                     count=check_count,
-                    repo_root=canonical_root,
+                    resolved=resolved,
                 )
             )
         check_result = run_check(
             check,
-            repo_root=canonical_root,
+            context=verification_context,
             artifact_dir=resolved_artifact_dir,
             cancellation=cancellation,
         )
@@ -1126,6 +1333,11 @@ def run_verification(
                     kind=check.kind,
                     result=check_result,
                     repo=check.repo,
+                    resolved_root=str(resolved.resolved_root),
+                    cwd=str(resolved.cwd) if resolved.cwd is not None else None,
+                    qualified_cwd=resolved.qualified_cwd,
+                    path=str(resolved.path) if resolved.path is not None else None,
+                    qualified_path=resolved.qualified_path,
                 )
             )
         return check_result
@@ -1177,10 +1389,17 @@ def run_verification(
         if failed_gate_names.intersection(check.on_failure_of):
             eligible_diagnostics.append(index)
             continue
+        resolved = verification_context.resolve_check(check)
         skipped = SkippedCheck(
             name=check.name,
             kind=check.kind,
             on_failure_of=check.on_failure_of,
+            repo=check.repo,
+            resolved_root=str(resolved.resolved_root),
+            cwd=str(resolved.cwd) if resolved.cwd is not None else None,
+            qualified_cwd=resolved.qualified_cwd,
+            path=str(resolved.path) if resolved.path is not None else None,
+            qualified_path=resolved.qualified_path,
         )
         skipped_by_index[index] = skipped
         if on_skipped is not None:
@@ -1194,6 +1413,11 @@ def run_verification(
                     on_failure_of=check.on_failure_of,
                     reason=skipped.reason,
                     repo=check.repo,
+                    resolved_root=str(resolved.resolved_root),
+                    cwd=str(resolved.cwd) if resolved.cwd is not None else None,
+                    qualified_cwd=resolved.qualified_cwd,
+                    path=str(resolved.path) if resolved.path is not None else None,
+                    qualified_path=resolved.qualified_path,
                 )
             )
 
@@ -1221,6 +1445,21 @@ def _check_result_payload(result: CheckResult) -> dict[str, Any]:
     return asdict(result)
 
 
+def _verification_context_payload(
+    context: VerificationContext,
+) -> dict[str, Any]:
+    if context.workspace is None:
+        return {}
+    return {
+        "workspace_root": str(context.root),
+        "registry_digest": context.registry_digest,
+        "repositories": [
+            {"alias": repository.alias, "resolved_root": str(repository.root)}
+            for repository in context.workspace.repositories
+        ],
+    }
+
+
 def _recipe_summary(contract: CompletionContract) -> dict[str, Any]:
     diagnostic_count = sum(
         bool(check.on_failure_of) for check in contract.verify.checks
@@ -1241,14 +1480,25 @@ def _print_text_verify_success(
     *,
     plan_dir: str,
     cwd: str,
+    context: VerificationContext | None = None,
 ) -> None:
     print(f"Plan: {plan_dir}")
     print(f"Session: {contract.session_id.value}")
-    print(f"Repo root: {cwd}")
+    if context is not None and context.workspace is not None:
+        print(f"Workspace root: {cwd}")
+        print(
+            "Repositories: "
+            + ", ".join(repository.alias for repository in context.workspace.repositories)
+        )
+    else:
+        print(f"Repo root: {cwd}")
     print(f"Checks: {result.configured_check_count}")
     for check in result.checks:
         marker = "PASS" if check.status == "pass" else "FAIL"
-        print(f"  [{marker}] {check.kind} {check.name}: {check.detail}")
+        repository = f" {check.repo}:" if check.repo else ""
+        print(
+            f"  [{marker}]{repository} {check.kind} {check.name}: {check.detail}"
+        )
         if check.status != "pass":
             if check.stdout:
                 snippet = check.stdout.strip().splitlines()[-1] if check.stdout.strip() else ""
@@ -1397,7 +1647,9 @@ def verify_from_args(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        canonical_cwd = canonicalize_path(cwd_arg)
+        verification_context = verification_context_from_plan(
+            plan_dir_arg, cwd_arg
+        )
     except (plans.PlanError, OSError) as error:
         _emit_verify_error(
             want_json=want_json,
@@ -1418,7 +1670,7 @@ def verify_from_args(args: argparse.Namespace) -> int:
             error=str(error),
             plan_dir=str(plan_dir_arg),
             session=session_id.value,
-            cwd=str(canonical_cwd),
+            cwd=str(verification_context.root),
         )
         return 1
 
@@ -1431,7 +1683,7 @@ def verify_from_args(args: argparse.Namespace) -> int:
             ),
             plan_dir=str(plan_dir_arg),
             session=session_id.value,
-            cwd=str(canonical_cwd),
+            cwd=str(verification_context.root),
             extra={
                 "passed": False,
                 "recipe": {
@@ -1450,11 +1702,63 @@ def verify_from_args(args: argparse.Namespace) -> int:
             _print_text_no_contract(session_id, plan_dir=str(plan_dir_arg))
         return 1
 
-    result = run_verification(
-        contract,
-        repo_root=canonical_cwd,
-        artifact_dir=artifact_dir_arg,
-    )
+    for check in contract.verify.checks:
+        try:
+            verification_context.resolve_check(check)
+        except plans.PlanError as error:
+            _emit_verify_error(
+                want_json=want_json,
+                reason=VERIFY_EXIT_REASON_MALFORMED_CONTRACT,
+                error=str(error),
+                plan_dir=str(plan_dir_arg),
+                session=session_id.value,
+                cwd=str(verification_context.root),
+                extra={
+                    **_verification_context_payload(verification_context),
+                    "passed": False,
+                    "check": check.name,
+                    "repo": check.repo,
+                    "recipe": _recipe_summary(contract),
+                    "checks": [
+                        {
+                            "name": check.name,
+                            "type": check.kind,
+                            "repo": check.repo,
+                            "status": "error",
+                            "failure_reason": "repository-contract",
+                            "detail": str(error),
+                        }
+                    ],
+                    "skipped_checks": [],
+                    "diagnostic_failures": [],
+                },
+            )
+            return 1
+
+    try:
+        result = run_verification(
+            contract,
+            context=verification_context,
+            artifact_dir=artifact_dir_arg,
+        )
+    except plans.PlanError as error:
+        _emit_verify_error(
+            want_json=want_json,
+            reason=VERIFY_EXIT_REASON_MALFORMED_CONTRACT,
+            error=str(error),
+            plan_dir=str(plan_dir_arg),
+            session=session_id.value,
+            cwd=str(verification_context.root),
+            extra={
+                **_verification_context_payload(verification_context),
+                "passed": False,
+                "recipe": _recipe_summary(contract),
+                "checks": [],
+                "skipped_checks": [],
+                "diagnostic_failures": [],
+            },
+        )
+        return 1
 
     if want_json:
         if result.passed:
@@ -1464,7 +1768,8 @@ def verify_from_args(args: argparse.Namespace) -> int:
                     reason=VERIFY_EXIT_REASON_OK,
                     plan_dir=str(plan_dir_arg),
                     session=result.session_id.value,
-                    cwd=str(canonical_cwd),
+                    cwd=str(verification_context.root),
+                    **_verification_context_payload(verification_context),
                     passed=True,
                     recipe=_recipe_summary(contract),
                     checks=[_check_result_payload(check) for check in result.checks],
@@ -1485,13 +1790,14 @@ def verify_from_args(args: argparse.Namespace) -> int:
                 ),
                 plan_dir=str(plan_dir_arg),
                 session=result.session_id.value,
-                cwd=str(canonical_cwd),
+                cwd=str(verification_context.root),
                 failure_reason=(
                     first_failure.failure_reason
                     if first_failure is not None
                     else None
                 ),
                 extra={
+                    **_verification_context_payload(verification_context),
                     "passed": False,
                     "recipe": _recipe_summary(contract),
                     "checks": [
@@ -1509,7 +1815,11 @@ def verify_from_args(args: argparse.Namespace) -> int:
             )
     else:
         _print_text_verify_success(
-            contract, result, plan_dir=str(plan_dir_arg), cwd=str(canonical_cwd)
+            contract,
+            result,
+            plan_dir=str(plan_dir_arg),
+            cwd=str(verification_context.root),
+            context=verification_context,
         )
 
     return 0 if result.passed else 1
@@ -1546,6 +1856,11 @@ def _contract_check_session_row(
         "name": None,
         "type": None,
         "repo": None,
+        "resolved_root": None,
+        "cwd": None,
+        "qualified_cwd": None,
+        "path": None,
+        "qualified_path": None,
         "status": status,
         "reason": None,
         "detail": detail,
@@ -1553,7 +1868,7 @@ def _contract_check_session_row(
 
 
 def _diagnose_contract_check(
-    check: VerificationCheck, *, repo_root: Path
+    check: VerificationCheck, *, context: VerificationContext
 ) -> tuple[str, str | None, str]:
     """Statically diagnose one check; return ``(status, reason, detail)``.
 
@@ -1561,8 +1876,9 @@ def _diagnose_contract_check(
     diagnosed by :func:`diagnose_command`/:func:`diagnose_command_scope` (both
     mapped to ``command-not-runnable``), an unversioned ``python`` interpreter
     invocation is flagged ``bare-python``, and file/regex checks are resolved
-    against ``repo_root`` for existence and pattern-match.
+    against the check's selected repository for existence and pattern-match.
     """
+    resolved = context.resolve_check(check)
     if isinstance(check, CommandCheck):
         if _is_bare_python_invocation(check.argv):
             return (
@@ -1580,7 +1896,10 @@ def _diagnose_contract_check(
                 CONTRACT_CHECK_ISSUE_COMMAND_NOT_RUNNABLE,
                 scope.detail,
             )
-        diagnostic = diagnose_command(check, repo_root=repo_root)
+        diagnostic = diagnose_command(
+            replace(check, cwd=str(resolved.cwd)),
+            repo_root=resolved.resolved_root,
+        )
         if diagnostic is not None:
             return (
                 CONTRACT_CHECK_ROW_FACTUAL_ISSUE,
@@ -1590,7 +1909,8 @@ def _diagnose_contract_check(
         return (CONTRACT_CHECK_ROW_OK, None, f"command is runnable: {' '.join(check.argv)}")
 
     if isinstance(check, FileExistsCheck):
-        target = _resolve_under_root(repo_root, check.path)
+        assert resolved.path is not None
+        target = resolved.path
         try:
             exists = target.exists()
         except OSError as error:
@@ -1608,7 +1928,8 @@ def _diagnose_contract_check(
         )
 
     if isinstance(check, RegexInFileCheck):
-        target = _resolve_under_root(repo_root, check.path)
+        assert resolved.path is not None
+        target = resolved.path
         try:
             text = target.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -1635,9 +1956,16 @@ def _diagnose_contract_check(
 
 
 def _contract_check_rows(
-    plan_dir: str | Path, session_id: SessionId, *, repo_root: Path
+    plan_dir: str | Path,
+    session_id: SessionId,
+    *,
+    repo_root: Path | None = None,
+    context: VerificationContext | None = None,
 ) -> list[dict[str, Any]]:
     """Return per-check rows for one session's completion contract."""
+    verification_context = _coerce_verification_context(
+        repo_root=repo_root, context=context
+    )
     try:
         contract = read_completion_contract(plan_dir, session_id)
     except plans.PlanError as error:
@@ -1657,13 +1985,40 @@ def _contract_check_rows(
 
     rows: list[dict[str, Any]] = []
     for check in contract.verify.checks:
-        status, reason, detail = _diagnose_contract_check(check, repo_root=repo_root)
+        try:
+            resolved = verification_context.resolve_check(check)
+            status, reason, detail = _diagnose_contract_check(
+                check, context=verification_context
+            )
+        except plans.PlanError as error:
+            rows.append(
+                {
+                    "session": session_id.value,
+                    "name": check.name,
+                    "type": check.kind,
+                    "repo": check.repo,
+                    "resolved_root": None,
+                    "cwd": None,
+                    "qualified_cwd": None,
+                    "path": None,
+                    "qualified_path": None,
+                    "status": CONTRACT_CHECK_ROW_SCHEMA_ERROR,
+                    "reason": "repository-contract",
+                    "detail": str(error),
+                }
+            )
+            continue
         rows.append(
             {
                 "session": session_id.value,
                 "name": check.name,
                 "type": check.kind,
                 "repo": check.repo,
+                "resolved_root": str(resolved.resolved_root),
+                "cwd": str(resolved.cwd) if resolved.cwd is not None else None,
+                "qualified_cwd": resolved.qualified_cwd,
+                "path": str(resolved.path) if resolved.path is not None else None,
+                "qualified_path": resolved.qualified_path,
                 "status": status,
                 "reason": reason,
                 "detail": detail,
@@ -1710,7 +2065,9 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        canonical_cwd = canonicalize_path(cwd_arg)
+        verification_context = verification_context_from_plan(
+            plan_dir_arg, cwd_arg
+        )
     except (plans.PlanError, OSError) as error:
         return _emit_error(CONTRACT_CHECK_EXIT_REASON_CWD_ERROR, str(error))
 
@@ -1741,12 +2098,15 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
     rows: list[dict[str, Any]] = []
     for session_id in session_ids:
         rows.extend(
-            _contract_check_rows(plan_dir_arg, session_id, repo_root=canonical_cwd)
+            _contract_check_rows(
+                plan_dir_arg, session_id, context=verification_context
+            )
         )
 
     issues = [row for row in rows if row["status"] != CONTRACT_CHECK_ROW_OK]
     result_fields = {
-        "cwd": str(canonical_cwd),
+        "cwd": str(verification_context.root),
+        **_verification_context_payload(verification_context),
         "checks": rows,
         "issue_count": len(issues),
     }
@@ -1762,7 +2122,12 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
             )
         else:
             print(f"Plan: {plan_dir_arg}")
-            print(f"Repo root: {canonical_cwd}")
+            root_label = (
+                "Workspace root"
+                if verification_context.workspace is not None
+                else "Repo root"
+            )
+            print(f"{root_label}: {verification_context.root}")
             print(f"Checks: {len(rows)} (all ok)")
         return 0
 
@@ -1778,13 +2143,20 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
         )
     else:
         print(f"Plan: {plan_dir_arg}")
-        print(f"Repo root: {canonical_cwd}")
+        root_label = (
+            "Workspace root"
+            if verification_context.workspace is not None
+            else "Repo root"
+        )
+        print(f"{root_label}: {verification_context.root}")
         for row in rows:
             marker = "OK" if row["status"] == CONTRACT_CHECK_ROW_OK else "ISSUE"
             label = row["name"] or row["status"]
             reason = f" ({row['reason']})" if row["reason"] else ""
+            repository = f" {row.get('repo')}:" if row.get("repo") else ""
             print(
-                f"  [{marker}] session {row['session']} {label}{reason}: "
+                f"  [{marker}]{repository} session {row['session']} "
+                f"{label}{reason}: "
                 f"{row['detail']}"
             )
         print(

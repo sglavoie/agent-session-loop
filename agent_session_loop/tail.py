@@ -10,7 +10,7 @@ import sys
 import threading
 from typing import Any, TextIO
 
-from . import events, plans, state
+from . import events, plans, state, workspaces
 from .formatting import (
     format_duration_seconds,
     format_turn_finished_message,
@@ -168,6 +168,21 @@ def _run_started_message(payload: dict[str, Any]) -> str:
     approval = payload.get("approval_mode")
     if approval is not None:
         parts.append(f"approval {approval}")
+
+    workspace_root = payload.get("workspace_root")
+    if workspace_root is not None:
+        parts.append(f"workspace {workspace_root}")
+        repositories = payload.get("repositories")
+        if isinstance(repositories, list):
+            visible, omitted = workspaces.bounded_repository_rows(repositories)
+            aliases = [
+                str(repository.get("alias"))
+                for repository in visible
+                if isinstance(repository, dict) and repository.get("alias")
+            ]
+            if aliases:
+                suffix = f",+{omitted}" if omitted else ""
+                parts.append(f"repositories {','.join(aliases)}{suffix}")
 
     run_dir = payload.get("run_dir")
     if run_dir is not None:
@@ -345,6 +360,46 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
             f"sha {sha}, "
             f"duration {format_duration_seconds(payload.get('duration_seconds'))})"
         )
+    if name in {
+        events.COMMIT_GROUP_STARTED_EVENT,
+        events.COMMIT_GROUP_UPDATED_EVENT,
+        events.COMMIT_GROUP_FINISHED_EVENT,
+    }:
+        group = payload.get("group")
+        if not isinstance(group, dict):
+            group = {}
+        partial = group.get("successful_repositories")
+        shas: list[str] = []
+        if isinstance(partial, list):
+            for row in partial:
+                if not isinstance(row, dict) or not row.get("commit_sha"):
+                    continue
+                alias = row.get("alias")
+                label = alias if alias is not None else row.get("key")
+                shas.append(f"{str(label)}={str(row.get('commit_sha'))}")
+        remaining = group.get("remaining_aliases")
+        remaining_values = (
+            [str(alias) for alias in remaining]
+            if isinstance(remaining, list)
+            else []
+        )
+        visible_remaining, omitted_remaining = workspaces.bounded_repository_rows(
+            remaining_values
+        )
+        visible_shas, omitted_shas = workspaces.bounded_repository_rows(shas)
+        remaining_preview = ",".join(visible_remaining) or "none"
+        sha_preview = ",".join(visible_shas) or "none"
+        if omitted_remaining:
+            remaining_preview += f" (+{omitted_remaining} more)"
+        if omitted_shas:
+            sha_preview += f" (+{omitted_shas} more)"
+        return (
+            f"commit group {payload.get('phase') or group.get('status') or 'updated'} "
+            f"(scope {group.get('scope', 'unknown')}, "
+            f"failed {group.get('failed_alias') or 'none'}, "
+            f"remaining {remaining_preview}, "
+            f"partial SHAs {sha_preview})"
+        )
     if name == events.RUN_CONTROL_EVENT:
         return _run_control_message(payload)
     if name == events.MAILBOX_EVENT:
@@ -372,12 +427,14 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
             if check_index is not None and check_count is not None
             else "?/?"
         )
+        repository = payload.get("repo")
+        repository_label = f" repo {repository}" if repository else ""
         return (
             f"verification check {position} started: "
             f"{payload.get('name', 'unknown')} "
             f"({payload.get('kind', 'unknown')}) "
             f"session {_format_session_label(payload)} "
-            f"turn {payload.get('turn_index')}"
+            f"turn {payload.get('turn_index')}{repository_label}"
         )
     if name == events.VERIFICATION_HEARTBEAT_EVENT:
         check_index = payload.get("check_index")
@@ -403,13 +460,15 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
         )
         failure_reason = payload.get("failure_reason")
         suffix = f", failure {failure_reason}" if failure_reason else ""
+        repository = payload.get("repo")
+        repository_label = f", repo {repository}" if repository else ""
         return (
             f"verification check {position} finished: "
             f"{payload.get('name', 'unknown')} "
             f"({payload.get('kind', 'unknown')}) "
             f"status {payload.get('status', 'unknown')}, "
             f"duration {format_duration_seconds(payload.get('duration_seconds'))}"
-            f"{suffix}"
+            f"{suffix}{repository_label}"
         )
     if name == events.VERIFICATION_CHECK_SKIPPED_EVENT:
         check_index = payload.get("check_index")

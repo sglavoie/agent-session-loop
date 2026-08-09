@@ -59,6 +59,7 @@ from agent_session_loop import (
     verification,
     workbench,
     workbench_server,
+    workspaces,
 )
 from agent_session_loop.formatting import (
     format_duration_seconds,
@@ -66,6 +67,7 @@ from agent_session_loop.formatting import (
     format_turn_started_message,
 )
 from tests.support import (
+    DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,
     write_plan,
     write_plan_with_ids,
@@ -73,7 +75,9 @@ from tests.support import (
     install_fake_codex,
     install_fake_harness,
     init_git_repo,
+    init_multi_repo_workspace,
     read_jsonl,
+    write_multi_repo_plan,
     _contract_block,
     _discovered,
     _structured_review_finding,
@@ -103,8 +107,19 @@ class StructuredReviewArtifactTests(unittest.TestCase):
             }
         ]
 
+        registry = workspaces.RepositoryRegistry(
+            (
+                workspaces.Repository(
+                    "SVC", "tundra_svc", "git@github.com:tundra/SVC.git"
+                ),
+            )
+        )
+
         self.assertEqual(
-            checks, review._validate_verification_checks("F1", checks)
+            checks,
+            review._validate_verification_checks(
+                "F1", checks, repository_registry=registry
+            ),
         )
 
     def test_parse_review_artifact_accepts_complete_findings(self) -> None:
@@ -131,13 +146,83 @@ class StructuredReviewArtifactTests(unittest.TestCase):
         self.assertEqual([], artifact["findings"])
 
     def test_parse_review_artifact_rejects_unsupported_version(self) -> None:
-        for version in (None, 1, 3, "2"):
+        for version in (None, 1, 4, "2"):
             with self.assertRaisesRegex(
                 review.ReviewArtifactError, "'version' must be"
             ):
                 review.parse_review_artifact(
                     json.dumps(self._artifact(version=version))
                 )
+
+    def test_repository_aware_artifact_requires_qualified_attribution(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            init_multi_repo_workspace(
+                tmp_dir / "workspace", DEFAULT_MULTI_REPO_SPECS[:2]
+            )
+            plan_dir = tmp_dir / "plan"
+            write_multi_repo_plan(
+                plan_dir,
+                ("pending",),
+                specs=DEFAULT_MULTI_REPO_SPECS[:2],
+            )
+            registry = plans.read_repository_registry(plan_dir)
+            assert registry is not None
+            finding = _structured_review_finding(
+                repo="SVC",
+                evidence=[
+                    {
+                        "path": "OAK:README.md",
+                        "symbol": "cross_repository_contract",
+                    }
+                ],
+                verification_checks=[
+                    {
+                        "type": "command",
+                        "name": "verify-oak",
+                        "repo": "OAK",
+                        "argv": ["python3", "-c", "pass"],
+                    }
+                ],
+            )
+            payload = self._artifact(
+                version=review.REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION,
+                findings=[finding],
+            )
+
+            parsed = review.parse_review_artifact(
+                json.dumps(payload), repository_registry=registry
+            )
+
+            self.assertEqual("SVC", parsed["findings"][0]["repo"])
+            self.assertEqual(
+                "OAK:README.md",
+                parsed["findings"][0]["evidence"][0]["path"],
+            )
+
+            for label, mutation in (
+                ("primary", lambda row: row.pop("repo")),
+                (
+                    "evidence",
+                    lambda row: row["evidence"][0].__setitem__(
+                        "path", "README.md"
+                    ),
+                ),
+                (
+                    "check",
+                    lambda row: row["verification_checks"][0].pop("repo"),
+                ),
+            ):
+                invalid = json.loads(json.dumps(payload))
+                mutation(invalid["findings"][0])
+                with self.subTest(label=label), self.assertRaises(
+                    review.ReviewArtifactError
+                ):
+                    review.parse_review_artifact(
+                        json.dumps(invalid), repository_registry=registry
+                    )
 
     def test_parse_review_artifact_rejects_invalid_json_and_shape(self) -> None:
         with self.assertRaisesRegex(review.ReviewArtifactError, "is empty"):
@@ -401,6 +486,29 @@ class StructuredReviewArtifactTests(unittest.TestCase):
                 str(plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME),
                 verdict["review_artifact_path"],
             )
+
+    def test_load_review_verdict_degrades_when_registry_is_malformed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            (plan_dir / "manifest.md").write_text(
+                "# Manifest\n\n## Repositories\n\n| Alias | Path |\n"
+                "| --- | --- |\n| Core | core |\n",
+                encoding="utf-8",
+            )
+            (plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
+                "body\nStatus: 1 Findings (1 high, 0 med, 0 low)\n",
+                encoding="utf-8",
+            )
+            (plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+                json.dumps(self._artifact()), encoding="utf-8"
+            )
+
+            verdict = review.load_review_verdict(plan_dir)
+
+            self.assertFalse(verdict["ok"])
+            self.assertEqual(review.REVIEW_REASON_MALFORMED_ARTIFACT, verdict["reason"])
+            self.assertIn("repository registry", verdict["error"])
+            self.assertEqual([], runner._prior_review_findings(plan_dir))
 
     def test_runner_and_autopilot_report_same_verdict_payload(self) -> None:
         autopilot = _load_script_module(
@@ -1135,6 +1243,71 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _make_registered_finding(
+        self,
+        finding_id: str,
+        repair_group: str,
+        repo: str,
+    ) -> dict[str, object]:
+        finding = self._finding(
+            finding_id,
+            repair_group,
+            evidence=[{"path": f"{repo}:pkg/{finding_id}.py", "symbol": "target"}],
+            verification_checks=[
+                {
+                    "type": "command",
+                    "name": f"verify-{finding_id}",
+                    "repo": repo,
+                    "argv": ["python3", "-c", "pass"],
+                }
+            ],
+        )
+        finding["repo"] = repo
+        return finding
+
+    def _register_plan(
+        self,
+        findings: list[dict[str, object]],
+        *,
+        artifact_version: int = review.REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION,
+    ) -> None:
+        self._write_plan(findings)
+        specs = DEFAULT_MULTI_REPO_SPECS[:2]
+        rows = "\n".join(
+            f"| {alias} | {path} | {origin} |"
+            for alias, path, origin in specs
+        )
+        (self.plan_dir / "manifest.md").write_text(
+            "# Manifest\n\n## Repositories\n\n"
+            "| Alias | Path | Origin |\n"
+            "| --- | --- | --- |\n"
+            f"{rows}\n",
+            encoding="utf-8",
+        )
+        for session_id, writes in (("1", "SVC, OAK"), ("2", "(none)")):
+            path = self.plan_dir / f"session-{session_id}.md"
+            heading, remainder = path.read_text(encoding="utf-8").split("\n", 1)
+            body = (
+                f"{heading}\n\n**Reads repositories**: SVC, OAK\n"
+                f"**Writes repositories**: {writes}\n{remainder}"
+            )
+            if session_id == "2":
+                body = body.replace(
+                    "- **Files modified**: (none yet)",
+                    "- **Files modified**: (none)",
+                )
+            path.write_text(body, encoding="utf-8")
+        (self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+            json.dumps(
+                {
+                    "version": artifact_version,
+                    "outcome": "findings",
+                    "findings": findings,
+                }
+            ),
+            encoding="utf-8",
+        )
+
     def _materialize(self, **kwargs: object) -> review_repair.ReviewRepairResult:
         return review_repair.materialize_review_repair_sessions(
             self.plan_dir, state_dir=self.state_dir, **kwargs
@@ -1204,6 +1377,219 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
         self.assertEqual(before, self._plan_bytes())
         self.assertFalse(self.state_dir.exists())
         self.assertEqual([], sorted(self.plan_dir.glob("session-2.*.md")))
+
+    def test_registered_groups_read_all_repositories_and_write_finding_aliases(
+        self,
+    ) -> None:
+        findings = [
+            self._make_registered_finding("F1", "shared", "OAK"),
+            self._make_registered_finding("F2", "shared", "SVC"),
+            self._make_registered_finding("F3", "svc-only", "SVC"),
+        ]
+        self._register_plan(findings)
+
+        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertTrue(repair_plan.ok, repair_plan.error)
+        shared, svc_only = repair_plan.repair_groups
+        self.assertEqual(("SVC", "OAK"), shared.read_repositories)
+        self.assertEqual(("SVC", "OAK"), shared.write_repositories)
+        self.assertEqual(("SVC",), svc_only.write_repositories)
+        self.assertIn("**Reads repositories**: SVC, OAK", shared.rendered_text)
+        self.assertIn("**Writes repositories**: SVC, OAK", shared.rendered_text)
+        self.assertIn("**Writes repositories**: SVC", svc_only.rendered_text)
+        self.assertIn(
+            review_repair.review_repair_session_version_marker(
+                review_repair.REPOSITORY_AWARE_GENERATED_REVIEW_REPAIR_SESSION_VERSION
+            ),
+            shared.rendered_text,
+        )
+        self.assertEqual(
+            ["OAK", "SVC"],
+            [check["repo"] for check in shared.checks],
+        )
+
+        result = self._materialize()
+
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(("SVC", "OAK"), result.children[0].read_repositories)
+        self.assertEqual(("SVC", "OAK"), result.children[0].write_repositories)
+        registry = plans.read_repository_registry(self.plan_dir)
+        assert registry is not None
+        child_scope = plans.parse_session_scope(
+            result.children[1].path.read_text(encoding="utf-8"), registry.aliases
+        )
+        self.assertEqual(plans.SessionScope(("SVC", "OAK"), ("SVC",)), child_scope)
+
+    def test_registered_repair_fails_closed_for_unattributed_legacy_finding(
+        self,
+    ) -> None:
+        finding = self._finding("F1", "runner")
+        self._register_plan([finding], artifact_version=review.REVIEW_ARTIFACT_VERSION)
+        before = self._plan_bytes()
+
+        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertFalse(repair_plan.ok)
+        self.assertIn("without an explicit repository alias", repair_plan.error)
+        self.assertEqual(before, self._plan_bytes())
+
+    def test_registered_repair_qualifies_same_check_name_across_aliases(self) -> None:
+        first = self._make_registered_finding("F1", "shared", "SVC")
+        second = self._make_registered_finding("F2", "shared", "OAK")
+        first["verification_checks"][0]["name"] = "shared-check"
+        second["verification_checks"][0]["name"] = "shared-check"
+        self._register_plan([first, second])
+
+        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertTrue(repair_plan.ok, repair_plan.error)
+        self.assertEqual(
+            ["SVC:shared-check", "OAK:shared-check"],
+            [check["name"] for check in repair_plan.repair_groups[0].checks],
+        )
+        result = self._materialize()
+        self.assertTrue(result.ok, result.error)
+        contract = contracts.read_completion_contract(self.plan_dir, "2.1")
+        assert contract is not None
+        self.assertEqual(
+            ["SVC:shared-check", "OAK:shared-check"],
+            [check.name for check in contract.verify.checks],
+        )
+
+    def test_registered_repair_avoids_literal_qualified_name_collision(self) -> None:
+        first = self._make_registered_finding("F1", "shared", "SVC")
+        second = self._make_registered_finding("F2", "shared", "OAK")
+        literal = self._make_registered_finding("F3", "shared", "SVC")
+        first["verification_checks"][0].update(
+            name="shared-check", argv=["python3", "-c", "pass # generated"]
+        )
+        second["verification_checks"][0]["name"] = "shared-check"
+        literal["verification_checks"][0].update(
+            name="SVC:shared-check",
+            argv=["python3", "-c", "pass # literal"],
+            on_failure_of=["shared-check"],
+        )
+        self._register_plan([first, second, literal])
+
+        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertTrue(repair_plan.ok, repair_plan.error)
+        expected_names = [
+            "SVC:shared-check#2",
+            "OAK:shared-check",
+            "SVC:shared-check",
+        ]
+        self.assertEqual(
+            expected_names,
+            [check["name"] for check in repair_plan.repair_groups[0].checks],
+        )
+        result = self._materialize()
+        self.assertTrue(result.ok, result.error)
+        contract = contracts.read_completion_contract(self.plan_dir, "2.1")
+        assert contract is not None
+        self.assertEqual(
+            expected_names,
+            [check.name for check in contract.verify.checks],
+        )
+        self.assertEqual(
+            ("SVC:shared-check#2",),
+            contract.verify.checks[2].on_failure_of,
+        )
+
+    def test_registered_repair_rejects_same_repo_check_name_conflict(self) -> None:
+        first = self._make_registered_finding("F1", "shared", "SVC")
+        second = self._make_registered_finding("F2", "shared", "SVC")
+        first["verification_checks"][0]["name"] = "shared-check"
+        second["verification_checks"][0]["name"] = "shared-check"
+        second["verification_checks"][0]["argv"] = ["python3", "-c", "raise SystemExit(1)"]
+        self._register_plan([first, second])
+
+        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertFalse(repair_plan.ok)
+        self.assertIn("conflicting definitions", repair_plan.error)
+
+    def test_registered_eventless_recovery_reads_bases_and_scopes_from_sessions(
+        self,
+    ) -> None:
+        finding = self._make_registered_finding("F1", "runner", "SVC")
+        self._register_plan([finding])
+        review_path = self.plan_dir / "session-2.md"
+        review_text = review_path.read_text(encoding="utf-8").replace(
+            review.review_session_version_marker(),
+            review.review_session_version_marker(
+                review.REPOSITORY_AWARE_GENERATED_REVIEW_SESSION_VERSION
+            ),
+        )
+        base_section = (
+            "## Ordered repository review base\n\n"
+            "- `SVC`: path `tundra_svc`; origin `github.com/tundra/SVC`; "
+            "HEAD `1111111111111111111111111111111111111111`.\n"
+            "  - Pre-existing dirty paths: (none)\n"
+            "- `OAK`: path `tundra_OAK`; origin `github.com/tundra/OAK`; "
+            "HEAD `2222222222222222222222222222222222222222`.\n"
+            "  - Pre-existing dirty paths:\n"
+            "    - `OAK:staged.txt`\n\n"
+        )
+        review_path.write_text(
+            review_text.replace(
+                "## Instructions\n", base_section + "## Instructions\n"
+            ),
+            encoding="utf-8",
+        )
+
+        planned = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertTrue(planned.ok, planned.error)
+        self.assertEqual(
+            ["SVC", "OAK"],
+            [row["alias"] for row in planned.repository_bases],
+        )
+        self.assertEqual(["OAK:staged.txt"], planned.repository_bases[1]["dirty_paths"])
+        materialized = self._materialize()
+        self.assertTrue(materialized.ok, materialized.error)
+
+        resume = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir),
+            self.tmp_path / "missing-events.jsonl",
+            max_review_fix_cycles=1,
+        )
+
+        self.assertEqual("run-repairs", resume.action)
+        self.assertEqual(
+            ["SVC", "OAK"],
+            [row["alias"] for row in resume.current_repositories],
+        )
+        assert resume.repair_groups is not None
+        self.assertEqual(["SVC"], resume.repair_groups[0]["write_repositories"])
+        payload = resume.to_payload()
+        self.assertEqual("SVC", payload["current_findings"][0]["repo"])
+        self.assertEqual(
+            ["OAK:staged.txt"],
+            payload["current_repositories"][1]["dirty_paths"],
+        )
+        event_path = self.tmp_path / "events.jsonl"
+        reopen = runner._review_reopen_record(
+            event_path=event_path,
+            payload={"run_id": "eventless"},
+            resume=resume,
+            max_review_fix_cycles=1,
+            materialized=True,
+            repair_session_ids=("2.1",),
+            result=review_repair.REVIEW_REPAIR_REASON_OK,
+            recovered=True,
+        )
+        events.append_event(
+            event_path,
+            events.Event(events.REVIEW_REPAIR_REOPENED_EVENT, reopen),
+        )
+        recovered = runner._last_repairs_materialized_cycle(event_path)
+        assert recovered is not None
+        self.assertEqual("SVC", recovered["findings"][0]["repo"])
+        self.assertEqual(
+            ["OAK:staged.txt"], recovered["repositories"][1]["dirty_paths"]
+        )
 
     def test_dry_planning_accepts_exactly_eight_groups(self) -> None:
         self._write_plan(
@@ -1526,7 +1912,15 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
             },
         ]
 
-        merged = review_repair._merge_verification_checks("runner", findings)
+        registry = workspaces.RepositoryRegistry(
+            tuple(
+                workspaces.Repository(alias, path, origin)
+                for alias, path, origin in DEFAULT_MULTI_REPO_SPECS[:2]
+            )
+        )
+        merged = review_repair._merge_verification_checks(
+            "runner", findings, repository_registry=registry
+        )
 
         self.assertEqual(["SVC", "OAK"], [check["repo"] for check in merged])
         self.assertEqual(2, len(merged))
@@ -2110,6 +2504,23 @@ class ReviewRepairCycleTests(unittest.TestCase):
         )
         self.assertTrue(
             review.finding_fingerprint(original).startswith("finding:")
+        )
+
+    def test_finding_fingerprint_pins_legacy_identity_and_scopes_repository(
+        self,
+    ) -> None:
+        legacy = _structured_review_finding(
+            finding_id="f1",
+            severity="high",
+            title="Broken thing at line 12",
+            evidence=[{"path": "a/b.py:12", "symbol": "do_thing"}],
+        )
+
+        self.assertEqual("finding:a8b33340696c4f61", review.finding_fingerprint(legacy))
+        svc = dict(legacy, repo="SVC")
+        oak = dict(legacy, repo="OAK")
+        self.assertNotEqual(
+            review.finding_fingerprint(svc), review.finding_fingerprint(oak)
         )
 
     def test_finding_fingerprint_normalizes_title_and_evidence_order(

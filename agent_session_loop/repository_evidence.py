@@ -1293,12 +1293,19 @@ def capture_workspace_snapshot(
     plan_dir: str | Path,
     *,
     exclude: Mapping[str, tuple[str, ...]] | None = None,
+    default_exclude: tuple[str, ...] = (),
     include_ignored: bool = False,
     max_repositories: int = 1024,
     _run_git_fn: GitRunner | None = None,
     _run_git_bytes_fn: GitBytesRunner | None = None,
 ) -> WorkspaceSnapshot:
-    """Capture an ordered root-to-evidence vector for every nested worktree."""
+    """Capture an ordered root-to-evidence vector for every nested worktree.
+
+    ``exclude`` overrides exclusions for named workspace-relative roots, while
+    ``default_exclude`` applies to every other discovered repository. This lets
+    callers give unregistered worktrees the same operator-controlled escape
+    hatch as registered repositories without knowing their roots in advance.
+    """
     root = Path(os.path.realpath(os.path.abspath(os.fspath(workspace_root))))
     git_token = _GIT_RUNNER.set(_run_git_fn)
     bytes_token = _GIT_BYTES_RUNNER.set(_run_git_bytes_fn)
@@ -1313,7 +1320,9 @@ def capture_workspace_snapshot(
             fingerprint = _capture_review_repo_fingerprint(
                 repository,
                 plan_dir,
-                exclude=tuple(per_repository_excludes.get(relative, ())),
+                exclude=tuple(
+                    per_repository_excludes.get(relative, default_exclude)
+                ),
                 include_ignored=include_ignored,
             )
             if not fingerprint.get("git"):

@@ -65,7 +65,9 @@ from agent_session_loop.formatting import (
     format_turn_started_message,
 )
 from tests.support import (
+    DEFAULT_MULTI_REPO_SPECS,
     write_plan,
+    write_multi_repo_plan,
     write_plan_with_ids,
     _write_state_payload,
     _write_raw_state_payload,
@@ -182,6 +184,33 @@ class WorkbenchServerTests(unittest.TestCase):
         )
         self.assertIsInstance(plan_payload["urgency_rank"], int)
         self.assertIn("alpha plan", plan_payload["searchable_text"])
+
+    def test_queue_isolates_corrupt_workspace_metadata_per_plan(self) -> None:
+        broken = self.tmp_path / "plans" / "broken-metadata"
+        write_multi_repo_plan(broken, ("pending",))
+        (broken / plans.PLAN_METADATA_FILE_NAME).write_text(
+            "{not-json", encoding="utf-8"
+        )
+        canonical_broken = plans.canonicalize_path(broken)
+        registry = workbench.load_registry(self.registry_path)
+        registry = workbench.upsert_pin(registry, self.canonical_plan_dir)
+        registry = workbench.upsert_pin(registry, canonical_broken)
+        workbench.save_registry(registry, self.registry_path)
+
+        server = self._start_server()
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/queue")
+
+        self.assertEqual(200, status)
+        plans_by_dir = {row["plan_dir"]: row for row in body["plans"]}
+        self.assertEqual(2, len(plans_by_dir))
+        self.assertEqual(
+            "ready", plans_by_dir[str(self.canonical_plan_dir)]["primary_state"]
+        )
+        broken_payload = plans_by_dir[str(canonical_broken)]
+        self.assertEqual("invalid", broken_payload["primary_state"])
+        self.assertIn(
+            "workspace metadata unreadable", broken_payload["detail"]
+        )
 
     def test_plan_endpoint_exposes_triage_payload_fields(self) -> None:
         server = self._start_server()
@@ -574,6 +603,35 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertTrue(
             any(artifact["kind"] == "state" for artifact in body["artifacts"])
         )
+
+    def test_registered_recovery_retains_cwd_compatibility_key(self) -> None:
+        registered = self.tmp_path / "plans" / "registered-recovery"
+        write_multi_repo_plan(registered, ("pending",))
+        registry = plans.read_repository_registry(registered)
+        assert registry is not None
+        workspace_root = self.tmp_path / "workspace"
+        plans.save_workspace_plan_metadata(
+            registered, workspace_root, registry.digest
+        )
+        canonical = plans.canonicalize_path(registered)
+        server = self._start_server()
+        query = urllib.parse.urlencode({"plan_dir": str(canonical)})
+
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/recovery?{query}"
+        )
+
+        self.assertEqual(200, status)
+        recovery = body["recovery"]
+        self.assertEqual(str(workspace_root.resolve()), recovery["cwd"])
+        for key in (
+            "cwd",
+            "workspace_root",
+            "registry_digest",
+            "repositories",
+            "repository_count",
+        ):
+            self.assertIn(key, recovery)
 
     def test_recovery_endpoint_includes_warning_details_additively(self) -> None:
         _write_raw_state_payload(self.canonical_plan_dir, self.state_dir, "[]")
@@ -2024,6 +2082,48 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
         )
         self.assertEqual("1", body["next_pending_id"])
 
+    def test_state_endpoint_emits_legacy_workspace_keys(self) -> None:
+        server = self._start_server()
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
+
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/state?{query}"
+        )
+
+        self.assertEqual(200, status)
+        self.assertIsNone(body["cwd"])
+        self.assertIsNone(body["workspace_root"])
+        self.assertIsNone(body["registry_digest"])
+        self.assertEqual([], body["repositories"])
+        self.assertEqual(0, body["repository_count"])
+
+    def test_state_and_final_review_survive_corrupt_workspace_metadata(
+        self,
+    ) -> None:
+        registered = self.tmp_path / "plans" / "corrupt-workspace-metadata"
+        write_multi_repo_plan(registered, ("pending",))
+        (registered / plans.PLAN_METADATA_FILE_NAME).write_text(
+            "{not-json", encoding="utf-8"
+        )
+        (registered / workbench.FINAL_REVIEW_FILE_NAME).write_text(
+            "# Findings\n", encoding="utf-8"
+        )
+        server = self._start_server()
+        query = urllib.parse.urlencode({"plan_dir": str(registered)})
+
+        for endpoint in ("state", "final-review"):
+            with self.subTest(endpoint=endpoint):
+                status, body, _ = _http_request(
+                    f"{self._base_url(server)}/api/{endpoint}?{query}"
+                )
+                self.assertEqual(200, status)
+                self.assertTrue(body["ok"])
+                self.assertEqual({}, body["workspace"])
+                self.assertIsNone(body["workspace_root"])
+                self.assertIsNone(body["registry_digest"])
+                self.assertEqual([], body["repositories"])
+                self.assertEqual(0, body["repository_count"])
+
     def test_state_endpoint_returns_dotted_sessions_and_counts(self) -> None:
         dotted_plan_dir = self.tmp_path / "plans" / "dotted"
         write_plan_with_ids(
@@ -2607,6 +2707,68 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertTrue(body["truncated"])
         self.assertEqual(32, len(body["text"]))
+
+    def test_final_review_endpoint_returns_structured_repository_findings(self) -> None:
+        (self.canonical_plan_dir / "final-review.md").write_text(
+            "# Findings\n", encoding="utf-8"
+        )
+        artifact = {
+            "version": 3,
+            "outcome": "findings",
+            "findings": [
+                {
+                    "id": "F1",
+                    "repo": "SVC",
+                    "title": "Repository-specific finding",
+                }
+            ],
+        }
+        (self.canonical_plan_dir / "final-review.json").write_text(
+            json.dumps(artifact), encoding="utf-8"
+        )
+        server = self._start_server()
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
+
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/final-review?{query}"
+        )
+
+        self.assertEqual(200, status)
+        self.assertEqual(artifact, body["structured_review"])
+        self.assertEqual("SVC", body["structured_review"]["findings"][0]["repo"])
+        self.assertTrue(body["artifact_path"].endswith("final-review.json"))
+
+    def test_registered_final_review_retains_cwd_compatibility_key(self) -> None:
+        registered = self.tmp_path / "plans" / "registered-review"
+        write_multi_repo_plan(
+            registered, ("complete",), specs=DEFAULT_MULTI_REPO_SPECS[:2]
+        )
+        registry = plans.read_repository_registry(registered)
+        assert registry is not None
+        workspace_root = self.tmp_path / "workspace"
+        plans.save_workspace_plan_metadata(
+            registered, workspace_root, registry.digest
+        )
+        (registered / workbench.FINAL_REVIEW_FILE_NAME).write_text(
+            "# Findings\n", encoding="utf-8"
+        )
+        server = self._start_server()
+        query = urllib.parse.urlencode({"plan_dir": str(registered)})
+
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/final-review?{query}"
+        )
+
+        self.assertEqual(200, status)
+        self.assertEqual(str(workspace_root.resolve()), body["cwd"])
+        for key in (
+            "cwd",
+            "workspace_root",
+            "registry_digest",
+            "repositories",
+            "repository_count",
+        ):
+            self.assertIn(key, body)
 
     def test_final_review_endpoint_404_when_missing(self) -> None:
         server = self._start_server()

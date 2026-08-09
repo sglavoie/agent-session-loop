@@ -17,7 +17,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from . import plans, responses, state
+from . import plans, responses, state, workspaces
 from .formatting import format_duration_seconds
 
 
@@ -84,6 +84,10 @@ class RunningRow:
     check_count: int | None = None
     check_name: str | None = None
     check_kind: str | None = None
+    cwd: str | None = None
+    workspace_root: str | None = None
+    registry_digest: str | None = None
+    repositories: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -101,6 +105,46 @@ class RecentRow:
     duration_seconds: float | None
     artifact_dir: Path
     session_kind: str | None = None
+    cwd: str | None = None
+    workspace_root: str | None = None
+    registry_digest: str | None = None
+    repositories: tuple[dict[str, Any], ...] = ()
+
+
+def _workspace_fields(
+    plan_dir: Path, payload: dict[str, Any]
+) -> tuple[str | None, str | None, str | None, tuple[dict[str, Any], ...]]:
+    root = _coerce_nonempty_str(payload.get("workspace_root"))
+    digest = _coerce_nonempty_str(payload.get("registry_digest"))
+    raw_rows = payload.get("repositories")
+    rows = tuple(
+        dict(row)
+        for row in raw_rows
+        if isinstance(row, dict)
+    ) if isinstance(raw_rows, list) else ()
+    cwd = _coerce_nonempty_str(payload.get("cwd"))
+    if root is not None and rows:
+        return cwd or root, root, digest, rows
+    try:
+        registry = plans.read_repository_registry(plan_dir)
+        metadata = plans.load_plan_metadata(plan_dir)
+    except (plans.PlanError, OSError):
+        return cwd, None, None, ()
+    if registry is None or not isinstance(metadata, plans.WorkspacePlanMetadata):
+        return cwd, None, None, ()
+    workspace_root = str(plans.canonicalize_path(metadata.workspace_root))
+    repositories = tuple(
+        {
+            "alias": repository.alias,
+            "path": repository.path,
+            "origin": repository.origin,
+            "resolved_root": str(
+                plans.canonicalize_path(Path(workspace_root) / repository.path)
+            ),
+        }
+        for repository in registry.repositories
+    )
+    return workspace_root, workspace_root, metadata.registry_digest, repositories
 
 
 @dataclass(frozen=True)
@@ -336,6 +380,9 @@ def _build_recent_row(
         Path(artifact_dir_value) if artifact_dir_value else result_path.parent
     )
     session_kind = _coerce_nonempty_str(payload.get("session_kind"))
+    cwd, workspace_root, registry_digest, repositories = _workspace_fields(
+        plan_dir, payload
+    )
     return RecentRow(
         plan_dir=plan_dir,
         state_dir=state_dir,
@@ -348,6 +395,10 @@ def _build_recent_row(
         duration_seconds=duration_seconds,
         artifact_dir=artifact_dir,
         session_kind=session_kind,
+        cwd=cwd,
+        workspace_root=workspace_root,
+        registry_digest=registry_digest,
+        repositories=repositories,
     )
 
 
@@ -489,6 +540,9 @@ def _build_running_row(
     plan_dir: Path,
     state_payload: dict[str, Any],
 ) -> RunningRow:
+    cwd, workspace_root, registry_digest, repositories = _workspace_fields(
+        plan_dir, state_payload
+    )
     active_verification = state_payload.get("active_verification")
     active_turn = state_payload.get("active_turn")
     check_index: int | None = None
@@ -576,6 +630,10 @@ def _build_running_row(
         check_count=check_count,
         check_name=check_name,
         check_kind=check_kind,
+        cwd=cwd,
+        workspace_root=workspace_root,
+        registry_digest=registry_digest,
+        repositories=repositories,
     )
 
 
@@ -728,6 +786,10 @@ def _running_row_payload(row: RunningRow) -> dict[str, Any]:
         "check_count": row.check_count,
         "check_name": row.check_name,
         "check_kind": row.check_kind,
+        "cwd": row.cwd,
+        "workspace_root": row.workspace_root,
+        "registry_digest": row.registry_digest,
+        "repositories": [dict(repository) for repository in row.repositories],
     }
 
 
@@ -744,6 +806,10 @@ def _recent_row_payload(row: RecentRow) -> dict[str, Any]:
         "duration_seconds": row.duration_seconds,
         "artifact_dir": str(row.artifact_dir),
         "session_kind": row.session_kind,
+        "cwd": row.cwd,
+        "workspace_root": row.workspace_root,
+        "registry_digest": row.registry_digest,
+        "repositories": [dict(repository) for repository in row.repositories],
     }
 
 
@@ -816,6 +882,22 @@ def _print_running_section(
         harness = row["harness"] or "unknown"
         pid = _format_int(row["pid"])
         check_suffix = ""
+        workspace_suffix = ""
+        if row.get("workspace_root"):
+            repositories = row.get("repositories") or []
+            visible, omitted = workspaces.bounded_repository_rows(repositories)
+            aliases = [
+                str(repository.get("alias"))
+                for repository in visible
+                if isinstance(repository, dict) and repository.get("alias")
+            ]
+            alias_text = ",".join(aliases)
+            if omitted:
+                alias_text += f",+{omitted}"
+            workspace_suffix = (
+                f"  workspace {row['workspace_root']}"
+                + (f" [{alias_text}]" if alias_text else "")
+            )
         if row.get("kind") == "verification":
             check_index = row.get("check_index")
             check_count = row.get("check_count")
@@ -840,6 +922,7 @@ def _print_running_section(
             f"  harness {harness}"
             f"  session {session_id} turn {turn_index}"
             f"{check_suffix}"
+            f"{workspace_suffix}"
             f"  plan {plan}"
         )
 
@@ -862,6 +945,11 @@ def _print_recent_section(
         status = row["status"] or "unknown"
         kind = row.get("session_kind")
         kind_label = f" ({kind})" if kind else ""
+        workspace_suffix = (
+            f"  workspace {row['workspace_root']}"
+            if row.get("workspace_root")
+            else ""
+        )
         print(
             f"  finished {format_local_time(row['finished_at'])}"
             f"  dur {format_duration_seconds(row['duration_seconds'])}"
@@ -869,6 +957,7 @@ def _print_recent_section(
             f"  harness {harness}"
             f"  session {session_id}{kind_label}"
             f"  run {run_id}"
+            f"{workspace_suffix}"
             f"  plan {plan}"
         )
 

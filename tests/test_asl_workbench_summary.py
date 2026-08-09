@@ -65,6 +65,9 @@ from agent_session_loop.formatting import (
     format_turn_started_message,
 )
 from tests.support import (
+    DEFAULT_MULTI_REPO_SPECS,
+    init_multi_repo_workspace,
+    write_multi_repo_plan,
     write_plan,
     write_completed_review_plan,
     write_review_cycle_event,
@@ -78,6 +81,27 @@ from tests.support import (
 
 
 class WorkbenchSummaryTests(unittest.TestCase):
+    def test_registered_summary_exposes_workspace_and_ordered_repositories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            specs = DEFAULT_MULTI_REPO_SPECS[:2]
+            workspace_root = tmp_path / "workspace"
+            init_multi_repo_workspace(workspace_root, specs)
+            plan_dir = tmp_path / "plan"
+            write_multi_repo_plan(plan_dir, ("pending",), specs=specs)
+            registry = plans.read_repository_registry(plan_dir)
+            assert registry is not None
+            plans.save_workspace_plan_metadata(plan_dir, workspace_root, registry.digest)
+
+            payload = workbench.build_workbench_summary(
+                _discovered(plan_dir), state_dir=tmp_path / "state"
+            ).to_payload()
+
+            self.assertEqual(str(workspace_root.resolve()), payload["cwd"])
+            self.assertEqual(str(workspace_root.resolve()), payload["workspace_root"])
+            self.assertEqual(2, payload["repository_count"])
+            self.assertEqual(["SVC", "OAK"], [row["alias"] for row in payload["repositories"]])
+
     def test_invalid_when_plan_directory_does_not_exist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1003,6 +1027,32 @@ class WorkbenchSummaryTests(unittest.TestCase):
             self.assertEqual(plan_b, summaries[1].plan_dir)
             for summary in summaries:
                 self.assertEqual("ready", summary.primary_state)
+
+    def test_corrupt_workspace_metadata_is_isolated_in_summary_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            healthy = _make_workbench_plan(tmp_path, "healthy")
+            broken = tmp_path / "broken"
+            write_multi_repo_plan(broken, ("pending",))
+            (broken / plans.PLAN_METADATA_FILE_NAME).write_text(
+                "{not-json", encoding="utf-8"
+            )
+
+            summaries = workbench.build_workbench_summaries(
+                [_discovered(healthy), _discovered(broken)],
+                state_dir=tmp_path / "state",
+            )
+
+            self.assertEqual(2, len(summaries))
+            self.assertEqual("ready", summaries[0].primary_state)
+            self.assertEqual("invalid", summaries[1].primary_state)
+            self.assertIn(
+                "workspace metadata unreadable", summaries[1].detail or ""
+            )
+            self.assertEqual(
+                "Workspace metadata cannot be inspected",
+                summaries[1].recovery["title"],
+            )
 
     def test_triage_fields_for_ready_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

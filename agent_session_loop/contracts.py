@@ -317,6 +317,11 @@ def _repository_alias(
             f"session {session_id.value} contract check #{index + 1} "
             "'repo' is required when the repository registry has multiple entries"
         )
+    if repository_registry is None:
+        raise PlanError(
+            f"session {session_id.value} contract check #{index + 1} "
+            "'repo' is only valid when the plan declares a repository registry"
+        )
     if not isinstance(raw, str) or not raw:
         raise PlanError(
             f"session {session_id.value} contract check #{index + 1} "

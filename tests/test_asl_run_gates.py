@@ -65,6 +65,7 @@ from agent_session_loop.formatting import (
     format_turn_started_message,
 )
 from tests.support import (
+    DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,
     agent_mux_notify_enabled,
     patched_env,
@@ -72,7 +73,9 @@ from tests.support import (
     install_fake_amx,
     install_fake_codex,
     init_git_repo,
+    init_multi_repo_workspace,
     read_jsonl,
+    write_multi_repo_plan,
     _command_contract,
     _contract_block,
 )
@@ -454,7 +457,7 @@ class RunReadinessGateTests(unittest.TestCase):
         self.assertIsNone(payload["readiness_state_final"])
         self.assertIsNone(plans.read_readiness_metadata(self.plan_dir))
 
-    def test_lifecycle_transitions_to_complete_when_all_sessions_finish(
+    def test_run_rejects_mismatched_prepared_root_without_overwriting_binding(
         self,
     ) -> None:
         self._write_plan(("pending",), readiness="loop-ready")
@@ -464,18 +467,17 @@ class RunReadinessGateTests(unittest.TestCase):
 
         completed, payload = self._run()
 
-        self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertTrue(payload["ok"])
-        self.assertEqual("loop-ready", payload["readiness_state_initial"])
-        self.assertEqual("complete", payload["readiness_state_final"])
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("workspace-error", payload["reason"])
         metadata = plans.read_readiness_metadata(self.plan_dir)
-        self.assertEqual("complete", metadata.state)
+        self.assertEqual("loop-ready", metadata.state)
         self.assertEqual(
             plans.stable_readiness_sha256(self.plan_dir),
             metadata.readiness_sha256,
         )
         self.assertEqual(
-            str(plans.canonicalize_path(self.repo_root)),
+            str(plans.canonicalize_path(previous)),
             plans.load_plan_metadata(self.plan_dir).cwd,
         )
 
@@ -1181,6 +1183,329 @@ class RunVerificationEnforcementTests(unittest.TestCase):
         self.assertIn("verify-failed", events.PAUSE_REASONS)
         self.assertIn("no-contract", events.PAUSE_REASONS)
         self.assertIn("malformed-contract", events.PAUSE_REASONS)
+
+
+class WorkspaceGuardExceptionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.workspace_root = self.tmp_path / "workspace"
+        self.repositories = init_multi_repo_workspace(
+            self.workspace_root,
+            DEFAULT_MULTI_REPO_SPECS[:2],
+        )
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+        write_multi_repo_plan(
+            self.plan_dir,
+            ("pending",),
+            specs=DEFAULT_MULTI_REPO_SPECS[:2],
+            contracts_by_id={
+                "1": _contract_block(
+                    '{"type": "file_exists", "repo": "SVC", '
+                    '"path": "README.md", "name": "svc-readme"}',
+                    session="1",
+                )
+            },
+        )
+        session_path = self.plan_dir / "session-1.md"
+        session_path.write_text(
+            session_path.read_text(encoding="utf-8").replace(
+                "**Reads repositories**: SVC, OAK\n"
+                "**Writes repositories**: SVC, OAK",
+                "**Reads repositories**: SVC\n"
+                "**Writes repositories**: SVC",
+            ),
+            encoding="utf-8",
+        )
+        registry = plans.read_repository_registry(self.plan_dir)
+        assert registry is not None
+        plans.save_workspace_plan_metadata(
+            self.plan_dir,
+            self.workspace_root,
+            registry.digest,
+        )
+        self.context = verification.VerificationContext.from_plan(
+            self.plan_dir,
+            self.workspace_root,
+        )
+
+    def _args(self) -> argparse.Namespace:
+        return argparse.Namespace(
+            plan_dir=str(self.plan_dir),
+            cwd=str(self.workspace_root),
+            harness="codex",
+            state_dir=str(self.state_dir),
+            json=True,
+            dry_run=False,
+            unsafe_bypass=True,
+            timeout=None,
+            max_sessions=None,
+            commit_mode=None,
+            model=None,
+            effort=None,
+            note=None,
+            allow_not_loop_ready=True,
+        )
+
+    def _invoke(self, run_id: str) -> tuple[int, dict[str, object]]:
+        lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+        try:
+            return runner._run_locked(
+                args=self._args(),
+                cwd=self.workspace_root,
+                timeout=None,
+                max_sessions=None,
+                commit_mode=None,
+                lock_info=lock_info,
+                run_id=run_id,
+                verification_context=self.context,
+            )
+        finally:
+            state.release_lock(self.plan_dir, self.state_dir)
+
+    def _pause_reasons(self) -> list[str]:
+        event_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir)
+            / events.EVENTS_FILE_NAME
+        )
+        return [
+            record["payload"]["reason"]
+            for record in read_jsonl(event_path)
+            if record["name"] == events.RUN_PAUSED_EVENT
+        ]
+
+    def _completed_harness_result(
+        self, *_args: object, **_kwargs: object
+    ) -> harnesses.HarnessResult:
+        session_path = self.plan_dir / "session-1.md"
+        session_path.write_text(
+            session_path.read_text(encoding="utf-8").replace(
+                "- **Status**: pending", "- **Status**: complete", 1
+            ),
+            encoding="utf-8",
+        )
+        return harnesses.HarnessResult(
+            name="codex",
+            argv=["fake"],
+            returncode=0,
+            stdout="ok\n",
+            stderr="",
+        )
+
+    def test_harness_exception_records_scope_violation_and_blocks_rerun(
+        self,
+    ) -> None:
+        target = self.repositories["OAK"] / "README.md"
+
+        def mutate_then_raise(*_args: object, **_kwargs: object) -> None:
+            target.write_text("retained unexpected mutation\n", encoding="utf-8")
+            raise RuntimeError("synthetic harness crash")
+
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=mutate_then_raise,
+        ), self.assertRaisesRegex(RuntimeError, "synthetic harness crash"):
+            self._invoke("exception-run")
+
+        event_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir)
+            / events.EVENTS_FILE_NAME
+        )
+        pause_records = [
+            record
+            for record in read_jsonl(event_path)
+            if record["name"] == events.RUN_PAUSED_EVENT
+        ]
+        self.assertEqual(1, len(pause_records))
+        pause = pause_records[0]["payload"]
+        self.assertEqual(
+            events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+            pause["reason"],
+        )
+        guard = pause["details"]["workspace_write_guard"]
+        self.assertEqual(
+            ["OAK:README.md"],
+            guard["violations"][0]["qualified_paths"],
+        )
+        self.assertIn("snapshot_before", guard)
+
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=AssertionError("rerun must stop before the harness"),
+        ):
+            exit_code, payload = self._invoke("blocked-rerun")
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual(
+            events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+            payload["pause_reason"],
+        )
+        self.assertEqual([], payload["turns"])
+
+    def test_post_harness_system_exit_records_scope_violation(self) -> None:
+        target = self.repositories["OAK"] / "README.md"
+
+        def mutate_then_exit(*_args: object, **_kwargs: object) -> None:
+            target.write_text("retained system-exit mutation\n", encoding="utf-8")
+            raise SystemExit(9)
+
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=self._completed_harness_result,
+        ), mock.patch.object(
+            runner,
+            "_write_turn_artifacts",
+            side_effect=mutate_then_exit,
+        ), self.assertRaises(SystemExit) as raised:
+            self._invoke("system-exit-run")
+
+        self.assertEqual(9, raised.exception.code)
+        self.assertIn(
+            events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+            self._pause_reasons(),
+        )
+        self.assertIn(
+            "- **Status**: pending",
+            (self.plan_dir / "session-1.md").read_text(encoding="utf-8"),
+        )
+
+    def test_post_harness_keyboard_interrupt_records_scope_violation(self) -> None:
+        target = self.repositories["OAK"] / "README.md"
+
+        def mutate_then_interrupt(*_args: object, **_kwargs: object) -> None:
+            target.write_text("retained interrupted mutation\n", encoding="utf-8")
+            raise KeyboardInterrupt
+
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=self._completed_harness_result,
+        ), mock.patch.object(
+            runner,
+            "_write_turn_artifacts",
+            side_effect=mutate_then_interrupt,
+        ):
+            exit_code, payload = self._invoke("keyboard-interrupt-run")
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual(
+            events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+            payload["pause_reason"],
+        )
+        self.assertNotEqual("interrupted", payload["pause_reason"])
+        self.assertIn(
+            "- **Status**: pending",
+            (self.plan_dir / "session-1.md").read_text(encoding="utf-8"),
+        )
+
+    def test_scope_repair_requirement_gates_named_later_session(self) -> None:
+        specs = DEFAULT_MULTI_REPO_SPECS[:2]
+        contracts_by_id = {
+            session_id: _contract_block(
+                '{"type": "file_exists", "repo": "SVC", '
+                '"path": "README.md", "name": "svc-readme"}',
+                session=session_id,
+            )
+            for session_id in ("1", "2")
+        }
+        write_multi_repo_plan(
+            self.plan_dir,
+            ("pending", "pending"),
+            specs=specs,
+            contracts_by_id=contracts_by_id,
+        )
+        for session_id in ("1", "2"):
+            session_path = self.plan_dir / f"session-{session_id}.md"
+            session_path.write_text(
+                session_path.read_text(encoding="utf-8").replace(
+                    "**Reads repositories**: SVC, OAK\n"
+                    "**Writes repositories**: SVC, OAK",
+                    "**Reads repositories**: SVC\n"
+                    "**Writes repositories**: SVC",
+                ),
+                encoding="utf-8",
+            )
+        registry = plans.read_repository_registry(self.plan_dir)
+        assert registry is not None
+        plans.save_workspace_plan_metadata(
+            self.plan_dir,
+            self.workspace_root,
+            registry.digest,
+        )
+        self.context = verification.VerificationContext.from_plan(
+            self.plan_dir,
+            self.workspace_root,
+        )
+
+        reached: list[str] = []
+
+        def complete_session(
+            name: str, **kwargs: object
+        ) -> harnesses.HarnessResult:
+            prompt = str(kwargs.get("prompt", ""))
+            session_id = "2" if "session-2.md" in prompt else "1"
+            reached.append(session_id)
+            if session_id == "2":
+                (self.repositories["OAK"] / "README.md").write_text(
+                    "retained out-of-scope mutation\n",
+                    encoding="utf-8",
+                )
+            session_path = self.plan_dir / f"session-{session_id}.md"
+            session_path.write_text(
+                session_path.read_text(encoding="utf-8").replace(
+                    "- **Status**: pending", "- **Status**: complete", 1
+                ),
+                encoding="utf-8",
+            )
+            return harnesses.HarnessResult(
+                name=name,
+                argv=["fake"],
+                returncode=0,
+                stdout="ok\n",
+                stderr="",
+            )
+
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=complete_session,
+        ):
+            first_exit, first_payload = self._invoke("scope-run-1")
+
+        self.assertEqual(1, first_exit)
+        self.assertEqual(["1", "2"], reached)
+        self.assertEqual(
+            events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+            first_payload["pause_reason"],
+        )
+
+        first_session = self.plan_dir / "session-1.md"
+        first_session.write_text(
+            first_session.read_text(encoding="utf-8").replace(
+                "- **Status**: complete", "- **Status**: pending", 1
+            ),
+            encoding="utf-8",
+        )
+        reached.clear()
+
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=complete_session,
+        ):
+            second_exit, second_payload = self._invoke("scope-run-2")
+
+        self.assertEqual(1, second_exit)
+        self.assertEqual(["1"], reached)
+        self.assertEqual(
+            events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+            second_payload["pause_reason"],
+        )
 
 
 class RunVerificationInterruptTests(unittest.TestCase):

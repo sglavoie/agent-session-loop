@@ -8,8 +8,13 @@ import subprocess
 import tempfile
 import unittest
 
-from agent_session_loop import repository_evidence, runner
-from tests.support import init_git_repo
+from agent_session_loop import plans, repository_evidence, runner, workspaces
+from tests.support import (
+    DEFAULT_MULTI_REPO_SPECS,
+    init_git_repo,
+    init_multi_repo_workspace,
+    write_multi_repo_plan,
+)
 
 
 class RepositoryEvidenceParityTests(unittest.TestCase):
@@ -192,6 +197,185 @@ class WorkspaceInventoryTests(unittest.TestCase):
             repository_evidence.discover_git_worktrees(
                 self.workspace, max_repositories=23
             )
+
+    def test_comparison_covers_tracked_staged_deleted_renamed_and_untracked(
+        self,
+    ) -> None:
+        cases = ("tracked", "staged", "deleted", "renamed", "untracked")
+        for case in cases:
+            with self.subTest(case=case):
+                repository = self.workspace / case
+                init_git_repo(repository)
+                before = repository_evidence.capture_workspace_snapshot(
+                    self.workspace, self.plan_dir
+                )
+                readme = repository / "README.md"
+                if case in ("tracked", "staged"):
+                    readme.write_text(f"{case}\n", encoding="utf-8")
+                    if case == "staged":
+                        subprocess.run(
+                            ["git", "add", "README.md"],
+                            cwd=repository,
+                            capture_output=True,
+                            check=True,
+                        )
+                elif case == "deleted":
+                    readme.unlink()
+                elif case == "renamed":
+                    readme.rename(repository / "renamed.md")
+                else:
+                    (repository / "new.txt").write_text(
+                        "untracked\n", encoding="utf-8"
+                    )
+                after = repository_evidence.capture_workspace_snapshot(
+                    self.workspace, self.plan_dir
+                )
+                comparison = repository_evidence.compare_workspace_snapshots(
+                    before, after
+                )
+                self.assertIn(case, comparison["changed"])
+                qualified = comparison["changed"][case]["qualified_paths"]
+                self.assertTrue(qualified)
+                if case == "renamed":
+                    self.assertIn(f"{case}:README.md", qualified)
+                    self.assertIn(f"{case}:renamed.md", qualified)
+
+
+class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        self.workspace_root = root / "workspace"
+        specs = DEFAULT_MULTI_REPO_SPECS[:2]
+        init_multi_repo_workspace(self.workspace_root, specs)
+        self.plan_dir = root / "plan"
+        write_multi_repo_plan(self.plan_dir, ("pending",), specs=specs)
+        registry = plans.read_repository_registry(self.plan_dir)
+        assert registry is not None
+        self.workspace = workspaces.resolve_workspace(
+            self.workspace_root, registry
+        )
+
+    def test_guard_classifies_read_only_outside_and_unregistered_changes(
+        self,
+    ) -> None:
+        comparison = {
+            "changed": OrderedDict(
+                (
+                    (
+                        "tundra_svc",
+                        {"qualified_paths": ["tundra_svc:allowed.py"]},
+                    ),
+                    (
+                        "tundra_OAK",
+                        {"qualified_paths": ["tundra_OAK:readonly.py"]},
+                    ),
+                    (
+                        "scratch",
+                        {"qualified_paths": ["scratch:unknown.py"]},
+                    ),
+                )
+            ),
+            "added": ["new-repo"],
+            "removed": ["old-repo"],
+            "unavailable": {},
+        }
+        evidence = runner._workspace_write_guard_evidence(
+            workspace=self.workspace,
+            scope=plans.SessionScope(
+                reads=("SVC", "OAK"), writes=("SVC",)
+            ),
+            comparison=comparison,
+            exclude=(),
+            include_ignored=False,
+        )
+
+        self.assertFalse(evidence["passed"])
+        self.assertEqual(["SVC"], evidence["authorized_aliases"])
+        self.assertEqual(
+            [
+                "unregistered-repository",
+                "read-only-repository",
+                "repository-added",
+                "repository-removed",
+            ],
+            [violation["kind"] for violation in evidence["violations"]],
+        )
+        self.assertEqual(
+            ["OAK:readonly.py"],
+            evidence["violations"][1]["qualified_paths"],
+        )
+
+    def test_guard_fails_closed_for_unavailable_evidence(self) -> None:
+        evidence = runner._workspace_write_guard_evidence(
+            workspace=self.workspace,
+            scope=plans.SessionScope(reads=("SVC",), writes=("SVC",)),
+            comparison={
+                "changed": {},
+                "added": [],
+                "removed": [],
+                "unavailable": {
+                    "tundra_svc": {
+                        "after": {"reason": "git-command-failed"}
+                    }
+                },
+            },
+            exclude=(),
+            include_ignored=False,
+        )
+
+        self.assertFalse(evidence["passed"])
+        self.assertEqual([], evidence["violations"])
+        self.assertEqual(
+            "git-command-failed",
+            evidence["unavailable"]["tundra_svc"]["after"]["reason"],
+        )
+        missing = runner._workspace_snapshot_unavailable(
+            OrderedDict(), required_repository_paths=("tundra_svc",)
+        )
+        self.assertEqual(
+            "registered-repository-missing",
+            missing["tundra_svc"]["reason"],
+        )
+
+    def test_exclusion_applies_inside_unregistered_repository(self) -> None:
+        scratch = self.workspace_root / "scratch"
+        nested = scratch / "inner"
+        init_git_repo(scratch)
+        init_git_repo(nested)
+
+        unavailable_snapshot = runner._capture_workspace_write_guard_snapshot(
+            workspace=self.workspace,
+            plan_dir=self.plan_dir,
+            exclude=(),
+            include_ignored=False,
+        )
+        detail = runner._workspace_snapshot_unavailable(unavailable_snapshot)
+        self.assertEqual(
+            "untracked-node-unsupported",
+            detail["scratch"]["reason"],
+        )
+        self.assertEqual("inner/", detail["scratch"]["path"])
+        self.assertEqual(
+            ": scratch:inner/ (untracked-node-unsupported)",
+            runner._workspace_unavailable_summary(
+                detail,
+                workspace=self.workspace,
+            ),
+        )
+
+        excluded_snapshot = runner._capture_workspace_write_guard_snapshot(
+            workspace=self.workspace,
+            plan_dir=self.plan_dir,
+            exclude=("inner",),
+            include_ignored=False,
+        )
+
+        self.assertNotIn(
+            "scratch",
+            runner._workspace_snapshot_unavailable(excluded_snapshot),
+        )
 
 
 if __name__ == "__main__":

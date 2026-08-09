@@ -31,6 +31,15 @@ def _append_log(mode: str) -> None:
 
 
 def _git_commit() -> subprocess.CompletedProcess[str]:
+    staged = subprocess.run(
+        ["git", "add", "-A"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if staged.returncode != 0:
+        return staged
     return subprocess.run(
         ["git", "commit", "--allow-empty", "-m", "Fake spec commit"],
         text=True,
@@ -50,6 +59,11 @@ def main() -> int:
 
     if mode == "failure":
         print("fake spec failure", file=sys.stderr)
+        return 23
+
+    fail_cwd = os.environ.get("FAKE_SPEC_FAIL_CWD_BASENAME")
+    if fail_cwd and Path.cwd().name == fail_cwd:
+        print(f"fake spec failure in {fail_cwd}", file=sys.stderr)
         return 23
 
     if mode == "unchanged-head":

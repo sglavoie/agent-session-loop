@@ -31,6 +31,7 @@ from . import (
     pause_policy,
     plans,
     responses,
+    workspaces,
 )
 from .formatting import format_duration_seconds
 
@@ -949,6 +950,16 @@ def _runner_state_payload(
         "run_id": raw.get("run_id"),
         "harness": raw.get("harness"),
         "review_harness": run_config.get("review_harness"),
+        **(
+            {
+                "cwd": raw.get("cwd"),
+                "workspace_root": raw.get("workspace_root"),
+                "registry_digest": raw.get("registry_digest"),
+                "repositories": raw.get("repositories"),
+            }
+            if raw.get("workspace_root") is not None
+            else {}
+        ),
         "ok": raw.get("ok"),
         "paused": raw.get("paused"),
         "reason": raw.get("reason"),
@@ -1346,7 +1357,9 @@ def mark_run_abandoned(
                 }
             )
             events_path = plan_state_dir_path / events.EVENTS_FILE_NAME
-            artifacts.atomic_write_bytes(state_path, _dump_state_bytes(payload))
+            artifacts.atomic_write_bytes(
+                state_path, _dump_state_bytes(payload), durable=True
+            )
             try:
                 events.append_event(
                     events_path,
@@ -1529,6 +1542,40 @@ def status_payload(
     review_resume = review_continuation.evaluate_review_continuation(
         snapshot, event_path
     ).to_payload()
+    workspace_fields = {
+        key: runner_state.get(key)
+        for key in ("workspace_root", "registry_digest", "repositories")
+        if runner_state.get(key) is not None
+    }
+    if not workspace_fields:
+        registry = plans.read_repository_registry(snapshot.plan_dir)
+        metadata = plans.load_plan_metadata(snapshot.plan_dir)
+        if registry is not None and isinstance(
+            metadata, plans.WorkspacePlanMetadata
+        ):
+            workspace_root = plans.canonicalize_path(metadata.workspace_root)
+            workspace_fields = {
+                "workspace_root": str(workspace_root),
+                "registry_digest": metadata.registry_digest,
+                "repositories": [
+                    {
+                        "alias": repository.alias,
+                        "path": repository.path,
+                        "origin": repository.origin,
+                        "resolved_root": str(
+                            plans.canonicalize_path(
+                                workspace_root / repository.path
+                            )
+                        ),
+                    }
+                    for repository in registry.repositories
+                ],
+            }
+    cwd_fields = (
+        {"cwd": workspace_fields["workspace_root"]}
+        if workspace_fields
+        else {}
+    )
     return responses.success_payload(
         "status",
         plan_dir=str(snapshot.plan_dir),
@@ -1561,6 +1608,8 @@ def status_payload(
         review_resume=review_resume,
         orphaned_state_candidates=orphaned_state_candidates(snapshot, state_dir),
         next_command=_next_command(snapshot),
+        **cwd_fields,
+        **workspace_fields,
     )
 
 
@@ -1571,6 +1620,21 @@ def _print_text_status(payload: dict[str, Any]) -> None:
     print(f"State dir: {payload['state_dir']}")
     print(f"State file: {payload['state_path']}")
     print(f"Events: {payload['events_path']}")
+    if payload.get("workspace_root") is not None:
+        print(f"Workspace root: {payload['workspace_root']}")
+        print(f"Registry digest: {payload.get('registry_digest')}")
+        repositories = payload.get("repositories")
+        if isinstance(repositories, list):
+            print("Repositories:")
+            visible, omitted = workspaces.bounded_repository_rows(repositories)
+            for repository in visible:
+                if isinstance(repository, dict):
+                    print(
+                        f"  {repository.get('alias')}: "
+                        f"{repository.get('resolved_root')}"
+                    )
+            if omitted:
+                print(f"  ... {omitted} more repositories")
 
     lock = payload["lock"]
     if not lock["present"]:
@@ -2172,7 +2236,9 @@ def migrate_plan_state(
     for field, value in field_targets.items():
         if field in migrated:
             migrated[field] = value
-    artifacts.atomic_write_bytes(new_state_path, _dump_state_bytes(migrated))
+    artifacts.atomic_write_bytes(
+        new_state_path, _dump_state_bytes(migrated), durable=True
+    )
 
     events.append_event(
         new_events_path,

@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 import json
 from pathlib import Path
+import re
 from typing import Any, Literal, Mapping
 
 from . import events, plans, review, review_repair, session_overview
@@ -100,9 +101,14 @@ class ReviewResume:
     current_review_artifact_sha256: str | None = None
     artifact_valid: bool | None = None
     artifact_error: str | None = None
+    source_findings: tuple[Mapping[str, Any], ...] | None = None
+    current_findings: tuple[Mapping[str, Any], ...] | None = None
+    source_repositories: tuple[Mapping[str, Any], ...] | None = None
+    current_repositories: tuple[Mapping[str, Any], ...] | None = None
+    repair_groups: tuple[Mapping[str, Any], ...] | None = None
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "source_cycle": self.source_cycle,
             "review_session_id": self.review_session_id,
             "source_disposition": self.source_disposition,
@@ -140,6 +146,21 @@ class ReviewResume:
             "artifact_valid": self.artifact_valid,
             "artifact_error": self.artifact_error,
         }
+        if self.source_findings is not None:
+            payload["source_findings"] = [dict(item) for item in self.source_findings]
+        if self.current_findings is not None:
+            payload["current_findings"] = [dict(item) for item in self.current_findings]
+        if self.source_repositories is not None:
+            payload["source_repositories"] = [
+                dict(item) for item in self.source_repositories
+            ]
+        if self.current_repositories is not None:
+            payload["current_repositories"] = [
+                dict(item) for item in self.current_repositories
+            ]
+        if self.repair_groups is not None:
+            payload["repair_groups"] = [dict(item) for item in self.repair_groups]
+        return payload
 
 
 def read_review_events(event_path: str | Path) -> tuple[ReviewEventRecord, ...]:
@@ -207,6 +228,12 @@ def _string_tuple(value: Any) -> tuple[str, ...] | None:
     if not isinstance(value, list):
         return None
     return tuple(item for item in value if isinstance(item, str))
+
+
+def _mapping_tuple(value: Any) -> tuple[Mapping[str, Any], ...] | None:
+    if not isinstance(value, list):
+        return None
+    return tuple(dict(item) for item in value if isinstance(item, Mapping))
 
 
 def _source_id_from_repair_ids(payload: Mapping[str, Any]) -> str | None:
@@ -863,6 +890,55 @@ def _repair_ids_for_source(
     return tuple(sorted(ids, key=sort_key))
 
 
+def _repair_groups_from_children(
+    plan_dir: Path,
+    generated: Mapping[str, plans.SessionStatus],
+) -> tuple[Mapping[str, Any], ...] | None:
+    """Recover repository attribution from durable generated child sessions."""
+    if not generated:
+        return None
+    registry = plans.read_repository_registry(plan_dir)
+    if registry is None:
+        return None
+    groups: list[Mapping[str, Any]] = []
+    for session_id in sorted(
+        generated, key=lambda item: plans.parse_session_id(item).sort_key
+    ):
+        status = generated[session_id]
+        try:
+            text = status.path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        group_match = re.search(r"(?m)^- Repair group: `([^`]+)`\.$", text)
+        finding_match = re.search(
+            r"(?m)^- Addresses [0-9]+ review finding\(s\): (.+)\.$", text
+        )
+        if group_match is None or finding_match is None:
+            return None
+        read_aliases: tuple[str, ...] = ()
+        write_aliases: tuple[str, ...] = ()
+        try:
+            scope = plans.parse_session_scope(text, registry.aliases)
+        except plans.PlanError:
+            return None
+        read_aliases = scope.reads
+        write_aliases = scope.writes
+        groups.append(
+            {
+                "repair_group": group_match.group(1),
+                "repair_session_id": session_id,
+                "finding_ids": [
+                    item.strip()
+                    for item in finding_match.group(1).split(",")
+                    if item.strip()
+                ],
+                "read_repositories": list(read_aliases),
+                "write_repositories": list(write_aliases),
+            }
+        )
+    return tuple(groups)
+
+
 def _resume(
     *,
     source_cycle: int | None,
@@ -877,6 +953,8 @@ def _resume(
     pending_ids: tuple[str, ...] = (),
     completed_ids: tuple[str, ...] = (),
     source_fingerprints: tuple[str, ...] | None = None,
+    source_findings: tuple[Mapping[str, Any], ...] | None = None,
+    source_repositories: tuple[Mapping[str, Any], ...] | None = None,
     planning: review_repair.ReviewRepairPlan | None = None,
 ) -> ReviewResume:
     current_fingerprints: tuple[str, ...] | None = None
@@ -884,7 +962,16 @@ def _resume(
     current_artifact_digest: str | None = None
     artifact_valid: bool | None = None
     artifact_error: str | None = None
+    current_findings: tuple[Mapping[str, Any], ...] | None = None
+    current_repositories: tuple[Mapping[str, Any], ...] | None = None
+    repair_groups: tuple[Mapping[str, Any], ...] | None = None
     if planning is not None:
+        repository_aware = bool(planning.repository_bases) or any(
+            group.read_repositories for group in planning.repair_groups
+        ) or any(
+            isinstance(finding.get("repo"), str)
+            for finding in planning.validated_findings
+        )
         current_fingerprints = (
             planning.finding_fingerprints
             if planning.ok or planning.finding_fingerprints
@@ -894,6 +981,25 @@ def _resume(
         current_artifact_digest = planning.review_artifact_sha256
         artifact_valid = planning.ok
         artifact_error = planning.error
+        if repository_aware and planning.validated_findings:
+            current_findings = tuple(
+                dict(finding) for finding in planning.validated_findings
+            )
+        if planning.repository_bases:
+            current_repositories = tuple(
+                dict(repository) for repository in planning.repository_bases
+            )
+        if repository_aware and planning.repair_groups:
+            repair_groups = tuple(
+                {
+                    "repair_group": group.repair_group,
+                    "finding_ids": list(group.finding_ids),
+                    "read_repositories": list(group.read_repositories),
+                    "write_repositories": list(group.write_repositories),
+                    "repair_session_id": group.proposed_child_id.value,
+                }
+                for group in planning.repair_groups
+            )
         if (
             action in {"run-repairs", "rereview"}
             and planning.existing_child_ids
@@ -923,6 +1029,11 @@ def _resume(
         current_review_artifact_sha256=current_artifact_digest,
         artifact_valid=artifact_valid,
         artifact_error=artifact_error,
+        source_findings=source_findings,
+        current_findings=current_findings,
+        source_repositories=source_repositories,
+        current_repositories=current_repositories,
+        repair_groups=repair_groups,
     )
 
 
@@ -1059,6 +1170,16 @@ def evaluate_review_continuation(
         if source_cycle_record is not None
         else None
     )
+    source_findings = (
+        _mapping_tuple(source_cycle_record.get("findings"))
+        if source_cycle_record is not None
+        else None
+    )
+    source_repositories = (
+        _mapping_tuple(source_cycle_record.get("repositories"))
+        if source_cycle_record is not None
+        else None
+    )
     source_output_digest, source_artifact_digest = _source_digests(
         source_cycle_record
     )
@@ -1107,8 +1228,17 @@ def evaluate_review_continuation(
             pending_ids=pending_ids,
             completed_ids=completed_ids,
             source_fingerprints=source_fingerprints,
+            source_findings=source_findings,
+            source_repositories=source_repositories,
             planning=planning,
         )
+        if resume.repair_groups is None:
+            resume = replace(
+                resume,
+                repair_groups=_repair_groups_from_children(
+                    snapshot.plan_dir, generated_for_source
+                ),
+            )
         return replace(
             resume,
             source_review_output_sha256=source_output_digest,

@@ -20,7 +20,12 @@ optional Agent Mux ``amx`` hook discovery, and a coarse turn-budget
 estimate based on pending session count. ``run_core_preflight`` remains
 environment-free; ``run_environment_preflight`` exposes only the
 environment findings; ``run_preflight`` aggregates both into a single
-report. Session 13 attaches machine-readable repair hints at the report
+report. Registered plans additionally resolve one workspace context, validate
+and capture fail-closed evidence for every declared checkout beneath the
+non-Git-capable common parent, and reuse those roots for command, baseline,
+and commit-mode checks. Recursive undeclared-checkout inventory is diagnostic
+only, so an unrelated broken sibling cannot block an otherwise valid plan.
+Session 13 attaches machine-readable repair hints at the report
 level — every finding resolves to a stable :class:`RepairHint` via
 :func:`repair_hint_for_finding`, and runtime pause reasons emitted by
 ``asl run``/``asl verify`` (``no-contract``, ``malformed-contract``,
@@ -44,7 +49,15 @@ import subprocess
 import sys
 from typing import Any, Literal
 
-from . import baseline, harnesses, progress_repair, responses, state
+from . import (
+    baseline,
+    harnesses,
+    progress_repair,
+    repository_evidence,
+    responses,
+    state,
+    workspaces,
+)
 from .baseline_cache import BASELINE_RESULTS_FILENAME, BaselineCache
 from .contracts import (
     COMPLETION_CONTRACT_HEADING,
@@ -62,6 +75,7 @@ from .plans import (
     ReadinessMetadata,
     ReadinessState,
     SessionFile,
+    SessionScopeError,
     canonicalize_path,
     inspect_plan,
     noncanonical_session_file_suggestions,
@@ -72,7 +86,11 @@ from .plans import (
     stable_readiness_sha256,
     write_readiness_metadata,
 )
-from .verification import diagnose_command, diagnose_command_scope
+from .verification import (
+    VerificationContext,
+    diagnose_command,
+    diagnose_command_scope,
+)
 
 
 PreflightSeverity = Literal["red", "yellow", "green"]
@@ -93,6 +111,13 @@ PreflightCategory = Literal[
     "baseline-unexpected",
     "baseline-timeout",
     "baseline-near-timeout",
+    "workspace-root",
+    "repository-registry",
+    "repository-root",
+    "repository-origin",
+    "repository-overlap",
+    "repository-scope",
+    "repository-contract",
     "env-repo-root",
     "env-git",
     "env-harness",
@@ -119,6 +144,13 @@ PREFLIGHT_CATEGORIES: tuple[PreflightCategory, ...] = (
     "baseline-unexpected",
     "baseline-timeout",
     "baseline-near-timeout",
+    "workspace-root",
+    "repository-registry",
+    "repository-root",
+    "repository-origin",
+    "repository-overlap",
+    "repository-scope",
+    "repository-contract",
     "env-repo-root",
     "env-git",
     "env-harness",
@@ -439,6 +471,105 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
             "({detail}). Should I narrow the recipe?"
         ),
         fix_category="session-recipe-edit",
+    ),
+    "workspace-root": RepairHint(
+        category="workspace-root",
+        check_id="workspace-root.use-cwd",
+        severity_hint="red",
+        message=(
+            "Pass the existing common workspace directory via `--cwd`; for a "
+            "registered plan it does not need to be a Git repository."
+        ),
+        question_template=(
+            "Workspace root {path} is invalid ({message}). Which directory "
+            "should I use as --cwd?"
+        ),
+        fix_category="invocation-fix",
+    ),
+    "repository-registry": RepairHint(
+        category="repository-registry",
+        check_id="repository-registry.repair",
+        severity_hint="red",
+        message=(
+            "Repair the manifest `## Repositories` table so aliases, relative "
+            "paths, and credential-free expected origins are valid and unique."
+        ),
+        question_template=(
+            "The repository registry is invalid ({message}). Should I repair "
+            "the manifest table?"
+        ),
+        fix_category="plan-edit",
+    ),
+    "repository-root": RepairHint(
+        category="repository-root",
+        check_id="repository-root.repair",
+        severity_hint="red",
+        message=(
+            "Restore the registered checkout as an exact Git worktree root and "
+            "make workspace repository inventory readable."
+        ),
+        question_template=(
+            "A registered repository root is invalid ({message}). Should I "
+            "inspect the checkout layout?"
+        ),
+        fix_category="env-state",
+    ),
+    "repository-origin": RepairHint(
+        category="repository-origin",
+        check_id="repository-origin.correct-checkout",
+        severity_hint="red",
+        message=(
+            "Use the checkout whose credential-free origin matches the registry, "
+            "or correct the registry if the declared origin is wrong."
+        ),
+        question_template=(
+            "A registered repository has the wrong origin ({message}). Should I "
+            "inspect the checkout and manifest entry?"
+        ),
+        fix_category="env-state",
+    ),
+    "repository-overlap": RepairHint(
+        category="repository-overlap",
+        check_id="repository-overlap.separate",
+        severity_hint="red",
+        message=(
+            "Use disjoint repository paths and exact Git top-levels; nested or "
+            "duplicate registered roots are not supported."
+        ),
+        question_template=(
+            "Registered repository roots overlap ({message}). Should I repair "
+            "the registry paths?"
+        ),
+        fix_category="plan-edit",
+    ),
+    "repository-scope": RepairHint(
+        category="repository-scope",
+        check_id="repository-scope.repair",
+        severity_hint="red",
+        message=(
+            "Add exactly one valid Reads repositories field and Writes "
+            "repositories field; writes must be a subset of reads and all aliases "
+            "must exist in the registry."
+        ),
+        question_template=(
+            "Session {session_id} has invalid repository scope ({message}). "
+            "Should I repair its scope fields?"
+        ),
+        fix_category="plan-edit",
+    ),
+    "repository-contract": RepairHint(
+        category="repository-contract",
+        check_id="repository-contract.repair",
+        severity_hint="red",
+        message=(
+            "Give every registered completion check a valid repository alias and "
+            "keep path/cwd values canonical and beneath that repository."
+        ),
+        question_template=(
+            "Session {session_id} has an invalid repository-aware contract "
+            "({message}). Should I repair the recipe?"
+        ),
+        fix_category="plan-edit",
     ),
     "env-repo-root": RepairHint(
         category="env-repo-root",
@@ -908,6 +1039,16 @@ def runtime_repair_hint(
 
 
 @dataclass(frozen=True)
+class RepositorySummary:
+    """Ordered declared and resolved identity for one workspace repository."""
+
+    alias: str
+    path: str
+    origin: str
+    resolved_root: str | None = None
+
+
+@dataclass(frozen=True)
 class PreflightReport:
     """Aggregated preflight result for a plan directory."""
 
@@ -917,6 +1058,9 @@ class PreflightReport:
     readiness: ReadinessMetadata | None = None
     expected_readiness_sha256: str | None = None
     contracts_by_session: dict[str, CompletionContract] = field(default_factory=dict)
+    repository_registry: workspaces.RepositoryRegistry | None = None
+    verification_context: VerificationContext | None = None
+    repositories: tuple[RepositorySummary, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -983,8 +1127,61 @@ def _read_session_text(session: SessionFile) -> str | None:
         return None
 
 
+def _repository_summaries(
+    registry: workspaces.RepositoryRegistry | None,
+    context: VerificationContext | None = None,
+) -> tuple[RepositorySummary, ...]:
+    if registry is None:
+        return ()
+    resolved_roots: dict[str, str] = {}
+    if context is not None and context.workspace is not None:
+        resolved_roots = {
+            repository.alias: str(repository.root)
+            for repository in context.workspace.repositories
+        }
+    return tuple(
+        RepositorySummary(
+            alias=repository.alias,
+            path=repository.path,
+            origin=repository.origin,
+            resolved_root=resolved_roots.get(repository.alias),
+        )
+        for repository in registry
+    )
+
+
+def _check_repository_registry(
+    canonical_dir: Path,
+) -> tuple[
+    tuple[PreflightFinding, ...],
+    workspaces.RepositoryRegistry | None,
+]:
+    manifest_path = canonical_dir / "manifest.md"
+    if not manifest_path.is_file():
+        return (), None
+    try:
+        registry = read_repository_registry(canonical_dir)
+    except PlanError as error:
+        message = str(error)
+        category: PreflightCategory = (
+            "repository-overlap"
+            if "overlap" in message or "paths must be unique" in message
+            else "repository-registry"
+        )
+        return (
+            _finding(
+                "red",
+                category,
+                message,
+                path=str(manifest_path),
+            ),
+        ), None
+    return (), registry
+
+
 def _check_plan_structure(
     canonical_dir: Path,
+    repository_registry: workspaces.RepositoryRegistry | None = None,
 ) -> tuple[tuple[PreflightFinding, ...], PlanSnapshot | None]:
     findings: list[PreflightFinding] = []
 
@@ -1011,7 +1208,23 @@ def _check_plan_structure(
         return tuple(findings), None
 
     try:
-        snapshot = inspect_plan(canonical_dir)
+        snapshot = inspect_plan(
+            canonical_dir,
+            repository_registry=repository_registry,
+        )
+    except SessionScopeError as error:
+        findings.append(
+            _finding(
+                "red",
+                "repository-scope",
+                error.reason,
+                session_id=error.session_id,
+                path=str(error.path or canonical_dir),
+                line=error.line_number,
+                detail=error.source_line,
+            )
+        )
+        return tuple(findings), None
     except PlanError as error:
         findings.append(
             _finding(
@@ -1024,6 +1237,137 @@ def _check_plan_structure(
         return tuple(findings), None
 
     return tuple(findings), snapshot
+
+
+def _workspace_error_category(message: str) -> PreflightCategory:
+    if "origin" in message:
+        return "repository-origin"
+    if "overlap" in message:
+        return "repository-overlap"
+    if "workspace root" in message or "outside the workspace" in message:
+        return "workspace-root"
+    return "repository-root"
+
+
+def _resolve_preflight_context(
+    *,
+    plan_dir: Path,
+    cwd: str | Path | None,
+    registry: workspaces.RepositoryRegistry | None,
+) -> tuple[
+    VerificationContext | None,
+    tuple[PreflightFinding, ...],
+    tuple[RepositorySummary, ...],
+]:
+    summaries = _repository_summaries(registry)
+    if cwd is None:
+        return None, (), summaries
+
+    canonical_cwd = canonicalize_path(cwd)
+    if registry is None:
+        if not canonical_cwd.is_dir():
+            return None, (), summaries
+        return VerificationContext.legacy(canonical_cwd), (), summaries
+
+    if not canonical_cwd.exists():
+        return None, (
+            _finding(
+                "red",
+                "workspace-root",
+                f"workspace root does not exist: {canonical_cwd}",
+                path=str(canonical_cwd),
+            ),
+        ), summaries
+    if not canonical_cwd.is_dir():
+        return None, (
+            _finding(
+                "red",
+                "workspace-root",
+                f"workspace root is not a directory: {canonical_cwd}",
+                path=str(canonical_cwd),
+            ),
+        ), summaries
+
+    try:
+        workspace = workspaces.resolve_workspace(canonical_cwd, registry)
+    except workspaces.WorkspaceError as error:
+        message = str(error)
+        return None, (
+            _finding(
+                "red",
+                _workspace_error_category(message),
+                message,
+                path=str(canonical_cwd),
+            ),
+        ), summaries
+
+    context = VerificationContext.resolved_workspace(workspace)
+    summaries = _repository_summaries(registry, context)
+    inventory_findings: list[PreflightFinding] = []
+    registered_by_path = {
+        repository.repository.path: repository
+        for repository in workspace.repositories
+    }
+    for relative_path, repository in registered_by_path.items():
+        fingerprint = repository_evidence.capture_repository_fingerprint(
+            repository.root,
+            plan_dir,
+        )
+        unavailable = repository_evidence.repository_evidence_unavailable(
+            fingerprint
+        )
+        if unavailable is not None or not fingerprint.get("git"):
+            inventory_findings.append(
+                _finding(
+                    "red",
+                    "repository-root",
+                    "repository evidence is unavailable for registered "
+                    f"repository {repository.alias}",
+                    path=str(repository.root),
+                    detail=str(
+                        unavailable or {"reason": "repository-unavailable"}
+                    ),
+                )
+            )
+
+    try:
+        inventory = repository_evidence.capture_workspace_snapshot(
+            canonical_cwd,
+            plan_dir,
+        )
+    except repository_evidence.RepositoryEvidenceError as error:
+        inventory_findings.append(
+            _finding(
+                "green",
+                "repository-root",
+                "undeclared workspace repository inventory is incomplete; "
+                "registered repositories were checked directly",
+                path=str(canonical_cwd),
+                detail=str(error),
+            )
+        )
+        return context, tuple(inventory_findings), summaries
+
+    for relative_path, fingerprint in inventory.items():
+        if relative_path in registered_by_path:
+            continue
+        unavailable = repository_evidence.repository_evidence_unavailable(
+            fingerprint
+        )
+        if unavailable is not None or not fingerprint.get("git"):
+            inventory_findings.append(
+                _finding(
+                    "green",
+                    "repository-root",
+                    "repository evidence is unavailable for undeclared "
+                    f"repository {relative_path}",
+                    path=str(canonical_cwd / relative_path),
+                    detail=str(
+                        unavailable or {"reason": "repository-unavailable"}
+                    ),
+                )
+            )
+    return context, tuple(inventory_findings), summaries
 
 
 def _check_canonical_session_ids(canonical_dir: Path) -> tuple[PreflightFinding, ...]:
@@ -1140,10 +1484,10 @@ def _instructions_range(lines: list[str]) -> tuple[int, int]:
 
 def _check_session_contracts(
     snapshot: PlanSnapshot,
+    repository_registry: workspaces.RepositoryRegistry | None = None,
 ) -> tuple[tuple[PreflightFinding, ...], dict[str, CompletionContract]]:
     findings: list[PreflightFinding] = []
     contracts: dict[str, CompletionContract] = {}
-    registry = read_repository_registry(snapshot.plan_dir)
 
     for status in snapshot.sessions:
         session = status.session
@@ -1164,13 +1508,18 @@ def _check_session_contracts(
             contract = parse_completion_contract(
                 text,
                 session_id=session.session_id,
-                repository_registry=registry,
+                repository_registry=repository_registry,
             )
         except PlanError as error:
+            category: PreflightCategory = (
+                "repository-contract"
+                if repository_registry is not None
+                else "malformed-contract"
+            )
             findings.append(
                 _finding(
                     "red",
-                    "malformed-contract",
+                    category,
                     f"session {session.id} completion contract is malformed: {error}",
                     session_id=session.id,
                     path=str(session.path),
@@ -1377,6 +1726,7 @@ def _check_command_runnability(
     contracts_by_session: dict[str, CompletionContract],
     cwd: str | Path | None,
     *,
+    context: VerificationContext | None = None,
     which: Any | None = None,
     module_probe: Any | None = None,
 ) -> tuple[PreflightFinding, ...]:
@@ -1395,7 +1745,7 @@ def _check_command_runnability(
     if cwd is None:
         return ()
 
-    repo_root = Path(cwd)
+    verification_context = context or VerificationContext.legacy(cwd)
     diagnose_kwargs: dict[str, Any] = {}
     if which is not None:
         diagnose_kwargs["which"] = which
@@ -1409,8 +1759,23 @@ def _check_command_runnability(
         for check in contract.verify.checks:
             if not isinstance(check, CommandCheck):
                 continue
+            try:
+                resolved = verification_context.resolve_check(check)
+            except PlanError as error:
+                findings.append(
+                    _finding(
+                        "red",
+                        "repository-contract",
+                        f"session {session_id} check {check.name!r} is invalid",
+                        session_id=session_id,
+                        detail=str(error),
+                    )
+                )
+                continue
             diagnostic = diagnose_command(
-                check, repo_root=repo_root, **diagnose_kwargs
+                check,
+                repo_root=resolved.resolved_root,
+                **diagnose_kwargs,
             )
             if diagnostic is None:
                 continue
@@ -1456,6 +1821,7 @@ def _check_baselines(
     snapshot: PlanSnapshot | None,
     *,
     plan_dir: Path,
+    context: VerificationContext | None = None,
 ) -> tuple[PreflightFinding, ...]:
     """Evaluate recorded baseline evidence against declared expectations.
 
@@ -1482,9 +1848,9 @@ def _check_baselines(
         # Implementation has started; do not re-gate on baseline evidence.
         return ()
 
-    canonical_cwd = canonicalize_path(cwd)
+    verification_context = context or VerificationContext.legacy(cwd)
+    canonical_cwd = verification_context.root
     cache = BaselineCache.load(plan_dir / BASELINE_RESULTS_FILENAME)
-    current_fingerprint = baseline.repository_fingerprint(canonical_cwd)
     refresh_hint = (
         "run `"
         + responses.format_command(
@@ -1495,8 +1861,15 @@ def _check_baselines(
 
     findings: list[PreflightFinding] = []
     seen_keys: set[str] = set()
+    current_evidence = baseline.capture_baseline_repository_evidence(
+        verification_context, plan_dir
+    )
     for session_id, check in collected:
-        key = baseline.baseline_identity_key(check, canonical_cwd)
+        key = baseline.baseline_identity_key(
+            check,
+            canonical_cwd,
+            context=verification_context,
+        )
         if key in seen_keys:
             continue
         seen_keys.add(key)
@@ -1518,8 +1891,12 @@ def _check_baselines(
             )
             continue
         result = record.result
-        stored_fingerprint = str(result.get("repository_fingerprint", ""))
-        if stored_fingerprint != current_fingerprint:
+        if not baseline.baseline_evidence_is_current(
+            result,
+            verification_context,
+            plan_dir,
+            current_evidence=current_evidence,
+        ):
             findings.append(
                 _finding(
                     "yellow",
@@ -1709,13 +2086,22 @@ def run_core_preflight(plan_dir: str | Path) -> PreflightReport:
     canonical_dir = canonicalize_path(plan_dir)
     findings: list[PreflightFinding] = []
 
-    structure_findings, snapshot = _check_plan_structure(canonical_dir)
+    registry_findings, repository_registry = _check_repository_registry(
+        canonical_dir
+    )
+    findings.extend(registry_findings)
+    structure_findings, snapshot = _check_plan_structure(
+        canonical_dir,
+        repository_registry,
+    )
     findings.extend(structure_findings)
 
     if not canonical_dir.is_dir():
         return PreflightReport(
             plan_dir=canonical_dir,
             findings=tuple(findings),
+            repository_registry=repository_registry,
+            repositories=_repository_summaries(repository_registry),
         )
 
     canonical_findings = _check_canonical_session_ids(canonical_dir)
@@ -1725,6 +2111,8 @@ def run_core_preflight(plan_dir: str | Path) -> PreflightReport:
         return PreflightReport(
             plan_dir=canonical_dir,
             findings=tuple(findings),
+            repository_registry=repository_registry,
+            repositories=_repository_summaries(repository_registry),
         )
 
     readiness_findings, readiness, expected_hash = _check_manifest_readiness_block(
@@ -1732,7 +2120,10 @@ def run_core_preflight(plan_dir: str | Path) -> PreflightReport:
     )
     findings.extend(readiness_findings)
 
-    contract_findings, contracts_by_session = _check_session_contracts(snapshot)
+    contract_findings, contracts_by_session = _check_session_contracts(
+        snapshot,
+        repository_registry,
+    )
     findings.extend(contract_findings)
 
     findings.extend(_check_ambiguity_sentinels(snapshot))
@@ -1748,6 +2139,8 @@ def run_core_preflight(plan_dir: str | Path) -> PreflightReport:
         readiness=readiness,
         expected_readiness_sha256=expected_hash,
         contracts_by_session=contracts_by_session,
+        repository_registry=repository_registry,
+        repositories=_repository_summaries(repository_registry),
     )
 
 
@@ -1840,6 +2233,44 @@ def _check_env_git(
                 )
             )
 
+    return tuple(findings)
+
+
+def _check_registered_env_git(
+    context: VerificationContext,
+    commit_mode: CommitMode | None,
+) -> tuple[PreflightFinding, ...]:
+    if context.workspace is None or commit_mode not in COMMIT_MODES:
+        return ()
+    findings: list[PreflightFinding] = []
+    for repository in context.workspace.repositories:
+        status = _run_git(repository.root, ["status", "--porcelain"])
+        if status is None or status.returncode != 0:
+            detail = ""
+            if status is not None:
+                detail = (status.stderr.strip() or status.stdout.strip())[:200]
+            findings.append(
+                _finding(
+                    "yellow",
+                    "env-git",
+                    f"could not inspect git status for {repository.alias}",
+                    path=str(repository.root),
+                    detail=detail,
+                )
+            )
+        elif status.stdout:
+            findings.append(
+                _finding(
+                    "yellow",
+                    "env-git",
+                    (
+                        f"repository {repository.alias} is dirty; commit-mode "
+                        "runs require every registered tree to be clean"
+                    ),
+                    path=str(repository.root),
+                    detail=f"commit-mode: {commit_mode}",
+                )
+            )
     return tuple(findings)
 
 
@@ -2021,15 +2452,22 @@ def _run_environment_checks(
     commit_mode: CommitMode | None,
     state_dir: str | Path | None,
     max_pending_sessions: int | None = None,
+    repository_registry: workspaces.RepositoryRegistry | None = None,
+    verification_context: VerificationContext | None = None,
 ) -> tuple[PreflightFinding, ...]:
     findings: list[PreflightFinding] = []
 
     if cwd is not None:
         canonical_cwd = canonicalize_path(cwd)
-        repo_findings = _check_env_repo_root(canonical_cwd)
-        findings.extend(repo_findings)
-        if not repo_findings:
-            findings.extend(_check_env_git(canonical_cwd, commit_mode))
+        if repository_registry is None:
+            repo_findings = _check_env_repo_root(canonical_cwd)
+            findings.extend(repo_findings)
+            if not repo_findings:
+                findings.extend(_check_env_git(canonical_cwd, commit_mode))
+        elif verification_context is not None:
+            findings.extend(
+                _check_registered_env_git(verification_context, commit_mode)
+            )
 
     if harness is not None:
         findings.extend(_check_env_harness(harness))
@@ -2070,12 +2508,26 @@ def run_environment_preflight(
     ``run_preflight`` to aggregate both.
     """
     canonical_dir = canonicalize_path(plan_dir)
+    registry_findings, repository_registry = _check_repository_registry(
+        canonical_dir
+    )
     snapshot: PlanSnapshot | None = None
     if canonical_dir.is_dir():
         try:
-            snapshot = inspect_plan(canonical_dir)
+            snapshot = inspect_plan(
+                canonical_dir,
+                repository_registry=repository_registry,
+            )
         except PlanError:
             snapshot = None
+
+    verification_context, workspace_findings, repositories = (
+        _resolve_preflight_context(
+            plan_dir=canonical_dir,
+            cwd=cwd,
+            registry=repository_registry,
+        )
+    )
 
     env_findings = _run_environment_checks(
         plan_dir=canonical_dir,
@@ -2085,15 +2537,21 @@ def run_environment_preflight(
         commit_mode=commit_mode,
         state_dir=state_dir,
         max_pending_sessions=max_pending_sessions,
+        repository_registry=repository_registry,
+        verification_context=verification_context,
     )
     return PreflightReport(
         plan_dir=canonical_dir,
-        findings=env_findings,
+        findings=registry_findings + workspace_findings + env_findings,
         snapshot=snapshot,
+        repository_registry=repository_registry,
+        verification_context=verification_context,
+        repositories=repositories,
     )
 
 
 RESUME_READINESS_STATES: tuple[ReadinessState, ...] = ("loop-ready", "running")
+_PREFLIGHT_REGISTRY_UNSET = object()
 
 
 def run_resume_preflight(
@@ -2142,6 +2600,17 @@ def run_resume_preflight(
         return None
 
     canonical_dir = canonicalize_path(plan_dir)
+    try:
+        repository_registry = read_repository_registry(canonical_dir)
+    except PlanError:
+        return None
+    verification_context, workspace_findings, repositories = (
+        _resolve_preflight_context(
+            plan_dir=canonical_dir,
+            cwd=cwd,
+            registry=repository_registry,
+        )
+    )
     findings = _run_environment_checks(
         plan_dir=canonical_dir,
         snapshot=snapshot,
@@ -2150,14 +2619,19 @@ def run_resume_preflight(
         commit_mode=commit_mode,
         state_dir=state_dir,
         max_pending_sessions=max_pending_sessions,
+        repository_registry=repository_registry,
+        verification_context=verification_context,
     )
     return PreflightReport(
         plan_dir=canonical_dir,
-        findings=findings,
+        findings=workspace_findings + findings,
         snapshot=snapshot,
         readiness=readiness,
         expected_readiness_sha256=expected_hash,
         contracts_by_session={},
+        repository_registry=repository_registry,
+        verification_context=verification_context,
+        repositories=repositories,
     )
 
 
@@ -2166,6 +2640,10 @@ def run_unhashed_state_checks(
     *,
     snapshot: PlanSnapshot,
     cwd: str | Path | None = None,
+    repository_registry: workspaces.RepositoryRegistry
+    | None
+    | object = _PREFLIGHT_REGISTRY_UNSET,
+    context: VerificationContext | None = None,
 ) -> tuple[PreflightFinding, ...]:
     """Check the plan state that ``stable_readiness_sha256`` does not cover.
 
@@ -2180,16 +2658,55 @@ def run_unhashed_state_checks(
     one, so the caller falls back to :func:`run_preflight`.
     """
     canonical_dir = canonicalize_path(plan_dir)
-    contract_findings, contracts_by_session = _check_session_contracts(snapshot)
-    return (
-        contract_findings
-        + _check_progress_journal(snapshot)
-        + _check_baselines(
+    if repository_registry is _PREFLIGHT_REGISTRY_UNSET:
+        try:
+            resolved_registry = read_repository_registry(canonical_dir)
+        except PlanError as error:
+            return (
+                _finding(
+                    "red",
+                    "repository-registry",
+                    str(error),
+                    path=str(canonical_dir / "manifest.md"),
+                ),
+            )
+    else:
+        resolved_registry = repository_registry
+    if resolved_registry is not None and not isinstance(
+        resolved_registry,
+        workspaces.RepositoryRegistry,
+    ):
+        raise TypeError(
+            "repository_registry must be a RepositoryRegistry or None"
+        )
+    workspace_findings: tuple[PreflightFinding, ...] = ()
+    verification_context = context
+    if verification_context is None:
+        verification_context, workspace_findings, _repositories = (
+            _resolve_preflight_context(
+            plan_dir=canonical_dir,
+            cwd=cwd,
+            registry=resolved_registry,
+        )
+        )
+    contract_findings, contracts_by_session = _check_session_contracts(
+        snapshot,
+        resolved_registry,
+    )
+    baseline_findings: tuple[PreflightFinding, ...] = ()
+    if resolved_registry is None or verification_context is not None:
+        baseline_findings = _check_baselines(
             contracts_by_session,
             cwd,
             snapshot,
             plan_dir=canonical_dir,
+            context=verification_context,
         )
+    return (
+        workspace_findings
+        + contract_findings
+        + _check_progress_journal(snapshot)
+        + baseline_findings
     )
 
 
@@ -2209,6 +2726,13 @@ def run_preflight(
     ``inspect_plan`` runs at most once per call.
     """
     core_report = run_core_preflight(plan_dir)
+    verification_context, workspace_findings, repositories = (
+        _resolve_preflight_context(
+            plan_dir=core_report.plan_dir,
+            cwd=cwd,
+            registry=core_report.repository_registry,
+        )
+    )
     env_findings = _run_environment_checks(
         plan_dir=core_report.plan_dir,
         snapshot=core_report.snapshot,
@@ -2217,20 +2741,29 @@ def run_preflight(
         commit_mode=commit_mode,
         state_dir=state_dir,
         max_pending_sessions=max_pending_sessions,
+        repository_registry=core_report.repository_registry,
+        verification_context=verification_context,
     )
-    command_findings = _check_command_runnability(
-        core_report.contracts_by_session, cwd
-    )
-    baseline_findings = _check_baselines(
-        core_report.contracts_by_session,
-        cwd,
-        core_report.snapshot,
-        plan_dir=core_report.plan_dir,
-    )
+    command_findings: tuple[PreflightFinding, ...] = ()
+    baseline_findings: tuple[PreflightFinding, ...] = ()
+    if core_report.repository_registry is None or verification_context is not None:
+        command_findings = _check_command_runnability(
+            core_report.contracts_by_session,
+            cwd,
+            context=verification_context,
+        )
+        baseline_findings = _check_baselines(
+            core_report.contracts_by_session,
+            cwd,
+            core_report.snapshot,
+            plan_dir=core_report.plan_dir,
+            context=verification_context,
+        )
     return PreflightReport(
         plan_dir=core_report.plan_dir,
         findings=(
             core_report.findings
+            + workspace_findings
             + env_findings
             + command_findings
             + baseline_findings
@@ -2239,6 +2772,9 @@ def run_preflight(
         readiness=core_report.readiness,
         expected_readiness_sha256=core_report.expected_readiness_sha256,
         contracts_by_session=core_report.contracts_by_session,
+        repository_registry=core_report.repository_registry,
+        verification_context=verification_context,
+        repositories=repositories,
     )
 
 
@@ -2545,6 +3081,20 @@ def _preflight_payload_fields(
             report, plan_dir=plan_dir_arg
         ),
     }
+    if report.repository_registry is not None:
+        fields.update(
+            {
+                "workspace_root": (
+                    str(report.verification_context.root)
+                    if report.verification_context is not None
+                    else cwd
+                ),
+                "registry_digest": report.repository_registry.digest,
+                "repositories": [
+                    asdict(repository) for repository in report.repositories
+                ],
+            }
+        )
     if mark_error is not None:
         fields["mark_error"] = mark_error
     return fields
@@ -2581,7 +3131,24 @@ def _print_text_preflight(
     )
     print(f"Plan: {plan_dir_arg}")
     print(f"Sessions: {session_count}")
-    if cwd is not None:
+    if report.repository_registry is not None:
+        if cwd is not None:
+            print(f"Workspace root: {cwd}")
+        print("Repositories:")
+        visible, omitted = workspaces.bounded_repository_rows(report.repositories)
+        for repository in visible:
+            resolved = (
+                f" -> {repository.resolved_root}"
+                if repository.resolved_root is not None
+                else ""
+            )
+            print(
+                f"  {repository.alias}: {repository.path}{resolved} "
+                f"({repository.origin})"
+            )
+        if omitted:
+            print(f"  ... {omitted} more repositories")
+    elif cwd is not None:
         print(f"Repo root: {cwd}")
     if harness is not None:
         print(f"Harness: {harness}")

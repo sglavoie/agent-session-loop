@@ -350,7 +350,10 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     doctor_parser.add_argument(
         "--cwd",
         default=".",
-        help="Repository root where the harness should run (default: current directory)",
+        help=(
+            "Repository root for a legacy plan or workspace root for a "
+            "registered plan (default: current directory)"
+        ),
     )
     doctor_parser.add_argument(
         "--plan-dir",
@@ -378,7 +381,10 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     verify_parser.add_argument(
         "--cwd",
         default=".",
-        help="Repository root for verification checks (default: current directory)",
+        help=(
+            "Repository root for a legacy plan or workspace root for a "
+            "registered plan (default: current directory)"
+        ),
     )
     verify_parser.add_argument(
         "--artifact-dir",
@@ -416,7 +422,10 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     contract_check_parser.add_argument(
         "--cwd",
         default=".",
-        help="Repository root for file/regex/command checks (default: current directory)",
+        help=(
+            "Repository root for a legacy plan or workspace root for a "
+            "registered plan (default: current directory)"
+        ),
     )
     contract_check_parser.add_argument(
         "--json",
@@ -440,7 +449,10 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     baseline_parser.add_argument(
         "--cwd",
         default=".",
-        help="Repository root to run baseline checks in (default: current directory)",
+        help=(
+            "Repository root for a legacy plan or workspace root for a "
+            "registered plan (default: current directory)"
+        ),
     )
     baseline_parser.add_argument(
         "--per-check-timeout",
@@ -569,10 +581,19 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         ),
     )
     prepare_parser.add_argument(
+        "--rebind-workspace",
+        action="store_true",
+        help=(
+            "Atomically replace a registered plan's workspace binding and all "
+            "workspace-dependent preparation evidence (requires --resume)"
+        ),
+    )
+    prepare_parser.add_argument(
         "--cwd",
         default=".",
         help=(
-            "Repository root the prepared plan will run against "
+            "Repository root for a legacy plan or workspace root for a "
+            "registered plan "
             "(default: current directory)"
         ),
     )
@@ -661,7 +682,10 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     preflight_parser.add_argument(
         "--cwd",
         default=None,
-        help="Repository root for environment checks (default: skip cwd checks)",
+        help=(
+            "Repository root for legacy environment checks or workspace root "
+            "for registered checks (default: skip cwd checks)"
+        ),
     )
     preflight_parser.add_argument(
         "--harness",
@@ -939,7 +963,10 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     workbench_pin_parser.add_argument(
         "--cwd",
         default=None,
-        help="Default working directory the Workbench should launch this plan in",
+        help=(
+            "Default legacy repository root; registered plans always launch "
+            "from their prepared workspace binding"
+        ),
     )
     workbench_pin_parser.add_argument(
         "--label",

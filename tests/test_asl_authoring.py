@@ -434,6 +434,107 @@ class PlanAuthoringTests(unittest.TestCase):
                 self.assertEqual(category, raised.exception.category)
                 self.assertIn(reason, str(raised.exception))
 
+    def test_registry_errors_redact_credential_bearing_origins(self) -> None:
+        text = (
+            "# Plan\n\n## Repositories\n\n"
+            "| Alias | Path | Origin |\n"
+            "| --- | --- | --- |\n"
+            "| SVC | ../svc | https://bob:ghp_SECRET123@github.com/t/SVC.git |\n\n"
+            "## Session 1: Thing\n\nDo work.\n"
+        )
+
+        with self.assertRaises(authoring.SourceRegistryError) as raised:
+            authoring.parse_plan_document(text)
+        result = authoring.lint_plan_document(text)
+        payload = json.dumps(
+            [finding.as_dict() for finding in result.findings], sort_keys=True
+        )
+
+        self.assertNotIn("bob", str(raised.exception))
+        self.assertNotIn("ghp_SECRET123", str(raised.exception))
+        self.assertNotIn("bob", raised.exception.source_line)
+        self.assertNotIn("ghp_SECRET123", raised.exception.source_line)
+        self.assertNotIn("bob", payload)
+        self.assertNotIn("ghp_SECRET123", payload)
+
+    def test_registry_lint_redacts_credentials_from_any_table_cell(self) -> None:
+        credential = "https://alice:s3cr3t@github.com/tundra/SVC.git"
+        documents = (
+            (
+                "# Plan\n\n## Repositories\n\n"
+                f"| SVC | svc | {credential} |\n"
+                "| --- | --- | --- |\n\n"
+                "## Session 1: Thing\n\nDo work.\n"
+            ),
+            (
+                "# Plan\n\n## Repositories\n\n"
+                "| Alias | Path | Origin |\n"
+                "| --- | --- | --- |\n"
+                f"| {credential} | svc | SVC |\n\n"
+                "## Session 1: Thing\n\nDo work.\n"
+            ),
+        )
+
+        for document in documents:
+            with self.subTest(document=document):
+                result = authoring.lint_plan_document(document)
+                payload = json.dumps(dataclasses.asdict(result), default=str)
+
+                self.assertEqual(1, len(result.findings))
+                self.assertEqual(
+                    "[repository row redacted]",
+                    result.findings[0].source_line,
+                )
+                self.assertNotIn("alice", payload)
+                self.assertNotIn("s3cr3t", payload)
+
+    def test_registry_rejects_markdown_delimiter_in_origin(self) -> None:
+        text = (
+            "# Plan\n\n## Repositories\n\n"
+            "| Alias | Path | Origin |\n"
+            "| --- | --- | --- |\n"
+            "| SVC | svc | https://github.com/t/pipe|name.git |\n"
+        )
+
+        with self.assertRaises(authoring.SourceRegistryError) as raised:
+            authoring.parse_plan_document(text)
+
+        self.assertEqual(
+            authoring.LINT_MALFORMED_REPOSITORIES,
+            raised.exception.category,
+        )
+        self.assertIn("exactly three cells", str(raised.exception))
+
+    def test_repositories_prefixed_prose_heading_is_not_a_registry(self) -> None:
+        text = (
+            "# Plan\n\n## Repositories consulted\n\n"
+            "Prose about repositories.\n\n"
+            "## Session 1: Thing\n\nDo work.\n"
+        )
+
+        parsed = authoring.parse_plan_document(text)
+        lint = authoring.lint_plan_document(text)
+
+        self.assertIsNone(parsed.registry)
+        self.assertEqual((), lint.findings)
+
+    def test_malformed_exact_repositories_heading_remains_diagnostic(self) -> None:
+        text = (
+            "# Plan\n\n## repositories\n\n"
+            "| Alias | Path | Origin |\n"
+            "| --- | --- | --- |\n"
+            "| SVC | svc | https://example.com/svc.git |\n"
+        )
+
+        result = authoring.lint_plan_document(text)
+
+        self.assertEqual(1, len(result.findings))
+        self.assertEqual(
+            authoring.LINT_REPOSITORIES_PLACEMENT,
+            result.findings[0].category,
+        )
+        self.assertIn("must be exactly", result.findings[0].message)
+
     # -- source-plan linting -------------------------------------------------
 
     def test_lint_plan_document_accepts_a_clean_plan(self) -> None:
@@ -707,6 +808,16 @@ class PlanAuthoringTests(unittest.TestCase):
         self.assertEqual("pass", parsed.verify.checks[0].baseline_expectation)
 
     def test_render_completion_contract_round_trips_repository_alias(self) -> None:
+        registry = workspaces.RepositoryRegistry(
+            (
+                workspaces.Repository(
+                    "SVC", "svc", "https://example.com/svc.git"
+                ),
+                workspaces.Repository(
+                    "OAK", "oak", "https://example.com/oak.git"
+                ),
+            )
+        )
         contract = contracts.CompletionContract(
             session_id=plans.parse_session_id("2"),
             done_when=("done",),
@@ -728,8 +839,15 @@ class PlanAuthoringTests(unittest.TestCase):
             ),
         )
 
-        rendered = authoring.render_completion_contract(contract)
-        reparsed = contracts.parse_completion_contract(rendered, session_id="2")
+        with self.assertRaisesRegex(plans.PlanError, "without a repository registry"):
+            authoring.render_completion_contract(contract)
+
+        rendered = authoring.render_completion_contract(
+            contract, repository_registry=registry
+        )
+        reparsed = contracts.parse_completion_contract(
+            rendered, session_id="2", repository_registry=registry
+        )
 
         self.assertEqual(
             ["SVC", "OAK", "SVC"],
@@ -1040,6 +1158,100 @@ class PlanAuthoringTests(unittest.TestCase):
             tx.stage("context.md", "updated")
             tx.commit()
             self.assertEqual("updated", (plan_dir / "context.md").read_text())
+
+    def test_transaction_recovery_waits_for_in_flight_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            names = ("a.md", "b.md", "c.md", "d.md", "e.md")
+            for name in names:
+                (plan_dir / name).write_text("OLD\n", encoding="utf-8")
+
+            started = threading.Event()
+            reader_results: list[bool] = []
+            reader_errors: list[BaseException] = []
+            original_fsync_directory = plans._fsync_directory
+            calls = 0
+
+            def slow_fsync_directory(path: Path) -> None:
+                nonlocal calls
+                original_fsync_directory(path)
+                calls += 1
+                if calls == 3:
+                    started.set()
+                    time.sleep(0.1)
+
+            def recover() -> None:
+                if not started.wait(5):
+                    reader_errors.append(AssertionError("commit did not start"))
+                    return
+                try:
+                    reader_results.append(
+                        plans.recover_pending_plan_transaction(plan_dir)
+                    )
+                except BaseException as error:
+                    reader_errors.append(error)
+
+            transaction = authoring.PlanTransaction(plan_dir)
+            for name in names:
+                transaction.stage(name, "NEW\n")
+            reader = threading.Thread(target=recover)
+            with mock.patch.object(
+                plans, "_fsync_directory", side_effect=slow_fsync_directory
+            ):
+                reader.start()
+                committed = transaction.commit()
+                reader.join(timeout=5)
+
+            self.assertFalse(reader.is_alive())
+            self.assertEqual([], reader_errors)
+            self.assertEqual([False], reader_results)
+            self.assertEqual(len(names), len(committed))
+            self.assertEqual(
+                {"NEW"},
+                {(plan_dir / name).read_text(encoding="utf-8").strip() for name in names},
+            )
+
+    def test_transaction_recovery_times_out_with_holder_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp)
+            transaction_dir = plan_dir / plans.PLAN_TRANSACTION_DIR_NAME
+            transaction_dir.mkdir()
+            (transaction_dir / plans.PLAN_TRANSACTION_JOURNAL_NAME).write_text(
+                '{"version":1,"entries":[]}\n', encoding="utf-8"
+            )
+            holder_ready = threading.Event()
+            release_holder = threading.Event()
+
+            def hold_transaction_lock() -> None:
+                with plans._plan_transaction_mutex(transaction_dir):
+                    holder_ready.set()
+                    release_holder.wait(5)
+
+            holder = threading.Thread(
+                target=hold_transaction_lock, name="transaction-test-holder"
+            )
+            holder.start()
+            self.assertTrue(holder_ready.wait(5))
+            started_at = time.monotonic()
+            try:
+                with (
+                    mock.patch.object(
+                        plans, "PLAN_TRANSACTION_LOCK_WAIT_SECONDS", 0.1
+                    ),
+                    self.assertRaisesRegex(
+                        plans.PlanError,
+                        r"timed out after 0\.1s waiting for plan transaction lock "
+                        r"at .*transaction\.lock; holder pid \d+ on .* "
+                        r"thread 'transaction-test-holder'",
+                    ),
+                ):
+                    plans.load_plan_metadata(plan_dir)
+            finally:
+                release_holder.set()
+                holder.join(timeout=5)
+
+            self.assertFalse(holder.is_alive())
+            self.assertLess(time.monotonic() - started_at, 1.0)
 
     # -- readiness refresh ---------------------------------------------------
 

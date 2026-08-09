@@ -51,6 +51,7 @@ from agent_session_loop import pause_policy as _pause_policy  # noqa: E402
 from agent_session_loop import review as _review  # noqa: E402
 from agent_session_loop import review_continuation as _review_continuation  # noqa: E402
 from agent_session_loop import run_flags as _run_flags  # noqa: E402
+from agent_session_loop import runner as _runner  # noqa: E402
 from agent_session_loop import state as _state  # noqa: E402
 from agent_session_loop import tail as _tail  # noqa: E402
 
@@ -228,7 +229,7 @@ classify_pause = _pause_policy.classify_pause
 # ``asl run --max-review-fix-cycles`` (``--max-review-fix-plans`` is a
 # deprecated alias). The helper only validates and forwards the flag; it never
 # creates follow-up fix plans.
-DEFAULT_MAX_REVIEW_FIX_CYCLES = 2
+DEFAULT_MAX_REVIEW_FIX_CYCLES = _runner.DEFAULT_MAX_REVIEW_FIX_CYCLES
 
 # Final review artifacts. When a run uses `--review-harness`, ASL writes the
 # review verdict to `<plan-dir>/final-review.md` with a single trailing
@@ -1197,6 +1198,15 @@ def _status_snapshot(status: object) -> dict:
         else None
     )
     common = {}
+    workspace = _status_workspace(status)
+    if workspace is not None:
+        common["workspace_root"] = workspace["workspace_root"]
+        common["registry_digest"] = workspace.get("registry_digest")
+        common["repository_aliases"] = [
+            repository["alias"]
+            for repository in workspace["repositories"][:20]
+        ]
+        common["repository_count"] = len(workspace["repositories"])
     if (
         isinstance(pending_outbox, int)
         and not isinstance(pending_outbox, bool)
@@ -2178,6 +2188,74 @@ def _argv_with_max_sessions(argv: Sequence[str], value: int) -> list:
     return out
 
 
+def _status_workspace(status: object) -> Optional[dict]:
+    """Return a complete ordered workspace projection from authoritative status."""
+    if not isinstance(status, dict) or not status.get("ok"):
+        return None
+    runner_state = status.get("runner_state")
+    candidates = [status]
+    if isinstance(runner_state, dict):
+        candidates.insert(0, runner_state)
+    for payload in candidates:
+        root = payload.get("workspace_root")
+        repositories = payload.get("repositories")
+        if not isinstance(root, str) or not root:
+            continue
+        if not isinstance(repositories, list) or any(
+            not isinstance(repository, dict)
+            or not isinstance(repository.get("alias"), str)
+            for repository in repositories
+        ):
+            continue
+        return {
+            "workspace_root": root,
+            "registry_digest": payload.get("registry_digest"),
+            "repositories": [dict(repository) for repository in repositories],
+        }
+    return None
+
+
+def _workspace_launch_error(parsed: dict, status: dict) -> Optional[str]:
+    workspace = _status_workspace(status)
+    requested = parsed.get("cwd")
+    if workspace is None or not requested:
+        return None
+    requested_root = os.path.realpath(os.path.abspath(os.path.expanduser(requested)))
+    bound_root = os.path.realpath(
+        os.path.abspath(os.path.expanduser(workspace["workspace_root"]))
+    )
+    if requested_root == bound_root:
+        return None
+    return (
+        "--cwd does not match the prepared workspace binding; autopilot will "
+        "not rebind automatically. Use `asl prepare PLAN_DIR --resume --cwd "
+        "NEW_WORKSPACE --rebind-workspace`, then relaunch."
+    )
+
+
+def _parsed_with_status_workspace(parsed: dict, status: dict) -> dict:
+    """Add the prepared workspace root to a launch that omitted ``--cwd``."""
+    workspace = _status_workspace(status)
+    if workspace is None or parsed.get("cwd"):
+        return parsed
+    root = workspace["workspace_root"]
+    argv = list(parsed["argv"])
+    insert_at = argv.index("--json") if "--json" in argv else len(argv)
+    argv[insert_at:insert_at] = ["--cwd", root]
+    run_args = list(parsed.get("run_args") or argv[1:])
+    run_insert = run_args.index("--json") if "--json" in run_args else len(run_args)
+    run_args[run_insert:run_insert] = ["--cwd", root]
+    return {
+        **parsed,
+        "cwd": root,
+        "workspace_root": root,
+        "registry_digest": workspace.get("registry_digest"),
+        "repositories": workspace.get("repositories", []),
+        "argv": argv,
+        "run_args": run_args,
+    }
+
+
 def _review_resume_payload(payload: Optional[dict]) -> Optional[dict]:
     """Return a payload's additive ``review_resume`` projection, if present."""
     if not isinstance(payload, dict):
@@ -3036,6 +3114,16 @@ def supervise_run(
             )
 
         events_path = status.get("events_path")
+        workspace_error = _workspace_launch_error(parsed, status)
+        if workspace_error is not None:
+            return run_result(
+                False,
+                "user_required",
+                status=status,
+                chunks=chunks,
+                error=workspace_error,
+                workspace=_status_workspace(status),
+            )
         disposition = _classify_lock(parsed, status)
         if disposition == "mismatch":
             return run_result(
@@ -3241,14 +3329,15 @@ def supervise_run(
         # here, so a relaunch after a pause that already completed some sessions
         # (the only case that recurs now that the runner drains all pending in
         # one chunk) cannot overshoot the total.
+        bound_parsed = _parsed_with_status_workspace(parsed, status)
         if budget is not None:
             remaining = budget - completed_total
             launch_parsed = {
-                **parsed,
-                "argv": _argv_with_max_sessions(parsed["argv"], remaining),
+                **bound_parsed,
+                "argv": _argv_with_max_sessions(bound_parsed["argv"], remaining),
             }
         else:
-            launch_parsed = parsed
+            launch_parsed = bound_parsed
         if not parsed.get("no_mailbox"):
             launch_now = clock()
             if mailbox_watcher is None:

@@ -33,6 +33,8 @@ import shutil
 import tempfile
 from typing import Any
 
+from . import durability
+
 
 # Previews standardize on the first 8 KiB and last 8 KiB of each stream.
 PREVIEW_HEAD_BYTES = 8 * 1024
@@ -91,16 +93,26 @@ def _cleanup(path: Path) -> None:
         pass
 
 
-def atomic_write_bytes(path: Path | str, data: bytes) -> None:
+def atomic_write_bytes(
+    path: Path | str, data: bytes, *, durable: bool = False
+) -> None:
     """Write ``data`` to ``path`` via temp-file + :func:`os.replace`.
 
     The destination is never left half-written: on any failure the temp file is
-    removed and the original destination (if any) is untouched.
+    removed and the original destination (if any) is untouched. When
+    ``durable`` is true, the temporary file receives a platform fullsync before
+    replacement and the containing directory is synced afterward.
     """
     path = Path(path)
     tmp_path = path.with_name(f".{path.name}.tmp")
     try:
-        tmp_path.write_bytes(data)
+        if durable:
+            with tmp_path.open("wb") as handle:
+                handle.write(data)
+                handle.flush()
+                durability.fullsync(handle.fileno())
+        else:
+            tmp_path.write_bytes(data)
     except OSError as error:
         _cleanup(tmp_path)
         raise ArtifactError(f"could not write artifact {path}: {error}") from error
@@ -111,6 +123,17 @@ def atomic_write_bytes(path: Path | str, data: bytes) -> None:
         raise ArtifactError(
             f"could not finalize artifact {path}: {error}"
         ) from error
+    if durable:
+        try:
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                durability.fullsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError as error:
+            raise ArtifactError(
+                f"could not sync artifact directory {path.parent}: {error}"
+            ) from error
 
 
 def gzip_compress(data: bytes) -> bytes:

@@ -59,7 +59,7 @@ For inline input, pipe the captured content to `asl split --check --inline-stdin
 
 Read the payload:
 
-- `ok: true` — record `session_ids` (the canonical ids to key contracts by in Step 5) and continue to Step 3.
+- `ok: true` — record `session_ids` (the canonical ids to key contracts by in Step 5). When the payload also carries ordered `repositories` and `registry_digest`, retain that registry context through Steps 3–7; the parser has already validated the exact top-level `## Repositories` table and every session's `Reads repositories` / `Writes repositories` scope. Continue to Step 3.
 - `reason: single-session` — apply the Step 4 single-session outcome and stop.
 - `reason: malformed-plan` — repair the plan, then re-check. Each finding carries `line`, `category`, `message`, `source_line`, and `suggested_line`.
 
@@ -87,6 +87,13 @@ Extract file paths from the plan text, check existence and line counts, and buil
 - **> 15 references**: run all sub-steps
 
 **3a. Extract paths**: Scan for backtick-quoted paths (e.g. `` `src/foo/bar.ts` ``) and bare paths in `**File:**` lines or list items. Deduplicate.
+
+For a registered source, treat `Alias:path` as the canonical prose location and
+resolve it beneath that alias's declared workspace-relative path. Do not guess
+which repository owns an unqualified path that could exist in more than one
+session read alias; record it as ambiguous for contract authoring and final
+preflight. The registry read scope is advisory research context, while the
+write scope is the durable mutation authority the runner will enforce.
 
 **3b. Probe files**: For each extracted path, run `wc -l <path> 2>/dev/null || echo "NEW"`. Record a tuple `(path, lines | NEW, session_number)` — where `session_number` is the session the reference appeared in (or `0` for context).
 
@@ -129,7 +136,7 @@ Contracts are the only generated content this skill authors; everything else is 
 Contract authoring rules (validated by `agent_session_loop.authoring.contract_from_payload`, which fails closed on any malformed entry):
 
 - `done_when` needs at least one non-trivial bullet derived from the session's own goal (title or first sentence); never leave generic placeholders that read like `<criterion>`.
-- `verify.checks` must be non-empty. `type` is one of `command`, `file_exists`, `regex_in_file`; `command` checks take a non-empty `argv` list (no shell strings) and `timeout_seconds <= 3600`; `file_exists` / `regex_in_file` take repo-relative or absolute paths (and a Python-`re`-valid `pattern`). Relative paths must not contain `..` traversal. `name` is optional and auto-assigned as `check-<index>`.
+- `verify.checks` must be non-empty. `type` is one of `command`, `file_exists`, `regex_in_file`; `command` checks take a non-empty `argv` list (no shell strings) and `timeout_seconds <= 3600`; `file_exists` / `regex_in_file` take a path (and a Python-`re`-valid `pattern`). In a registered plan, put `"repo": "Alias"` on every check and keep every `path` and command `cwd` repository-relative, non-absolute, and free of upward `..` traversal; the alias must be in that session's read scope. In a legacy plan, checks may omit `repo` and retain repo-relative or absolute `path` / `cwd` behavior. `name` is optional and auto-assigned as `check-<index>`.
 - Author one authoritative gate for each logical verification surface. A check without `on_failure_of` is a gate and determines whether the contract passes. Do not emit both a focused test command and a broader command that already includes those tests as unconditional gates; prefer the repo's evidenced aggregate command when it is appropriately scoped to the session.
 - A genuinely narrower troubleshooting check may set `on_failure_of` to a non-empty list of named gates. It then runs only when at least one named gate fails, is reported as a diagnostic, and never changes the aggregate pass/fail decision. Dependencies must name unconditional gates in the same recipe; self-references, unknown names, and diagnostic-to-diagnostic chains are invalid. Keep diagnostics only when their failure evidence is worth the extra runtime. Exact duplicate `argv`/`cwd` pairs are a yellow `verification-duplicate` preflight finding.
 - `verify.session` must match the session id exactly (no leading zeroes, dotted form).
@@ -177,7 +184,7 @@ Echo the `asl split --json` output as a concise summary:
 
 1. Number of sessions extracted (`session_ids`).
 2. Source plan path (`source_path`), especially when inline content was captured. If Step 2 repaired any heading, also print the user's original path and one `line <N>: <category>` line per repair so the change is auditable.
-3. Output directory (`output_dir`) and its `Plan ID` (`plan_id`).
+3. Output directory (`output_dir`) and its `Plan ID` (`plan_id`). For a registered plan, also print the ordered alias/path registry from `repositories` and its credential-free `registry_digest`; do not print credentials or invent resolved roots during splitting.
 4. File listing (`files`) with approximate sizes.
 5. The ready-to-paste serial execution command (the `## Execution` block from `manifest.md`).
 6. Estimated token savings percentage; if an Execution Weight table was generated, highlight any "heavy" session and suggest splitting it further.
@@ -190,5 +197,6 @@ Echo the `asl split --json` output as a concise summary:
 - Deterministic generation is owned by `asl split` / `agent_session_loop.authoring`. This skill authors only session boundaries and completion contracts; it never hand-writes `context.md`, `session-N.md`, `manifest.md`, or `progress.md`.
 - The generated plan is serial-only. Do not emit `## Parallel Metadata`, dependency waves, worker prompts, or explicit `--session N` commands; do not generate `parallel-validation.md` (the readiness hash ignores it even when a legacy copy lingers). `session-run` accepts only directory auto-advance.
 - Every emitted `session-N.md` carries a parseable `## Completion Contract` above its `## Handoff`; plans without contracts are rejected by `asl preflight` (red `missing-contract`) and by `asl run`'s verification gate (`reason="no-contract"` unless `--allow-not-loop-ready`).
+- Registered plans carry the authoritative ordered registry only in `manifest.md`. Their sessions retain exact read/write scope fields, their completion checks are repository-attributed, and completed handoffs use `Alias:path` entries limited to write aliases. Legacy plans keep the v1 single-root syntax and JSON compatibility surface.
 - `manifest.md` ships `**Readiness**: draft` with a stable SHA from `agent_session_loop.plans.stable_readiness_sha256`; only `asl preflight --mark-loop-ready` (typically via directory-mode `session-expand`) advances it after validation.
 - `progress.md` is a runner-managed header-only skeleton (`agent_session_loop.plans.PROGRESS_HEADER`), excluded from `plan_content_sha256` / `stable_readiness_sha256`, and never appears in the manifest session table.

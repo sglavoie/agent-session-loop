@@ -91,6 +91,7 @@ Contract allocation rules (enforced by the helper; violations fail closed as `am
 - Every child needs explicit `done_when` criteria and at least one verification check via `inherit_checks` (parent check names) and/or `checks` (explicit replacement objects, same JSON shape as contract checks).
 - If any child inherits parent checks, **every** parent check must be inherited by at least one child; leaving one unallocated is `ambiguous-contract`. If no child inherits, every child must carry its own `checks` (the explicit replacement of the parent recipe).
 - `inherit_checks` naming an undefined parent check, legacy `{title, instructions}`-only specs, and empty allocations are rejected (`ambiguous-contract`); unknown spec keys are rejected (`ambiguous-input`).
+- In a registered plan, every explicit replacement check retains a valid `repo` alias from the child's inherited read scope, and every `path` / command `cwd` remains relative beneath that repository. Do not move a check to another alias merely to match a proposed child boundary. Child instructions and later handoffs use qualified `Alias:path` locations, while completed file entries remain limited to inherited write aliases.
 
 Without `--child-spec`, the helper derives every child contract from the parent's own `## Completion Contract`: each child inherits the full verify recipe and the last child also inherits the parent's `Done when`. A parent with no parseable contract is rejected as `no-contract` (the helper never inserts a `python3 -m unittest` placeholder). Prefer explicit specs whenever the parent's checks split meaningfully.
 
@@ -115,5 +116,6 @@ Because resplitting invalidates the parent expansion and resets readiness to `dr
 - Preserve dotted session IDs everywhere: filenames, headings, dependencies, lineage, examples, and reports.
 - Never author child files, manifest tables, or contracts by hand — the helper and `agent_session_loop.authoring` own those schemas. This skill supplies boundaries, instructions, and contract allocation only.
 - Child contracts are never placeholders: derived from the parent contract or supplied per child. Ambiguous allocation fails closed (`no-contract` / `ambiguous-contract`) instead of inserting a `python3 -m unittest` default.
+- Registered children inherit the parent's exact read/write scopes before any explicit later narrowing. Resplitting never broadens repository authority, never converts `(none)` into a write alias, and never strips `repo` from inherited contract checks.
 - Do not read or rewrite `parallel-validation.md` or touch legacy dependency-wave/ownership tables — both this skill and `session-run` ignore them, and their rows stay intact even when they reference the resplit parent.
 - After resplitting, rerun `session-expand` before `session-run`.

@@ -69,8 +69,9 @@ asl doctor --harness codex --plan-dir ~/.local/share/agent-plans/example-plan/
 
 `doctor` verifies the working directory, plan directory, configured harness
 executable, next pending session, generated prompt, and argv.
-Both `run` and `doctor` default to the current directory; pass
-`--cwd REPO_ROOT` to run the harness somewhere else.
+Both `run` and `doctor` default to the current directory. Pass `--cwd ROOT` to
+select the repository root for a legacy plan or the common workspace root for
+a registered plan.
 
 ## Workflow: Split, Expand, Repair, Verify, Run
 
@@ -275,6 +276,12 @@ shapes. Required and optional fields:
   upward-traversing `..` segment. Without a registry, file and regex paths and
   command working directories retain the legacy absolute-path behavior;
   preflight still rejects unsafe relative file paths as before.
+  For `verify`, `contract-check`, and `baseline`, `--cwd` denotes the workspace
+  root when the plan has a registry and the legacy repository root otherwise.
+  Commands and Python-module probes use the selected repository (plus the
+  check's repository-relative `cwd`), while file and regex checks resolve under
+  that same alias. JSON check rows and observer events include the alias,
+  qualified cwd/path, absolute resolved root, and resolved cwd/path.
 - Every check also accepts an optional `baseline_expectation` (one of `skip`,
   `pass`, `fail`; defaults to `skip`). `pass`/`fail` declare how the check must
   behave on the *unmodified* repository; `asl baseline` records the evidence
@@ -315,6 +322,10 @@ hard pause. The JSON body carries a stable `reason` field
 the skill reverts the session handoff back to `pending` and the runner pauses
 with `reason: verify-failed`.
 
+For a registered plan, pass its workspace root to `--cwd`; ASL resolves and
+validates the declared registry locally before dispatching each check to its
+alias. A legacy plan continues to interpret `--cwd` as one repository root.
+
 `asl contract-check` statically diagnoses the same `Verify` recipes without
 executing any command — the single-file mode plan-wide `asl preflight` cannot
 express (`--session ID` narrows to one session; omit it to sweep the whole
@@ -332,8 +343,8 @@ row is `ok`; otherwise exit 1 with
 `reason: contract-issues` and the full `checks` list plus an `issue_count`.
 Static check rows include `repo` (`null` for legacy checks), and verification
 observer start, finish, and skip events carry the same alias. This schema
-session records repository identity only; repository-aware check dispatch is
-implemented by the later workspace verification layer.
+is also used by repository-aware execution: ASL resolves the alias through the
+validated workspace registry before diagnosing or running the check.
 
 ## Migration From Older Split Plans
 
@@ -380,12 +391,14 @@ parent's read and write scope exactly. Resplitting never broadens authority;
 an explicit later plan edit may narrow a child's scope before fresh readiness
 validation.
 
-Optional auto-commit modes require the resolved working directory to be a clean
-git worktree before the first harness turn starts, and require `spec` on
-`PATH`. Use
-`--commit-per-session` to commit after each verified completed session, or
-`--commit-at-end` to commit once after all pending sessions complete in the
-same run. Both modes always invoke `spec commit --yes --no-verify`. A
+Optional auto-commit modes require `spec` on `PATH`. Legacy plans require their
+resolved Git worktree to be clean before the first harness turn; registered
+plans require every declared repository clean. Use `--commit-per-session` to
+commit after each verified completed session, or `--commit-at-end` to commit
+after all pending sessions complete in the same run. Registered per-session
+groups contain only changed write aliases proven by the turn guard; registered
+end groups contain every changed declared repository. Repositories are
+committed serially in manifest order with `spec commit --yes --no-verify`. A
 stop-after-current request before all sessions complete exits successfully
 (`reason: stopped`) without running the final `--commit-at-end` commit. A stop
 honored once every session is complete still runs that commit first, then stops
@@ -394,21 +407,21 @@ before any `--review-harness` work.
 ## Commands
 
 ```text
-asl run PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--review-harness codex|claude|copilot] [--review-harness-model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--max-pending-sessions N] [--max-review-fix-cycles N] [--review-guard-exclude PATH] [--review-guard-include-ignored] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--no-mailbox] [--allow-not-loop-ready] [--reply TEXT|--reply-stdin] [--json] [--dry-run]
-asl preflight PLAN_DIR [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--max-pending-sessions N] [--mark-loop-ready] [--json]
-asl verify PLAN_DIR --session ID [--cwd REPO_ROOT] [--artifact-dir DIR] [--json]
-asl contract-check PLAN_DIR [--session ID] [--cwd REPO_ROOT] [--json]
-asl baseline PLAN_DIR [--cwd REPO_ROOT] [--per-check-timeout SECONDS] [--total-timeout SECONDS] [--json]
+asl run PLAN_DIR [--cwd ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--review-harness codex|claude|copilot] [--review-harness-model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--max-pending-sessions N] [--max-review-fix-cycles N] [--review-guard-exclude PATH] [--review-guard-include-ignored] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--no-mailbox] [--allow-not-loop-ready] [--reply TEXT|--reply-stdin] [--json] [--dry-run]
+asl preflight PLAN_DIR [--cwd ROOT] [--harness codex|claude|copilot] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--max-pending-sessions N] [--mark-loop-ready] [--json]
+asl verify PLAN_DIR --session ID [--cwd ROOT] [--artifact-dir DIR] [--json]
+asl contract-check PLAN_DIR [--session ID] [--cwd ROOT] [--json]
+asl baseline PLAN_DIR [--cwd ROOT] [--per-check-timeout SECONDS] [--total-timeout SECONDS] [--json]
 asl split (--plan-file PATH | --inline-stdin) --contracts-file PATH [--base-dir DIR] [--skill-prefix auto|codex|claude|copilot] [--analysis-file PATH] [--json]
-asl prepare PLAN.md [--cwd REPO_ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--validator-harness H] [--review-harness H] [--review-harness-model MODEL] [--base-dir DIR] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--json]
-asl prepare --resume PLAN_DIR [...]
+asl prepare PLAN.md [--cwd ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--validator-harness H] [--review-harness H] [--review-harness-model MODEL] [--base-dir DIR] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--json]
+asl prepare --resume PLAN_DIR [--rebind-workspace ...]
 asl expand-ingest PLAN_DIR --batch-file PATH [--json]
 asl status PLAN_DIR_OR_ID [--state-dir DIR] [--json]
 asl questions PLAN_DIR [--state-dir DIR] [--json]
 asl review-verdict PLAN_DIR [--state-dir DIR] [--json]
 asl tail PLAN_DIR [--state-dir DIR] [--lines N] [--no-follow]
 asl sessions [--running] [--recent] [--limit N] [--state-dir DIR] [--verbose] [--json]
-asl doctor --harness codex|claude|copilot [--harness-model MODEL] [--effort EFFORT] [--cwd REPO_ROOT] --plan-dir PLAN_DIR [--unsafe-bypass|--no-unsafe-bypass] [--json]
+asl doctor --harness codex|claude|copilot [--harness-model MODEL] [--effort EFFORT] [--cwd ROOT] --plan-dir PLAN_DIR [--unsafe-bypass|--no-unsafe-bypass] [--json]
 asl inbox guidance PLAN_DIR_OR_ID (--text TEXT | --text-stdin) [--state-dir DIR] [--json]
 asl inbox reply PLAN_DIR_OR_ID --to QUESTION_ID (--text TEXT | --text-stdin) [--wait-consumed] [--wait-timeout SECONDS] [--state-dir DIR] [--json]
 asl inbox resolve PLAN_DIR_OR_ID --to QUESTION_ID --action continue|pause [--note TEXT|--note-stdin] [--wait-consumed] [--wait-timeout SECONDS] [--state-dir DIR] [--json]
@@ -891,8 +904,21 @@ bypassed. After each completed session, the runner invokes the same
 `reason: verify-failed`. `--allow-not-loop-ready` also suppresses the
 verification gate's `no-contract` pause for sessions that lack a
 `## Completion Contract`, but it never suppresses a failing contract that is
-present. `--commit-per-session` then runs
-`spec commit --yes --no-verify` before the next harness turn starts.
+present. `--commit-per-session` then runs its repository commit group before
+the next harness turn starts. Registered targets come from the passing turn
+guard and are filtered again for a dirty worktree at commit time, so a harness
+that already advanced HEAD cleanly is not committed a second time. Each group
+is checkpointed in state and events
+before its first repository command and after every outcome. Its durable
+identity records the scope, session, ordered aliases, successful repository
+SHAs, failed alias, and remaining aliases. If a process stops or a later
+repository fails, the next run reconstructs the unresolved group and completes
+it before launching a worker. Already successful repositories are never
+committed twice; unresolved repositories that are now clean are recorded as
+recovered or skipped. A failure retains earlier successful commits and pauses
+with repository-qualified commit artifacts. Legacy single-repository commits
+use the same coordinator, which also makes a failed per-session commit
+retryable on resume.
 
 The implementation worker and runner have deliberately separate validation
 ownership. The worker runs focused checks while iterating, but does not rerun
@@ -910,6 +936,41 @@ invoke the manual `session-run` skill; that skill remains the manual
 one-session-per-conversation path. Setting `ASL_WORKER_MODE=skill` in the
 runner's environment is a temporary rollback that restores the legacy
 skill-invocation prompt for autonomous turns.
+
+For a registered plan, both packet and rollback prompts include the ordered
+credential-free registry, the selected session's exact read and write aliases,
+and the `Alias:path/to/file` handoff/reference rule. They reveal
+absolute resolved roots only for aliases in that session's read scope. The
+harness invocation cwd is the bound workspace root. Before every registered
+implementation turn (including reply and resolution resumes), the runner
+recursively inventories all registered and unregistered Git worktrees beneath
+that root and captures fail-closed content evidence. It repeats the capture
+before handling any harness result. Changes pass only for repositories named
+by the session's write aliases; an empty write set makes the turn read-only.
+Changes in read-only, out-of-read-scope, or unregistered repositories and all
+added or removed repositories pause as `workspace-write-scope-violation`.
+Unavailable inventory or fingerprint evidence pauses as
+`workspace-write-guard-unavailable`. Both post-turn failures retain repository
+contents, restore the handoff to pending, record qualified evidence, and run
+before verification or commit. Scope violations require a durable scope repair
+and fresh expansion/preflight before continuing. The workspace write guard
+shares the `--review-guard-include-ignored` setting with the review mutation
+guard. By default it cannot observe untracked paths hidden by Git ignore rules,
+including ignored cache/build output; tracked changes remain observable. Pass
+`--review-guard-include-ignored` to include ignored untracked paths in both
+guards. Generated registered reviews use the same workspace-wide guard with
+all declared aliases readable and an empty write set, so any registered or
+unregistered repository mutation is retained, qualified, and rejected before
+the turn outcome can take precedence.
+
+Registered repository paths may not traverse symlinks, even when the target is
+another directory beneath the workspace; resolution rejects such a binding
+before preparation can make it runnable. Preflight captures every declared
+repository directly and fails closed with its alias when that evidence is
+unavailable. Its recursive inventory of undeclared siblings is supplementary:
+an uninspectable sibling or an exceeded inventory bound is reported as a
+non-blocking diagnostic and does not prevent a valid registered plan from
+remaining loop-ready.
 
 `--review-harness codex|claude|copilot` appends a final pure-critique session
 after the implementation sessions finish. The flag must differ from the startup
@@ -946,9 +1007,22 @@ live in `agent_session_loop.review`; the runner and the `asl` skill's
 autopilot helper both read verdicts through it. Other review execution
 failures (nonzero exit, timeout, verification failure on missing or empty
 `final-review.md`) or repo mutations outside the plan directory also fail
-the run. A git mutation guard fingerprints dirty, staged, and untracked content
-outside `PLAN_DIR` before and after the review turn and pauses the run with
-`reason: review-mutated-worktree` if the fingerprint changes. The post-turn
+the run.
+
+Registered plans generate review session version 4 and structured artifact
+version 3 while legacy plans continue to generate the exact v3/v2 form above.
+The repository-aware session reads every registry alias, writes none, and
+includes an ordered combined repository base containing each alias, path,
+origin, HEAD, and pre-existing qualified dirty paths. Every v3 finding carries
+a primary `repo`, every evidence path uses `Alias:path`, and every verification
+check carries `repo`; aliases are validated against the plan registry. Readers
+continue to accept historical artifact v2 and generated review marker versions.
+
+Legacy review turns use the single-repository mutation guard described below.
+Registered review turns use the generic workspace vector guard across every
+registered and unregistered worktree; any content or topology change pauses
+with repository-qualified evidence and restores the generated review handoff
+to pending while retaining the mutation. The post-turn
 comparison runs ahead of every other result branch, so a review turn that also
 timed out, exited nonzero, was interrupted, emitted `RUNNER_PAUSE`, or left the
 plan unreadable still pauses on the guard rather than on its own outcome — those
@@ -1020,7 +1094,10 @@ pending).
 `os.pathsep`-separated `ASL_REVIEW_GUARD_EXCLUDE` environment variable) adds
 repo-relative files or directories the guard ignores — use it for a *tracked*
 path a harness rewrites on its own, or an untracked one git does not already
-ignore. Values must be
+ignore. In a registered workspace each value applies independently to every
+discovered repository, including unregistered worktrees; this is the escape
+hatch for an unsupported nested untracked repository or other node reported by
+an undeclared checkout. Values must be
 repo-relative and free of `..` segments; anything else is an `input-error`
 before the first turn. Each value is matched literally against the repository
 root — `*`, `?`, and `[]` are ordinary filename characters, not wildcards — and
@@ -1066,7 +1143,14 @@ bounded same-plan repair/rereview cycles: it materializes one pending repair
 child per `repair_group` beneath the review session (`N.1`, `N.2`, ... via
 `agent_session_loop.review_repair`), executes the children serially with the
 implementation harness, then appends the next top-level review session and
-rereviews. `--max-review-fix-cycles N` is an **absolute cross-run cap** on
+rereviews. In a registered plan, every finding must name its repository. Each
+generated child reads the full ordered registry and writes only the aliases
+named by findings in that repair group; mixed-repository groups retain every
+such alias. The child completion contract preserves each check's `repo`, and
+same-name checks that disagree across aliases fail closed before any plan file
+is written. The ordinary workspace write guard enforces these generated scopes
+with the same pause and retained-change behavior as authored sessions.
+`--max-review-fix-cycles N` is an **absolute cross-run cap** on
 unique source-review materializations (default 4; `0` still runs the review but
 never creates repair sessions; `--max-review-fix-plans` is a deprecated
 compatibility alias — passing both flags is an input error). A source review
@@ -1134,6 +1218,18 @@ therefore always full-scope. Delta scoping narrows only what the reviewer must
 read: the output grammar, required artifacts, and verdict enforcement are
 scope-agnostic.
 
+For registered rereviews, the cycle records an ordered `repositories` base
+vector instead of collapsing the workspace to one `repo_head`. Delta selection
+requires a resolvable ancestor base and complete dirty-path evidence for every
+declared repository. The rendered combined scope provides explicit `git -C`
+commands per repository and alias-qualified changed paths; failure in any
+repository widens the whole rereview to full scope. Reopen records preserve the
+same ordered vector, qualified findings, and repair-group scopes. If a crash
+loses the cycle event after children were authored, continuation reconstructs
+the vector from the generated review session and each group scope from the
+generated children, so staged repairs, restored dirty paths, and eventless
+rereviews do not collapse repository namespaces.
+
 A pending review session's scope is a static list, but the repository keeps
 moving — a crash and resume, or an in-run reuse, can leave a delta scope that
 predates files the reviewer must now inspect, and untracked additions never
@@ -1166,10 +1262,13 @@ cap. Repeated and unstructured findings are terminal circuit breakers. Every
 review completion appends a `review_cycle` event and a `review_cycles[]` state
 entry recording the cycle number, review session id, outcome,
 introduced/closed/repeated fingerprints, repair session ids, disposition, and
-full artifact digests (digest fields are nullable for legacy records). A reopen
-attempt appends `review_repair_reopened`; successful records preserve source
-lineage, previous/current fingerprints and digests, exact child IDs, and
-before/after cap accounting. The run payload's `review_fix_disposition` keeps
+full artifact digests (digest fields are nullable for legacy records).
+Registered records additionally retain the qualified structured findings,
+ordered repository bases, and finding-derived repair-group read/write scopes.
+A reopen attempt appends `review_repair_reopened`; successful records preserve
+source lineage, previous/current fingerprints and digests, exact child IDs,
+repository evidence, group attribution, and before/after cap accounting. The
+run payload's `review_fix_disposition` keeps
 the compatible disposition vocabulary (`all-clear`, `repairs-materialized`,
 `cycles-disabled`, `cycle-cap-exhausted`, `findings-repeated`,
 `unstructured-findings`, `malformed-review-repair`, or `not-loop-ready`).
@@ -1212,6 +1311,26 @@ carries a stable shape with `findings`, `findings_by_severity`, `repair_hints`,
 `mark_loop_ready_requested`, and `marked_loop_ready` fields. JSON also always
 includes `auto_repairs`; it is an empty list unless `--mark-loop-ready`
 performed a derived repair.
+The stable finding categories are `plan-structure`, `canonical-session-id`,
+`manifest-readiness`, `missing-contract`, `malformed-contract`,
+`ambiguity-sentinel`, `path-reference`, `verification-scope`,
+`verification-duplicate`, `command-not-runnable`,
+`progress-journal-missing`, `baseline-missing`, `baseline-stale`,
+`baseline-unexpected`, `baseline-timeout`, `baseline-near-timeout`,
+`workspace-root`, `repository-registry`, `repository-root`,
+`repository-origin`, `repository-overlap`, `repository-scope`,
+`repository-contract`, `env-repo-root`, `env-git`, `env-harness`, `env-spec`,
+`env-lock`, `env-amx`, and `env-turn-budget`. Consumers should branch on these
+category values and the paired repair hint rather than parsing message prose.
+For a registered plan, `--cwd` is the non-Git-capable common workspace root.
+Preflight resolves the ordered registry once; validates child existence,
+directory type, exact Git top-level, origin, disjointness, scope, and contract
+locations; inventories all workspace Git roots fail-closed; and reuses the
+resolved repository context for command and baseline checks. Commit mode
+requires every registered tree to be clean. Registered JSON adds
+`workspace_root`, `registry_digest`, and ordered `repositories` summaries;
+text output prints the same ordered summaries. Legacy plans retain `Repo root`
+text and omit those additive JSON fields.
 `--mark-loop-ready` force-backfills stale or missing `progress.md` when
 `progress-journal-missing` is the only non-readiness blocker, then flips
 `**Readiness**` to `loop-ready` and re-stamps the SHA and timestamp when the
@@ -1232,8 +1351,10 @@ stable `reason` (`ok`,
 `verify-failed`, `no-contract`, `malformed-contract`, `cwd-error`, or
 `invalid-session`). Per-check rows include stdout/stderr snippets and a stable
 `failure_reason` enum.
-`--commit-at-end` runs the same command once after all pending sessions finish
-successfully in that runner invocation. `--commit-at-end` cannot be combined
+`--commit-at-end` runs the same grouped coordination after all pending sessions
+finish successfully in that runner invocation. In registered mode it selects
+all currently changed declared repositories; a clean repository is omitted.
+`--commit-at-end` cannot be combined
 with `--max-sessions` unless `--max-sessions` is high enough to complete every
 session that was pending at the start of the run. If text TTY run controls stop
 the run before all pending sessions finish, `--commit-at-end` does not run.
@@ -1360,8 +1481,9 @@ so repeated runs for the same plan are not collapsed by the latest
 shapes) and unreadable artifacts surface in dedicated `Stale locks` and
 `Skipped artifacts` footer sections without aborting the scan.
 
-`doctor` performs a non-mutating harness and path check. Use `--json` for
-scriptable prerequisite checks.
+`doctor` performs a non-mutating harness and path check. For registered plans
+it resolves `--cwd` as the common workspace root and reports the ordered child
+repositories in text and JSON. Use `--json` for scriptable prerequisite checks.
 
 `unlock` removes a stale lock. It refuses to remove an active lock unless
 `--force` is supplied. Use `--json` when automation needs the removed lock
@@ -1451,6 +1573,11 @@ fingerprint is stored inside the record so preflight can tell *stale* evidence
 recording evidence never invalidates a loop-ready manifest. Preflight requires
 current baseline evidence only while no session is complete; once
 implementation has started, baseline findings are suppressed.
+For registered plans, the identity also includes the ordered registry digest,
+each check runs in its selected repository, and the record stores an aggregate
+fingerprint over every registered repository. A change in a repository that a
+particular baseline check did not execute in still makes that evidence stale.
+Legacy plans retain their historical v1 key and single-repository fingerprint.
 
 `split` runs the deterministic session-split authoring chain as one command:
 `capture_inline_plan` (for `--inline-stdin`) or an explicit `--plan-file` →
@@ -1517,6 +1644,29 @@ normalized authoritative table to `manifest.md`; it is not duplicated in
 stable-readiness hashes. Sources without the section keep their historical
 manifest, context, and JSON response structure.
 
+A four-repository workspace can use a non-Git common parent such as
+`/Users/dev/1_dev_projects`:
+
+```markdown
+## Repositories
+
+| Alias | Path | Origin |
+| --- | --- | --- |
+| SVC | tundra_svc | git@github.com:tundra/SVC.git |
+| OAK | tundra_OAK | git@github.com:tundra/OAK.git |
+| OWL | tundra_OWL_J | git@github.com:tundra/OWL.J.git |
+| Kiln | tundra_Kiln | git@github.com:tundra/Kiln.git |
+```
+
+The common parent becomes a valid `--cwd` only because the registry makes the
+Git boundaries explicit. ASL resolves each path beneath that parent, requires
+it to be an exact non-overlapping Git top-level with the expected normalized
+origin, and performs Git evidence, verification, mutation-guard, review, and
+commit work in the selected child repositories. A legacy plan with no registry
+still requires its `--cwd` itself to be the Git worktree root; merely pointing
+an old plan at a directory containing several repositories does not opt it into
+workspace behavior.
+
 Each session in a multi-repository source must contain these exact fields:
 
 ```markdown
@@ -1547,6 +1697,61 @@ validation only for sessions missing from the stored
 `prepare-validation.json` aggregate and reuses recorded baseline evidence
 whose repository fingerprint still matches; it never creates another split.
 
+Registered plans use validator-output version 2. The packet names the canonical
+workspace root and exact ordered resolved registry, then gives each session only
+the absolute repository roots in its declared read scope. This is advisory
+research context, not filesystem isolation. Every claim, issue, concrete detail,
+reuse pattern, dependency, and correction carries a `repo` alias. Ingestion
+rejects output before mutation when its workspace, registry, session IDs, or an
+attributed alias differs from the authoritative plan or falls outside the
+session's read scope. An unbound registered plan is bound to its first validated
+workspace in the same atomic transaction as the validation aggregate,
+expansions, reference lines, and factual corrections.
+
+Registered expansion notes render repository-qualified locations. Validators
+report path prose that could refer to more than one read repository as a
+`repository-ambiguous` issue; `prepare` preserves that evidence but refuses to
+mark the plan loop-ready until the source claim is qualified. Preparation runs
+baseline checks and final preflight through the resolved workspace context, so
+each check executes in its declared repository and cached evidence covers the
+whole ordered registry. Validator-output version 1 remains accepted only for
+legacy single-repository plans.
+
+Explicit workspace replacement is available only for an existing registered
+plan:
+
+```text
+asl prepare PLAN_DIR --resume --cwd NEW_WORKSPACE --rebind-workspace
+```
+
+The replacement root must differ from the current version 2 binding, every
+declared repository must resolve beneath it as an exact Git top-level with the
+expected credential-free origin, and the plan must have no active runner lock.
+New preparation, legacy plans, unchanged bindings, and ordinary `asl run`
+invocations reject the flag. After validating the replacement workspace,
+prepare holds the plan lock and copies the plan into an isolated system-temporary
+staging view while preserving symlinks.
+It discards the staged copy's old aggregate and baseline cache, revalidates all
+sessions, regenerates every expansion and correction, runs fresh baselines,
+generates replacement metadata, and completes final loop-ready preflight there.
+The original plan is untouched until one `PlanTransaction` publishes the new
+metadata, validator aggregate, expansion files, corrected session text,
+baseline cache, and readiness manifest. The transaction records immutable
+payloads in a durable journal before replacing any destination: ordinary I/O
+failures roll back immediately, while the next authoritative plan read rolls a
+process interruption forward to the complete new generation. Publication and
+recovery share a marker-scoped mutex; acquisition has a bounded wait, and a
+timeout reports the lock path plus its recorded process and thread holder rather
+than leaving plan readers blocked indefinitely. A failure before publication
+discards the staged view, releases the lock, and preserves all old plan bytes;
+staged blocker and step paths are rebased to the durable plan directory. Prepare JSON
+adds `workspace_rebind` with credential-free `old` and `new` workspace and
+repository projections, a `failure_stage` and `error` on failure, and the
+relative `published_files` list on success. Failed rebind guidance retains
+`--rebind-workspace` in its resumable command. Lock and concurrency races use
+the distinct `workspace-rebind-failed` reason and include `workspace_rebind`
+context rather than being classified as input errors.
+
 `asl expand-ingest` is the standalone ingestion step `prepare` runs internally,
 exposed for the manual `session-expand` path: it reads one validator-output
 batch file (`--batch-file`), parses it fail-closed, merges it into the stored
@@ -1562,9 +1767,9 @@ count. A malformed payload exits 1 with `reason: validator-schema` and the
 batch file exits 1 with `reason: input-error`.
 
 `prepare` also writes `PLAN_DIR/plan-metadata.json` as soon as the authored or
-resumed plan directory is bound to a repository, including plans retained after
-a later preparation failure. The durable schema is deliberately small and
-strict:
+resumed plan directory is bound, including plans retained after a later
+preparation failure. Legacy plans retain the deliberately small version 1
+schema:
 
 ```json
 {
@@ -1573,12 +1778,18 @@ strict:
 }
 ```
 
-On resume, `prepare` refuses to rebind a plan when this `cwd` or the legacy
-`prepare-validation.json.codebase_root` identifies a different repository. A
-non-dry-run `asl run` refreshes the file from the runner's actual canonical
-working directory, which also backfills older plans; `--dry-run` does not write
-it. The metadata file is not plan prose and is excluded from both the plan
-content and stable readiness hashes.
+Registered plans write version 2 with `workspace_root` and the ordered registry
+digest. On ordinary resume, `prepare` refuses to rebind when the stored root,
+digest, or validation aggregate differs from the resolved workspace; the
+explicit staged replacement flow above is the only exception. `asl run` also
+refuses a root or registry mismatch and never rewrites an existing binding;
+only an unbound legacy plan is backfilled on a non-dry run. `--dry-run` does not
+write metadata. Registered runner state and JSON surfaces add `workspace_root`,
+`registry_digest`, and ordered resolved `repositories`, while retaining `cwd`
+as the workspace-root compatibility alias. Resume validates those persisted
+workspace fields against the current durable binding before continuing. The
+metadata file is not plan prose and is excluded from both the plan content and
+stable readiness hashes.
 
 Source-plan session headings use a tolerant, fence-aware grammar shared by
 `session-split`, `plan-iterate`, and `asl prepare`. Outside matching backtick or
@@ -1923,6 +2134,13 @@ Runtime files include:
   commit SHA when one was created, and artifact paths.
 - `runs/<run_id>/commit-0001-end/...`: equivalent artifacts for
   `--commit-at-end`.
+
+Durable mailbox, event, and state-ledger writes issue `fcntl(F_FULLFSYNC)` on
+Darwin so completed records cross the device cache. Filesystems that reject
+that device barrier as unsupported fall back to `fsync`; other platforms use
+`fsync` directly. Atomic state replacement also syncs the containing directory
+after the rename. Supervisor lease heartbeats and immutable diagnostic
+artifacts do not make this power-loss durability guarantee.
 
 `state.json` is updated to the latest run and includes `run_id`, `run_dir`, and
 `turns[*]` entries with `artifact_dir`, `stdout_path`, `stderr_path`,
@@ -2360,6 +2578,13 @@ the same command after resolving the issue.
 Common pause reasons:
 
 - `nonzero-exit`: harness command exited nonzero.
+- `quota-exhausted`: the provider rejected the turn for quota and supplied a
+  recognized or unrecognized reset hint; ordinary runs stop for operator
+  action, while Autopilot may wait only under its explicit bounded quota policy.
+- `auth-failed`: harness authentication failed; retrying without repairing
+  credentials is not automatic.
+- `invalid-model`: the requested harness model was rejected; choose a supported
+  model or clear the override before resuming.
 - `timeout`: harness exceeded `--timeout`.
 - `no-status-change`: the pending session did not become complete.
 - `multiple-status-changes`: more than one session changed during one turn.
@@ -2376,9 +2601,12 @@ Common pause reasons:
   such as a dirty initial worktree, missing `spec`, a non-git working
   directory, or an incompatible `--commit-at-end` and `--max-sessions`
   combination.
-- `commit-failed`: `spec commit --yes --no-verify` ran but did not create a new
-  commit, including nonzero exits and zero-exit no-op commits that leave `HEAD`
-  unchanged.
+- `commit-failed`: a durable commit group could not be reconstructed or a
+  repository's `spec commit --yes --no-verify` did not create a clean new
+  commit. This includes nonzero exits, zero-exit no-op commits that leave
+  `HEAD` unchanged, and a command that changes `HEAD` but leaves tracked or
+  untracked Git status behind. The pause details identify the failed alias,
+  successful repository SHAs, remaining aliases, and repo-qualified artifacts.
 - `harness-unavailable`: a runtime-selected future harness could not be resolved
   before the next turn started. The previous completed turn remains recorded,
   the lock is released, and `pause_details` identifies the session, requested
@@ -2422,6 +2650,19 @@ Common pause reasons:
   session (a `session-<id>.md` carrying the `<!-- asl:generated-review-session -->`
   marker) but the run was started without `--review-harness`. Rerun with
   `--review-harness codex|claude|copilot`.
+- `workspace-write-scope-violation`: a registered implementation turn changed
+  a repository outside its exact write aliases, or added/removed a worktree.
+  The guard compares against the fresh pre-turn vector, so unchanged dirty
+  baseline content is not adopted as a turn mutation. The pause retains all
+  content, returns the selected handoff to pending, precedes the turn's own
+  timeout/failure/pause and all verification/commit work, and carries a
+  `workspace_write_guard` block with alias-qualified paths, topology changes,
+  read/write aliases, and the required scope/expansion/preflight repair flags.
+- `workspace-write-guard-unavailable`: the runner could not inventory the
+  workspace or capture complete Git evidence before or after a registered
+  implementation turn. A before-turn failure spends no harness turn. An
+  after-turn failure retains content, returns the handoff to pending, and
+  outranks every harness-result branch because the runner cannot prove scope.
 - `review-mutated-worktree`: the review harness changed repo content outside
   the plan directory. The pre/post fingerprint covers the working tree's
   `HEAD`, tracked diff, the separate `--cached` (index) diff — so staging a
@@ -2499,6 +2740,10 @@ with the harness agent driving the skill. It:
 - Leaves ASL authoritative for implementation, verification, session status,
   progress journals, and review session execution. The skill does not patch
   repository code directly.
+- Prefers the complete ordered workspace projection from `asl status --json`.
+  When a registered command omits `--cwd`, the child receives the bound
+  workspace root. A conflicting `--cwd` stops as `user_required` with atomic
+  rebind guidance; Autopilot never grants itself rebind authority.
 - Never persists reply text: resumes flow through `asl run --reply-stdin`, so
   the reply appears only on the child's stdin, never in argv or helper output.
 - Uses the existing child/attach wait loops for mailbox polling and lease
@@ -2712,6 +2957,22 @@ If a plan has no pending sessions but is not complete, inspect every final
 `session-<id>.md` handoff and normalize statuses to exactly `pending` or
 `complete`. Ignore older status templates preserved above the final handoff.
 
+### Five-second plan transaction lock timeout
+
+Atomic plan publication and recovery are serialized by a marker-scoped plan
+transaction lock. Plan reads wait up to five seconds for the publication to
+finish and then fail instead of hanging indefinitely. This timeout can surface
+from plan reads behind `asl status`, `asl tail`, `asl prepare`, and the
+Workbench API.
+
+The diagnostic names the lock path and the pid, hostname, and thread of the
+process that held the lock when it was acquired. Those holder fields identify
+the publishing process and its host and thread for investigation; the kernel
+lock remains authoritative. Retry the operation once if plan publication was
+still in progress. If the timeout repeats, inspect the named holder before
+retrying or restarting that process. Do not delete the transaction marker or
+confuse this publication lock with the separately managed runner lock.
+
 ### Long verification after `session N/N finished`
 
 The runner emits `session N/N finished` as soon as a harness turn writes a
@@ -2898,12 +3159,28 @@ asl workbench registry --json
 ```
 
 `pin` upserts a registry entry for the canonical `plan_dir`; `--cwd`
-sets the optional repository root and `--label` sets the optional
-human-readable name. Other launch-profile fields stay `null` (runner
+sets the optional legacy repository root and `--label` sets the optional
+human-readable name. Registered pins additionally project their prepared
+`workspace_root`, registry digest, and complete ordered repositories. Their
+launches always use that binding; a conflicting saved root is rejected with
+`asl prepare PLAN_DIR --resume --cwd NEW_WORKSPACE --rebind-workspace`
+guidance. Other launch-profile fields stay `null` (runner
 default) unless edited through the UI. `unpin` removes the matching
 pin. `registry` prints the loaded registry (pins, `plan_roots`, and
 any loader warnings); pass `--json` for the
 `responses.success_payload`-shaped envelope used elsewhere in the CLI.
+
+Queue/detail summaries, launch results, state, Recovery Center, and final-review
+responses retain `cwd` for compatibility and add `workspace_root`,
+`registry_digest`, and ordered `repositories`. Recovery evidence identifies
+repository-qualified failed checks, retained scope violations, unavailable Git
+evidence, unresolved commit groups, and partial per-repository commit SHAs.
+`GET /api/final-review` also returns the bounded Markdown view plus parsed
+`final-review.json` when available, preserving finding repository attribution
+and repair-group scopes. Browser and terminal summaries show a bounded prefix
+for very large registries; machine-readable vectors remain complete. The
+browser's `formatRepositoryAliases` formatter is the authoritative source for
+its 12-repository preview limit.
 
 The console output for a normal start is:
 

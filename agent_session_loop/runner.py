@@ -32,9 +32,11 @@ import uuid
 
 from . import (
     agent_mux_delivery,
+    commit_groups,
     config,
     contracts,
     control_queue,
+    durability,
     events,
     harnesses,
     mailbox,
@@ -55,6 +57,7 @@ from . import (
     state,
     tail,
     verification,
+    workspaces,
 )
 from .formatting import (
     format_duration_seconds,
@@ -83,6 +86,13 @@ COMMIT_MODES = (COMMIT_MODE_PER_SESSION, COMMIT_MODE_END)
 COMMIT_ARGV: tuple[str, ...] = ("spec", "commit", "--yes", "--no-verify")
 RUNNER_MANAGED_SESSION_ARG = "--runner-managed"
 SESSION_RUN_SKILL_NAME = "session-run"
+# Registered implementation turns are enabled only because every such turn is
+# wrapped by the authoritative workspace snapshot guard below. Registered
+# review turns remain fail-closed until the combined review guard in Session 13.
+MULTI_REPO_IMPLEMENTATION_TURNS_ENABLED = True
+MULTI_REPO_CAPABILITY_PAUSE_REASON = (
+    events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE
+)
 # Review artifact contract. The grammar, the structured final-review.json
 # schema, and the shared verdict payload all live in
 # ``agent_session_loop.review``; these re-exports keep the runner's historical
@@ -93,8 +103,14 @@ REVIEW_STATUS_ALL_CLEAR = review.REVIEW_STATUS_ALL_CLEAR
 _REVIEW_STATUS_FINDINGS_RE = review._REVIEW_STATUS_FINDINGS_RE
 REVIEW_SESSION_MARKER = review.REVIEW_SESSION_MARKER
 GENERATED_REVIEW_SESSION_VERSION = review.GENERATED_REVIEW_SESSION_VERSION
+REPOSITORY_AWARE_GENERATED_REVIEW_SESSION_VERSION = (
+    review.REPOSITORY_AWARE_GENERATED_REVIEW_SESSION_VERSION
+)
 STRUCTURED_REVIEW_MIN_VERSION = review.STRUCTURED_REVIEW_MIN_VERSION
 REVIEW_ARTIFACT_VERSION = review.REVIEW_ARTIFACT_VERSION
+REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION = (
+    review.REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION
+)
 SESSION_KIND_IMPLEMENTATION = "implementation"
 SESSION_KIND_REVIEW = "review"
 SESSION_KINDS: tuple[str, ...] = (
@@ -353,6 +369,7 @@ REVIEW_SCOPE_DELTA = "delta"
 
 # Headings that delimit the re-review scope the runner owns and re-derives.
 REVIEW_SCOPE_HEADING = "## Delta Review Scope"
+REVIEW_REPOSITORY_BASE_HEADING = "## Ordered repository review base"
 REVIEW_PRIOR_FINDINGS_HEADING = "### Prior findings to verify"
 REVIEW_SCOPE_DETAIL_HEADING = "### Scope"
 
@@ -557,29 +574,68 @@ _GENERATED_REVIEW_ARTIFACT_VERIFY_SOURCE = "\n".join(
 
 
 def _generated_review_contract_payload(
-    session_id: plans.SessionId, *, plan_dir: Path
+    session_id: plans.SessionId,
+    *,
+    plan_dir: Path,
+    repository_aliases: Sequence[str] = (),
 ) -> dict[str, Any]:
+    repository_alias = repository_aliases[0] if repository_aliases else None
+    verify_source = _GENERATED_REVIEW_VERIFY_SOURCE
+    artifact_source = _GENERATED_REVIEW_ARTIFACT_VERIFY_SOURCE
+    cwd = str(plan_dir)
+    if repository_alias is not None:
+        review_path = str(plan_dir / review.FINAL_REVIEW_FILENAME)
+        artifact_path = str(plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME)
+        verify_source = verify_source.replace(
+            repr(review.FINAL_REVIEW_FILENAME), repr(review_path), 1
+        )
+        artifact_source = artifact_source.replace(
+            repr(review.FINAL_REVIEW_FILENAME), repr(review_path), 1
+        ).replace(
+            repr(review.FINAL_REVIEW_ARTIFACT_FILENAME), repr(artifact_path), 1
+        ).replace(
+            f"artifact.get('version') != {review.REVIEW_ARTIFACT_VERSION}",
+            "artifact.get('version') != "
+            f"{review.REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION}",
+            1,
+        )
+        aliases_literal = repr(tuple(repository_aliases))
+        artifact_source = artifact_source.replace(
+            "    if finding['severity'] not in tally: sys.exit(1)",
+            "    aliases = " + aliases_literal + "\n"
+            "    if finding.get('repo') not in aliases: sys.exit(1)\n"
+            "    evidence = finding.get('evidence')\n"
+            "    checks = finding.get('verification_checks')\n"
+            "    if not isinstance(evidence, list) or not evidence: sys.exit(1)\n"
+            "    if any(not isinstance(item, dict) or not any(\n"
+            "        isinstance(item.get('path'), str) and "
+            "item['path'].startswith(alias + ':') for alias in aliases\n"
+            "    ) for item in evidence): sys.exit(1)\n"
+            "    if not isinstance(checks, list) or not checks: sys.exit(1)\n"
+            "    if any(not isinstance(item, dict) or item.get('repo') "
+            "not in aliases for item in checks): sys.exit(1)\n"
+            "    if finding['severity'] not in tally: sys.exit(1)",
+            1,
+        )
+        cwd = "."
+
+    def command_check(name: str, source: str) -> dict[str, Any]:
+        check: dict[str, Any] = {
+            "type": "command",
+            "name": name,
+            "argv": ["python3", "-c", source],
+            "cwd": cwd,
+            "timeout_seconds": 60,
+        }
+        if repository_alias is not None:
+            check["repo"] = repository_alias
+        return check
+
     return {
         "session": session_id.value,
         "checks": [
-            {
-                "type": "command",
-                "name": "final-review-output-evidence-based",
-                "argv": ["python3", "-c", _GENERATED_REVIEW_VERIFY_SOURCE],
-                "cwd": str(plan_dir),
-                "timeout_seconds": 60,
-            },
-            {
-                "type": "command",
-                "name": "final-review-artifact-consistent",
-                "argv": [
-                    "python3",
-                    "-c",
-                    _GENERATED_REVIEW_ARTIFACT_VERIFY_SOURCE,
-                ],
-                "cwd": str(plan_dir),
-                "timeout_seconds": 60,
-            },
+            command_check("final-review-output-evidence-based", verify_source),
+            command_check("final-review-artifact-consistent", artifact_source),
         ],
     }
 
@@ -622,6 +678,42 @@ def _review_scope_detail_lines(delta: Mapping[str, Any] | None) -> list[str]:
             "scope is not narrowed: review the whole plan and every file it "
             "touched, exactly as a first review would."
         )
+        lines.append("")
+        return lines
+
+    repositories = delta.get("repositories")
+    if isinstance(repositories, Sequence) and not isinstance(
+        repositories, (str, bytes)
+    ):
+        lines.append(
+            "- Review the combined repair delta in every repository below; "
+            "keep aliases attached to all path evidence so namespaces never "
+            "merge. Each command is rooted explicitly at its repository."
+        )
+        for repository in repositories:
+            if not isinstance(repository, Mapping):
+                continue
+            alias = repository["alias"]
+            path = repository["path"]
+            base_sha = repository["base_sha"]
+            flags = " ".join(_DELTA_DIFF_FLAGS)
+            lines.append(f"- `{alias}` (`{path}`), base `{base_sha}`:")
+            lines.append(
+                f"  - Run `git -C {shlex.quote(str(path))} diff {flags} "
+                f"{base_sha}` and `git -C {shlex.quote(str(path))} diff "
+                f"--cached {flags} {base_sha}`."
+            )
+            changed_files = repository.get("changed_files") or ()
+            if changed_files:
+                lines.append("  - Qualified changed paths:")
+                lines.extend(f"    - `{item}`" for item in changed_files)
+            else:
+                lines.append("  - No files changed since this repository base.")
+            if repository.get("baseline_dirty"):
+                lines.append(
+                    "  - The reviewed base included pre-existing dirty paths; "
+                    "they remain included even if a repair restored them."
+                )
         lines.append("")
         return lines
 
@@ -744,22 +836,52 @@ def build_generated_review_session_body(
     review_harness: str,
     plan_dir: str | Path,
     delta: Mapping[str, Any] | None = None,
+    workspace: workspaces.ResolvedWorkspace | None = None,
+    review_bases: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     """Render the markdown body of a generated review session file."""
     canonical_plan_dir = plans.canonicalize_path(plan_dir)
+    artifact_version = (
+        REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION
+        if workspace is not None
+        else REVIEW_ARTIFACT_VERSION
+    )
+    generated_version = (
+        REPOSITORY_AWARE_GENERATED_REVIEW_SESSION_VERSION
+        if workspace is not None
+        else GENERATED_REVIEW_SESSION_VERSION
+    )
+    handoff_files = "(none)" if workspace is not None else "(none yet)"
     contract_json = json.dumps(
-        _generated_review_contract_payload(session_id, plan_dir=canonical_plan_dir),
+        _generated_review_contract_payload(
+            session_id,
+            plan_dir=canonical_plan_dir,
+            repository_aliases=(
+                workspace.registry.aliases if workspace is not None else ()
+            ),
+        ),
         indent=2,
     )
     scope_lines = (
         _delta_review_scope_lines(delta) if delta is not None else []
     )
+    header_lines = [f"# {session_id.display_label}: Final Review", ""]
+    repository_lines: list[str] = []
+    if workspace is not None:
+        scope = plans.SessionScope(
+            reads=workspace.registry.aliases,
+            writes=(),
+        )
+        header_lines.extend(plans.render_session_scope(scope).rstrip().splitlines())
+        header_lines.append("")
+        repository_lines = _repository_review_base_lines(
+            workspace, review_bases
+        )
     return "\n".join(
         [
-            f"# {session_id.display_label}: Final Review",
-            "",
+            *header_lines,
             REVIEW_SESSION_MARKER,
-            review.review_session_version_marker(),
+            review.review_session_version_marker(generated_version),
             "",
             "## Instructions",
             "",
@@ -793,9 +915,21 @@ def build_generated_review_session_body(
                 "- Also write the structured review artifact "
                 f"`{FINAL_REVIEW_ARTIFACT_FILENAME}` inside this plan "
                 "directory: a JSON object with `\"version\": "
-                f"{REVIEW_ARTIFACT_VERSION}`, `\"outcome\"` "
+                f"{artifact_version}`, `\"outcome\"` "
                 "(`\"all-clear\"` or `\"findings\"`), and `\"findings\"` "
                 "(a list, empty for all-clear)."
+            ),
+            *(
+                [
+                    (
+                        "- In repository-aware findings, every finding requires "
+                        "a primary `repo` alias, every evidence `path` must use "
+                        "qualified `Alias:path` syntax, and every verification "
+                        "check requires its own `repo` alias."
+                    )
+                ]
+                if workspace is not None
+                else []
             ),
             (
                 "- Each finding object requires every one of these keys: "
@@ -819,6 +953,7 @@ def build_generated_review_session_body(
                 "other handoff status."
             ),
             "",
+            *repository_lines,
             *scope_lines,
             "## Completion Contract",
             "",
@@ -833,7 +968,7 @@ def build_generated_review_session_body(
             ),
             (
                 f"- `{FINAL_REVIEW_ARTIFACT_FILENAME}` exists in the plan "
-                f"directory, parses as version {REVIEW_ARTIFACT_VERSION} "
+                f"directory, parses as version {artifact_version} "
                 "JSON with complete findings, and agrees with the "
                 f"`{FINAL_REVIEW_FILENAME}` status line on outcome and "
                 "severity totals."
@@ -850,11 +985,77 @@ def build_generated_review_session_body(
             "<!-- Fill this section when the session is complete -->",
             "",
             "- **Status**: pending",
-            "- **Files modified**: (none yet)",
+            f"- **Files modified**: {handoff_files}",
             "- **Key decisions**: (none yet)",
             "- **Blockers for next session**: (none)",
             "- **Notes**:",
             "",
+        ]
+    )
+
+
+def _repository_review_base_lines(
+    workspace: workspaces.ResolvedWorkspace,
+    review_bases: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    lines = [
+        REVIEW_REPOSITORY_BASE_HEADING,
+        "",
+        (
+            "Review all repositories as one system while keeping every path "
+            "qualified as `Alias:path`. The base below records the HEAD and "
+            "pre-existing dirty paths the review started from."
+        ),
+        "",
+    ]
+    bases_by_alias = {
+        str(item.get("alias")): item
+        for item in review_bases
+        if isinstance(item, Mapping)
+    }
+    for repository in workspace.repositories:
+        base = bases_by_alias.get(repository.alias, {})
+        head = base.get("head") or "(unborn HEAD)"
+        dirty_paths = base.get("dirty_paths") or ()
+        lines.append(
+            f"- `{repository.alias}`: path `{repository.repository.path}`; "
+            f"origin `{repository.origin}`; HEAD `{head}`."
+        )
+        if dirty_paths:
+            lines.append("  - Pre-existing dirty paths:")
+            lines.extend(f"    - `{path}`" for path in dirty_paths)
+        else:
+            lines.append("  - Pre-existing dirty paths: (none)")
+    lines.append("")
+    return lines
+
+
+def refreshed_review_repository_base(
+    text: str,
+    workspace: workspaces.ResolvedWorkspace,
+    review_bases: Sequence[Mapping[str, Any]],
+) -> str:
+    """Replace the generated review's repository base before execution."""
+    lines = text.split("\n")
+    if REVIEW_REPOSITORY_BASE_HEADING not in lines:
+        raise plans.PlanError(
+            "repository-aware generated review is missing its ordered "
+            "repository review base"
+        )
+    start = lines.index(REVIEW_REPOSITORY_BASE_HEADING)
+    end = next(
+        (
+            index
+            for index in range(start + 1, len(lines))
+            if lines[index].startswith("## ")
+        ),
+        len(lines),
+    )
+    return "\n".join(
+        [
+            *lines[:start],
+            *_repository_review_base_lines(workspace, review_bases),
+            *lines[end:],
         ]
     )
 
@@ -878,6 +1079,8 @@ def ensure_generated_review_session(
     *,
     review_harness: str,
     delta: Mapping[str, Any] | None = None,
+    workspace: workspaces.ResolvedWorkspace | None = None,
+    review_bases: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[plans.SessionFile, bool]:
     """Reuse a pending generated review session, or append a new one.
 
@@ -890,6 +1093,24 @@ def ensure_generated_review_session(
     canonical_dir = plans.canonicalize_path(plan_dir)
     pending = find_pending_generated_review_session(canonical_dir)
     if pending is not None:
+        if workspace is not None:
+            text = pending.path.read_text(encoding="utf-8")
+            version = review.review_session_marker_version(text)
+            if (
+                version is None
+                or version < REPOSITORY_AWARE_GENERATED_REVIEW_SESSION_VERSION
+            ):
+                pending.path.write_text(
+                    build_generated_review_session_body(
+                        pending.session_id,
+                        review_harness=review_harness,
+                        plan_dir=canonical_dir,
+                        delta=delta,
+                        workspace=workspace,
+                        review_bases=review_bases,
+                    ),
+                    encoding="utf-8",
+                )
         return pending, False
 
     session_id = plans.next_top_level_session_id(canonical_dir)
@@ -898,6 +1119,8 @@ def ensure_generated_review_session(
         review_harness=review_harness,
         plan_dir=canonical_dir,
         delta=delta,
+        workspace=workspace,
+        review_bases=review_bases,
     )
     target_path = canonical_dir / session_id.filename
     target_path.write_text(body, encoding="utf-8")
@@ -918,6 +1141,98 @@ def _prompt_plan_dir(plan_dir: str | Path) -> str:
     if not plan_dir_text.endswith("/"):
         plan_dir_text += "/"
     return plan_dir_text
+
+
+def _resolved_repositories_payload(
+    workspace: workspaces.ResolvedWorkspace,
+) -> list[dict[str, str]]:
+    """Return the canonical ordered repository projection used by runner APIs."""
+    return [
+        {
+            "alias": repository.alias,
+            "path": repository.repository.path,
+            "origin": repository.origin,
+            "resolved_root": str(repository.root),
+        }
+        for repository in workspace.repositories
+    ]
+
+
+def _workspace_payload_fields(
+    context: verification.VerificationContext,
+) -> dict[str, Any]:
+    """Return additive workspace fields, leaving legacy payloads unchanged."""
+    if context.workspace is None:
+        return {}
+    return {
+        "workspace_root": str(context.root),
+        "registry_digest": context.registry_digest,
+        "repositories": _resolved_repositories_payload(context.workspace),
+    }
+
+
+def _session_scope(
+    session: plans.SessionStatus,
+    workspace: workspaces.ResolvedWorkspace,
+) -> plans.SessionScope:
+    """Read the selected session's exact registry-validated scope."""
+    try:
+        text = session.path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise plans.PlanError(f"cannot read {session.path}: {error}") from error
+    try:
+        return plans.parse_session_scope(text, workspace.registry.aliases)
+    except (plans.SessionScopeError, ValueError) as error:
+        raise plans.PlanError(
+            f"invalid repository scope for session {session.id}: {error}"
+        ) from error
+
+
+def _workspace_prompt_lines(
+    workspace: workspaces.ResolvedWorkspace,
+    scope: plans.SessionScope,
+) -> list[str]:
+    """Render bounded repository authority without unrelated resolved roots."""
+    lines = [
+        "## Repository workspace authority",
+        "",
+        f"- Workspace root (your process cwd): {workspace.root}",
+        f"- Registry digest: {workspace.registry.digest}",
+        f"- Expected read aliases: {', '.join(scope.reads)}",
+        (
+            "- Writable aliases: "
+            + (", ".join(scope.writes) if scope.writes else "(none)")
+        ),
+        "",
+        "The ordered registry is:",
+        "",
+    ]
+    for repository in workspace.registry.repositories:
+        lines.append(
+            f"- {repository.alias}: path={repository.path}; "
+            f"origin={repository.origin}"
+        )
+    lines.extend(
+        [
+            "",
+            "Resolved roots are provided only for repositories this session may read:",
+            "",
+        ]
+    )
+    for alias in scope.reads:
+        repository = workspace.get(alias)
+        lines.append(f"- {alias}: {repository.root}")
+    lines.extend(
+        [
+            "",
+            "- Read only repositories named by `Expected read aliases`.",
+            "- Modify files only in repositories named by `Writable aliases`.",
+            "- In handoffs and cross-repository references use qualified paths "
+            "in canonical `Alias:path/to/file` form; never use an "
+            "absolute path or an unqualified cross-repository path.",
+        ]
+    )
+    return lines
 
 
 MAILBOX_PROTOCOL_HEADING = "## Live mailbox protocol"
@@ -1130,6 +1445,8 @@ def build_session_prompt(
     mailbox_enabled: bool = False,
     state_dir: str | Path | None = None,
     pending_guidance: Sequence[mailbox.MailboxMessage] = (),
+    workspace: workspaces.ResolvedWorkspace | None = None,
+    session_scope: plans.SessionScope | None = None,
 ) -> str:
     """Build the legacy worker prompt, keeping the skill invocation first."""
     adapter = harnesses.get_adapter(harness)
@@ -1138,9 +1455,17 @@ def build_session_prompt(
         f"{shlex.quote(_prompt_plan_dir(plan_dir))} "
         f"{RUNNER_MANAGED_SESSION_ARG}"
     )
-    if not mailbox_enabled:
+    if (workspace is None) != (session_scope is None):
+        raise ValueError("workspace and session_scope must be provided together")
+    if not mailbox_enabled and workspace is None:
         return first_line
     lines = [first_line, ""]
+    if workspace is not None and session_scope is not None:
+        lines.extend(_workspace_prompt_lines(workspace, session_scope))
+        if mailbox_enabled:
+            lines.append("")
+    if not mailbox_enabled:
+        return "\n".join(lines)
     lines.extend(
         _mailbox_protocol_lines(
             read_command=_mailbox_read_command_text(plan_dir, state_dir),
@@ -1257,6 +1582,8 @@ def build_reply_prompt(
     mailbox_enabled: bool = False,
     state_dir: str | Path | None = None,
     pending_guidance: Sequence[mailbox.MailboxMessage] = (),
+    workspace: workspaces.ResolvedWorkspace | None = None,
+    session_scope: plans.SessionScope | None = None,
 ) -> str:
     """Build the resumed-turn prompt for ``asl run --reply``.
 
@@ -1273,6 +1600,8 @@ def build_reply_prompt(
         mailbox_enabled=mailbox_enabled,
         state_dir=state_dir,
         pending_guidance=pending_guidance,
+        workspace=workspace,
+        session_scope=session_scope,
     )
     reply_text = reply.strip()
     if not reply_text:
@@ -1363,6 +1692,8 @@ def build_resolution_prompt(
     mailbox_enabled: bool = False,
     state_dir: str | Path | None = None,
     pending_guidance: Sequence[mailbox.MailboxMessage] = (),
+    workspace: workspaces.ResolvedWorkspace | None = None,
+    session_scope: plans.SessionScope | None = None,
 ) -> str:
     """Build an answerless mailbox-resolution continuation prompt.
 
@@ -1377,6 +1708,8 @@ def build_resolution_prompt(
         mailbox_enabled=mailbox_enabled,
         state_dir=state_dir,
         pending_guidance=pending_guidance,
+        workspace=workspace,
+        session_scope=session_scope,
     )
     lines: list[str] = [base, "", RESOLUTION_CONTEXT_HEADING, ""]
     lines.extend(_resolution_context_body(action, note, context))
@@ -1518,6 +1851,8 @@ class SessionTaskPacket:
     pending_guidance: tuple[mailbox.MailboxMessage, ...] = ()
     reply_block: tuple[str, ...] = field(default_factory=tuple)
     resolution_block: tuple[str, ...] = field(default_factory=tuple)
+    workspace: workspaces.ResolvedWorkspace | None = None
+    session_scope: plans.SessionScope | None = None
 
     @property
     def has_reply_context(self) -> bool:
@@ -1562,6 +1897,12 @@ class SessionTaskPacket:
                 "(read its `## Handoff` section)"
             )
         lines.append("")
+
+        if self.workspace is not None and self.session_scope is not None:
+            lines.extend(
+                _workspace_prompt_lines(self.workspace, self.session_scope)
+            )
+            lines.append("")
 
         if self.repair_references:
             lines.append("## Verification repair references")
@@ -1660,6 +2001,8 @@ def build_task_packet(
     mailbox_enabled: bool = False,
     state_dir: str | Path | None = None,
     pending_guidance: Sequence[mailbox.MailboxMessage] = (),
+    workspace: workspaces.ResolvedWorkspace | None = None,
+    session_scope: plans.SessionScope | None = None,
 ) -> SessionTaskPacket:
     """Build the compact autonomous-worker packet for one selected session.
 
@@ -1691,6 +2034,8 @@ def build_task_packet(
 
     canonical_dir = plans.canonicalize_path(plan_dir)
     selected = plans.parse_session_id(session_id)
+    if (workspace is None) != (session_scope is None):
+        raise ValueError("workspace and session_scope must be provided together")
     pending_guidance_tuple = tuple(pending_guidance)
     if pending_guidance_tuple and not mailbox_enabled:
         raise ValueError("pending_guidance requires mailbox_enabled")
@@ -1785,6 +2130,8 @@ def build_task_packet(
         pending_guidance=pending_guidance_tuple,
         reply_block=reply_block,
         resolution_block=resolution_block,
+        workspace=workspace,
+        session_scope=session_scope,
     )
 
 
@@ -2313,6 +2660,10 @@ def _session_path_label(session_id: str) -> str:
     return f"session-{plans.parse_session_id(session_id).value}"
 
 
+def _repository_path_label(alias: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", alias).strip("-") or "repository"
+
+
 def _session_identity_payload(session_id: str) -> dict[str, Any]:
     payload: dict[str, Any] = {"session": _session_compat_value(session_id)}
     payload["session_id"] = session_id
@@ -2619,6 +2970,83 @@ def _validate_run_inputs(
     return cwd, timeout, max_sessions, commit_mode
 
 
+def _resolve_run_verification_context(
+    plan_dir: str | Path,
+    cwd: Path,
+) -> verification.VerificationContext:
+    """Resolve the run root once and enforce prepare's durable binding."""
+    registry = plans.read_repository_registry(plan_dir)
+    metadata = plans.load_plan_metadata(plan_dir)
+    if registry is None:
+        if isinstance(metadata, plans.WorkspacePlanMetadata):
+            raise plans.PlanError(
+                "legacy plan has incompatible multi-repository workspace metadata"
+            )
+        if isinstance(metadata, plans.PlanMetadata) and metadata.cwd != str(cwd):
+            raise plans.PlanError(
+                "run cwd does not match stored plan metadata: "
+                f"{cwd} != {metadata.cwd}"
+            )
+        return verification.VerificationContext.legacy(cwd)
+
+    try:
+        workspace = workspaces.resolve_workspace(cwd, registry)
+    except workspaces.WorkspaceError as error:
+        raise plans.PlanError(f"invalid run workspace: {error}") from error
+    if metadata is None:
+        raise plans.PlanError(
+            "registered plan has no prepared workspace binding; run prepare first"
+        )
+    if not isinstance(metadata, plans.WorkspacePlanMetadata):
+        raise plans.PlanError(
+            "registered plan has incompatible legacy workspace metadata"
+        )
+    if (
+        metadata.workspace_root != str(workspace.root)
+        or metadata.registry_digest != registry.digest
+    ):
+        raise plans.PlanError(
+            "run workspace does not match the prepared workspace binding"
+        )
+    return verification.VerificationContext.resolved_workspace(workspace)
+
+
+def _validate_resume_workspace_binding(
+    args: argparse.Namespace,
+    context: verification.VerificationContext,
+) -> None:
+    """Reject a resume whose current binding differs from its paused run."""
+    persisted = getattr(args, "_resume_workspace_config", None)
+    if not isinstance(persisted, dict):
+        return
+    if context.workspace is None:
+        if any(
+            persisted.get(key) is not None
+            for key in ("workspace_root", "registry_digest", "repositories")
+        ):
+            raise plans.PlanError(
+                "resume workspace mode does not match the persisted run"
+            )
+        return
+    current = _workspace_payload_fields(context)
+    for key in ("workspace_root", "registry_digest", "repositories"):
+        if persisted.get(key) != current[key]:
+            raise plans.PlanError(
+                "resume workspace binding does not match the persisted run"
+            )
+
+
+def _ensure_legacy_run_metadata(
+    plan_dir: Path,
+    context: verification.VerificationContext,
+) -> None:
+    """First-bind an unprepared legacy plan without rewriting existing metadata."""
+    if context.workspace is not None:
+        return
+    if plans.load_plan_metadata(plan_dir) is None:
+        plans.save_plan_metadata(plan_dir, context.root)
+
+
 def _max_review_fix_cycles(args: argparse.Namespace) -> int:
     """Resolve the repair/rereview cycle cap for this run.
 
@@ -2815,11 +3243,51 @@ def _validate_spec_available() -> str:
     return spec_path
 
 
-def _validate_commit_preflight(cwd: Path) -> dict[str, Any]:
-    _validate_git_worktree(cwd)
+def _git_status_is_clean(cwd: Path) -> bool:
+    result = _run_git(cwd, ["status", "--porcelain"])
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        if detail:
+            raise RunError(f"could not inspect git status: {detail}")
+        raise RunError("could not inspect git status")
+    return not bool(result.stdout)
+
+
+def _validate_commit_preflight(
+    cwd: Path,
+    *,
+    verification_context: verification.VerificationContext | None = None,
+) -> dict[str, Any]:
     spec_path = _validate_spec_available()
-    _validate_clean_git_status(cwd)
-    return {"spec_path": spec_path}
+    context = verification_context or verification.VerificationContext.legacy(cwd)
+    if context.workspace is None:
+        _validate_git_worktree(cwd)
+        _validate_clean_git_status(cwd)
+        return {"spec_path": spec_path}
+
+    repositories: list[dict[str, Any]] = []
+    for repository in context.workspace.repositories:
+        _validate_git_worktree(repository.root)
+        try:
+            clean = _git_status_is_clean(repository.root)
+        except RunError as error:
+            raise RunError(
+                f"could not inspect repository {repository.alias}: {error}"
+            ) from error
+        repositories.append(
+            {
+                "alias": repository.alias,
+                "path": repository.repository.path,
+                "resolved_root": str(repository.root),
+                "clean": clean,
+            }
+        )
+        if not clean:
+            raise RunError(
+                "git status --porcelain must be empty before auto-commit "
+                f"in repository {repository.alias}"
+            )
+    return {"spec_path": spec_path, "repositories": repositories}
 
 
 def _validate_commit_at_end_scope(
@@ -2876,12 +3344,15 @@ def _commit_paths(
     *,
     commit_index: int,
     session_id: str | None,
+    repository_alias: str | None = None,
 ) -> dict[str, Path]:
     if commit_index <= 0:
         raise RunError("commit_index must be a positive integer")
     if session_id is not None:
         session_id = plans.parse_session_id(session_id).value
     suffix = _session_path_label(session_id) if session_id is not None else "end"
+    if repository_alias is not None:
+        suffix = f"{suffix}-{_repository_path_label(repository_alias)}"
     artifact_dir = run_dir / f"commit-{commit_index:04d}-{suffix}"
     return {
         "artifact_dir": artifact_dir,
@@ -2895,6 +3366,7 @@ def _build_invocation_payload(
     invocation: harnesses.HarnessInvocation,
     *,
     model_effort: dict[str, str | None] | None = None,
+    verification_context: verification.VerificationContext | None = None,
 ) -> dict[str, Any]:
     if model_effort is None:
         model_effort = config.model_effort_payload(
@@ -2902,6 +3374,11 @@ def _build_invocation_payload(
             model=invocation.model,
             effort=invocation.effort,
         )
+    workspace_fields = (
+        {}
+        if verification_context is None
+        else _workspace_payload_fields(verification_context)
+    )
     return {
         "name": invocation.name,
         "argv": invocation.argv,
@@ -2912,6 +3389,7 @@ def _build_invocation_payload(
             else None
         ),
         **model_effort,
+        **workspace_fields,
     }
 
 
@@ -3269,16 +3747,36 @@ def _write_turn_artifacts(
     return payload
 
 
-def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
+def _write_json_file(
+    path: Path,
+    payload: dict[str, Any],
+    *,
+    durable: bool = False,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(
         f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
     )
-    temporary_path.write_text(
-        json.dumps(payload, sort_keys=True, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary_path, path)
+    try:
+        with temporary_path.open("w", encoding="utf-8") as temporary_file:
+            temporary_file.write(
+                json.dumps(payload, sort_keys=True, indent=2) + "\n"
+            )
+            if durable:
+                temporary_file.flush()
+                durability.fullsync(temporary_file.fileno())
+        os.replace(temporary_path, path)
+        if durable:
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                durability.fullsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _write_bytes_file(path: Path, payload: bytes) -> None:
@@ -3312,6 +3810,7 @@ def _commit_status_result(
     returncode: int,
     head_before: str | None,
     head_after: str | None,
+    clean_after: bool | None,
 ) -> str:
     if returncode != 0:
         return "nonzero-exit"
@@ -3319,6 +3818,10 @@ def _commit_status_result(
         return "missing-head"
     if head_before == head_after:
         return "unchanged-head"
+    if clean_after is None:
+        return "status-unavailable"
+    if not clean_after:
+        return "dirty-after-commit"
     return "success"
 
 
@@ -3340,12 +3843,18 @@ def _run_spec_commit(
     run_dir: Path,
     commit_index: int,
     session_id: str | None,
+    group_id: str | None = None,
+    repository_key: str = commit_groups.LEGACY_REPOSITORY_KEY,
+    repository_alias: str | None = None,
+    repository_path: str = ".",
+    qualified_paths: Sequence[str] = (),
 ) -> dict[str, Any]:
     canonical_cwd = plans.canonicalize_path(cwd)
     paths = _commit_paths(
         run_dir,
         commit_index=commit_index,
         session_id=session_id,
+        repository_alias=repository_alias,
     )
     argv = list(COMMIT_ARGV)
     head_before_payload = _read_git_head(canonical_cwd)
@@ -3380,10 +3889,18 @@ def _run_spec_commit(
     head_after_payload = _read_git_head(canonical_cwd)
     head_before = head_before_payload["head"]
     head_after = head_after_payload["head"]
+    try:
+        clean_after: bool | None = _git_status_is_clean(canonical_cwd)
+    except RunError as error:
+        clean_after = None
+        status_error = str(error)
+    else:
+        status_error = None
     status_result = _commit_status_result(
         returncode=result.returncode,
         head_before=head_before,
         head_after=head_after,
+        clean_after=clean_after,
     )
     session_identity = (
         _session_identity_payload(session_id)
@@ -3392,6 +3909,12 @@ def _run_spec_commit(
     )
     payload = {
         "commit_index": commit_index,
+        "group_id": group_id,
+        "repository_key": repository_key,
+        "repo": repository_alias,
+        "repository_alias": repository_alias,
+        "repository_path": repository_path,
+        "qualified_paths": list(qualified_paths),
         "scope": "session" if session_id is not None else "end",
         **session_identity,
         "artifact_dir": str(paths["artifact_dir"]),
@@ -3407,6 +3930,7 @@ def _run_spec_commit(
         "head_after": head_after,
         "head_before_result": head_before_payload,
         "head_after_result": head_after_payload,
+        "clean_after": clean_after,
         "commit_sha": head_after if status_result == "success" else None,
         "started_at": _isoformat(started_at),
         "finished_at": _isoformat(finished_at),
@@ -3416,6 +3940,8 @@ def _run_spec_commit(
     }
     if exec_error is not None:
         payload["exec_error"] = exec_error
+    if status_error is not None:
+        payload["status_error"] = status_error
     _write_commit_artifacts(
         paths=paths,
         stdout=result.stdout,
@@ -3432,11 +3958,17 @@ def _commit_started_payload(
     run_dir: Path,
     commit_index: int,
     session_id: str | None,
+    group_id: str | None = None,
+    repository_key: str = commit_groups.LEGACY_REPOSITORY_KEY,
+    repository_alias: str | None = None,
+    repository_path: str = ".",
+    qualified_paths: Sequence[str] = (),
 ) -> dict[str, Any]:
     paths = _commit_paths(
         run_dir,
         commit_index=commit_index,
         session_id=session_id,
+        repository_alias=repository_alias,
     )
     session_identity = (
         _session_identity_payload(session_id)
@@ -3446,6 +3978,12 @@ def _commit_started_payload(
     return {
         "run_id": run_id,
         "commit_index": commit_index,
+        "group_id": group_id,
+        "repository_key": repository_key,
+        "repo": repository_alias,
+        "repository_alias": repository_alias,
+        "repository_path": repository_path,
+        "qualified_paths": list(qualified_paths),
         "scope": "session" if session_id is not None else "end",
         **session_identity,
         "artifact_dir": str(paths["artifact_dir"]),
@@ -3589,6 +4127,16 @@ def _run_finished_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "review_reopen": payload.get("review_reopen"),
         "state_path": payload.get("state_path"),
         "events_path": payload.get("events_path"),
+        **(
+            {
+                "cwd": payload.get("cwd"),
+                "workspace_root": payload.get("workspace_root"),
+                "registry_digest": payload.get("registry_digest"),
+                "repositories": payload.get("repositories"),
+            }
+            if payload.get("workspace_root") is not None
+            else {}
+        ),
     }
 
 
@@ -3596,7 +4144,11 @@ def _write_state_payload(payload: dict[str, Any]) -> None:
     state_path = payload.get("state_path")
     if not isinstance(state_path, str) or not state_path:
         return
-    _write_json_file(Path(state_path), _compact_state_payload(payload))
+    _write_json_file(
+        Path(state_path),
+        _compact_state_payload(payload),
+        durable=True,
+    )
 
 
 def _loop_harness(
@@ -5094,10 +5646,13 @@ def _progress_commit_label(commit: dict[str, Any]) -> str:
     scope = commit.get("scope")
     session = commit.get("session_id") or commit.get("session")
     if scope == "session" and session is not None:
-        return f"session {session}"
-    if scope == "end":
-        return "end"
-    return str(scope or "unknown")
+        label = f"session {session}"
+    elif scope == "end":
+        label = "end"
+    else:
+        label = str(scope or "unknown")
+    alias = commit.get("repository_alias") or commit.get("repo")
+    return f"{label}, repository {alias}" if alias else label
 
 
 def _note_lines(payload: dict[str, Any], *, prefix: str) -> list[str]:
@@ -6831,45 +7386,288 @@ class _LiveVerification:
         return heartbeat
 
 
-def _run_auto_commit(
+def _upsert_commit_group(payload: dict[str, Any], group: Mapping[str, Any]) -> None:
+    groups = payload.setdefault("commit_groups", [])
+    group_id = group.get("group_id")
+    for index, existing in enumerate(groups):
+        if isinstance(existing, Mapping) and existing.get("group_id") == group_id:
+            groups[index] = dict(group)
+            return
+    groups.append(dict(group))
+
+
+def _persist_commit_group(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    persistence: _RunPersistence,
+    run_id: str,
+    group: dict[str, Any],
+    phase: str,
+) -> None:
+    if phase == "started":
+        event_name = events.COMMIT_GROUP_STARTED_EVENT
+    elif phase == "complete":
+        event_name = events.COMMIT_GROUP_FINISHED_EVENT
+    else:
+        event_name = events.COMMIT_GROUP_UPDATED_EVENT
+    with persistence.lock:
+        _upsert_commit_group(payload, group)
+        persistence.append_event(
+            event_path,
+            event_name,
+            {
+                "run_id": run_id,
+                "phase": phase,
+                "group": group,
+            },
+        )
+        persistence.write_state(payload)
+
+
+def _commit_target_head(target: Mapping[str, Any]) -> str | None:
+    return _read_git_head(Path(str(target["root"]))).get("head")
+
+
+def _commit_target_is_clean(target: Mapping[str, Any]) -> bool:
+    return _git_status_is_clean(Path(str(target["root"])))
+
+
+def _commit_targets(
+    verification_context: verification.VerificationContext,
+    *,
+    aliases: Sequence[str] | None = None,
+    qualified_paths: Mapping[str, Sequence[str]] | None = None,
+) -> list[dict[str, Any]]:
+    workspace = verification_context.workspace
+    if workspace is None:
+        return [
+            commit_groups.create_target(
+                alias=None,
+                root=verification_context.root,
+                repository_path=".",
+            )
+        ]
+    selected = set(workspace.registry.aliases if aliases is None else aliases)
+    unknown = selected - set(workspace.registry.aliases)
+    if unknown:
+        raise RunError(
+            "commit group references unknown repositories: "
+            + ", ".join(sorted(unknown))
+        )
+    path_map = qualified_paths or {}
+    return [
+        commit_groups.create_target(
+            alias=repository.alias,
+            root=repository.root,
+            repository_path=repository.repository.path,
+            qualified_paths=path_map.get(repository.alias, ()),
+        )
+        for repository in workspace.repositories
+        if repository.alias in selected
+    ]
+
+
+def _registered_session_commit_targets(
+    verification_context: verification.VerificationContext,
+    guard: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    if guard.get("passed") is not True:
+        raise RunError("workspace write guard did not pass")
+    for field in ("added", "removed", "violations"):
+        if guard.get(field):
+            raise RunError(f"workspace write guard has unsafe {field} evidence")
+    if guard.get("unavailable"):
+        raise RunError("workspace write guard evidence is unavailable")
+    aliases = guard.get("authorized_aliases")
+    if not isinstance(aliases, list) or any(
+        not isinstance(alias, str) for alias in aliases
+    ):
+        raise RunError("workspace write guard authorized aliases are malformed")
+    if len(set(aliases)) != len(aliases):
+        raise RunError("workspace write guard authorized aliases are duplicated")
+    qualified: dict[str, Sequence[str]] = {}
+    changed_aliases: set[str] = set()
+    changed = guard.get("changed")
+    if not isinstance(changed, Mapping):
+        raise RunError("workspace write guard changed evidence is malformed")
+    for raw in changed.values():
+        if not isinstance(raw, Mapping):
+            raise RunError("workspace write guard change record is malformed")
+        alias = raw.get("alias")
+        paths = raw.get("qualified_paths")
+        if not isinstance(alias, str) or not isinstance(paths, list):
+            raise RunError("workspace write guard change record is malformed")
+        changed_aliases.add(alias)
+        qualified[alias] = [str(path) for path in paths]
+    workspace = verification_context.workspace
+    assert workspace is not None
+    expected_aliases = [
+        repository.alias
+        for repository in workspace.repositories
+        if repository.alias in changed_aliases
+    ]
+    if aliases != expected_aliases:
+        raise RunError(
+            "workspace write guard changed and authorized aliases disagree"
+        )
+    targets = _commit_targets(
+        verification_context,
+        aliases=aliases,
+        qualified_paths=qualified,
+    )
+    return [target for target in targets if not _commit_target_is_clean(target)]
+
+
+def _registered_end_commit_targets(
+    verification_context: verification.VerificationContext,
+) -> list[dict[str, Any]]:
+    workspace = verification_context.workspace
+    if workspace is None:
+        return _commit_targets(verification_context)
+    aliases = [
+        repository.alias
+        for repository in workspace.repositories
+        if not _git_status_is_clean(repository.root)
+    ]
+    return _commit_targets(verification_context, aliases=aliases)
+
+
+def _resolve_recovered_commit_targets(
+    group: Mapping[str, Any],
+    verification_context: verification.VerificationContext,
+) -> list[dict[str, Any]]:
+    keys = group.get("ordered_aliases")
+    if not isinstance(keys, list) or any(not isinstance(key, str) for key in keys):
+        raise RunError("unresolved commit group has malformed aliases")
+    rows = group.get("repositories")
+    if not isinstance(rows, list):
+        raise RunError("unresolved commit group has malformed repositories")
+    qualified = {
+        str(row.get("key")): [str(path) for path in row.get("qualified_paths", ())]
+        for row in rows
+        if isinstance(row, Mapping) and isinstance(row.get("key"), str)
+    }
+    if verification_context.workspace is None:
+        if keys != [commit_groups.LEGACY_REPOSITORY_KEY]:
+            raise RunError("unresolved commit group does not match the repository")
+        return _commit_targets(verification_context)
+    if commit_groups.LEGACY_REPOSITORY_KEY in keys:
+        raise RunError("legacy commit group cannot be resumed in a workspace")
+    return _commit_targets(
+        verification_context,
+        aliases=keys,
+        qualified_paths=qualified,
+    )
+
+
+def _run_commit_group(
     *,
     event_path: Path,
     payload: dict[str, Any],
     progress: _ProgressReporter,
-    cwd: Path,
+    verification_context: verification.VerificationContext,
     run_dir: Path,
     run_id: str,
     session_id: str | None,
+    targets: Sequence[Mapping[str, Any]],
+    recovered_group: Mapping[str, Any] | None = None,
     persistence: _RunPersistence | None = None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     persistence = _run_persistence(persistence)
-    with persistence.lock:
-        commit_index = len(payload["commits"]) + 1
-    commit_started = _commit_started_payload(
-        run_id=run_id,
-        cwd=cwd,
-        run_dir=run_dir,
-        commit_index=commit_index,
-        session_id=session_id,
-    )
-    with persistence.lock:
-        persistence.append_event(event_path, events.COMMIT_STARTED_EVENT, commit_started)
-        persistence.write_state(payload)
-    progress.commit_started(commit_started)
+    if recovered_group is None:
+        initial_heads = {
+            str(target["key"]): _commit_target_head(target) for target in targets
+        }
+        group = commit_groups.create_group(
+            scope="session" if session_id is not None else "end",
+            session_id=session_id,
+            targets=targets,
+            initial_heads=initial_heads,
+        )
+        _persist_commit_group(
+            event_path=event_path,
+            payload=payload,
+            persistence=persistence,
+            run_id=run_id,
+            group=group,
+            phase="started",
+        )
+        skip_clean = False
+    else:
+        group = dict(recovered_group)
+        group["repositories"] = [dict(target) for target in targets]
+        skip_clean = True
 
-    commit_payload = _run_spec_commit(
-        cwd=cwd,
-        run_dir=run_dir,
-        commit_index=commit_index,
-        session_id=session_id,
-    )
-    commit_finished = {"run_id": run_id, **commit_payload}
-    with persistence.lock:
-        payload["commits"].append(commit_payload)
-        persistence.append_event(event_path, events.COMMIT_FINISHED_EVENT, commit_finished)
-        persistence.write_state(payload)
-    progress.commit_finished(commit_finished)
-    return commit_payload
+    def persist_group(current: dict[str, Any], phase: str) -> None:
+        _persist_commit_group(
+            event_path=event_path,
+            payload=payload,
+            persistence=persistence,
+            run_id=run_id,
+            group=current,
+            phase=phase,
+        )
+
+    def run_target(target: Mapping[str, Any], group_id: str) -> Mapping[str, Any]:
+        with persistence.lock:
+            commit_index = len(payload["commits"]) + 1
+        repository_alias = target.get("alias")
+        commit_started = _commit_started_payload(
+            run_id=run_id,
+            cwd=Path(str(target["root"])),
+            run_dir=run_dir,
+            commit_index=commit_index,
+            session_id=session_id,
+            group_id=group_id,
+            repository_key=str(target["key"]),
+            repository_alias=(
+                str(repository_alias) if repository_alias is not None else None
+            ),
+            repository_path=str(target["repository_path"]),
+            qualified_paths=[str(path) for path in target.get("qualified_paths", ())],
+        )
+        with persistence.lock:
+            persistence.append_event(
+                event_path, events.COMMIT_STARTED_EVENT, commit_started
+            )
+            persistence.write_state(payload)
+        progress.commit_started(commit_started)
+
+        commit_payload = _run_spec_commit(
+            cwd=Path(str(target["root"])),
+            run_dir=run_dir,
+            commit_index=commit_index,
+            session_id=session_id,
+            group_id=group_id,
+            repository_key=str(target["key"]),
+            repository_alias=(
+                str(repository_alias) if repository_alias is not None else None
+            ),
+            repository_path=str(target["repository_path"]),
+            qualified_paths=[str(path) for path in target.get("qualified_paths", ())],
+        )
+        commit_finished = {"run_id": run_id, **commit_payload}
+        with persistence.lock:
+            payload["commits"].append(commit_payload)
+            persistence.append_event(
+                event_path, events.COMMIT_FINISHED_EVENT, commit_finished
+            )
+            persistence.write_state(payload)
+        progress.commit_finished(commit_finished)
+        return commit_payload
+
+    try:
+        return commit_groups.coordinate_group(
+            group,
+            is_clean=_commit_target_is_clean,
+            read_head=_commit_target_head,
+            run_commit=run_target,
+            persist=persist_group,
+            skip_clean=skip_clean,
+        )
+    except commit_groups.CommitGroupError as error:
+        raise RunError(f"invalid commit group: {error}") from error
 
 
 def _finish_run(
@@ -7423,6 +8221,9 @@ def _strip_own_lock_findings(
         readiness=report.readiness,
         expected_readiness_sha256=report.expected_readiness_sha256,
         contracts_by_session=report.contracts_by_session,
+        repository_registry=report.repository_registry,
+        verification_context=report.verification_context,
+        repositories=report.repositories,
     )
 
 
@@ -7460,7 +8261,11 @@ def _reduced_preflight_report(
     if not _resume_gate_passed(report):
         return None
     if preflight.run_unhashed_state_checks(
-        plan_dir, snapshot=snapshot, cwd=preflight_kwargs["cwd"]
+        plan_dir,
+        snapshot=snapshot,
+        cwd=preflight_kwargs["cwd"],
+        repository_registry=report.repository_registry,
+        context=report.verification_context,
     ):
         return None
     return report
@@ -7991,10 +8796,24 @@ def _review_artifact_digests(plan_dir: Path) -> tuple[str | None, str | None]:
 def _last_repairs_materialized_cycle(
     event_path: Path,
 ) -> dict[str, Any] | None:
-    """Return the most recent cycle that materialized repair sessions."""
-    for cycle in reversed(_read_prior_review_cycles(event_path)):
-        if cycle.get("disposition") == REVIEW_CYCLE_DISPOSITION_REPAIRS:
-            return cycle
+    """Return the newest durable repair materialization evidence."""
+    for record in reversed(review_continuation.read_review_events(event_path)):
+        payload = dict(record.payload)
+        if record.name == events.REVIEW_CYCLE_EVENT:
+            if payload.get("disposition") == REVIEW_CYCLE_DISPOSITION_REPAIRS:
+                return payload
+            continue
+        if (
+            record.name == events.REVIEW_REPAIR_REOPENED_EVENT
+            and payload.get("materialized") is True
+        ):
+            repositories = payload.get("current_repositories")
+            if isinstance(repositories, list):
+                payload["repositories"] = repositories
+            findings = payload.get("current_findings")
+            if isinstance(findings, list):
+                payload["findings"] = findings
+            return payload
     return None
 
 
@@ -8161,12 +8980,139 @@ def _compute_review_delta_context(
     )
 
 
+def _compute_registered_review_delta_context(
+    *,
+    event_path: Path,
+    plan_dir: Path,
+    workspace: workspaces.ResolvedWorkspace,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Compute one fail-closed combined delta across the ordered registry."""
+    cycle = _last_repairs_materialized_cycle(event_path)
+    if cycle is None:
+        return None, "no-prior-repair-cycle"
+    findings = _prior_review_findings(plan_dir)
+    if not findings:
+        return None, "prior-findings-unavailable"
+    degraded = {"mode": REVIEW_SCOPE_FULL, "prior_findings": findings}
+    raw_bases = cycle.get("repositories")
+    if not isinstance(raw_bases, list):
+        return degraded, "no-recorded-repository-bases"
+    bases = {
+        item.get("alias"): item
+        for item in raw_bases
+        if isinstance(item, Mapping) and isinstance(item.get("alias"), str)
+    }
+    repository_deltas: list[dict[str, Any]] = []
+    all_changed: list[str] = []
+    for repository in workspace.repositories:
+        base_record = bases.get(repository.alias)
+        if not isinstance(base_record, Mapping):
+            return degraded, f"base-missing:{repository.alias}"
+        base = base_record.get("head")
+        if not isinstance(base, str) or not base:
+            return degraded, f"no-recorded-base:{repository.alias}"
+        dirty = base_record.get("worktree_dirty")
+        raw_dirty_paths = base_record.get("dirty_paths")
+        if dirty is False:
+            baseline_dirty: list[str] = []
+        elif dirty is True and isinstance(raw_dirty_paths, list):
+            prefix = f"{repository.alias}:"
+            baseline_dirty = [
+                path[len(prefix) :]
+                for path in raw_dirty_paths
+                if isinstance(path, str) and path.startswith(prefix)
+            ]
+        else:
+            return degraded, f"dirty-base-evidence-missing:{repository.alias}"
+        try:
+            resolved = _run_git(
+                repository.root,
+                ["rev-parse", "--verify", f"{base}^{{commit}}"],
+            )
+            ancestor = _run_git(
+                repository.root,
+                ["merge-base", "--is-ancestor", base, "HEAD"],
+            )
+            names = _run_git(
+                repository.root,
+                ["diff", "--name-only", *_DELTA_DIFF_FLAGS, base],
+            )
+            index_names = _run_git(
+                repository.root,
+                ["diff", "--cached", "--name-only", *_DELTA_DIFF_FLAGS, base],
+            )
+            untracked = _run_git(
+                repository.root,
+                [
+                    "ls-files",
+                    "--others",
+                    "--exclude-standard",
+                    "--full-name",
+                    "--",
+                    ":(top)",
+                ],
+            )
+            index_flags = _run_git(
+                repository.root,
+                ["ls-files", "-v", "--full-name", "--", ":(top)"],
+            )
+        except RunError:
+            return degraded, f"git-unavailable:{repository.alias}"
+        probes = (
+            (resolved, "base-unresolvable"),
+            (ancestor, "base-not-ancestor"),
+            (names, "base-diff-failed"),
+            (index_names, "index-diff-failed"),
+            (untracked, "untracked-scan-failed"),
+            (index_flags, "index-flags-scan-failed"),
+        )
+        for result, reason in probes:
+            if result.returncode != 0:
+                return degraded, f"{reason}:{repository.alias}"
+        relative_paths = sorted(
+            {
+                line
+                for line in (
+                    *names.stdout.splitlines(),
+                    *index_names.stdout.splitlines(),
+                    *untracked.stdout.splitlines(),
+                    *_index_flagged_paths(index_flags.stdout),
+                    *baseline_dirty,
+                )
+                if line
+            }
+        )
+        qualified_paths = [
+            f"{repository.alias}:{path}" for path in relative_paths
+        ]
+        all_changed.extend(qualified_paths)
+        repository_deltas.append(
+            {
+                "alias": repository.alias,
+                "path": repository.repository.path,
+                "base_sha": base,
+                "changed_files": qualified_paths,
+                "baseline_dirty": bool(baseline_dirty),
+            }
+        )
+    return (
+        {
+            "mode": REVIEW_SCOPE_DELTA,
+            "repositories": repository_deltas,
+            "changed_files": all_changed,
+            "prior_findings": findings,
+        },
+        None,
+    )
+
+
 def _refresh_pending_review_scope(
     *,
     session: plans.SessionStatus,
     event_path: Path,
     plan_dir: Path,
     cwd: Path,
+    workspace: workspaces.ResolvedWorkspace | None,
     run_id: str,
     persistence: _RunPersistence,
 ) -> bool:
@@ -8183,11 +9129,18 @@ def _refresh_pending_review_scope(
     text = session.path.read_text(encoding="utf-8")
     if REVIEW_SCOPE_HEADING not in text:
         return False
-    delta, fallback_reason = _compute_review_delta_context(
-        event_path=event_path,
-        plan_dir=plan_dir,
-        cwd=cwd,
-    )
+    if workspace is None:
+        delta, fallback_reason = _compute_review_delta_context(
+            event_path=event_path,
+            plan_dir=plan_dir,
+            cwd=cwd,
+        )
+    else:
+        delta, fallback_reason = _compute_registered_review_delta_context(
+            event_path=event_path,
+            plan_dir=plan_dir,
+            workspace=workspace,
+        )
     rescoped = rescoped_review_session_body(text, delta)
     if rescoped is None or rescoped == text:
         return False
@@ -8203,6 +9156,11 @@ def _refresh_pending_review_scope(
             ),
             "base_sha": (
                 delta.get("base_sha") if delta is not None else None
+            ),
+            **(
+                {"repositories": delta.get("repositories")}
+                if delta is not None and "repositories" in delta
+                else {}
             ),
             "fallback_reason": fallback_reason,
             "refreshed": True,
@@ -8258,7 +9216,7 @@ def _review_reopen_record(
         # backfill record instead of counting the source twice.
         before_count = max(0, before_count - 1)
     after_count = before_count + (1 if materialized else 0)
-    return {
+    record = {
         "run_id": payload.get("run_id"),
         "source_cycle": resume.source_cycle,
         "source_review_session_id": resume.review_session_id,
@@ -8294,6 +9252,21 @@ def _review_reopen_record(
         ),
         "after_max_review_fix_cycles": max_review_fix_cycles,
     }
+    if resume.source_findings is not None:
+        record["source_findings"] = [dict(item) for item in resume.source_findings]
+    if resume.current_findings is not None:
+        record["current_findings"] = [dict(item) for item in resume.current_findings]
+    if resume.source_repositories is not None:
+        record["source_repositories"] = [
+            dict(item) for item in resume.source_repositories
+        ]
+    if resume.current_repositories is not None:
+        record["current_repositories"] = [
+            dict(item) for item in resume.current_repositories
+        ]
+    if resume.repair_groups is not None:
+        record["repair_groups"] = [dict(item) for item in resume.repair_groups]
+    return record
 
 
 def _record_review_reopen(
@@ -8452,6 +9425,12 @@ def _advance_review_cycle(
     cycle_record["repo_head"] = repo_state.get("head")
     cycle_record["worktree_dirty"] = repo_state.get("worktree_dirty")
     cycle_record["dirty_paths"] = repo_state.get("dirty_paths")
+    repository_bases = turn_payload.get("review_repository_bases")
+    if isinstance(repository_bases, list):
+        cycle_record["repositories"] = repository_bases
+        findings = verdict.get("findings")
+        if isinstance(findings, list):
+            cycle_record["findings"] = findings
 
     def record_and_complete(disposition: str) -> tuple[str, plans.PlanSnapshot]:
         _record_review_cycle(
@@ -8488,6 +9467,17 @@ def _advance_review_cycle(
     cycle_record["repair_session_ids"] = [
         child.session_id.value for child in repair_result.children
     ]
+    if "repositories" in cycle_record:
+        cycle_record["repair_groups"] = [
+            {
+                "repair_group": child.repair_group,
+                "repair_session_id": child.session_id.value,
+                "finding_ids": list(child.finding_ids),
+                "read_repositories": list(child.read_repositories),
+                "write_repositories": list(child.write_repositories),
+            }
+            for child in repair_result.children
+        ]
 
     if not repair_result.ok:
         _record_review_cycle(
@@ -8959,6 +9949,464 @@ def _enforce_review_mutation_guard(
     return True
 
 
+def _capture_workspace_write_guard_snapshot(
+    *,
+    workspace: workspaces.ResolvedWorkspace,
+    plan_dir: Path,
+    exclude: tuple[str, ...],
+    include_ignored: bool,
+) -> repository_evidence.WorkspaceSnapshot:
+    """Capture every registered and unregistered worktree in ``workspace``.
+
+    The public review-guard exclusions are repository-relative and apply
+    independently to every discovered repository, including unregistered
+    worktrees. Git's ordinary ignore policy is still honored everywhere unless
+    ``include_ignored`` was explicitly requested.
+    """
+    return repository_evidence.capture_workspace_snapshot(
+        workspace.root,
+        plan_dir,
+        default_exclude=exclude,
+        include_ignored=include_ignored,
+        _run_git_fn=_run_git,
+        _run_git_bytes_fn=_run_git_bytes,
+    )
+
+
+def _workspace_review_bases(
+    workspace: workspaces.ResolvedWorkspace,
+    snapshot: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Project ordered per-repository HEAD and pre-existing dirty paths."""
+    bases: list[dict[str, Any]] = []
+    for repository in workspace.repositories:
+        relative_root = repository.repository.path
+        fingerprint = snapshot.get(relative_root)
+        state_payload = (
+            repository_evidence.repository_state(fingerprint)
+            if isinstance(fingerprint, Mapping)
+            else None
+        )
+        if state_payload is None:
+            raise RunError(
+                "review base unavailable for registered repository "
+                f"{repository.alias}"
+            )
+        dirty_paths = [
+            f"{repository.alias}:{path}"
+            for path in state_payload.get("dirty_paths", ())
+        ]
+        bases.append(
+            {
+                "alias": repository.alias,
+                "path": relative_root,
+                "origin": repository.origin,
+                "head": state_payload.get("head"),
+                "worktree_dirty": bool(state_payload.get("worktree_dirty")),
+                "dirty_paths": dirty_paths,
+            }
+        )
+    return bases
+
+
+def _workspace_snapshot_unavailable(
+    snapshot: Mapping[str, Mapping[str, Any]],
+    *,
+    required_repository_paths: Sequence[str] = (),
+) -> dict[str, dict[str, Any]]:
+    """Return deterministic fail-closed details from a workspace snapshot."""
+    unavailable: dict[str, dict[str, Any]] = {}
+    for repository in sorted(set(required_repository_paths) - set(snapshot)):
+        unavailable[repository] = {
+            "reason": "registered-repository-missing"
+        }
+    for repository in sorted(snapshot):
+        fingerprint = snapshot[repository]
+        detail = repository_evidence.repository_evidence_unavailable(
+            fingerprint
+        )
+        if detail is None and not fingerprint.get("git"):
+            detail = {"reason": "repository-unavailable"}
+        if detail is not None:
+            unavailable[repository] = detail
+    return unavailable
+
+
+def _workspace_unavailable_summary(
+    unavailable: Mapping[str, Any],
+    *,
+    workspace: workspaces.ResolvedWorkspace,
+) -> str:
+    """Name repositories and failing nodes in a bounded pause suffix."""
+    aliases = {
+        repository.repository.path: repository.alias
+        for repository in workspace.repositories
+    }
+    named: list[str] = []
+    for repository in sorted(unavailable):
+        raw_detail = unavailable[repository]
+        detail = raw_detail if isinstance(raw_detail, Mapping) else {}
+        for phase in ("after", "before"):
+            phase_detail = detail.get(phase)
+            if isinstance(phase_detail, Mapping):
+                detail = phase_detail
+                break
+        label = aliases.get(repository, repository)
+        node = detail.get("path")
+        reason = detail.get("reason")
+        subject = f"{label}:{node}" if node else label
+        named.append(f"{subject} ({reason})" if reason else subject)
+    if not named:
+        return ""
+    suffix = f": {', '.join(named[:3])}"
+    if len(named) > 3:
+        suffix += f" (+{len(named) - 3} more)"
+    return suffix
+
+
+def _workspace_write_guard_evidence(
+    *,
+    workspace: workspaces.ResolvedWorkspace,
+    scope: plans.SessionScope,
+    comparison: Mapping[str, Any],
+    exclude: tuple[str, ...],
+    include_ignored: bool,
+) -> dict[str, Any]:
+    """Classify workspace-vector changes against one session's write scope."""
+    registered = {
+        repository.repository.path: repository.alias
+        for repository in workspace.repositories
+    }
+    changed_payload: dict[str, Any] = {}
+    violations: list[dict[str, Any]] = []
+    authorized: list[str] = []
+
+    raw_changed = comparison.get("changed")
+    if isinstance(raw_changed, Mapping):
+        for repository in sorted(raw_changed):
+            raw_changes = raw_changed[repository]
+            changes = dict(raw_changes) if isinstance(raw_changes, Mapping) else {}
+            alias = registered.get(repository)
+            qualifier = alias or repository
+            qualified_paths = [
+                f"{qualifier}:{path.split(':', 1)[1]}"
+                if isinstance(path, str) and ":" in path
+                else f"{qualifier}:{path}"
+                for path in changes.get("qualified_paths", ())
+            ]
+            changes["qualified_paths"] = qualified_paths
+            record = {
+                "repository": repository,
+                "alias": alias,
+                **changes,
+            }
+            changed_payload[repository] = record
+            if alias is not None and alias in scope.writes:
+                authorized.append(alias)
+                continue
+            if alias is None:
+                kind = "unregistered-repository"
+            elif alias in scope.reads:
+                kind = "read-only-repository"
+            else:
+                kind = "outside-read-scope"
+            violations.append(
+                {
+                    "kind": kind,
+                    "repository": repository,
+                    "alias": alias,
+                    "qualified_paths": qualified_paths,
+                }
+            )
+
+    for topology_kind in ("added", "removed"):
+        roots = comparison.get(topology_kind)
+        if not isinstance(roots, Sequence) or isinstance(roots, (str, bytes)):
+            continue
+        for repository in sorted(str(root) for root in roots):
+            alias = registered.get(repository)
+            violations.append(
+                {
+                    "kind": f"repository-{topology_kind}",
+                    "repository": repository,
+                    "alias": alias,
+                    "qualified_paths": [],
+                }
+            )
+
+    unavailable = comparison.get("unavailable")
+    unavailable_payload = (
+        {str(key): value for key, value in unavailable.items()}
+        if isinstance(unavailable, Mapping)
+        else {}
+    )
+    authorized_set = set(authorized)
+    return {
+        "passed": not violations and not unavailable_payload,
+        "read_aliases": list(scope.reads),
+        "write_aliases": list(scope.writes),
+        "registered_repositories": [
+            {
+                "alias": repository.alias,
+                "path": repository.repository.path,
+            }
+            for repository in workspace.repositories
+        ],
+        "changed": changed_payload,
+        "authorized_aliases": [
+            repository.alias
+            for repository in workspace.repositories
+            if repository.alias in authorized_set
+        ],
+        "added": list(comparison.get("added") or ()),
+        "removed": list(comparison.get("removed") or ()),
+        "unavailable": unavailable_payload,
+        "violations": violations,
+        "excluded": list(exclude),
+        "include_ignored": include_ignored,
+    }
+
+
+def _workspace_guard_violation_summary(evidence: Mapping[str, Any]) -> str:
+    named: list[str] = []
+    violations = evidence.get("violations")
+    if isinstance(violations, Sequence):
+        for violation in violations:
+            if not isinstance(violation, Mapping):
+                continue
+            qualified = violation.get("qualified_paths")
+            if isinstance(qualified, Sequence) and not isinstance(
+                qualified, (str, bytes)
+            ):
+                named.extend(str(path) for path in qualified)
+            if not qualified:
+                alias = violation.get("alias")
+                repository = violation.get("repository")
+                named.append(str(alias or repository))
+    named = list(dict.fromkeys(named))
+    if not named:
+        return ""
+    suffix = f": {', '.join(named[:3])}"
+    if len(named) > 3:
+        suffix += f" (+{len(named) - 3} more)"
+    return suffix
+
+
+def _session_expansion_evidence(plan_dir: Path, session_id: str) -> dict[str, Any]:
+    path = plan_dir / plans.session_id_to_expansion_filename(session_id)
+    try:
+        stat_result = path.stat()
+        content = path.read_bytes()
+    except FileNotFoundError:
+        return {"path": str(path), "present": False}
+    except OSError as error:
+        return {
+            "path": str(path),
+            "present": True,
+            "unavailable": str(error),
+        }
+    return {
+        "path": str(path),
+        "present": True,
+        "mtime_ns": stat_result.st_mtime_ns,
+        "sha256": hashlib.sha256(content).hexdigest(),
+    }
+
+
+def _latest_workspace_scope_repair_requirement(
+    event_path: Path, session_id: str
+) -> dict[str, Any] | None:
+    """Return the latest uncleared retained-mutation record for a session."""
+    try:
+        lines = event_path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        # Event history is operational evidence. If it cannot be read, the
+        # ordinary readiness and pre-turn evidence gates still apply.
+        return None
+    for line in reversed(lines):
+        try:
+            record = json.loads(line)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        details = payload.get("details")
+        if not isinstance(details, dict):
+            continue
+        guard = details.get("workspace_write_guard")
+        guard_session_id = (
+            guard.get("session_id") if isinstance(guard, dict) else None
+        )
+        detail_session_id = details.get("session_id")
+        detail_session = details.get("session")
+        if (
+            guard_session_id != session_id
+            and detail_session_id != session_id
+            and str(detail_session) != session_id
+        ):
+            continue
+        if record.get("name") == events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT:
+            return None
+        if (
+            record.get("name") == events.RUN_PAUSED_EVENT
+            and payload.get("reason")
+            == events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION
+        ):
+            return dict(guard) if isinstance(guard, dict) else None
+    return None
+
+
+def _workspace_scope_repair_is_fresh(
+    prior: Mapping[str, Any], current: Mapping[str, Any]
+) -> bool:
+    if current.get("present") is not True or current.get("unavailable"):
+        return False
+    if prior.get("present") is not True:
+        return True
+    prior_mtime = prior.get("mtime_ns")
+    current_mtime = current.get("mtime_ns")
+    return (
+        isinstance(prior_mtime, int)
+        and isinstance(current_mtime, int)
+        and current_mtime > prior_mtime
+    )
+
+
+def _enforce_workspace_write_guard(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    persistence: _RunPersistence,
+    workspace: workspaces.ResolvedWorkspace,
+    scope: plans.SessionScope,
+    before: plans.PlanSnapshot,
+    after: plans.PlanSnapshot | None,
+    snapshot_before: repository_evidence.WorkspaceSnapshot,
+    exclude: tuple[str, ...],
+    include_ignored: bool,
+    session_id: str,
+    session_label: str,
+    session_details: dict[str, Any],
+    turn_payload: dict[str, Any],
+    paths: dict[str, Path],
+    plan_cache: plans.PlanSnapshotCache,
+) -> bool:
+    """Fail closed when a registered implementation turn exceeds its writes."""
+    try:
+        snapshot_after = _capture_workspace_write_guard_snapshot(
+            workspace=workspace,
+            plan_dir=before.plan_dir,
+            exclude=exclude,
+            include_ignored=include_ignored,
+        )
+    except repository_evidence.RepositoryEvidenceError as error:
+        comparison: dict[str, Any] = {
+            "changed": {},
+            "added": [],
+            "removed": [],
+            "unavailable": {
+                ".": {
+                    "after": {
+                        "reason": "workspace-inventory-failed",
+                        "error": str(error),
+                    }
+                }
+            },
+        }
+    else:
+        comparison = repository_evidence.compare_workspace_snapshots(
+            snapshot_before, snapshot_after
+        )
+
+    evidence = _workspace_write_guard_evidence(
+        workspace=workspace,
+        scope=scope,
+        comparison=comparison,
+        exclude=exclude,
+        include_ignored=include_ignored,
+    )
+    if evidence["passed"]:
+        with persistence.lock:
+            turn_payload["workspace_write_guard"] = evidence
+            _write_json_file(paths["result"], turn_payload)
+        return False
+
+    if evidence["unavailable"]:
+        unavailable_summary = _workspace_unavailable_summary(
+            evidence["unavailable"], workspace=workspace
+        )
+        reason = events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE
+        failure_note = (
+            "workspace write guard unavailable; repository evidence could "
+            f"not be captured safely{unavailable_summary}"
+        )
+        message = (
+            f"workspace write guard unavailable after {session_label}; "
+            "repository evidence could not be captured safely"
+            f"{unavailable_summary}"
+        )
+    else:
+        reason = events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION
+        summary = _workspace_guard_violation_summary(evidence)
+        failure_note = (
+            "workspace write scope violation retained"
+            f"{summary}; repair the durable repository scope and rerun "
+            "expansion/preflight before continuing"
+        )
+        message = (
+            f"{session_label} changed repositories outside its write aliases"
+            f"{summary}; changes were retained"
+        )
+
+    revert_target = after if after is not None else before
+    reverted = _revert_session_status_to_pending(
+        revert_target,
+        session_id,
+        failure_note=failure_note,
+    )
+    inspected = _reinspect_after_revert(
+        before.plan_dir, revert_target, reverted, plan_cache
+    )
+    guard_record = {
+        **evidence,
+        "session_id": session_id,
+        "reason": reason,
+        "phase": "after",
+        "reverted_to_pending": reverted is not None,
+        "repair_required": {
+            "durable_scope": True,
+            "fresh_expansion": True,
+            "fresh_preflight": True,
+        },
+    }
+    if reason == events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION:
+        guard_record["snapshot_before"] = snapshot_before
+        guard_record["expansion_before_repair"] = _session_expansion_evidence(
+            before.plan_dir, session_id
+        )
+    with persistence.lock:
+        payload["final_snapshot"] = _snapshot_payload(inspected)
+        turn_payload["workspace_write_guard"] = guard_record
+        _write_json_file(paths["result"], turn_payload)
+    _pause_run(
+        event_path,
+        payload,
+        reason=reason,
+        message=message,
+        details={
+            **session_details,
+            "workspace_write_guard": guard_record,
+        },
+        persistence=persistence,
+    )
+    return True
+
+
 def _enforce_review_verdict(
     *,
     event_path: Path,
@@ -9118,6 +10566,7 @@ def _enforce_session_verification(
     turn_index: int,
     total_sessions: int | None,
     heartbeat_interval: float = VERIFICATION_HEARTBEAT_INTERVAL_SECONDS,
+    verification_context: verification.VerificationContext | None = None,
 ) -> bool:
     """Run the session's `Verify` recipe and pause on failure or contract problems.
 
@@ -9268,12 +10717,15 @@ def _enforce_session_verification(
 
     live_verification.start()
     try:
-        result = verification.run_verification(
-            contract,
-            repo_root=cwd,
-            observer=observer,
-            artifact_dir=verification_artifact_dir,
-        )
+        verification_kwargs: dict[str, Any] = {
+            "observer": observer,
+            "artifact_dir": verification_artifact_dir,
+        }
+        if verification_context is None:
+            verification_kwargs["repo_root"] = cwd
+        else:
+            verification_kwargs["context"] = verification_context
+        result = verification.run_verification(contract, **verification_kwargs)
     except KeyboardInterrupt:
         live_verification.finish(
             passed=False,
@@ -9488,6 +10940,7 @@ def _run_config_payload(
     *,
     cwd: Path,
     commit_mode: str | None,
+    verification_context: verification.VerificationContext | None = None,
 ) -> dict[str, Any]:
     """Snapshot the resolved run flags so ``asl run --resume`` can rehydrate.
 
@@ -9500,6 +10953,7 @@ def _run_config_payload(
     harness/model/effort selection that a default resume would otherwise reset
     to the ``codex`` defaults.
     """
+    context = verification_context or verification.VerificationContext.legacy(cwd)
     return {
         "harness": args.harness,
         "harness_model": getattr(args, "harness_model", None),
@@ -9519,6 +10973,7 @@ def _run_config_payload(
         "note": getattr(args, "note", None),
         "cwd": str(cwd),
         "state_dir_override": getattr(args, "state_dir", None),
+        **_workspace_payload_fields(context),
     }
 
 
@@ -9535,7 +10990,9 @@ def _initial_payload(
     run_id: str,
     commit_mode: str | None,
     mailbox_activation: Mapping[str, Any],
+    verification_context: verification.VerificationContext | None = None,
 ) -> dict[str, Any]:
+    context = verification_context or verification.VerificationContext.legacy(cwd)
     model_effort = _selected_model_effort_payload(args)
     review_harness = getattr(args, "review_harness", None)
     review_requested = review_harness is not None
@@ -9565,7 +11022,12 @@ def _initial_payload(
         commit_mode=commit_mode,
         max_pending_sessions=getattr(args, "max_pending_sessions", None),
         note=getattr(args, "note", None),
-        run_config=_run_config_payload(args, cwd=cwd, commit_mode=commit_mode),
+        run_config=_run_config_payload(
+            args,
+            cwd=cwd,
+            commit_mode=commit_mode,
+            verification_context=context,
+        ),
         no_mailbox=_no_mailbox(args),
         mailbox_enabled=bool(mailbox_activation.get("enabled")),
         mailbox_activation=dict(mailbox_activation),
@@ -9584,6 +11046,7 @@ def _initial_payload(
         completed_sessions=[],
         completed_session_ids=[],
         commits=[],
+        commit_groups=[],
         turns=[],
         control=_initial_control_payload(),
         initial_snapshot=_snapshot_payload(snapshot),
@@ -9604,6 +11067,7 @@ def _initial_payload(
         review_fix_disposition=None,
         review_resume=None,
         review_reopen=None,
+        **_workspace_payload_fields(context),
     )
 
 
@@ -9617,7 +11081,9 @@ def _dry_run_payload(
     reply_text: str | None = None,
     reply_context: qna.QnAContext | None = None,
     reply_origin: str = REPLY_ORIGIN_ARGV,
+    verification_context: verification.VerificationContext | None = None,
 ) -> dict[str, Any]:
+    context = verification_context or verification.VerificationContext.legacy(cwd)
     review_harness = getattr(args, "review_harness", None)
     review_requested = review_harness is not None
     review_output_path = (
@@ -9649,6 +11115,7 @@ def _dry_run_payload(
             "review_harness": review_harness,
             "review_output_path": review_output_path,
             **model_effort,
+            **_workspace_payload_fields(context),
         }
 
     is_review_session = is_generated_review_session_file(next_pending.path)
@@ -9666,16 +11133,72 @@ def _dry_run_payload(
         is_review_turn=is_review_session,
     )
     paths = _turn_paths(run_dir, turn_index=1, session_id=next_pending.id)
-    if reply_context is not None and reply_text is not None:
-        prompt = build_reply_prompt(
-            turn_harness,
-            snapshot.plan_dir,
-            reply=reply_text,
-            context=reply_context,
-            mailbox_enabled=mailbox_enabled,
-            state_dir=getattr(args, "state_dir", None),
-            pending_guidance=pending_guidance,
+    workspace = context.workspace
+    session_scope = (
+        _session_scope(next_pending, workspace)
+        if workspace is not None
+        else None
+    )
+    use_registered_packet = (
+        workspace is not None and _worker_mode() == WORKER_MODE_PACKET
+    )
+    packet_kwargs: dict[str, Any] = {}
+    if use_registered_packet:
+        dry_run_event_path = (
+            state.plan_state_dir(
+                snapshot.plan_dir, getattr(args, "state_dir", None)
+            )
+            / events.EVENTS_FILE_NAME
         )
+        repair_references = _verification_repair_state(
+            dry_run_event_path,
+            next_pending.id,
+        )["references"]
+        if is_review_session:
+            repair_references = repair_references + (
+                _review_verdict_repair_references(
+                    dry_run_event_path, next_pending.id
+                )
+            )
+        packet_kwargs = {
+            "session_id": next_pending.id,
+            "predecessor_id": _predecessor_session_id(
+                snapshot, next_pending.id
+            ),
+            "has_expansion": _session_has_expansion(
+                snapshot.plan_dir, next_pending.id
+            ),
+            "has_progress": (
+                snapshot.plan_dir / plans.PROGRESS_FILE_NAME
+            ).is_file(),
+            "repair_references": repair_references,
+            "mailbox_enabled": mailbox_enabled,
+            "state_dir": getattr(args, "state_dir", None),
+            "pending_guidance": pending_guidance,
+            "workspace": workspace,
+            "session_scope": session_scope,
+        }
+    if reply_context is not None and reply_text is not None:
+        if use_registered_packet:
+            prompt = build_task_packet(
+                turn_harness,
+                snapshot.plan_dir,
+                reply=reply_text,
+                reply_context=reply_context,
+                **packet_kwargs,
+            ).render()
+        else:
+            prompt = build_reply_prompt(
+                turn_harness,
+                snapshot.plan_dir,
+                reply=reply_text,
+                context=reply_context,
+                mailbox_enabled=mailbox_enabled,
+                state_dir=getattr(args, "state_dir", None),
+                pending_guidance=pending_guidance,
+                workspace=workspace,
+                session_scope=session_scope,
+            )
         prompt_kind = "reply"
         resolver_prompt: str | None = qna.render_resolver_prompt(reply_context)
         reply_source: dict[str, Any] | None = {
@@ -9687,13 +11210,22 @@ def _dry_run_payload(
             "origin": reply_origin,
         }
     else:
-        prompt = build_session_prompt(
-            turn_harness,
-            snapshot.plan_dir,
-            mailbox_enabled=mailbox_enabled,
-            state_dir=getattr(args, "state_dir", None),
-            pending_guidance=pending_guidance,
-        )
+        if use_registered_packet:
+            prompt = build_task_packet(
+                turn_harness,
+                snapshot.plan_dir,
+                **packet_kwargs,
+            ).render()
+        else:
+            prompt = build_session_prompt(
+                turn_harness,
+                snapshot.plan_dir,
+                mailbox_enabled=mailbox_enabled,
+                state_dir=getattr(args, "state_dir", None),
+                pending_guidance=pending_guidance,
+                workspace=workspace,
+                session_scope=session_scope,
+            )
         prompt_kind = "session"
         resolver_prompt = None
         reply_source = None
@@ -9714,6 +11246,7 @@ def _dry_run_payload(
         "invocation": _build_invocation_payload(
             invocation,
             model_effort=model_effort,
+            verification_context=context,
         ),
         "resolver_prompt": resolver_prompt,
         "prompt_kind": prompt_kind,
@@ -9725,6 +11258,7 @@ def _dry_run_payload(
         "review_harness": review_harness,
         "review_output_path": review_output_path,
         **model_effort,
+        **_workspace_payload_fields(context),
     }
 
 
@@ -9739,15 +11273,28 @@ def _run_locked(
     run_id: str,
     reply_text: str | None = None,
     reply_origin: str = REPLY_ORIGIN_ARGV,
+    verification_context: verification.VerificationContext | None = None,
 ) -> tuple[int, dict[str, Any]]:
+    if verification_context is None:
+        verification_context = verification.VerificationContext.legacy(cwd)
     plan_cache = plans.PlanSnapshotCache()
     snapshot = plan_cache.get(args.plan_dir)
     if not args.dry_run:
-        plans.save_plan_metadata(snapshot.plan_dir, cwd)
+        _ensure_legacy_run_metadata(snapshot.plan_dir, verification_context)
     state_dir = state.plan_state_dir(snapshot.plan_dir, args.state_dir)
     run_dir = state_dir / "runs" / run_id
     event_path = state_dir / events.EVENTS_FILE_NAME
     state_path = state_dir / events.STATE_FILE_NAME
+    try:
+        unresolved_commit_group = commit_groups.load_unresolved_group(
+            state_path=state_path,
+            event_path=event_path,
+        )
+    except commit_groups.CommitGroupError as error:
+        unresolved_commit_group = None
+        commit_group_load_error = str(error)
+    else:
+        commit_group_load_error = None
     mailbox_activation = _mailbox_activation_payload(args, snapshot.plan_dir)
     mailbox_enabled = bool(mailbox_activation["enabled"])
     review_guard_excludes = _review_guard_excludes(args)
@@ -9794,7 +11341,12 @@ def _run_locked(
         run_id=run_id,
         commit_mode=commit_mode,
         mailbox_activation=mailbox_activation,
+        verification_context=verification_context,
     )
+    if unresolved_commit_group is not None:
+        _upsert_commit_group(payload, unresolved_commit_group)
+    if commit_group_load_error is not None:
+        payload["commit_group_load_error"] = commit_group_load_error
     reply_state_preserver = _ReplyStatePreserver(
         state_path=state_path,
         event_path=event_path,
@@ -9857,6 +11409,14 @@ def _run_locked(
             "mailbox_enabled": mailbox_enabled,
             "counts": payload["initial_snapshot"]["counts"],
             "next_pending": payload["initial_snapshot"]["next_pending"],
+            **(
+                {
+                    "cwd": str(cwd),
+                    **_workspace_payload_fields(verification_context),
+                }
+                if verification_context.workspace is not None
+                else {}
+            ),
         },
     )
     persistence.write_state(payload)
@@ -9879,6 +11439,86 @@ def _run_locked(
         )
         _finish_run(event_path, payload, progress, persistence=persistence)
         return finish_run_locked(1, payload)
+
+    if commit_group_load_error is not None:
+        with persistence.lock:
+            payload["final_snapshot"] = _snapshot_payload(snapshot)
+        _pause_run(
+            event_path,
+            payload,
+            reason="commit-failed",
+            message="durable commit-group evidence could not be reconstructed",
+            details={"error": commit_group_load_error},
+            persistence=persistence,
+        )
+        _finish_run(event_path, payload, progress, persistence=persistence)
+        return finish_run_locked(1, payload)
+
+    if unresolved_commit_group is not None and args.dry_run:
+        with persistence.lock:
+            payload["commit_group_recovery"] = {
+                "group_id": unresolved_commit_group.get("group_id"),
+                "success": False,
+                "pending": True,
+                "error": None,
+                "group": unresolved_commit_group,
+            }
+    elif unresolved_commit_group is not None:
+        try:
+            _validate_spec_available()
+            recovery_targets = _resolve_recovered_commit_targets(
+                unresolved_commit_group,
+                verification_context,
+            )
+            recovered_group, failed_commit = _run_commit_group(
+                event_path=event_path,
+                payload=payload,
+                progress=progress,
+                verification_context=verification_context,
+                run_dir=run_dir,
+                run_id=run_id,
+                session_id=(
+                    str(unresolved_commit_group["session_id"])
+                    if unresolved_commit_group.get("session_id") is not None
+                    else None
+                ),
+                targets=recovery_targets,
+                recovered_group=unresolved_commit_group,
+                persistence=persistence,
+            )
+        except (RunError, commit_groups.CommitGroupError) as error:
+            recovered_group = dict(unresolved_commit_group)
+            failed_commit = None
+            recovery_error = str(error)
+        else:
+            recovery_error = None
+        with persistence.lock:
+            payload["commit_group_recovery"] = {
+                "group_id": unresolved_commit_group.get("group_id"),
+                "success": recovery_error is None and failed_commit is None,
+                "error": recovery_error,
+                "group": recovered_group,
+            }
+        if recovery_error is not None or failed_commit is not None:
+            with persistence.lock:
+                payload["final_snapshot"] = _snapshot_payload(snapshot)
+            _pause_run(
+                event_path,
+                payload,
+                reason="commit-failed",
+                message=(
+                    "unresolved auto-commit group could not be completed "
+                    "before the next session"
+                ),
+                details={
+                    "commit_group": recovered_group,
+                    "commit": failed_commit,
+                    "error": recovery_error,
+                },
+                persistence=persistence,
+            )
+            _finish_run(event_path, payload, progress, persistence=persistence)
+            return finish_run_locked(1, payload)
 
     review_requested = getattr(args, "review_harness", None) is not None
     max_review_fix_cycles = _max_review_fix_cycles(args)
@@ -9945,9 +11585,33 @@ def _run_locked(
                 reply_text=reply_text,
                 reply_context=reply_context,
                 reply_origin=reply_origin,
+                verification_context=verification_context,
             )
         _finish_run(event_path, payload, progress, persistence=persistence)
         return finish_run_locked(0, payload)
+
+    if (
+        verification_context.workspace is not None
+        and not MULTI_REPO_IMPLEMENTATION_TURNS_ENABLED
+    ):
+        with persistence.lock:
+            payload["final_snapshot"] = _snapshot_payload(snapshot)
+        _pause_run(
+            event_path,
+            payload,
+            reason=MULTI_REPO_CAPABILITY_PAUSE_REASON,
+            message=(
+                "multi-repository harness turns are disabled until the "
+                "authoritative workspace write guard is installed"
+            ),
+            details={
+                "workspace_root": str(verification_context.root),
+                "registry_digest": verification_context.registry_digest,
+            },
+            persistence=persistence,
+        )
+        _finish_run(event_path, payload, progress, persistence=persistence)
+        return finish_run_locked(1, payload)
 
     if (
         review_resume is not None
@@ -10039,6 +11703,38 @@ def _run_locked(
         if preflight_report.readiness is not None:
             payload["readiness_state_initial"] = preflight_report.readiness.state
 
+    initial_workspace_scope_repair = (
+        _latest_workspace_scope_repair_requirement(
+            event_path, snapshot.next_pending.id
+        )
+        if verification_context.workspace is not None
+        and snapshot.next_pending is not None
+        else None
+    )
+    if initial_workspace_scope_repair is not None and not gate_passed:
+        session_id = snapshot.next_pending.id
+        details = {
+            **_session_details_payload(session_id),
+            "readiness_gate": gate_payload,
+            "workspace_write_guard": initial_workspace_scope_repair,
+        }
+        with persistence.lock:
+            payload["final_snapshot"] = _snapshot_payload(snapshot)
+        _pause_run(
+            event_path,
+            payload,
+            reason=events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+            message=(
+                f"{_session_label(session_id)} has retained out-of-scope "
+                "changes; repair its durable repository scope and rerun "
+                "expansion plus preflight before continuing"
+            ),
+            details=details,
+            persistence=persistence,
+        )
+        _finish_run(event_path, payload, progress, persistence=persistence)
+        return finish_run_locked(1, payload)
+
     if (
         not gate_passed
         and not allow_not_loop_ready
@@ -10095,7 +11791,10 @@ def _run_locked(
                 max_sessions=max_sessions,
             )
         if commit_mode is not None:
-            commit_preflight = _validate_commit_preflight(cwd)
+            commit_preflight = _validate_commit_preflight(
+                cwd,
+                verification_context=verification_context,
+            )
             with persistence.lock:
                 payload["commit_preflight"] = commit_preflight
     except RunError as error:
@@ -10242,6 +11941,7 @@ def _run_locked(
         persistence=persistence,
         run_control_lock=run_control_lock,
     )
+    pending_exception_guard: dict[str, Any] | None = None
     try:
         while True:
             pending_session = snapshot.next_pending
@@ -10267,17 +11967,28 @@ def _run_locked(
                     commit_at_end_attempted = True
                     with persistence.lock:
                         payload["final_snapshot"] = _snapshot_payload(snapshot)
-                    commit_payload = _run_auto_commit(
-                        event_path=event_path,
-                        payload=payload,
-                        progress=progress,
-                        cwd=cwd,
-                        run_dir=run_dir,
-                        run_id=run_id,
-                        session_id=None,
-                        persistence=persistence,
-                    )
-                    if not commit_payload["success"]:
+                    try:
+                        end_targets = _registered_end_commit_targets(
+                            verification_context
+                        )
+                        commit_group, failed_commit = _run_commit_group(
+                            event_path=event_path,
+                            payload=payload,
+                            progress=progress,
+                            verification_context=verification_context,
+                            run_dir=run_dir,
+                            run_id=run_id,
+                            session_id=None,
+                            targets=end_targets,
+                            persistence=persistence,
+                        )
+                    except RunError as error:
+                        commit_group = None
+                        failed_commit = None
+                        commit_error = str(error)
+                    else:
+                        commit_error = None
+                    if failed_commit is not None or commit_error is not None:
                         _pause_run(
                             event_path,
                             payload,
@@ -10286,7 +11997,11 @@ def _run_locked(
                                 "final auto-commit failed after all sessions "
                                 "completed"
                             ),
-                            details={"commit": commit_payload},
+                            details={
+                                "commit_group": commit_group,
+                                "commit": failed_commit,
+                                "error": commit_error,
+                            },
                             persistence=persistence,
                         )
                         break
@@ -10584,13 +12299,97 @@ def _run_locked(
                         )
                         break
 
-                    review_delta, review_scope_fallback = (
-                        _compute_review_delta_context(
-                            event_path=event_path,
-                            plan_dir=snapshot.plan_dir,
-                            cwd=cwd,
+                    review_workspace = verification_context.workspace
+                    review_bases: list[dict[str, Any]] = []
+                    if review_workspace is None:
+                        review_delta, review_scope_fallback = (
+                            _compute_review_delta_context(
+                                event_path=event_path,
+                                plan_dir=snapshot.plan_dir,
+                                cwd=cwd,
+                            )
                         )
-                    )
+                    else:
+                        try:
+                            review_base_snapshot = (
+                                _capture_workspace_write_guard_snapshot(
+                                    workspace=review_workspace,
+                                    plan_dir=snapshot.plan_dir,
+                                    exclude=review_guard_excludes,
+                                    include_ignored=(
+                                        review_guard_include_ignored
+                                    ),
+                                )
+                            )
+                        except repository_evidence.RepositoryEvidenceError as error:
+                            unavailable = {
+                                ".": {
+                                    "reason": "workspace-inventory-failed",
+                                    "error": str(error),
+                                }
+                            }
+                        else:
+                            unavailable = _workspace_snapshot_unavailable(
+                                review_base_snapshot,
+                                required_repository_paths=tuple(
+                                    repository.repository.path
+                                    for repository in review_workspace.repositories
+                                ),
+                            )
+                        if unavailable:
+                            unavailable_summary = _workspace_unavailable_summary(
+                                unavailable,
+                                workspace=review_workspace,
+                            )
+                            with persistence.lock:
+                                payload["final_snapshot"] = _snapshot_payload(
+                                    snapshot
+                                )
+                            _pause_run(
+                                event_path,
+                                payload,
+                                reason=(
+                                    events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE
+                                ),
+                                message=(
+                                    "combined workspace review base could not "
+                                    "be captured safely"
+                                    f"{unavailable_summary}"
+                                ),
+                                details={
+                                    "workspace_root": str(review_workspace.root),
+                                    "unavailable": unavailable,
+                                },
+                                persistence=persistence,
+                            )
+                            break
+                        try:
+                            review_bases = _workspace_review_bases(
+                                review_workspace, review_base_snapshot
+                            )
+                        except RunError as error:
+                            with persistence.lock:
+                                payload["final_snapshot"] = _snapshot_payload(
+                                    snapshot
+                                )
+                            _pause_run(
+                                event_path,
+                                payload,
+                                reason=(
+                                    events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE
+                                ),
+                                message=str(error),
+                                details={"error": str(error)},
+                                persistence=persistence,
+                            )
+                            break
+                        review_delta, review_scope_fallback = (
+                            _compute_registered_review_delta_context(
+                                event_path=event_path,
+                                plan_dir=snapshot.plan_dir,
+                                workspace=review_workspace,
+                            )
+                        )
                     review_scope = (
                         review_delta["mode"]
                         if review_delta is not None
@@ -10606,6 +12405,8 @@ def _run_locked(
                             snapshot.plan_dir,
                             review_harness=args.review_harness,
                             delta=review_delta,
+                            workspace=review_workspace,
+                            review_bases=review_bases,
                         )
                     except (plans.PlanError, OSError) as error:
                         with persistence.lock:
@@ -10636,6 +12437,16 @@ def _run_locked(
                                 "session_id": review_file.session_id.value,
                                 "scope": review_scope,
                                 "base_sha": review_base_sha,
+                                **(
+                                    {
+                                        "repositories": review_delta.get(
+                                            "repositories"
+                                        )
+                                    }
+                                    if review_delta is not None
+                                    and "repositories" in review_delta
+                                    else {}
+                                ),
                                 "fallback_reason": review_scope_fallback,
                                 "refreshed": False,
                             },
@@ -10657,6 +12468,11 @@ def _run_locked(
                                 ),
                                 "review_scope": review_scope,
                                 "review_base_sha": review_base_sha,
+                                **(
+                                    {"repositories": review_bases}
+                                    if review_workspace is not None
+                                    else {}
+                                ),
                             },
                         )
                     try:
@@ -10702,6 +12518,9 @@ def _run_locked(
             is_review_session = is_generated_review_session_file(
                 pending_session.path
             )
+            prepared_review_workspace_snapshot: (
+                repository_evidence.WorkspaceSnapshot | None
+            ) = None
             if is_review_session:
                 try:
                     rescoped = _refresh_pending_review_scope(
@@ -10709,10 +12528,57 @@ def _run_locked(
                         event_path=event_path,
                         plan_dir=snapshot.plan_dir,
                         cwd=cwd,
+                        workspace=verification_context.workspace,
                         run_id=run_id,
                         persistence=persistence,
                     )
-                    if rescoped:
+                    review_workspace = verification_context.workspace
+                    base_refreshed = False
+                    if review_workspace is not None:
+                        try:
+                            prepared_review_workspace_snapshot = (
+                                _capture_workspace_write_guard_snapshot(
+                                    workspace=review_workspace,
+                                    plan_dir=snapshot.plan_dir,
+                                    exclude=review_guard_excludes,
+                                    include_ignored=(
+                                        review_guard_include_ignored
+                                    ),
+                                )
+                            )
+                        except repository_evidence.RepositoryEvidenceError as error:
+                            raise plans.PlanError(
+                                "combined workspace review base inventory "
+                                f"failed: {error}"
+                            ) from error
+                        unavailable = _workspace_snapshot_unavailable(
+                            prepared_review_workspace_snapshot,
+                            required_repository_paths=tuple(
+                                repository.repository.path
+                                for repository in review_workspace.repositories
+                            ),
+                        )
+                        if unavailable:
+                            raise plans.PlanError(
+                                "combined workspace review base is unavailable: "
+                                + json.dumps(unavailable, sort_keys=True)
+                            )
+                        review_bases = _workspace_review_bases(
+                            review_workspace,
+                            prepared_review_workspace_snapshot,
+                        )
+                        review_text = pending_session.path.read_text(
+                            encoding="utf-8"
+                        )
+                        refreshed_text = refreshed_review_repository_base(
+                            review_text, review_workspace, review_bases
+                        )
+                        if refreshed_text != review_text:
+                            pending_session.path.write_text(
+                                refreshed_text, encoding="utf-8"
+                            )
+                            base_refreshed = True
+                    if rescoped or base_refreshed:
                         _refresh_active_readiness_state(
                             payload, snapshot.plan_dir, persistence
                         )
@@ -10855,6 +12721,17 @@ def _run_locked(
                 plan_dir=before.plan_dir,
                 state_dir_arg=args.state_dir,
             )
+            workspace = verification_context.workspace
+            session_scope = (
+                _session_scope(pending_session, workspace)
+                if workspace is not None
+                else None
+            )
+            pending_workspace_scope_repair = (
+                _latest_workspace_scope_repair_requirement(event_path, session_id)
+                if workspace is not None
+                else None
+            )
             turn_reply = pending_reply
             turn_resolution = pending_resolution
             if turn_reply is not None and turn_resolution is not None:
@@ -10876,6 +12753,8 @@ def _run_locked(
                         mailbox_enabled=mailbox_enabled,
                         state_dir=args.state_dir,
                         pending_guidance=pending_guidance,
+                        workspace=workspace,
+                        session_scope=session_scope,
                     )
                 else:
                     prompt = build_task_packet(
@@ -10891,6 +12770,8 @@ def _run_locked(
                         mailbox_enabled=mailbox_enabled,
                         state_dir=args.state_dir,
                         pending_guidance=pending_guidance,
+                        workspace=workspace,
+                        session_scope=session_scope,
                     ).render()
                 prompt_kind = "reply"
                 reply_source_meta: dict[str, Any] | None = {
@@ -10928,6 +12809,8 @@ def _run_locked(
                         mailbox_enabled=mailbox_enabled,
                         state_dir=args.state_dir,
                         pending_guidance=pending_guidance,
+                        workspace=workspace,
+                        session_scope=session_scope,
                     )
                 else:
                     prompt = build_task_packet(
@@ -10944,6 +12827,8 @@ def _run_locked(
                         mailbox_enabled=mailbox_enabled,
                         state_dir=args.state_dir,
                         pending_guidance=pending_guidance,
+                        workspace=workspace,
+                        session_scope=session_scope,
                     ).render()
                 prompt_kind = "resolution"
                 reply_source_meta = None
@@ -10962,6 +12847,8 @@ def _run_locked(
                         mailbox_enabled=mailbox_enabled,
                         state_dir=args.state_dir,
                         pending_guidance=pending_guidance,
+                        workspace=workspace,
+                        session_scope=session_scope,
                     )
                 else:
                     prompt = build_task_packet(
@@ -10975,6 +12862,8 @@ def _run_locked(
                         mailbox_enabled=mailbox_enabled,
                         state_dir=args.state_dir,
                         pending_guidance=pending_guidance,
+                        workspace=workspace,
+                        session_scope=session_scope,
                     ).render()
                 prompt_kind = "session"
                 reply_source_meta = None
@@ -11026,6 +12915,14 @@ def _run_locked(
                 "action_required": None,
                 "prompt_kind": prompt_kind,
                 "reply_source": reply_source_meta,
+                **(
+                    {
+                        "cwd": str(cwd),
+                        **_workspace_payload_fields(verification_context),
+                    }
+                    if verification_context.workspace is not None
+                    else {}
+                ),
             }
             if resolution_source_meta is not None:
                 active_turn["resolution_source"] = resolution_source_meta
@@ -11050,6 +12947,186 @@ def _run_locked(
                 run_control_context = dict(active_turn)
             # Captured before the reply is consumed and before `turn_started`:
             # an unusable guard has to stop the run without spending the turn.
+            workspace_snapshot_before: (
+                repository_evidence.WorkspaceSnapshot | None
+            ) = None
+            if workspace is not None:
+                assert session_scope is not None
+                if is_review_session and prepared_review_workspace_snapshot is not None:
+                    workspace_snapshot_before = (
+                        prepared_review_workspace_snapshot
+                    )
+                    unavailable = _workspace_snapshot_unavailable(
+                        workspace_snapshot_before,
+                        required_repository_paths=tuple(
+                            repository.repository.path
+                            for repository in workspace.repositories
+                        ),
+                    )
+                else:
+                    try:
+                        workspace_snapshot_before = (
+                            _capture_workspace_write_guard_snapshot(
+                                workspace=workspace,
+                                plan_dir=before.plan_dir,
+                                exclude=review_guard_excludes,
+                                include_ignored=review_guard_include_ignored,
+                            )
+                        )
+                    except repository_evidence.RepositoryEvidenceError as error:
+                        unavailable = {
+                            ".": {
+                                "reason": "workspace-inventory-failed",
+                                "error": str(error),
+                            }
+                        }
+                    else:
+                        unavailable = _workspace_snapshot_unavailable(
+                            workspace_snapshot_before,
+                            required_repository_paths=tuple(
+                                repository.repository.path
+                                for repository in workspace.repositories
+                            ),
+                        )
+                if unavailable:
+                    unavailable_summary = _workspace_unavailable_summary(
+                        unavailable,
+                        workspace=workspace,
+                    )
+                    guard_record = {
+                        "passed": False,
+                        "reason": (
+                            events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE
+                        ),
+                        "phase": "before",
+                        "unavailable": unavailable,
+                        "read_aliases": list(session_scope.reads),
+                        "write_aliases": list(session_scope.writes),
+                        "excluded": list(review_guard_excludes),
+                        "include_ignored": review_guard_include_ignored,
+                    }
+                    with persistence.lock:
+                        payload["final_snapshot"] = _snapshot_payload(before)
+                    _pause_run(
+                        event_path,
+                        payload,
+                        reason=(
+                            events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE
+                        ),
+                        message=(
+                            "workspace write guard unavailable before "
+                            f"{session_label}; repository evidence could not "
+                            f"be captured safely{unavailable_summary}"
+                        ),
+                        details={
+                            **session_details,
+                            "workspace_write_guard": guard_record,
+                        },
+                        persistence=persistence,
+                    )
+                    break
+                if (
+                    pending_workspace_scope_repair is not None
+                    and pending_workspace_scope_repair.get("session_id")
+                    == session_id
+                ):
+                    prior_snapshot = pending_workspace_scope_repair.get(
+                        "snapshot_before"
+                    )
+                    if isinstance(prior_snapshot, Mapping):
+                        repair_comparison = (
+                            repository_evidence.compare_workspace_snapshots(
+                                prior_snapshot, workspace_snapshot_before
+                            )
+                        )
+                        repair_evidence = _workspace_write_guard_evidence(
+                            workspace=workspace,
+                            scope=session_scope,
+                            comparison=repair_comparison,
+                            exclude=review_guard_excludes,
+                            include_ignored=review_guard_include_ignored,
+                        )
+                    else:
+                        repair_evidence = {
+                            "passed": False,
+                            "unavailable": {
+                                ".": {
+                                    "reason": "repair-baseline-missing"
+                                }
+                            },
+                            "violations": [],
+                        }
+                    current_expansion = _session_expansion_evidence(
+                        before.plan_dir, session_id
+                    )
+                    prior_expansion = pending_workspace_scope_repair.get(
+                        "expansion_before_repair"
+                    )
+                    expansion_fresh = (
+                        isinstance(prior_expansion, Mapping)
+                        and _workspace_scope_repair_is_fresh(
+                            prior_expansion, current_expansion
+                        )
+                    )
+                    if not repair_evidence["passed"] or not expansion_fresh:
+                        repair_record = {
+                            **pending_workspace_scope_repair,
+                            "phase": "repair-check",
+                            "current_scope_evidence": repair_evidence,
+                            "current_expansion": current_expansion,
+                            "expansion_fresh": expansion_fresh,
+                        }
+                        with persistence.lock:
+                            payload["final_snapshot"] = _snapshot_payload(before)
+                        _pause_run(
+                            event_path,
+                            payload,
+                            reason=(
+                                events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION
+                            ),
+                            message=(
+                                f"{session_label} still has retained changes "
+                                "outside its durable write scope or lacks a "
+                                "fresh expansion; repair scope and rerun "
+                                "expansion/preflight before continuing"
+                            ),
+                            details={
+                                **session_details,
+                                "workspace_write_guard": repair_record,
+                            },
+                            persistence=persistence,
+                        )
+                        break
+                    persistence.append_event(
+                        event_path,
+                        events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT,
+                        {
+                            "run_id": run_id,
+                            "details": {
+                                **session_details,
+                                "session_id": session_id,
+                                "workspace_write_guard": repair_evidence,
+                                "expansion": current_expansion,
+                            },
+                        },
+                    )
+            if workspace is not None:
+                assert session_scope is not None
+                assert workspace_snapshot_before is not None
+                pending_exception_guard = {
+                    "workspace": workspace,
+                    "scope": session_scope,
+                    "before": before,
+                    "after": None,
+                    "snapshot_before": workspace_snapshot_before,
+                    "session_id": session_id,
+                    "session_label": session_label,
+                    "session_details": session_details,
+                    "turn_payload": None,
+                    "active_turn": active_turn,
+                    "live_turn": live_turn,
+                    "paths": paths,
+                }
             review_fingerprint_before: dict[str, Any] | None = (
                 _capture_review_repo_fingerprint(
                     cwd,
@@ -11057,7 +13134,7 @@ def _run_locked(
                     exclude=review_guard_excludes,
                     include_ignored=review_guard_include_ignored,
                 )
-                if is_review_session
+                if is_review_session and workspace is None
                 else None
             )
             if review_fingerprint_before is not None:
@@ -11205,6 +13282,8 @@ def _run_locked(
             except plans.PlanError as error:
                 after = None
                 plan_error = str(error)
+            if pending_exception_guard is not None:
+                pending_exception_guard["after"] = after
             turn_payload = _write_turn_artifacts(
                 paths=paths,
                 result=result,
@@ -11221,6 +13300,8 @@ def _run_locked(
                     else None
                 ),
             )
+            if pending_exception_guard is not None:
+                pending_exception_guard["turn_payload"] = turn_payload
             with persistence.lock:
                 payload["turns"].append(turn_payload)
                 persistence.append_event(event_path, "turn_finished", turn_payload)
@@ -11242,8 +13323,55 @@ def _run_locked(
             )
 
             # Ahead of every result branch: a retryable pause (timeout,
-            # transport failure) would otherwise relaunch the review against
-            # its own mutation and adopt it as the new baseline.
+            # transport failure) would otherwise relaunch against the turn's
+            # own mutation and adopt it as the new baseline.
+            if workspace is not None:
+                assert session_scope is not None
+                assert workspace_snapshot_before is not None
+                pending_exception_guard = None
+                if _enforce_workspace_write_guard(
+                    event_path=event_path,
+                    payload=payload,
+                    persistence=persistence,
+                    workspace=workspace,
+                    scope=session_scope,
+                    before=before,
+                    after=after,
+                    snapshot_before=workspace_snapshot_before,
+                    exclude=review_guard_excludes,
+                    include_ignored=review_guard_include_ignored,
+                    session_id=session_id,
+                    session_label=session_label,
+                    session_details=session_details,
+                    turn_payload=turn_payload,
+                    paths=paths,
+                    plan_cache=plan_cache,
+                ):
+                    break
+                if is_review_session:
+                    try:
+                        review_bases = _workspace_review_bases(
+                            workspace, workspace_snapshot_before
+                        )
+                    except RunError as error:
+                        with persistence.lock:
+                            payload["final_snapshot"] = (
+                                _snapshot_payload(after)
+                                if after is not None
+                                else _snapshot_payload(before)
+                            )
+                        _pause_run(
+                            event_path,
+                            payload,
+                            reason=events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,
+                            message=str(error),
+                            details={**session_details, "error": str(error)},
+                            persistence=persistence,
+                        )
+                        break
+                    with persistence.lock:
+                        turn_payload["review_repository_bases"] = review_bases
+                        _write_json_file(paths["result"], turn_payload)
             if is_review_session and review_fingerprint_before is not None:
                 if _enforce_review_mutation_guard(
                     event_path=event_path,
@@ -11704,6 +13832,11 @@ def _run_locked(
                 run_id=run_id,
                 turn_index=turn_index,
                 total_sessions=total_sessions,
+                verification_context=(
+                    verification_context
+                    if verification_context.workspace is not None
+                    else None
+                ),
             ):
                 break
 
@@ -11826,17 +13959,33 @@ def _run_locked(
             _refresh_active_readiness_state(payload, after.plan_dir, persistence)
 
             if not is_review_session and commit_mode == COMMIT_MODE_PER_SESSION:
-                commit_payload = _run_auto_commit(
-                    event_path=event_path,
-                    payload=payload,
-                    progress=progress,
-                    cwd=cwd,
-                    run_dir=run_dir,
-                    run_id=run_id,
-                    session_id=session_id,
-                    persistence=persistence,
-                )
-                if not commit_payload["success"]:
+                try:
+                    session_targets = (
+                        _registered_session_commit_targets(
+                            verification_context,
+                            turn_payload.get("workspace_write_guard", {}),
+                        )
+                        if verification_context.workspace is not None
+                        else _commit_targets(verification_context)
+                    )
+                    commit_group, failed_commit = _run_commit_group(
+                        event_path=event_path,
+                        payload=payload,
+                        progress=progress,
+                        verification_context=verification_context,
+                        run_dir=run_dir,
+                        run_id=run_id,
+                        session_id=session_id,
+                        targets=session_targets,
+                        persistence=persistence,
+                    )
+                except RunError as error:
+                    commit_group = None
+                    failed_commit = None
+                    commit_error = str(error)
+                else:
+                    commit_error = None
+                if failed_commit is not None or commit_error is not None:
                     with persistence.lock:
                         payload["final_snapshot"] = _snapshot_payload(after)
                     _pause_run(
@@ -11849,7 +13998,9 @@ def _run_locked(
                         ),
                         details={
                             **session_details,
-                            "commit": commit_payload,
+                            "commit_group": commit_group,
+                            "commit": failed_commit,
+                            "error": commit_error,
                         },
                         persistence=persistence,
                     )
@@ -11944,16 +14095,80 @@ def _run_locked(
             if stop_now:
                 break
 
-    except KeyboardInterrupt:
-        if not payload.get("paused"):
-            _pause_run(
-                event_path,
-                payload,
-                reason="interrupted",
-                message="run interrupted by user",
-                details=dict(last_session_details),
-                persistence=persistence,
-            )
+    except BaseException as error:
+        guard_context = pending_exception_guard
+        pending_exception_guard = None
+        if guard_context is not None:
+            live_turn = guard_context["live_turn"]
+            live_turn.stop()
+            finished_at = _utc_now()
+            live_turn_payload = live_turn.finish(finished_at)
+            with run_control_lock:
+                run_control_context = None
+
+            after = guard_context.get("after")
+            if after is None:
+                try:
+                    after = plan_cache.get_fresh(snapshot.plan_dir)
+                except Exception:
+                    after = None
+            turn_payload = guard_context.get("turn_payload")
+            if not isinstance(turn_payload, dict):
+                turn_payload = {
+                    **live_turn_payload,
+                    "run_id": run_id,
+                    "turn_index": live_turn_payload.get("turn_index"),
+                    **_session_identity_payload(
+                        str(guard_context["session_id"])
+                    ),
+                    "status_result": "exception",
+                    "exception": {
+                        "type": type(error).__name__,
+                        "message": str(error),
+                    },
+                    "before": _snapshot_payload(guard_context["before"]),
+                    "after": (
+                        _snapshot_payload(after) if after is not None else None
+                    ),
+                }
+            try:
+                _enforce_workspace_write_guard(
+                    event_path=event_path,
+                    payload=payload,
+                    persistence=persistence,
+                    workspace=guard_context["workspace"],
+                    scope=guard_context["scope"],
+                    before=guard_context["before"],
+                    after=after,
+                    snapshot_before=guard_context["snapshot_before"],
+                    exclude=review_guard_excludes,
+                    include_ignored=review_guard_include_ignored,
+                    session_id=str(guard_context["session_id"]),
+                    session_label=str(guard_context["session_label"]),
+                    session_details=guard_context["session_details"],
+                    turn_payload=turn_payload,
+                    paths=guard_context["paths"],
+                    plan_cache=plan_cache,
+                )
+            except Exception as guard_error:
+                error.add_note(
+                    "post-turn workspace write guard failed while handling "
+                    f"the exception: {guard_error}"
+                )
+        if isinstance(error, KeyboardInterrupt):
+            if not payload.get("paused"):
+                _pause_run(
+                    event_path,
+                    payload,
+                    reason="interrupted",
+                    message="run interrupted by user",
+                    details=dict(last_session_details),
+                    persistence=persistence,
+                )
+        else:
+            run_controls.stop()
+            inline_tail.stop()
+            raise
 
     if review_requested:
         # An ordinary repair child can change pending/completed membership
@@ -12043,6 +14258,7 @@ def _error_payload(
         commit_mode=_commit_mode_payload(args),
         note=getattr(args, "note", None),
         commits=[],
+        commit_groups=[],
         plan_dir=plan_dir,
         cwd=str(cwd) if cwd is not None else str(getattr(args, "cwd", "")),
         harness=getattr(args, "harness", None),
@@ -12075,6 +14291,34 @@ def _error_payload(
         )
         payload["initial_snapshot"] = _snapshot_payload(snapshot)
         payload["final_snapshot"] = _snapshot_payload(snapshot)
+        try:
+            registry = plans.read_repository_registry(snapshot.plan_dir)
+            metadata = plans.load_plan_metadata(snapshot.plan_dir)
+        except plans.PlanError:
+            registry = None
+            metadata = None
+        if registry is not None and isinstance(metadata, plans.WorkspacePlanMetadata):
+            workspace_root = plans.canonicalize_path(metadata.workspace_root)
+            payload.update(
+                {
+                    "cwd": str(workspace_root),
+                    "workspace_root": str(workspace_root),
+                    "registry_digest": metadata.registry_digest,
+                    "repositories": [
+                        {
+                            "alias": repository.alias,
+                            "path": repository.path,
+                            "origin": repository.origin,
+                            "resolved_root": str(
+                                plans.canonicalize_path(
+                                    workspace_root / repository.path
+                                )
+                            ),
+                        }
+                        for repository in registry.repositories
+                    ],
+                }
+            )
     return payload
 
 
@@ -12097,10 +14341,13 @@ def _commit_scope_label(commit: dict[str, Any]) -> str:
     scope = commit.get("scope")
     session = commit.get("session_id") or commit.get("session")
     if scope == "session" and session is not None:
-        return f"session {session}"
-    if scope == "end":
-        return "end"
-    return str(scope or "unknown")
+        label = f"session {session}"
+    elif scope == "end":
+        label = "end"
+    else:
+        label = str(scope or "unknown")
+    alias = commit.get("repository_alias") or commit.get("repo")
+    return f"{label}, repository {alias}" if alias else label
 
 
 def _print_commit_outcome_lines(payload: dict[str, Any]) -> None:
@@ -12130,6 +14377,20 @@ def _last_commit(payload: dict[str, Any]) -> dict[str, Any] | None:
 
 def _print_text_outcome(payload: dict[str, Any]) -> None:
     print(f"Plan: {payload['plan_dir']}")
+    workspace_root = payload.get("workspace_root")
+    if workspace_root is not None:
+        print(f"Workspace root: {workspace_root}")
+        repositories = payload.get("repositories")
+        if isinstance(repositories, list):
+            visible, omitted = workspaces.bounded_repository_rows(repositories)
+            aliases = [
+                str(row.get("alias"))
+                for row in visible
+                if isinstance(row, Mapping) and row.get("alias")
+            ]
+            if aliases:
+                suffix = f" (+{omitted} more)" if omitted else ""
+                print(f"Repositories: {', '.join(aliases)}{suffix}")
     if payload.get("harness") is not None:
         print(f"Harness: {payload['harness']}")
         _print_model_effort_lines(payload)
@@ -12165,12 +14426,47 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
     for session_number in payload["completed_sessions"]:
         print(f"Completed session {session_number}")
     _print_commit_outcome_lines(payload)
+    commit_groups_payload = payload.get("commit_groups")
+    if isinstance(commit_groups_payload, list):
+        unresolved = [
+            group
+            for group in commit_groups_payload
+            if isinstance(group, Mapping) and group.get("status") != "complete"
+        ]
+        for group in unresolved[:3]:
+            successful = group.get("successful_repositories")
+            partial = [
+                f"{row.get('alias') or row.get('key')}={row.get('commit_sha')}"
+                for row in successful
+                if isinstance(row, Mapping) and row.get("commit_sha")
+            ] if isinstance(successful, list) else []
+            print(
+                "Pending commit group: "
+                f"failed {group.get('failed_alias') or 'none'}; "
+                f"remaining {', '.join(group.get('remaining_aliases') or []) or 'none'}; "
+                f"partial SHAs {', '.join(partial) or 'none'}"
+            )
+        if len(unresolved) > 3:
+            print(f"Pending commit groups: +{len(unresolved) - 3} more")
 
     if not payload["ok"]:
         if payload.get("paused"):
             print(f"Run paused: {payload['pause_reason']}", file=sys.stderr)
             if payload.get("pause_message"):
                 print(f"Pause detail: {payload['pause_message']}", file=sys.stderr)
+            details = payload.get("pause_details") or payload.get("details")
+            guard = (
+                details.get("workspace_write_guard")
+                if isinstance(details, Mapping)
+                else None
+            )
+            if isinstance(guard, Mapping):
+                violations = guard.get("violations")
+                unavailable = guard.get("unavailable")
+                if violations:
+                    print("Workspace scope violations retained; edit durable scope and rerun expansion/preflight.", file=sys.stderr)
+                if unavailable:
+                    print("Repository evidence unavailable; repair Git evidence before retrying.", file=sys.stderr)
         else:
             print(f"Run failed: {payload['reason']}", file=sys.stderr)
         if payload["turns"]:
@@ -12378,6 +14674,10 @@ def _apply_resume_config(
             ),
         )
     explicit = _explicit_resume_dests(run_argv)
+    args._resume_workspace_config = {
+        key: run_config.get(key)
+        for key in ("workspace_root", "registry_digest", "repositories")
+    }
     for dest in _RESUME_OVERLAY_DESTS:
         if dest in explicit or dest not in run_config:
             continue
@@ -12481,6 +14781,24 @@ def run_from_args(
         _emit_run_payload(args, payload)
         return 1
 
+    try:
+        verification_context = _resolve_run_verification_context(
+            initial_snapshot.plan_dir,
+            cwd,
+        )
+        _validate_resume_workspace_binding(args, verification_context)
+    except plans.PlanError as error:
+        payload = _error_payload(
+            args,
+            reason="workspace-error",
+            message=str(error),
+            paused=True,
+            cwd=cwd,
+            snapshot=initial_snapshot,
+        )
+        _emit_run_payload(args, payload)
+        return 1
+
     run_id = _utc_run_id()
     try:
         lock_info = state.acquire_lock(initial_snapshot.plan_dir, args.state_dir)
@@ -12501,7 +14819,8 @@ def run_from_args(
         try:
             exit_code, payload = _run_locked(
                 args=args,
-                cwd=cwd,
+                cwd=verification_context.root,
+                verification_context=verification_context,
                 timeout=timeout,
                 max_sessions=max_sessions,
                 commit_mode=commit_mode,
@@ -12583,13 +14902,89 @@ def doctor_from_args(args: argparse.Namespace) -> int:
         return _print_doctor_error(args, reason="input-error", error=error)
 
     try:
-        snapshot = plans.inspect_plan(args.plan_dir)
+        repository_registry = plans.read_repository_registry(args.plan_dir)
+        snapshot = plans.inspect_plan(
+            args.plan_dir,
+            repository_registry=repository_registry,
+        )
     except plans.PlanError as error:
         return _print_doctor_error(
             args,
             reason="malformed-plan",
             error=error,
             cwd=cwd,
+        )
+
+    verification_context = verification.VerificationContext.legacy(cwd)
+    if repository_registry is not None:
+        try:
+            verification_context = verification.VerificationContext.resolved_workspace(
+                workspaces.resolve_workspace(cwd, repository_registry)
+            )
+        except workspaces.WorkspaceError as error:
+            return _print_doctor_error(
+                args,
+                reason="workspace-error",
+                error=error,
+                cwd=cwd,
+                plan_dir=snapshot.plan_dir,
+                details={"registry_digest": repository_registry.digest},
+            )
+        metadata = plans.load_plan_metadata(snapshot.plan_dir)
+        if metadata is not None and (
+            not isinstance(metadata, plans.WorkspacePlanMetadata)
+            or metadata.workspace_root != str(verification_context.root)
+            or metadata.registry_digest != repository_registry.digest
+        ):
+            return _print_doctor_error(
+                args,
+                reason="workspace-error",
+                error=plans.PlanError(
+                    "doctor workspace does not match the prepared workspace binding"
+                ),
+                cwd=cwd,
+                plan_dir=snapshot.plan_dir,
+                details={"registry_digest": repository_registry.digest},
+            )
+
+    prompt_workspace = (
+        verification_context.workspace
+        if snapshot.next_pending is not None
+        else None
+    )
+    prompt_scope = (
+        _session_scope(snapshot.next_pending, prompt_workspace)
+        if snapshot.next_pending is not None and prompt_workspace is not None
+        else None
+    )
+    if (
+        prompt_workspace is not None
+        and prompt_scope is not None
+        and _worker_mode() == WORKER_MODE_PACKET
+    ):
+        assert snapshot.next_pending is not None
+        prompt = build_task_packet(
+            args.harness,
+            snapshot.plan_dir,
+            session_id=snapshot.next_pending.id,
+            predecessor_id=_predecessor_session_id(
+                snapshot, snapshot.next_pending.id
+            ),
+            has_expansion=_session_has_expansion(
+                snapshot.plan_dir, snapshot.next_pending.id
+            ),
+            has_progress=(
+                snapshot.plan_dir / plans.PROGRESS_FILE_NAME
+            ).is_file(),
+            workspace=prompt_workspace,
+            session_scope=prompt_scope,
+        ).render()
+    else:
+        prompt = build_session_prompt(
+            args.harness,
+            snapshot.plan_dir,
+            workspace=prompt_workspace,
+            session_scope=prompt_scope,
         )
 
     try:
@@ -12607,12 +15002,13 @@ def doctor_from_args(args: argparse.Namespace) -> int:
         model_effort = _selected_model_effort_payload(args)
         invocation = build_harness_invocation(
             args.harness,
-            cwd=cwd,
+            cwd=verification_context.root,
             plan_dir=snapshot.plan_dir,
             unsafe_bypass=_unsafe_bypass(args),
             last_message_path=last_message_path,
             model=_requested_model(args, harness=args.harness),
             effort=args.effort,
+            prompt=prompt,
         )
     except config.ConfigError as error:
         return _print_doctor_error(
@@ -12639,8 +15035,22 @@ def doctor_from_args(args: argparse.Namespace) -> int:
             plan_dir=snapshot.plan_dir,
         )
 
-    prompt = build_session_prompt(adapter.name, snapshot.plan_dir)
     if args.json:
+        doctor_fields: dict[str, Any] = {}
+        if verification_context.workspace is not None:
+            doctor_fields = {
+                "workspace_root": str(verification_context.root),
+                "registry_digest": verification_context.registry_digest,
+                "repositories": [
+                    {
+                        "alias": repository.alias,
+                        "path": repository.repository.path,
+                        "origin": repository.origin,
+                        "resolved_root": str(repository.root),
+                    }
+                    for repository in verification_context.workspace.repositories
+                ],
+            }
         responses.print_json(
             responses.success_payload(
                 "doctor",
@@ -12666,8 +15076,10 @@ def doctor_from_args(args: argparse.Namespace) -> int:
                 invocation=_build_invocation_payload(
                     invocation,
                     model_effort=model_effort,
+                    verification_context=verification_context,
                 ),
                 invocation_argv=invocation.argv,
+                **doctor_fields,
             )
         )
         return 0
@@ -12681,7 +15093,21 @@ def doctor_from_args(args: argparse.Namespace) -> int:
     else:
         print("Configured harnesses: none")
     print(f"Executable: {executable_path}")
-    print(f"CWD: {cwd}")
+    if verification_context.workspace is None:
+        print(f"CWD: {cwd}")
+    else:
+        print(f"Workspace root: {cwd}")
+        print("Repositories:")
+        visible, omitted = workspaces.bounded_repository_rows(
+            verification_context.workspace.repositories
+        )
+        for repository in visible:
+            print(
+                f"  {repository.alias}: {repository.repository.path} -> "
+                f"{repository.root} ({repository.origin})"
+            )
+        if omitted:
+            print(f"  ... {omitted} more repositories")
     print(f"Plan: {snapshot.plan_dir}")
     if snapshot.next_pending is None:
         print("Next pending: none")

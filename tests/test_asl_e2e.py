@@ -65,13 +65,18 @@ from agent_session_loop.formatting import (
     format_turn_started_message,
 )
 from tests.support import (
+    DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,
-    write_plan,
-    install_fake_codex,
-    install_fake_harness,
-    init_git_repo,
     _contract_block,
     _write_loop_ready_plan,
+    git_stdout,
+    init_git_repo,
+    init_multi_repo_workspace,
+    install_fake_codex,
+    install_fake_harness,
+    install_fake_spec,
+    read_jsonl,
+    write_plan,
 )
 
 
@@ -835,6 +840,842 @@ class EndToEndQATests(unittest.TestCase):
             self.assertIn(key, verify_payload)
         self.assertEqual("verify", verify_payload["command"])
         self.assertEqual("ok", verify_payload["reason"])
+
+
+class MultiRepositoryEndToEndQATests(unittest.TestCase):
+    """Public-CLI acceptance matrix for a four-repository workspace."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.config_home = self.tmp_path / "config"
+        self.fake_codex = install_fake_codex(self.tmp_path)
+        self.fake_claude = install_fake_harness(self.tmp_path, "claude")
+        install_fake_spec(self.tmp_path)
+        config_path = self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps(
+                {
+                    "codex": {"executable": str(self.fake_codex)},
+                    "claude": {"executable": str(self.fake_claude)},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _env(self, **updates: str) -> dict[str, str]:
+        env = os.environ.copy()
+        env.update(
+            {
+                "XDG_CONFIG_HOME": str(self.config_home),
+                "PATH": str(self.tmp_path) + os.pathsep + env.get("PATH", ""),
+                "PYTHONPATH": str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", ""),
+                "FAKE_CODEX_MODE": "success",
+                **updates,
+            }
+        )
+        return env
+
+    def _cli(
+        self,
+        *args: str,
+        env_updates: dict[str, str] | None = None,
+        timeout: int = 60,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+        completed = subprocess.run(
+            [sys.executable, "-m", "agent_session_loop", *args],
+            cwd=REPO_ROOT,
+            env=self._env(**(env_updates or {})),
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+        payload = json.loads(completed.stdout) if completed.stdout else {}
+        return completed, payload
+
+    @staticmethod
+    def _source_text(*, first_writes: tuple[str, ...]) -> str:
+        registry_rows = "\n".join(
+            f"| {alias} | {path} | {origin} |"
+            for alias, path, origin in DEFAULT_MULTI_REPO_SPECS
+        )
+        aliases = ", ".join(alias for alias, _path, _origin in DEFAULT_MULTI_REPO_SPECS)
+        writes = ", ".join(first_writes) if first_writes else "(none)"
+        return (
+            "# Four Repository E2E Plan\n\n"
+            "Shared public-CLI acceptance context.\n\n"
+            "## Repositories\n\n"
+            "| Alias | Path | Origin |\n"
+            "| --- | --- | --- |\n"
+            f"{registry_rows}\n\n"
+            "## Session 1: Multi-write implementation\n\n"
+            f"**Reads repositories**: {aliases}\n"
+            f"**Writes repositories**: {writes}\n\n"
+            "Exercise qualified paths across the registered workspace.\n\n"
+            "## Session 2: Read-only validation\n\n"
+            f"**Reads repositories**: {aliases}\n"
+            "**Writes repositories**: (none)\n\n"
+            "Validate the completed workspace without mutating repositories.\n"
+        )
+
+    @staticmethod
+    def _contracts() -> dict[str, object]:
+        first_checks: list[dict[str, object]] = []
+        for number, (alias, relative_path, _origin) in enumerate(
+            DEFAULT_MULTI_REPO_SPECS, start=1
+        ):
+            first_checks.append(
+                {
+                    "name": f"repo-cwd-{number}",
+                    "type": "command",
+                    "repo": alias,
+                    "argv": [
+                        sys.executable,
+                        "-c",
+                        (
+                            "from pathlib import Path; "
+                            "raise SystemExit(Path.cwd().name != "
+                            f"{relative_path!r})"
+                        ),
+                    ],
+                    "timeout_seconds": 30,
+                    "baseline_expectation": "pass",
+                }
+            )
+        return {
+            "1": {
+                "done_when": ["All registered command checks pass."],
+                "verify": {"session": "1", "checks": first_checks},
+            },
+            "2": {
+                "done_when": ["Read-only repository evidence is valid."],
+                "verify": {
+                    "session": "2",
+                    "checks": [
+                        {
+                            "name": "kiln-readme",
+                            "type": "file_exists",
+                            "repo": "Kiln",
+                            "path": "README.md",
+                            "baseline_expectation": "pass",
+                        }
+                    ],
+                },
+            },
+        }
+
+    def _validation_payload(self, plan_dir: Path, workspace: Path) -> dict:
+        packet = prepare.build_validation_packet(
+            plan_dir,
+            ("1", "2"),
+            codebase_root=workspace,
+        )
+        sessions = []
+        for session_id, alias in (("1", "SVC"), ("2", "Kiln")):
+            sessions.append(
+                {
+                    "session_id": session_id,
+                    "title": (
+                        "Multi-write implementation"
+                        if session_id == "1"
+                        else "Read-only validation"
+                    ),
+                    "claims": [
+                        {
+                            "claim": "README.md exists",
+                            "claim_type": "P",
+                            "location": "README.md",
+                            "line": 1,
+                            "to_be_created": False,
+                            "repo": alias,
+                        }
+                    ],
+                    "issues": [],
+                    "details": [],
+                    "patterns": [],
+                    "dependencies": [],
+                    "contract_checked": True,
+                    "contract_problems": [],
+                    "corrections": [],
+                }
+            )
+        return {
+            "version": prepare.PREPARE_VALIDATION_VERSION,
+            "workspace_root": str(workspace.resolve()),
+            "repositories": [repo.to_dict() for repo in packet.repositories],
+            "sessions": sessions,
+        }
+
+    def _prepare_case(
+        self,
+        name: str,
+        *,
+        first_writes: tuple[str, ...] = ("SVC", "OAK", "OWL"),
+        dirty_registered: bool = False,
+        dirty_unregistered: bool = False,
+    ) -> tuple[Path, Path, Path, dict[str, Path], Path]:
+        case_dir = self.tmp_path / name
+        case_dir.mkdir()
+        workspace = case_dir / "workspace"
+        repositories = init_multi_repo_workspace(workspace, DEFAULT_MULTI_REPO_SPECS)
+        unregistered = workspace / "unregistered"
+        init_git_repo(unregistered)
+        if dirty_registered:
+            (repositories["OAK"] / "preexisting.txt").write_text(
+                "registered dirty state\n", encoding="utf-8"
+            )
+        if dirty_unregistered:
+            (unregistered / "scratch.txt").write_text(
+                "unregistered dirty state\n", encoding="utf-8"
+            )
+        self.assertFalse((workspace / ".git").exists())
+
+        source = case_dir / "plan.md"
+        source.write_text(
+            self._source_text(first_writes=first_writes), encoding="utf-8"
+        )
+        contracts_path = case_dir / "contracts.json"
+        contracts_path.write_text(json.dumps(self._contracts()), encoding="utf-8")
+        split, split_payload = self._cli(
+            "split",
+            "--plan-file",
+            str(source),
+            "--contracts-file",
+            str(contracts_path),
+            "--base-dir",
+            str(case_dir / "plans"),
+            "--skill-prefix",
+            "codex",
+            "--json",
+        )
+        self.assertEqual(0, split.returncode, split.stderr or split.stdout)
+        self.assertEqual(
+            ["SVC", "OAK", "OWL", "Kiln"],
+            [row["alias"] for row in split_payload["repositories"]],
+        )
+        plan_dir = Path(str(split_payload["output_dir"]))
+
+        batch_path = case_dir / "validation.json"
+        batch_path.write_text(
+            json.dumps(self._validation_payload(plan_dir, workspace)),
+            encoding="utf-8",
+        )
+        ingest, ingest_payload = self._cli(
+            "expand-ingest",
+            str(plan_dir),
+            "--batch-file",
+            str(batch_path),
+            "--json",
+        )
+        self.assertEqual(0, ingest.returncode, ingest.stderr or ingest.stdout)
+        self.assertEqual(["1", "2"], ingest_payload["sessions"])
+
+        state_dir = case_dir / "state"
+        prepared, prepared_payload = self._cli(
+            "prepare",
+            str(plan_dir),
+            "--resume",
+            "--cwd",
+            str(workspace),
+            "--harness",
+            "codex",
+            "--validator-harness",
+            "codex",
+            "--state-dir",
+            str(state_dir),
+            "--json",
+            timeout=120,
+        )
+        self.assertEqual(0, prepared.returncode, prepared.stderr or prepared.stdout)
+        self.assertTrue(prepared_payload["marked_loop_ready"])
+        self.assertTrue((plan_dir / "session-1.expand.md").is_file())
+        self.assertTrue((plan_dir / "session-2.expand.md").is_file())
+        return workspace, plan_dir, state_dir, repositories, unregistered
+
+    def _run_plan(
+        self,
+        plan_dir: Path,
+        workspace: Path,
+        state_dir: Path,
+        *extra: str,
+        env_updates: dict[str, str] | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+        return self._cli(
+            "run",
+            str(plan_dir),
+            "--cwd",
+            str(workspace),
+            "--harness",
+            "codex",
+            "--state-dir",
+            str(state_dir),
+            "--json",
+            *extra,
+            env_updates=env_updates,
+            timeout=120,
+        )
+
+    @staticmethod
+    def _plan_file_bytes(plan_dir: Path) -> dict[str, bytes]:
+        return {
+            path.relative_to(plan_dir).as_posix(): path.read_bytes()
+            for path in sorted(plan_dir.rglob("*"))
+            if path.is_file()
+        }
+
+    def _rebind_plan(
+        self,
+        plan_dir: Path,
+        workspace: Path,
+        state_dir: Path,
+        *,
+        env_updates: dict[str, str] | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+        return self._cli(
+            "prepare",
+            str(plan_dir),
+            "--resume",
+            "--cwd",
+            str(workspace),
+            "--rebind-workspace",
+            "--harness",
+            "codex",
+            "--validator-harness",
+            "codex",
+            "--state-dir",
+            str(state_dir),
+            "--json",
+            env_updates=env_updates,
+            timeout=120,
+        )
+
+    def test_four_repository_public_core_lifecycle(self) -> None:
+        workspace, plan_dir, state_dir, repositories, unregistered = self._prepare_case(
+            "core", dirty_unregistered=True
+        )
+
+        baseline_completed, baseline_payload = self._cli(
+            "baseline",
+            str(plan_dir),
+            "--cwd",
+            str(workspace),
+            "--json",
+        )
+        self.assertEqual(0, baseline_completed.returncode, baseline_completed.stderr)
+        self.assertEqual(5, baseline_payload["check_count"])
+        self.assertEqual(
+            ["SVC", "OAK", "OWL", "Kiln", "Kiln"],
+            [check["repo"] for check in baseline_payload["checks"]],
+        )
+
+        preflight_completed, preflight_payload = self._cli(
+            "preflight",
+            str(plan_dir),
+            "--cwd",
+            str(workspace),
+            "--harness",
+            "codex",
+            "--state-dir",
+            str(state_dir),
+            "--json",
+        )
+        self.assertEqual(0, preflight_completed.returncode, preflight_completed.stderr)
+        self.assertTrue(preflight_payload["ok"])
+
+        dry_completed, dry_payload = self._run_plan(
+            plan_dir, workspace, state_dir, "--dry-run"
+        )
+        self.assertEqual(0, dry_completed.returncode, dry_completed.stderr)
+        self.assertEqual(str(workspace.resolve()), dry_payload["workspace_root"])
+        self.assertIn(
+            "Writable aliases: SVC, OAK, OWL", dry_payload["planned"]["prompt"]
+        )
+
+        mutations = [
+            {
+                "path": str(repositories[alias] / "session-1.txt"),
+                "text": f"{alias}\n",
+            }
+            for alias in ("SVC", "OAK", "OWL")
+        ]
+        run_completed, run_payload = self._run_plan(
+            plan_dir,
+            workspace,
+            state_dir,
+            env_updates={
+                "FAKE_CODEX_MUTATIONS_JSON": json.dumps(mutations),
+                "FAKE_CODEX_HANDOFF_FILES_JSON": json.dumps(
+                    {
+                        "1": [
+                            "SVC:session-1.txt",
+                            "OAK:session-1.txt",
+                            "OWL:session-1.txt",
+                        ],
+                        "2": [],
+                    }
+                ),
+            },
+        )
+        self.assertEqual(
+            0, run_completed.returncode, run_completed.stderr or run_completed.stdout
+        )
+        self.assertEqual("all-complete", run_payload["reason"])
+        self.assertEqual([1, 2], run_payload["completed_sessions"])
+        self.assertTrue(run_payload["turns"][0]["workspace_write_guard"]["passed"])
+        self.assertEqual(
+            ["SVC", "OAK", "OWL"],
+            run_payload["turns"][0]["workspace_write_guard"]["authorized_aliases"],
+        )
+        read_only_guard = run_payload["turns"][1]["workspace_write_guard"]
+        self.assertTrue(read_only_guard["passed"])
+        self.assertEqual([], read_only_guard["write_aliases"])
+        self.assertTrue((unregistered / "scratch.txt").is_file())
+
+        for session_id in ("1", "2"):
+            verified, verify_payload = self._cli(
+                "verify",
+                str(plan_dir),
+                "--session",
+                session_id,
+                "--cwd",
+                str(workspace),
+                "--json",
+            )
+            self.assertEqual(0, verified.returncode, verified.stderr)
+            self.assertTrue(verify_payload["passed"])
+
+    def test_dirty_registered_preflight_and_workspace_guard_matrix(self) -> None:
+        workspace, plan_dir, state_dir, _repositories, unregistered = (
+            self._prepare_case(
+                "dirty-preflight",
+                dirty_registered=True,
+                dirty_unregistered=True,
+            )
+        )
+        clean_mode, clean_payload = self._cli(
+            "preflight",
+            str(plan_dir),
+            "--cwd",
+            str(workspace),
+            "--harness",
+            "codex",
+            "--state-dir",
+            str(state_dir),
+            "--json",
+        )
+        self.assertEqual(0, clean_mode.returncode, clean_mode.stderr)
+        self.assertTrue(clean_payload["ok"])
+
+        commit_mode, commit_payload = self._cli(
+            "preflight",
+            str(plan_dir),
+            "--cwd",
+            str(workspace),
+            "--harness",
+            "codex",
+            "--commit-per-session",
+            "--state-dir",
+            str(state_dir),
+            "--json",
+        )
+        self.assertEqual(1, commit_mode.returncode)
+        dirty_messages = "\n".join(
+            finding["message"]
+            for finding in commit_payload["findings"]
+            if finding["category"] == "env-git"
+        )
+        self.assertIn("OAK", dirty_messages)
+        self.assertNotIn(unregistered.name, dirty_messages)
+
+        mutation_cases = (
+            (
+                "tracked",
+                lambda repos, _workspace, _unregistered: {
+                    "path": str(repos["OAK"] / "README.md"),
+                    "text": "tracked unauthorized\n",
+                },
+                "OAK:README.md",
+            ),
+            (
+                "staged",
+                lambda repos, _workspace, _unregistered: {
+                    "path": str(repos["OAK"] / "staged.txt"),
+                    "action": "stage",
+                },
+                "OAK:staged.txt",
+            ),
+            (
+                "untracked",
+                lambda repos, _workspace, _unregistered: {
+                    "path": str(repos["OAK"] / "untracked.txt"),
+                },
+                "OAK:untracked.txt",
+            ),
+            (
+                "repository-added",
+                lambda _repos, case_workspace, _unregistered: {
+                    "path": str(case_workspace / "surprise"),
+                    "action": "git-init",
+                },
+                "repository-added",
+            ),
+            (
+                "repository-removed",
+                lambda _repos, _workspace, case_unregistered: {
+                    "path": str(case_unregistered),
+                    "action": "rename",
+                    "destination": str(case_unregistered.parent.parent / "retained"),
+                },
+                "repository-removed",
+            ),
+        )
+        for case_name, mutation_factory, expected in mutation_cases:
+            with self.subTest(case=case_name):
+                (
+                    case_workspace,
+                    case_plan,
+                    case_state,
+                    case_repositories,
+                    case_unregistered,
+                ) = self._prepare_case(f"guard-{case_name}", first_writes=("SVC",))
+                mutation = mutation_factory(
+                    case_repositories, case_workspace, case_unregistered
+                )
+                completed, payload = self._run_plan(
+                    case_plan,
+                    case_workspace,
+                    case_state,
+                    "--max-sessions",
+                    "1",
+                    env_updates={"FAKE_CODEX_MUTATIONS_JSON": json.dumps([mutation])},
+                )
+                self.assertEqual(1, completed.returncode, completed.stderr)
+                self.assertEqual(
+                    events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+                    payload["pause_reason"],
+                )
+                guard = payload["turns"][0]["workspace_write_guard"]
+                self.assertFalse(guard["passed"])
+                if expected.startswith("OAK:"):
+                    self.assertEqual(
+                        "read-only-repository", guard["violations"][0]["kind"]
+                    )
+                    self.assertIn(expected, guard["violations"][0]["qualified_paths"])
+                    status = git_stdout(
+                        case_repositories["OAK"], "status", "--porcelain"
+                    )
+                    self.assertIn(Path(str(mutation["path"])).name, status)
+                else:
+                    self.assertEqual(expected, guard["violations"][0]["kind"])
+                    retained = (
+                        Path(str(mutation["path"]))
+                        if expected == "repository-added"
+                        else Path(str(mutation["destination"]))
+                    )
+                    self.assertTrue((retained / ".git").is_dir())
+                self.assertIn(
+                    "- **Status**: pending",
+                    (case_plan / "session-1.md").read_text(encoding="utf-8"),
+                )
+
+    def test_per_session_and_end_commit_modes_use_manifest_order(self) -> None:
+        for commit_flag, scope in (
+            ("--commit-per-session", "session"),
+            ("--commit-at-end", "end"),
+        ):
+            with self.subTest(commit_flag=commit_flag):
+                name = commit_flag.removeprefix("--")
+                workspace, plan_dir, state_dir, repositories, _unregistered = (
+                    self._prepare_case(name)
+                )
+                spec_log = self.tmp_path / f"{name}.jsonl"
+                mutations = [
+                    {
+                        "path": str(repositories[alias] / "committed.txt"),
+                        "text": f"{alias}\n",
+                    }
+                    for alias in ("SVC", "OAK", "OWL")
+                ]
+                completed, payload = self._run_plan(
+                    plan_dir,
+                    workspace,
+                    state_dir,
+                    commit_flag,
+                    env_updates={
+                        "FAKE_CODEX_MUTATIONS_JSON": json.dumps(mutations),
+                        "FAKE_CODEX_HANDOFF_FILES_JSON": json.dumps(
+                            {
+                                "1": [
+                                    "SVC:committed.txt",
+                                    "OAK:committed.txt",
+                                    "OWL:committed.txt",
+                                ],
+                                "2": [],
+                            }
+                        ),
+                        "FAKE_SPEC_LOG": str(spec_log),
+                    },
+                )
+                self.assertEqual(0, completed.returncode, completed.stderr)
+                self.assertEqual(
+                    ["SVC", "OAK", "OWL"],
+                    [commit["repository_alias"] for commit in payload["commits"]],
+                )
+                group = next(
+                    group
+                    for group in payload["commit_groups"]
+                    if group["ordered_aliases"]
+                )
+                self.assertEqual(scope, group["scope"])
+                self.assertEqual(["SVC", "OAK", "OWL"], group["ordered_aliases"])
+                self.assertEqual(
+                    [
+                        str(repositories[alias].resolve())
+                        for alias in ("SVC", "OAK", "OWL")
+                    ],
+                    [record["cwd"] for record in read_jsonl(spec_log)],
+                )
+
+    def test_partial_commit_failure_recovers_in_a_new_process(self) -> None:
+        workspace, plan_dir, state_dir, repositories, _unregistered = (
+            self._prepare_case("partial-commit")
+        )
+        spec_log = self.tmp_path / "partial-commit.jsonl"
+        mutations = [
+            {
+                "path": str(repositories[alias] / "partial.txt"),
+                "text": f"{alias}\n",
+            }
+            for alias in ("SVC", "OAK", "OWL")
+        ]
+        first, first_payload = self._run_plan(
+            plan_dir,
+            workspace,
+            state_dir,
+            "--commit-per-session",
+            env_updates={
+                "FAKE_CODEX_MUTATIONS_JSON": json.dumps(mutations),
+                "FAKE_CODEX_HANDOFF_FILES_JSON": json.dumps(
+                    {
+                        "1": [
+                            "SVC:partial.txt",
+                            "OAK:partial.txt",
+                            "OWL:partial.txt",
+                        ]
+                    }
+                ),
+                "FAKE_SPEC_LOG": str(spec_log),
+                "FAKE_SPEC_FAIL_CWD_BASENAME": repositories["OAK"].name,
+            },
+        )
+        self.assertEqual(1, first.returncode, first.stderr)
+        self.assertEqual("commit-failed", first_payload["pause_reason"])
+        failed_group = first_payload["commit_groups"][0]
+        self.assertEqual("OAK", failed_group["failed_alias"])
+        self.assertEqual(["OAK", "OWL"], failed_group["remaining_aliases"])
+        self.assertEqual(
+            ["SVC"],
+            [row["alias"] for row in failed_group["successful_repositories"]],
+        )
+        svc_head = git_stdout(repositories["SVC"], "rev-parse", "HEAD")
+
+        dry, dry_payload = self._run_plan(
+            plan_dir,
+            workspace,
+            state_dir,
+            "--resume",
+            "--dry-run",
+            env_updates={"FAKE_SPEC_LOG": str(spec_log)},
+        )
+        self.assertEqual(0, dry.returncode, dry.stderr)
+        self.assertTrue(dry_payload["commit_group_recovery"]["pending"])
+
+        resumed, resumed_payload = self._run_plan(
+            plan_dir,
+            workspace,
+            state_dir,
+            "--resume",
+            env_updates={"FAKE_SPEC_LOG": str(spec_log)},
+        )
+        self.assertEqual(0, resumed.returncode, resumed.stderr)
+        self.assertTrue(resumed_payload["commit_group_recovery"]["success"])
+        self.assertEqual(
+            [
+                repositories["SVC"].name,
+                repositories["OAK"].name,
+                repositories["OAK"].name,
+                repositories["OWL"].name,
+            ],
+            [Path(record["cwd"]).name for record in read_jsonl(spec_log)],
+        )
+        self.assertEqual(svc_head, git_stdout(repositories["SVC"], "rev-parse", "HEAD"))
+        for repository in repositories.values():
+            self.assertEqual("", git_stdout(repository, "status", "--porcelain"))
+
+    def test_combined_review_repairs_rereviews_and_rejects_mutation(self) -> None:
+        workspace, plan_dir, state_dir, _repositories, _unregistered = (
+            self._prepare_case("review-cycle")
+        )
+        completed, payload = self._run_plan(
+            plan_dir,
+            workspace,
+            state_dir,
+            "--review-harness",
+            "claude",
+            "--max-review-fix-cycles",
+            "1",
+            env_updates={
+                "FAKE_CODEX_MODE": "success-with-review",
+                "FAKE_CODEX_REVIEW_OUTCOMES": "findings,all-clear",
+                "FAKE_CODEX_HANDOFF_FILES_JSON": json.dumps({"1": [], "2": []}),
+            },
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual(
+            ["1", "2", "3", "3.1", "4"],
+            [turn["session_id"] for turn in payload["turns"]],
+        )
+        self.assertEqual("all-clear", payload["review_fix_disposition"])
+        review_artifact = json.loads(
+            (plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(3, review_artifact["version"])
+        repair_body = (plan_dir / "session-3.1.md").read_text(encoding="utf-8")
+        self.assertIn("**Reads repositories**: SVC, OAK, OWL, Kiln", repair_body)
+        self.assertIn("**Writes repositories**: SVC", repair_body)
+        for session_id in ("3", "3.1", "4"):
+            self.assertTrue(
+                next(
+                    turn["workspace_write_guard"]["passed"]
+                    for turn in payload["turns"]
+                    if turn["session_id"] == session_id
+                )
+            )
+
+        (
+            mutation_workspace,
+            mutation_plan,
+            mutation_state,
+            mutation_repositories,
+            _mutation_unregistered,
+        ) = self._prepare_case("review-mutation")
+        rejected, rejected_payload = self._run_plan(
+            mutation_plan,
+            mutation_workspace,
+            mutation_state,
+            "--review-harness",
+            "claude",
+            "--max-review-fix-cycles",
+            "0",
+            env_updates={
+                "FAKE_CODEX_MODE": "success-with-review",
+                "FAKE_CODEX_REVIEW_OUTCOMES": "all-clear",
+                "FAKE_CODEX_REVIEW_MUTATION_PATH": str(
+                    mutation_repositories["OAK"] / "review-mutation.txt"
+                ),
+                "FAKE_CODEX_HANDOFF_FILES_JSON": json.dumps({"1": [], "2": []}),
+            },
+        )
+        self.assertEqual(1, rejected.returncode, rejected.stderr)
+        self.assertEqual(
+            events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+            rejected_payload["pause_reason"],
+        )
+        rejected_guard = rejected_payload["turns"][-1]["workspace_write_guard"]
+        self.assertFalse(rejected_guard["passed"])
+        self.assertEqual(
+            "read-only-repository", rejected_guard["violations"][0]["kind"]
+        )
+        self.assertIn(
+            "OAK:review-mutation.txt",
+            rejected_guard["violations"][0]["qualified_paths"],
+        )
+        self.assertIn(
+            "- **Status**: pending",
+            (mutation_plan / "session-3.md").read_text(encoding="utf-8"),
+        )
+
+    def test_rebind_transport_equivalence_and_failure_stages_are_atomic(self) -> None:
+        old_workspace, plan_dir, state_dir, _repositories, _unregistered = (
+            self._prepare_case("rebind-source")
+        )
+        before = self._plan_file_bytes(plan_dir)
+
+        wrong_specs = list(DEFAULT_MULTI_REPO_SPECS)
+        alias, relative_path, _origin = wrong_specs[0]
+        wrong_specs[0] = (alias, relative_path, "https://example.com/wrong/repo.git")
+        invalid_workspace = self.tmp_path / "rebind-invalid-origin"
+        init_multi_repo_workspace(invalid_workspace, tuple(wrong_specs))
+        invalid, invalid_payload = self._rebind_plan(
+            plan_dir, invalid_workspace, state_dir
+        )
+        self.assertEqual(1, invalid.returncode, invalid.stderr)
+        self.assertEqual(
+            prepare.PREPARE_STAGE_WORKSPACE,
+            invalid_payload["workspace_rebind"]["failure_stage"],
+        )
+        self.assertEqual(before, self._plan_file_bytes(plan_dir))
+
+        validator_workspace = self.tmp_path / "rebind-validator-failure"
+        init_multi_repo_workspace(validator_workspace, DEFAULT_MULTI_REPO_SPECS)
+        validator_failed, validator_payload = self._rebind_plan(
+            plan_dir,
+            validator_workspace,
+            state_dir,
+            env_updates={"FAKE_CODEX_VALIDATOR_MODE": "failure"},
+        )
+        self.assertEqual(1, validator_failed.returncode, validator_failed.stderr)
+        self.assertEqual(
+            prepare.PREPARE_STAGE_VALIDATION,
+            validator_payload["workspace_rebind"]["failure_stage"],
+        )
+        self.assertEqual(before, self._plan_file_bytes(plan_dir))
+
+        baseline_workspace = self.tmp_path / "rebind-baseline-failure"
+        baseline_repositories = init_multi_repo_workspace(
+            baseline_workspace, DEFAULT_MULTI_REPO_SPECS
+        )
+        (baseline_repositories["Kiln"] / "README.md").unlink()
+        baseline_failed, baseline_payload = self._rebind_plan(
+            plan_dir, baseline_workspace, state_dir
+        )
+        self.assertEqual(1, baseline_failed.returncode, baseline_failed.stderr)
+        self.assertEqual(
+            prepare.PREPARE_STAGE_BASELINE,
+            baseline_payload["workspace_rebind"]["failure_stage"],
+        )
+        self.assertEqual(before, self._plan_file_bytes(plan_dir))
+
+        equivalent_specs = tuple(
+            (
+                alias,
+                relative_path,
+                origin.replace("git@github.com:", "https://github.com/"),
+            )
+            for alias, relative_path, origin in DEFAULT_MULTI_REPO_SPECS
+        )
+        equivalent_workspace = self.tmp_path / "rebind-equivalent"
+        init_multi_repo_workspace(equivalent_workspace, equivalent_specs)
+        rebound, rebound_payload = self._rebind_plan(
+            plan_dir, equivalent_workspace, state_dir
+        )
+        self.assertEqual(0, rebound.returncode, rebound.stderr)
+        rebind = rebound_payload["workspace_rebind"]
+        self.assertEqual(str(old_workspace.resolve()), rebind["old"]["workspace_root"])
+        self.assertEqual(
+            str(equivalent_workspace.resolve()), rebind["new"]["workspace_root"]
+        )
+        self.assertIsNone(rebind["failure_stage"])
+        metadata = plans.load_plan_metadata(plan_dir)
+        self.assertIsInstance(metadata, plans.WorkspacePlanMetadata)
+        self.assertEqual(str(equivalent_workspace.resolve()), metadata.workspace_root)
+        self.assertNotIn("git@", json.dumps(rebind))
 
 
 class VerificationRepairLoopTests(unittest.TestCase):

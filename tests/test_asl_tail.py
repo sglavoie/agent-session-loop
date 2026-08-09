@@ -112,6 +112,41 @@ class TailFollowerTests(unittest.TestCase):
         self.assertIn("attempts 3", message)
         self.assertIn("trace trace-3", message)
 
+    def test_commit_group_preview_bounds_and_coerces_durable_values(self) -> None:
+        remaining = list(range(25))
+        successful = [
+            {"alias": index, "commit_sha": index + 100}
+            for index in range(25)
+        ]
+        payload = {
+            "phase": "updated",
+            "group": {
+                "scope": "end",
+                "remaining_aliases": remaining,
+                "successful_repositories": successful,
+            },
+        }
+
+        message = tail._event_message(
+            events.COMMIT_GROUP_UPDATED_EVENT,
+            payload,
+        )
+
+        self.assertIn(
+            "remaining " + ",".join(str(index) for index in range(20))
+            + " (+5 more)",
+            message,
+        )
+        self.assertIn(
+            "partial SHAs "
+            + ",".join(f"{index}={index + 100}" for index in range(20))
+            + " (+5 more)",
+            message,
+        )
+        self.assertNotIn("20=120", message)
+        self.assertEqual(25, len(payload["group"]["remaining_aliases"]))
+        self.assertEqual(25, len(payload["group"]["successful_repositories"]))
+
     def test_model_control_events_include_target_changes_and_overrides(
         self,
     ) -> None:

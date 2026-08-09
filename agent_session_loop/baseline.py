@@ -6,7 +6,8 @@ BaselineCache` store. This module is the *execution* engine that consumes them:
 it walks a plan's completion contracts, collects the checks that declare a
 non-``skip`` baseline expectation, deduplicates equivalent checks across
 sessions, runs each one under the clamped baseline budget, and records the
-pass/fail/timeout outcome plus the repository fingerprint into the cache.
+pass/fail/timeout outcome plus repository evidence into the cache. Registered
+plans aggregate every declared repository; legacy plans retain one fingerprint.
 
 The recorded evidence is what the preflight readiness gate consults (without
 ever running commands itself) to decide whether a pre-existing broad-suite
@@ -14,10 +15,11 @@ failure should block before implementation. See
 :func:`agent_session_loop.preflight._check_baselines`.
 
 Storage uses a *fingerprint-independent identity key* (recipe + cwd +
-executable + environment, with the repository fingerprint deliberately
-excluded) so a recorded outcome remains findable after the working tree
-changes; the fingerprint captured at record time lives inside the stored
-result, letting preflight distinguish a *missing* baseline from a *stale* one.
+executable + environment, plus a registry digest when present, with repository
+fingerprints deliberately excluded) so a recorded outcome remains findable
+after the working tree changes; the fingerprint captured at record time lives
+inside the stored result, letting preflight distinguish a *missing* baseline
+from a *stale* one.
 
 The module is stdlib-only.
 """
@@ -26,11 +28,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+import hashlib
+import json
 from pathlib import Path
 import sys
 from typing import Any
 
-from . import contracts, plans, responses
+from . import contracts, plans, repository_evidence, responses
 from .baseline_cache import (
     BASELINE_RESULTS_FILENAME,
     BaselineCache,
@@ -43,7 +47,12 @@ from .baseline_cache import (
 )
 from .contracts import CommandCheck, VerificationCheck, VerifyRecipe
 from .plans import PlanError, canonicalize_path
-from .verification import CheckResult, run_check
+from .verification import (
+    CheckResult,
+    VerificationContext,
+    run_check,
+    verification_context_from_plan,
+)
 
 
 #: Baseline outcome statuses recorded in the cache. ``pass``/``fail`` mirror the
@@ -73,6 +82,7 @@ def baseline_identity_key(
     cwd: str | Path,
     *,
     env: dict | None = None,
+    context: VerificationContext | None = None,
 ) -> str:
     """Return the fingerprint-independent cache key for a single check.
 
@@ -85,12 +95,91 @@ def baseline_identity_key(
     check name.
     """
     recipe = _single_check_recipe(check)
+    verification_context = context or VerificationContext.legacy(cwd)
     return cache_key(
         recipe=recipe,
-        cwd=cwd,
+        cwd=verification_context.root,
         repo_fingerprint="",
         executable=_recipe_executable_identity(recipe),
         environment=environment_signature(env),
+        registry_digest=verification_context.registry_digest,
+    )
+
+
+def aggregate_repository_fingerprint(
+    context: VerificationContext,
+    plan_dir: str | Path,
+) -> str:
+    """Hash ordered, alias-qualified evidence for every registered repository."""
+    digest, available = capture_baseline_repository_evidence(context, plan_dir)
+    if not available:
+        raise PlanError(
+            "cannot aggregate repository fingerprint because evidence is unavailable"
+        )
+    return digest
+
+
+def capture_baseline_repository_evidence(
+    context: VerificationContext,
+    plan_dir: str | Path,
+) -> tuple[str, bool]:
+    """Capture reusable current evidence for baseline freshness checks."""
+    if context.workspace is None:
+        return repository_fingerprint(context.root), True
+    return _registered_repository_fingerprint(context, plan_dir)
+
+
+def _registered_repository_fingerprint(
+    context: VerificationContext,
+    plan_dir: str | Path,
+) -> tuple[str, bool]:
+    """Return aggregate digest and whether every repository probe was usable."""
+    assert context.workspace is not None
+    evidence = []
+    available = True
+    for repository in context.workspace.repositories:
+        fingerprint = repository_evidence.capture_repository_fingerprint(
+            repository.root, plan_dir
+        )
+        if (
+            repository_evidence.repository_evidence_unavailable(fingerprint)
+            is not None
+            or not fingerprint.get("git")
+        ):
+            available = False
+        evidence.append(
+            {
+                "alias": repository.alias,
+                "fingerprint": fingerprint,
+            }
+        )
+    encoded = json.dumps(
+        evidence, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest(), available
+
+
+def baseline_evidence_is_current(
+    result: dict[str, Any],
+    context: VerificationContext,
+    plan_dir: str | Path,
+    *,
+    current_evidence: tuple[str, bool] | None = None,
+) -> bool:
+    """Return whether a cache result matches the current plan-mode evidence."""
+    fingerprint, available = (
+        current_evidence
+        if current_evidence is not None
+        else capture_baseline_repository_evidence(context, plan_dir)
+    )
+    if context.workspace is None:
+        return str(result.get("repository_fingerprint", "")) == fingerprint
+    return (
+        available
+        and result.get("repository_evidence_available") is True
+        and result.get("registry_digest") == context.registry_digest
+        and result.get("aggregate_repository_fingerprint")
+        == fingerprint
     )
 
 
@@ -160,10 +249,17 @@ class BaselineCheckOutcome:
     detail: str
     repository_fingerprint: str
     recorded_at: str
+    repo: str | None = None
+    resolved_root: str | None = None
+    qualified_cwd: str | None = None
+    qualified_path: str | None = None
+    registry_digest: str | None = None
+    aggregate_repository_fingerprint: str | None = None
+    repository_evidence_available: bool | None = None
 
     def to_result(self) -> dict[str, Any]:
         """Return the cache ``result`` payload for this outcome."""
-        return {
+        payload = {
             "check_name": self.name,
             "kind": self.kind,
             "expectation": self.expectation,
@@ -177,6 +273,23 @@ class BaselineCheckOutcome:
             "repository_fingerprint": self.repository_fingerprint,
             "recorded_at": self.recorded_at,
         }
+        if self.registry_digest is not None:
+            payload.update(
+                {
+                    "repo": self.repo,
+                    "resolved_root": self.resolved_root,
+                    "qualified_cwd": self.qualified_cwd,
+                    "qualified_path": self.qualified_path,
+                    "registry_digest": self.registry_digest,
+                    "aggregate_repository_fingerprint": (
+                        self.aggregate_repository_fingerprint
+                    ),
+                    "repository_evidence_available": (
+                        self.repository_evidence_available
+                    ),
+                }
+            )
+        return payload
 
 
 @dataclass(frozen=True)
@@ -190,6 +303,8 @@ class BaselineRunResult:
     total_budget_seconds: float
     total_exceeded: bool
     results_path: Path
+    registry_digest: str | None = None
+    aggregate_repository_fingerprint: str | None = None
 
     @property
     def all_satisfied(self) -> bool:
@@ -223,6 +338,7 @@ def run_baseline(
     total_timeout: float | None = None,
     cache: BaselineCache | None = None,
     now: str | None = None,
+    context: VerificationContext | None = None,
 ) -> BaselineRunResult:
     """Execute the plan's baseline checks and record outcomes into the cache.
 
@@ -236,7 +352,8 @@ def run_baseline(
     loop-ready. Every executed outcome is persisted to ``baseline-results.json``.
     """
     canonical_dir = canonicalize_path(plan_dir)
-    canonical_cwd = canonicalize_path(cwd)
+    verification_context = context or verification_context_from_plan(plan_dir, cwd)
+    canonical_cwd = verification_context.root
     snapshot = plans.inspect_plan(canonical_dir)
 
     contracts_by_session: dict[str, Any] = {}
@@ -251,6 +368,36 @@ def run_baseline(
     if cache is None:
         cache = BaselineCache.load(results_path)
 
+    # Resolve every location before executing any baseline command. Registered
+    # paths can fail only after filesystem resolution (for example, when an
+    # in-repository symlink escapes its repository), and discovering that late
+    # would otherwise discard earlier side-effecting outcomes and repeat them
+    # on the next baseline attempt.
+    resolved_checks = []
+    seen_keys: set[str] = set()
+    try:
+        for session_id, check in collected:
+            key = baseline_identity_key(
+                check, canonical_cwd, context=verification_context
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            resolved_checks.append(
+                (
+                    session_id,
+                    check,
+                    key,
+                    verification_context.resolve_check(check),
+                )
+            )
+    except PlanError:
+        # Persist the loaded cache even when no new command was eligible to run.
+        # Besides preserving prior evidence, this leaves a valid derived journal
+        # instead of repeatedly entering an evidence-free failed pass.
+        cache.save()
+        raise
+
     total_budget = (
         float(total_timeout)
         if total_timeout is not None
@@ -259,18 +406,23 @@ def run_baseline(
         )
     )
     recorded_at = now or datetime.now(timezone.utc).isoformat()
-    fingerprint = repository_fingerprint(canonical_cwd)
+    registry_digest = verification_context.registry_digest
+    if verification_context.workspace is None:
+        fingerprint = repository_fingerprint(canonical_cwd)
+        aggregate_fingerprint = None
+        repository_evidence_available: bool | None = None
+    else:
+        fingerprint, repository_evidence_available = (
+            _registered_repository_fingerprint(
+                verification_context, canonical_dir
+            )
+        )
+        aggregate_fingerprint = fingerprint
 
     outcomes: list[BaselineCheckOutcome] = []
-    seen_keys: set[str] = set()
     total_seconds = 0.0
     total_exceeded = False
-    for session_id, check in collected:
-        key = baseline_identity_key(check, canonical_cwd)
-        if key in seen_keys:
-            # Deduplicated: an equivalent check already ran this pass.
-            continue
-        seen_keys.add(key)
+    for session_id, check, key, resolved in resolved_checks:
         budget = _per_check_budget(check, per_check_timeout)
         expectation = getattr(check, "baseline_expectation", "skip")
 
@@ -294,6 +446,13 @@ def run_baseline(
                 ),
                 repository_fingerprint=fingerprint,
                 recorded_at=recorded_at,
+                repo=check.repo,
+                resolved_root=str(resolved.resolved_root),
+                qualified_cwd=resolved.qualified_cwd,
+                qualified_path=resolved.qualified_path,
+                registry_digest=registry_digest,
+                aggregate_repository_fingerprint=aggregate_fingerprint,
+                repository_evidence_available=repository_evidence_available,
             )
             outcomes.append(outcome)
             cache.put(
@@ -310,7 +469,11 @@ def run_baseline(
         # its command timeout is clamped to whatever total budget remains.
         budget = min(budget, total_budget - total_seconds)
         clamped = _clamp_command_timeout(check, budget)
-        result = run_check(clamped, repo_root=canonical_cwd)
+        if verification_context.workspace is None:
+            # Retain the legacy keyword call for downstream monkeypatch seams.
+            result = run_check(clamped, repo_root=canonical_cwd)
+        else:
+            result = run_check(clamped, context=verification_context)
         total_seconds += result.duration_seconds
         crossed_total = total_seconds > total_budget
         if crossed_total:
@@ -327,6 +490,8 @@ def run_baseline(
                 f"{detail}; total baseline budget of {total_budget:g}s "
                 "exceeded during this check"
             )
+        if repository_evidence_available is False:
+            detail = f"{detail}; registered repository evidence was unavailable"
         outcome = BaselineCheckOutcome(
             session_id=session_id,
             key=key,
@@ -336,7 +501,11 @@ def run_baseline(
             status=status,
             # A total-budget overrun is never satisfied evidence, even when
             # the command itself matched its expectation.
-            satisfied=_satisfied(expectation, status) and not crossed_total,
+            satisfied=(
+                _satisfied(expectation, status)
+                and not crossed_total
+                and repository_evidence_available is not False
+            ),
             duration_seconds=result.duration_seconds,
             budget_seconds=budget,
             near_timeout=near_timeout,
@@ -344,6 +513,13 @@ def run_baseline(
             detail=detail,
             repository_fingerprint=fingerprint,
             recorded_at=recorded_at,
+            repo=check.repo,
+            resolved_root=str(resolved.resolved_root),
+            qualified_cwd=resolved.qualified_cwd,
+            qualified_path=resolved.qualified_path,
+            registry_digest=registry_digest,
+            aggregate_repository_fingerprint=aggregate_fingerprint,
+            repository_evidence_available=repository_evidence_available,
         )
         outcomes.append(outcome)
         cache.put(
@@ -364,11 +540,13 @@ def run_baseline(
         total_budget_seconds=total_budget,
         total_exceeded=total_exceeded,
         results_path=results_path,
+        registry_digest=registry_digest,
+        aggregate_repository_fingerprint=aggregate_fingerprint,
     )
 
 
 def _outcome_payload(outcome: BaselineCheckOutcome) -> dict[str, Any]:
-    return {
+    payload = {
         "session_id": outcome.session_id,
         "key": outcome.key,
         "name": outcome.name,
@@ -382,6 +560,23 @@ def _outcome_payload(outcome: BaselineCheckOutcome) -> dict[str, Any]:
         "total_budget_exceeded": outcome.total_budget_exceeded,
         "detail": outcome.detail,
     }
+    if outcome.registry_digest is not None:
+        payload.update(
+            {
+                "repo": outcome.repo,
+                "resolved_root": outcome.resolved_root,
+                "qualified_cwd": outcome.qualified_cwd,
+                "qualified_path": outcome.qualified_path,
+                "registry_digest": outcome.registry_digest,
+                "aggregate_repository_fingerprint": (
+                    outcome.aggregate_repository_fingerprint
+                ),
+                "repository_evidence_available": (
+                    outcome.repository_evidence_available
+                ),
+            }
+        )
+    return payload
 
 
 def _run_result_payload(
@@ -391,9 +586,10 @@ def _run_result_payload(
     cwd_arg: str,
     per_check_timeout: float | None,
     total_timeout: float | None,
+    verification_context: VerificationContext | None = None,
 ) -> dict[str, Any]:
     satisfied_count = sum(1 for o in result.outcomes if o.satisfied)
-    return {
+    payload = {
         "plan_dir": plan_dir_arg,
         "plan_dir_resolved": str(result.plan_dir),
         "cwd": cwd_arg,
@@ -410,16 +606,43 @@ def _run_result_payload(
         "total_exceeded": result.total_exceeded,
         "checks": [_outcome_payload(o) for o in result.outcomes],
     }
+    if result.registry_digest is not None:
+        repositories = []
+        if verification_context is not None and verification_context.workspace is not None:
+            repositories = [
+                {
+                    "alias": repository.alias,
+                    "path": repository.repository.path,
+                    "origin": repository.origin,
+                    "resolved_root": str(repository.root),
+                }
+                for repository in verification_context.workspace.repositories
+            ]
+        payload.update(
+            {
+                "workspace_root": str(result.cwd),
+                "registry_digest": result.registry_digest,
+                "repositories": repositories,
+                "aggregate_repository_fingerprint": (
+                    result.aggregate_repository_fingerprint
+                ),
+            }
+        )
+    return payload
 
 
 def _print_text_baseline(result: BaselineRunResult, *, plan_dir_arg: str) -> None:
     print(f"Plan: {plan_dir_arg}")
-    print(f"Repo root: {result.cwd}")
+    print(
+        f"{'Workspace root' if result.registry_digest is not None else 'Repo root'}: "
+        f"{result.cwd}"
+    )
     print(f"Baseline checks: {len(result.outcomes)}")
     for outcome in result.outcomes:
         marker = "OK" if outcome.satisfied else "MISS"
+        repository = f" {outcome.repo}:" if outcome.repo else ""
         print(
-            f"  [{marker}] {outcome.kind} {outcome.name} "
+            f"  [{marker}]{repository} {outcome.kind} {outcome.name} "
             f"(expect {outcome.expectation}, got {outcome.status}, "
             f"{outcome.duration_seconds:.2f}s): {outcome.detail}"
         )
@@ -446,7 +669,9 @@ def baseline_from_args(args: Any) -> int:
     }
 
     try:
-        canonicalize_path(cwd_arg)
+        verification_context = verification_context_from_plan(
+            plan_dir_arg, cwd_arg
+        )
     except (PlanError, OSError) as error:
         _emit_baseline_error(
             want_json=want_json,
@@ -462,6 +687,7 @@ def baseline_from_args(args: Any) -> int:
             cwd_arg,
             per_check_timeout=per_check_timeout,
             total_timeout=total_timeout,
+            context=verification_context,
         )
     except PlanError as error:
         reason = (
@@ -483,6 +709,7 @@ def baseline_from_args(args: Any) -> int:
         cwd_arg=str(cwd_arg),
         per_check_timeout=per_check_timeout,
         total_timeout=total_timeout,
+        verification_context=verification_context,
     )
 
     if not result.outcomes:

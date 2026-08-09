@@ -16,7 +16,7 @@ Use this skill before `asl run` whenever preflight is not green. The companion s
 
 The user provides a plan directory path. Optional flags pass through to `asl preflight`:
 
-- `--cwd REPO_ROOT` — repo root for environment checks
+- `--cwd ROOT` — repository root for a legacy plan or common workspace root for a registered plan
 - `--harness codex|claude|copilot` — harness to validate
 - `--commit-per-session` or `--commit-at-end` — validate commit-mode prerequisites
 - `--state-dir DIR` — override operational state directory
@@ -62,12 +62,19 @@ Parse the argument list. Verify the plan directory exists and contains `manifest
 
 Record the optional `--cwd`, `--harness`, `--commit-mode`, `--state-dir`, and `--max-pending-sessions` values. They will be forwarded verbatim to every `asl preflight` invocation so that the same set of checks runs on every iteration.
 
+Read the optional ordered registry from `manifest.md`. For a registered plan,
+never infer `--cwd` from one child checkout: use the prepared version 2
+`workspace_root` or ask the user for the common workspace root. An existing
+binding mismatch is not an invocation typo that this skill may paper over;
+surface the atomic `asl prepare PLAN_DIR --resume --cwd NEW_WORKSPACE
+--rebind-workspace` remediation instead.
+
 ### Step 2: Baseline Preflight Run
 
 Run the baseline preflight using the Bash tool:
 
 ```text
-asl preflight <plan-dir> --json [--cwd <repo>] [--harness <name>] [--commit-per-session|--commit-at-end] [--state-dir <dir>] [--max-pending-sessions <n>]
+asl preflight <plan-dir> --json [--cwd <root>] [--harness <name>] [--commit-per-session|--commit-at-end] [--state-dir <dir>] [--max-pending-sessions <n>]
 ```
 
 Capture stdout. Parse the JSON body. Expect the stable shape emitted by `agent_session_loop.preflight._preflight_payload_fields`:
@@ -79,6 +86,7 @@ Capture stdout. Parse the JSON body. Expect the stable shape emitted by `agent_s
 - `readiness` (object | null), `expected_readiness_sha256` (string | null)
 - `max_pending_sessions` (int | null)
 - `mark_loop_ready_requested` (bool), `marked_loop_ready` (bool)
+- Registered plans add `workspace_root`, `registry_digest`, and ordered `repositories`; require them to match the manifest registry and keep their qualified root/origin/overlap findings intact.
 
 If exit code is non-zero and the JSON body contains a `reason` of `plan-structure`, print the error and stop — the plan directory itself is malformed and must be repaired or recreated with `session-split` before this skill can help.
 
@@ -128,7 +136,7 @@ Choose the option set based on `fix_category`:
 
 - `manifest-update`
   - `Run mark-loop-ready` / "Re-run `asl preflight --mark-loop-ready` once non-readiness blockers are clear"
-  - `Edit manifest.md` / "Edit the readiness block manually"
+  - `Inspect blocker` / "Show why mark-loop-ready cannot safely refresh the derived readiness block yet"
   - `Skip for now` / "Leave this finding unresolved this round"
 
 - `progress-journal-missing.backfill`
@@ -166,14 +174,16 @@ Choose the option set based on `fix_category`:
   - Do not ask a question; surface the message inline.
 
 Open one `AskUserQuestion` call with all picked questions in the same batch.
+Every question is blocking: do not set an auto-resolution timeout, choose a
+recommended/default answer, or continue when the user has not answered.
 
 #### 4c. Apply the User's Answers
 
 Apply edits one finding at a time:
 
-- **plan-edit**: Read the session file from `finding.path`. For missing/malformed `## Completion Contract` errors, build the contract scaffold using the parser shape (a `### Done when` bullet list and a fenced ```json``` Verify block whose `session` matches `session_id`). For ambiguity sentinels, jump to `finding.line` and use Edit to replace the sentinel with the user's wording. For path-reference findings, remove `..` traversal from the relative contract `path` field or replace it with an explicit absolute path. After every edit, re-read the file to confirm the change landed.
+- **plan-edit**: Read the session file from `finding.path`. For missing/malformed `## Completion Contract` errors, build the contract scaffold using the parser shape (a `### Done when` bullet list and a fenced ```json``` Verify block whose `session` matches `session_id`). For a registered plan, every check needs a valid `repo` from the session read scope and every `path` / command `cwd` must remain relative beneath that repository; absolute paths and upward traversal are invalid. For a legacy plan, remove unsafe `..` traversal or use an explicit absolute path when that is the intended existing contract. For ambiguity sentinels or repository-ambiguous prose, jump to `finding.line` and use the user's wording or qualified `Alias:path` choice. After every edit, re-read the file to confirm the change landed.
 
-- **manifest-update**: When the user picked `Run mark-loop-ready`, defer it until Step 5. When they picked `Edit manifest.md`, open `manifest.md` and use Edit to fix the `**Readiness**`, `**Readiness SHA-256**`, or `**Readiness checked at**` line called out in the finding `message`/`detail`.
+- **manifest-update**: Defer the repair until Step 5 and use `asl preflight --mark-loop-ready`; never hand-edit readiness state, SHA, or timestamp. Registry rows are durable plan content rather than derived readiness metadata, so a registry correction requires an explicit user-approved plan edit followed by fresh preparation evidence.
 
 - **progress-journal-missing.backfill**: When the user picked `Run backfill --force`, run `asl backfill-progress --force <plan-dir>` via Bash; the command rewrites `progress.md` atomically from completed handoffs. Confirm the file exists after the call. When the user picked `Defer to mark-loop-ready`, take no action this round — Step 5 will auto-backfill via `asl preflight --mark-loop-ready` when no non-readiness/non-progress blockers remain.
 
@@ -181,11 +191,11 @@ Apply edits one finding at a time:
 
 - **session-recipe-edit**: Open the session file. The Verify recipe is a fenced ```json``` block inside `## Completion Contract`. Edit only that block: bump timeouts, fix `path` values, relax regex patterns — never silently delete a check. If the user picked `Skip for now`, leave the recipe alone.
 
-- **env-state**: For stale or active locks, run the suggested `asl unlock <plan-dir>` command. For dirty worktrees, print the `git status --short` summary and pause for the user to stash/commit outside the skill — do not stash on their behalf. Mark the finding as deferred if the user chose `I'll fix it outside the skill`.
+- **env-state**: Execute only the preflight hint's non-forced repair. A stale lock may be cleared through ordinary `asl unlock <plan-dir> --json`; an active lock is a hard stop requiring the user to wait for or investigate the live runner, and this skill never uses `asl unlock --force`. For dirty worktrees, print `git status --short` for the affected legacy root or each affected registered alias and pause for the user to stash/commit outside the skill — do not stash on their behalf. Mark the finding as deferred if the user chose `I'll fix it outside the skill`.
 
 - **env-install**: Print the suggested install hint from the hint `message` and pause. If the user picked `Drop the dependent flag`, drop the matching CLI flag from the in-memory invocation state so subsequent preflight runs do not re-trigger the finding.
 
-- **invocation-fix**: Ask the user for a new `--cwd` value via a follow-up question, validate the path with Bash `test -d`, and update the in-memory invocation state. Do not edit any plan files.
+- **invocation-fix**: Ask the user for a new `--cwd` value via a follow-up question, validate the path with Bash `test -d`, and update the in-memory invocation state only when it is the correct legacy repository root or matches the registered plan's durable workspace binding. A different registered workspace uses the explicit atomic rebind command instead. Do not edit metadata or other plan files to simulate a rebind.
 
 - **plan-recreate**: Print a short message recommending `<skill-prefix>session-split <source-plan>` and stop the skill with `PREFLIGHT_ITERATE_PAUSE: plan-recreate` so the user can pick up outside this loop.
 
@@ -212,7 +222,7 @@ If five rounds complete without reaching green, stop the loop. Step 5 will refus
 When the most recent preflight returns `ok: true`, or when its only remaining red/yellow findings are `manifest-readiness` and/or `progress-journal-missing` findings, run:
 
 ```text
-asl preflight <plan-dir> --json --mark-loop-ready [--cwd <repo>] [--harness <name>] [--commit-per-session|--commit-at-end] [--state-dir <dir>] [--max-pending-sessions <n>]
+asl preflight <plan-dir> --json --mark-loop-ready [--cwd <root>] [--harness <name>] [--commit-per-session|--commit-at-end] [--state-dir <dir>] [--max-pending-sessions <n>]
 ```
 
 Forward the same flags that the iteration used so the readiness check sees the same environment. `--mark-loop-ready` auto-backfills `progress.md` (force semantics) when the only non-readiness blockers are `progress-journal-missing` findings; any such repair appears in the JSON payload's `auto_repairs` array with `action: "rewrite"` and `category: "progress-journal-missing"`. Parse the response:
@@ -255,6 +265,7 @@ Do not re-print every preflight finding; the per-round confirmations already nam
 - `manifest.md` and `context.md` readiness rows and status tables are derived bookkeeping. The session-file handoffs remain the source of truth for completion. This skill must not change handoff statuses; it only repairs structure and metadata so the runner can start.
 - When a finding's `fix_category` is `plan-recreate`, do not attempt repairs — stop the skill and recommend rerunning `session-split`.
 - When a finding's `fix_category` is `env-install` or `invocation-fix`, the right action is to update the invocation, not the plan. Do not edit plan files to paper over an environment problem.
+- In registered mode, preserve the ordered registry, exact session read/write scopes, repository-attributed checks, and qualified `Alias:path` handoff rules. Do not silence root/origin/overlap/scope findings by converting the plan to legacy syntax or selecting one child as `--cwd`.
 - Always rerun `asl preflight --json` after a batch of edits. Trust the fresh JSON over remembered findings — overrides like `manifest-readiness.sha-mismatch` may resolve into different `check_id`s after an edit.
 - Cap the loop at 5 rounds. If the plan is not green by then, stop and surface what is left; the user can re-invoke the skill after addressing structural issues by hand.
 - Only mark loop-ready through `asl preflight --mark-loop-ready`. Do not write `**Readiness**` lines directly — the package is the only place that computes the canonical `Readiness SHA-256`.
