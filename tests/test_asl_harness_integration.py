@@ -88,6 +88,43 @@ from tests.support import (
 )
 
 
+class _PythonScriptCopilotAdapter(harnesses.CopilotAdapter):
+    """Run a synthetic Copilot harness through Python instead of direct exec.
+
+    macOS attaches ``com.apple.provenance`` to locally generated executables
+    and may open a Gatekeeper verification window when these temporary test
+    scripts are executed directly.  Making the trusted Python interpreter the
+    executable preserves the adapter arguments and process-group behavior
+    without asking Gatekeeper to assess each disposable script.
+    """
+
+    def __init__(self, script: Path) -> None:
+        super().__init__(executable=sys.executable)
+        self.script = script
+
+    def build_argv(
+        self,
+        *,
+        cwd: Path,
+        plan_dir: Path,
+        prompt: str,
+        unsafe_bypass: bool = False,
+        last_message_path: Path | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> list[str]:
+        argv = super().build_argv(
+            cwd=cwd,
+            plan_dir=plan_dir,
+            prompt=prompt,
+            unsafe_bypass=unsafe_bypass,
+            last_message_path=last_message_path,
+            model=model,
+            effort=effort,
+        )
+        return [argv[0], str(self.script), *argv[1:]]
+
+
 class FakeHarnessIntegrationTests(unittest.TestCase):
     def setup_loop(
         self,
@@ -5703,7 +5740,7 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
         fired: list[int] = []
 
         start = time.monotonic()
-        result = harnesses.CopilotAdapter(executable=str(fake_harness)).run(
+        result = _PythonScriptCopilotAdapter(fake_harness).run(
             cwd=self.tmp_dir,
             plan_dir=self.tmp_dir,
             prompt="noop",
@@ -6018,7 +6055,7 @@ class HarnessProcessGroupSweepTests(unittest.TestCase):
         )
         spawn_pids: list[int] = []
 
-        result = harnesses.CopilotAdapter(executable=str(fake_harness)).run(
+        result = _PythonScriptCopilotAdapter(fake_harness).run(
             cwd=self.tmp_dir,
             plan_dir=self.tmp_dir,
             prompt="noop",
@@ -6053,7 +6090,7 @@ class HarnessProcessGroupSweepTests(unittest.TestCase):
             spawn_pids.append(pid)
             self._wait_for_grandchild_on_spawn(pid)
 
-        result = harnesses.CopilotAdapter(executable=str(fake_harness)).run(
+        result = _PythonScriptCopilotAdapter(fake_harness).run(
             cwd=self.tmp_dir,
             plan_dir=self.tmp_dir,
             prompt="noop",
@@ -6093,7 +6130,7 @@ class HarnessProcessGroupSweepTests(unittest.TestCase):
             detached=True, tail=("time.sleep(60)",)
         )
 
-        result = harnesses.CopilotAdapter(executable=str(fake_harness)).run(
+        result = _PythonScriptCopilotAdapter(fake_harness).run(
             cwd=self.tmp_dir,
             plan_dir=self.tmp_dir,
             prompt="noop",
@@ -6150,7 +6187,7 @@ class HarnessProcessGroupSweepTests(unittest.TestCase):
             )
             gate.write_text("go", encoding="utf-8")
 
-        result = harnesses.CopilotAdapter(executable=str(fake_harness)).run(
+        result = _PythonScriptCopilotAdapter(fake_harness).run(
             cwd=self.tmp_dir,
             plan_dir=self.tmp_dir,
             prompt="noop",
@@ -6210,7 +6247,7 @@ class HarnessProcessGroupSweepTests(unittest.TestCase):
         ready = self.root / "grandchildren" / "turn"
 
         with self._interrupting_popen(ready):
-            result = harnesses.CopilotAdapter(executable=str(fake_harness)).run(
+            result = _PythonScriptCopilotAdapter(fake_harness).run(
                 cwd=self.tmp_dir,
                 plan_dir=self.tmp_dir,
                 prompt="noop",
