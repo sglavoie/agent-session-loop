@@ -1436,6 +1436,132 @@ class PreflightCommandRunnabilityTests(unittest.TestCase):
         self.assertEqual("yellow", hint.severity_hint)
 
 
+class RepositoryFootprintPreflightTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.root = Path(self._temp.name)
+        self.workspace = self.root / "workspace"
+        self.repositories = init_multi_repo_workspace(
+            self.workspace, DEFAULT_MULTI_REPO_SPECS[:2]
+        )
+        self.first = self.repositories["SVC"]
+        self.second = self.repositories["OAK"]
+        for repository in (self.first, self.second):
+            (repository / "README.md").write_text("x\n", encoding="utf-8")
+        self.plan_dir = self.root / "plan"
+
+    def _write_plan(self, *paths: Path) -> None:
+        contract = _contract_block(
+            ", ".join(
+                json.dumps(
+                    {"type": "file_exists", "path": str(path), "name": f"check-{index}"}
+                )
+                for index, path in enumerate(paths)
+            ),
+            session="1",
+        )
+        _write_loop_ready_plan(
+            self.plan_dir, ("pending",), contracts_by_id={"1": contract}
+        )
+
+    def _footprint_findings(
+        self, report: preflight.PreflightReport
+    ) -> list[preflight.PreflightFinding]:
+        return [
+            finding
+            for finding in report.findings
+            if finding.category == "repository-footprint"
+        ]
+
+    def test_out_of_root_check_is_red_using_the_stored_plan_metadata(self) -> None:
+        self._write_plan(self.first / "README.md", self.second / "README.md")
+        plans.save_plan_metadata(self.plan_dir, str(self.first))
+
+        report = preflight.run_core_preflight(self.plan_dir)
+
+        findings = self._footprint_findings(report)
+        self.assertEqual(["red", "red"], [finding.severity for finding in findings])
+        self.assertIn("escapes the bound root", findings[0].message)
+        self.assertIn("2 git repositories", findings[1].message)
+        self.assertEqual(
+            ["repository-footprint.out-of-root", "repository-footprint.multi-repo"],
+            [preflight.repair_hint_for_finding(f).check_id for f in findings],
+        )
+
+    def test_absolute_check_inside_the_bound_root_stays_green(self) -> None:
+        self._write_plan(self.first / "README.md")
+        plans.save_plan_metadata(self.plan_dir, str(self.first))
+
+        report = preflight.run_core_preflight(self.plan_dir)
+
+        self.assertEqual([], self._footprint_findings(report))
+        self.assertFalse(report.repository_footprint.registry_required)
+
+    def test_without_plan_metadata_the_explicit_cwd_supplies_the_root(self) -> None:
+        self._write_plan(self.first / "README.md", self.second / "README.md")
+
+        core_report = preflight.run_core_preflight(self.plan_dir)
+        self.assertEqual([], self._footprint_findings(core_report))
+
+        report = preflight.run_preflight(self.plan_dir, cwd=self.first)
+
+        self.assertTrue(self._footprint_findings(report))
+
+    def test_footprint_blocks_marking_the_plan_loop_ready(self) -> None:
+        self._write_plan(self.first / "README.md", self.second / "README.md")
+        plans.save_plan_metadata(self.plan_dir, str(self.first))
+
+        report = preflight.run_core_preflight(self.plan_dir)
+
+        blockers = preflight._mark_loop_ready_blockers(report)
+        self.assertIn(
+            "repository-footprint", {blocker.category for blocker in blockers}
+        )
+
+    def test_payload_carries_a_registry_table_derived_from_disk(self) -> None:
+        self._write_plan(self.first / "README.md", self.second / "README.md")
+        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        report = preflight.run_core_preflight(self.plan_dir)
+
+        payload = preflight._preflight_payload_fields(
+            report,
+            plan_dir_arg=str(self.plan_dir),
+            cwd=None,
+            harness=None,
+            commit_mode=None,
+            state_dir=None,
+            max_pending_sessions=None,
+            mark_loop_ready=False,
+        )["repository_footprint"]
+
+        self.assertEqual(str(self.workspace.resolve()), payload["workspace_root"])
+        self.assertFalse(payload["registry_present"])
+        self.assertTrue(payload["registry_required"])
+        self.assertEqual(
+            ["| Alias | Path | Origin |", "| --- | --- | --- |"],
+            payload["suggested_registry_table"][:2],
+        )
+        self.assertEqual(
+            ["tundra_OAK", "tundra_svc"],
+            sorted(entry["alias"] for entry in payload["detected"]),
+        )
+        self.assertEqual(
+            ["tundra_OAK", "tundra_svc"],
+            sorted(payload["suggested_scopes"]["1"]["writes"]),
+        )
+
+    def test_registered_plans_are_governed_by_the_registry_instead(self) -> None:
+        write_multi_repo_plan(
+            self.plan_dir, ("pending",), specs=DEFAULT_MULTI_REPO_SPECS[:2]
+        )
+
+        report = preflight.run_core_preflight(self.plan_dir)
+
+        self.assertEqual([], self._footprint_findings(report))
+        self.assertIsNone(report.repository_footprint)
+
+
 class PreflightRepairHintTests(unittest.TestCase):
     def test_every_preflight_category_has_a_default_hint(self) -> None:
         for category in preflight.PREFLIGHT_CATEGORIES:

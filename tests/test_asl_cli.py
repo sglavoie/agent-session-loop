@@ -1448,8 +1448,12 @@ class CommandAndConfigTests(unittest.TestCase):
             self.assertIsInstance(check, contracts.CommandCheck)
             self.assertEqual("final-review-output-evidence-based", check.name)
             self.assertEqual("python3", check.argv[0])
-            self.assertEqual(
-                str(plans.canonicalize_path(plan_dir)), check.cwd
+            # The check runs at the bound root; the plan artifacts it reads are
+            # named by absolute path inside the command source.
+            self.assertEqual(".", check.cwd)
+            self.assertIn(
+                str(plans.canonicalize_path(plan_dir) / review.FINAL_REVIEW_FILENAME),
+                check.argv[2],
             )
 
     def test_find_pending_generated_review_session_returns_none_when_no_marker(

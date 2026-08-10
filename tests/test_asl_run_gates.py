@@ -457,6 +457,37 @@ class RunReadinessGateTests(unittest.TestCase):
         self.assertIsNone(payload["readiness_state_final"])
         self.assertIsNone(plans.read_readiness_metadata(self.plan_dir))
 
+    def test_allow_not_loop_ready_does_not_bypass_repository_footprint(
+        self,
+    ) -> None:
+        other_repo = self.tmp_path / "other"
+        init_git_repo(other_repo)
+        self._write_plan(
+            ("pending",),
+            contracts_by_id={
+                "1": _contract_block(
+                    json.dumps(
+                        {
+                            "type": "file_exists",
+                            "path": str(other_repo / "README.md"),
+                            "name": "cross-repo",
+                        }
+                    ),
+                    session="1",
+                )
+            },
+        )
+
+        completed, payload = self._run(allow_not_loop_ready=True)
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("not-loop-ready", payload["pause_reason"])
+        self.assertEqual(
+            ["repository-footprint"], payload["pause_details"]["blocker"]
+        )
+        self.assertEqual([], payload["turns"])
+
     def test_run_rejects_mismatched_prepared_root_without_overwriting_binding(
         self,
     ) -> None:

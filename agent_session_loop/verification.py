@@ -79,6 +79,10 @@ class VerificationContext:
 
     root: Path
     workspace: workspaces.ResolvedWorkspace | None = None
+    #: Plan-owned directory a legacy check may also reach. ASL's own generated
+    #: review contracts verify plan artifacts, which live here rather than in
+    #: any repository.
+    plan_dir: Path | None = None
 
     def __post_init__(self) -> None:
         canonical_root = canonicalize_path(self.root)
@@ -87,10 +91,14 @@ class VerificationContext:
                 "verification workspace root does not match the resolved workspace"
             )
         object.__setattr__(self, "root", canonical_root)
+        if self.plan_dir is not None:
+            object.__setattr__(self, "plan_dir", canonicalize_path(self.plan_dir))
 
     @classmethod
-    def legacy(cls, repo_root: str | Path) -> "VerificationContext":
-        return cls(root=canonicalize_path(repo_root))
+    def legacy(
+        cls, repo_root: str | Path, *, plan_dir: str | Path | None = None
+    ) -> "VerificationContext":
+        return cls(root=canonicalize_path(repo_root), plan_dir=plan_dir)
 
     @classmethod
     def resolved_workspace(
@@ -105,7 +113,7 @@ class VerificationContext:
         """Interpret ``cwd`` as a repository root or workspace root by plan mode."""
         registry = plans.read_repository_registry(plan_dir)
         if registry is None:
-            return cls.legacy(cwd)
+            return cls.legacy(cwd, plan_dir=plan_dir)
         try:
             workspace = workspaces.resolve_workspace(cwd, registry)
         except workspaces.WorkspaceError as error:
@@ -147,15 +155,25 @@ class VerificationContext:
                     f"{check.repo}"
                 )
             resolved = _resolve_under_root(selected_root, value)
+            canonical = canonicalize_path(resolved)
+            escapes = not workspaces.is_descendant(
+                canonical, selected_root, allow_equal=True
+            ) and not (
+                self.plan_dir is not None
+                and workspaces.is_descendant(
+                    canonical, self.plan_dir, allow_equal=True
+                )
+            )
+            if escapes:
+                target = (
+                    f"repository {check.repo}"
+                    if registered
+                    else f"the bound root {selected_root}"
+                )
+                raise plans.PlanError(
+                    f"check {check.name!r} location escapes {target}: {value}"
+                )
             if registered:
-                canonical = canonicalize_path(resolved)
-                try:
-                    canonical.relative_to(selected_root)
-                except ValueError as error:
-                    raise plans.PlanError(
-                        f"check {check.name!r} location escapes repository "
-                        f"{check.repo}"
-                    ) from error
                 return canonical
             return resolved
 

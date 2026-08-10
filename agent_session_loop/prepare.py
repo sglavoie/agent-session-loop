@@ -385,6 +385,33 @@ class ValidatorRepository:
 # ---------------------------------------------------------------------------
 
 
+class RepositoryFootprintError(PlanError):
+    """A legacy plan reaches beyond the single root a v1 packet can describe.
+
+    Carries the serialized verdict so the caller can hand the operator the
+    suggested registry table instead of only a message.
+    """
+
+    def __init__(self, message: str, *, payload: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.payload = payload
+
+
+def _require_legacy_repository_footprint(
+    plan_dir: str | Path, root: str | Path
+) -> None:
+    """Refuse a legacy plan whose reach exceeds one repository under ``root``."""
+    _, payload = preflight.plan_repository_footprint(plan_dir, root)
+    if payload is None:
+        return
+    raise RepositoryFootprintError(
+        "plan reaches beyond the bound root "
+        f"{root} but manifest.md declares no `## Repositories` registry; "
+        "declare the registry and per-session repository scopes first",
+        payload=payload,
+    )
+
+
 def _fail(message: str) -> PlanError:
     return PlanError(f"validator output rejected: {message}")
 
@@ -967,6 +994,20 @@ class ValidationTaskPacket:
                     ),
                 ]
             )
+        else:
+            lines.extend(
+                [
+                    (
+                        f"- {self.codebase_root} is the only bound root for this "
+                        "plan. Use locations relative to it."
+                    ),
+                    (
+                        "- Report any path that resolves outside that root, or "
+                        "that names a second repository, as an issue with "
+                        f"issue_type={REPOSITORY_AMBIGUITY_ISSUE}."
+                    ),
+                ]
+            )
         return "\n".join(lines)
 
     def _schema_summary(self) -> str:
@@ -1033,6 +1074,8 @@ def build_validation_packet(
             repository.alias: repository for repository in resolved_repositories
         }
         packet_version = PREPARE_VALIDATION_VERSION
+    else:
+        _require_legacy_repository_footprint(canonical_dir, codebase_root)
 
     session_paths: list[str] = []
     session_read_repositories: list[tuple[ValidatorRepository, ...]] = []
@@ -1164,6 +1207,21 @@ def _validate_validation_authority(
     if registry is None:
         if validation.version != LEGACY_PREPARE_VALIDATION_VERSION:
             raise _fail("validator v2 is only valid for a registered plan")
+        _require_legacy_repository_footprint(canonical_dir, validation.codebase_root)
+        ambiguous = sorted(
+            {
+                session.session_id.value
+                for session in validation.sessions
+                for issue in session.issues
+                if issue.issue_type == REPOSITORY_AMBIGUITY_ISSUE
+            }
+        )
+        if ambiguous:
+            raise _fail(
+                "the validator reported repository ambiguity in sessions "
+                f"{', '.join(ambiguous)}; declare a `## Repositories` registry "
+                "before expanding this plan"
+            )
         return None
 
     if validation.version != PREPARE_VALIDATION_VERSION:
@@ -2603,16 +2661,24 @@ def _prepare_workspace_rebind(
     if registry is None:
         raise PlanError("--rebind-workspace requires a registered plan")
     metadata = plans.load_plan_metadata(plan_dir)
-    if not isinstance(metadata, plans.WorkspacePlanMetadata):
-        raise PlanError(
-            "--rebind-workspace requires an existing version 2 workspace binding"
-        )
-    if metadata.registry_digest != registry.digest:
-        raise PlanError("stored workspace binding does not match the plan registry")
-    if canonicalize_path(metadata.workspace_root) == cwd:
-        raise PlanError("--rebind-workspace requires a changed workspace binding")
+    if isinstance(metadata, plans.WorkspacePlanMetadata):
+        if metadata.registry_digest != registry.digest:
+            raise PlanError("stored workspace binding does not match the plan registry")
+        if canonicalize_path(metadata.workspace_root) == cwd:
+            raise PlanError("--rebind-workspace requires a changed workspace binding")
+        old_workspace = _workspace_rebind_summary(metadata.workspace_root, registry)
+    elif isinstance(metadata, plans.PlanMetadata):
+        # A plan that grew a registry after it was bound in legacy mode: the
+        # stale v1 binding names no repositories, so it is discarded wholesale
+        # rather than compared against the registry.
+        old_workspace = {
+            "workspace_root": str(canonicalize_path(metadata.cwd)),
+            "registry_digest": "",
+            "repositories": [],
+        }
+    else:
+        raise PlanError("--rebind-workspace requires an existing workspace binding")
 
-    old_workspace = _workspace_rebind_summary(metadata.workspace_root, registry)
     unresolved_new_workspace = _workspace_rebind_summary(cwd, registry)
     lock_info = state.inspect_lock_info(plan_dir, state_dir)
     if lock_info is not None and lock_info.active:
@@ -3474,6 +3540,9 @@ EXPAND_INGEST_REASON_OK = "ok"
 EXPAND_INGEST_REASON_VALIDATOR_SCHEMA = "validator-schema"
 #: The batch file itself could not be read (not a validator schema problem).
 EXPAND_INGEST_REASON_INPUT_ERROR = "input-error"
+#: The plan reaches more than one repository while still in legacy mode. The
+#: payload is well-formed; the plan is the thing that must change.
+EXPAND_INGEST_REASON_REPOSITORY_FOOTPRINT = "repository-footprint"
 
 
 def expand_ingest_from_args(args: Any) -> int:
@@ -3493,7 +3562,7 @@ def expand_ingest_from_args(args: Any) -> int:
     batch_file = str(args.batch_file)
     common_fields = {"plan_dir": plan_dir, "batch_file": batch_file}
 
-    def _emit_error(reason: str, error: str) -> int:
+    def _emit_error(reason: str, error: str, **extra: Any) -> int:
         if want_json:
             responses.print_json(
                 responses.error_payload(
@@ -3501,7 +3570,7 @@ def expand_ingest_from_args(args: Any) -> int:
                     reason=reason,
                     error=error,
                     paused=False,
-                    **common_fields,
+                    **{**common_fields, **extra},
                 )
             )
         else:
@@ -3529,6 +3598,12 @@ def expand_ingest_from_args(args: Any) -> int:
         # corrections operate on exactly the batch, not the whole aggregate;
         # a late failure leaves prepare-validation.json unwritten.
         result = ingest_expand_batch(plan_dir, payload)
+    except RepositoryFootprintError as error:
+        return _emit_error(
+            EXPAND_INGEST_REASON_REPOSITORY_FOOTPRINT,
+            str(error),
+            repository_footprint=error.payload,
+        )
     except PlanError as error:
         return _emit_error(EXPAND_INGEST_REASON_VALIDATOR_SCHEMA, str(error))
     batch_session_ids = result.batch_session_ids

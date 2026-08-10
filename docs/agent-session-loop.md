@@ -412,7 +412,7 @@ asl preflight PLAN_DIR [--cwd ROOT] [--harness codex|claude|copilot] [--commit-p
 asl verify PLAN_DIR --session ID [--cwd ROOT] [--artifact-dir DIR] [--json]
 asl contract-check PLAN_DIR [--session ID] [--cwd ROOT] [--json]
 asl baseline PLAN_DIR [--cwd ROOT] [--per-check-timeout SECONDS] [--total-timeout SECONDS] [--json]
-asl split (--plan-file PATH | --inline-stdin) --contracts-file PATH [--base-dir DIR] [--skill-prefix auto|codex|claude|copilot] [--analysis-file PATH] [--json]
+asl split (--plan-file PATH | --inline-stdin) --contracts-file PATH [--cwd ROOT] [--base-dir DIR] [--skill-prefix auto|codex|claude|copilot] [--analysis-file PATH] [--json]
 asl prepare PLAN.md [--cwd ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--validator-harness H] [--review-harness H] [--review-harness-model MODEL] [--base-dir DIR] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--json]
 asl prepare --resume PLAN_DIR [--rebind-workspace ...]
 asl expand-ingest PLAN_DIR --batch-file PATH [--json]
@@ -1319,9 +1319,24 @@ The stable finding categories are `plan-structure`, `canonical-session-id`,
 `baseline-unexpected`, `baseline-timeout`, `baseline-near-timeout`,
 `workspace-root`, `repository-registry`, `repository-root`,
 `repository-origin`, `repository-overlap`, `repository-scope`,
-`repository-contract`, `env-repo-root`, `env-git`, `env-harness`, `env-spec`,
-`env-lock`, `env-amx`, and `env-turn-budget`. Consumers should branch on these
+`repository-contract`, `repository-footprint`, `env-repo-root`, `env-git`,
+`env-harness`, `env-spec`, `env-lock`, `env-amx`, and `env-turn-budget`.
+Consumers should branch on these
 category values and the paired repair hint rather than parsing message prose.
+
+`repository-footprint` is red-only and applies to legacy plans: it fires when a
+contract or handoff target resolves outside the bound root, or when the plan's
+targets resolve into more than one Git repository. An absolute path that stays
+inside the bound root is accepted, so plans predating repo-relative authoring
+keep passing. The finding is derived from the plan's stored `cwd` when
+`plan-metadata.json` is present, so `asl preflight PLAN_DIR --json` reports it
+without `--cwd`. It is also the only non-bypassable category: `asl run
+--allow-not-loop-ready` still pauses with `pause_reason: not-loop-ready` and
+`pause_details.blocker: ["repository-footprint"]`, and `verification` refuses
+the escaping check at run time even if the gate is skipped. The JSON payload
+carries a `repository_footprint` object (described under JSON Output) whose
+`suggested_registry_table` is the exact `## Repositories` block to paste. The
+fix is to declare the registry and per-session scopes, not to widen `--cwd`.
 For a registered plan, `--cwd` is the non-Git-capable common workspace root.
 Preflight resolves the ordered registry once; validates child existence,
 directory type, exact Git top-level, origin, disjointness, scope, and contract
@@ -1618,8 +1633,17 @@ a single correct rewrite (`punctuation-free-title` and
 parse; every other category would invent an id, renumber sessions, or drop a
 title, so it is left for a human decision. Repository declarations add
 `repositories-placement`, `duplicate-repositories`,
-`malformed-repositories`, `invalid-repository`, and `invalid-session-scope`. A
-clean check exits `0` with
+`malformed-repositories`, `invalid-repository`, `invalid-session-scope`, and
+`missing-repository-registry`. The last one needs `--cwd` (default `.`): the
+check resolves the plan's absolute and `Alias:path` targets against that root
+and reports a source that reaches a second repository, or escapes the root,
+while declaring no `## Repositories` section. Only paths that exist on disk
+count, and anything inside a code fence is ignored, so illustrative paths do
+not invent repositories. The `--json` payload then carries a
+`repository_footprint` object with `suggested_registry_table` and
+`suggested_scopes`; the write path (`asl split` without `--check`) applies the
+same test to the plan text *and* to every `--contracts-file` `path`/`cwd`
+value, failing with `reason: malformed-plan`. A clean check exits `0` with
 `ok: true`, `checked: true`, `session_ids`, and `session_count` — the canonical
 ids a caller should key contracts by. Findings exit `1` with
 `reason: malformed-plan` and `error` set to the first finding's message; fewer
@@ -1665,7 +1689,22 @@ origin, and performs Git evidence, verification, mutation-guard, review, and
 commit work in the selected child repositories. A legacy plan with no registry
 still requires its `--cwd` itself to be the Git worktree root; merely pointing
 an old plan at a directory containing several repositories does not opt it into
-workspace behavior.
+workspace behavior. A legacy plan that nonetheless reaches a second repository
+is refused rather than reinterpreted: `split --check`, `preflight`, `prepare`,
+`expand-ingest`, and `run` all fail closed until the registry exists.
+
+To migrate an existing legacy plan that has outgrown one repository:
+
+1. Paste `repository_footprint.suggested_registry_table` into `manifest.md`
+   above the first session heading.
+2. Add `**Reads repositories**:` / `**Writes repositories**:` to each
+   `session-<id>.md`, using `repository_footprint.suggested_scopes`.
+3. Add a `repo` alias and a repository-relative `path`/`cwd` to every contract
+   check.
+4. Run `asl prepare PLAN_DIR --resume --rebind-workspace --cwd WORKSPACE_ROOT`.
+   `--rebind-workspace` accepts a plan whose `manifest.md` now carries a
+   registry while `plan-metadata.json` is still the legacy single-root form;
+   the stale binding is discarded rather than compared against the registry.
 
 Each session in a multi-repository source must contain these exact fields:
 
@@ -1714,8 +1753,18 @@ report path prose that could refer to more than one read repository as a
 mark the plan loop-ready until the source claim is qualified. Preparation runs
 baseline checks and final preflight through the resolved workspace context, so
 each check executes in its declared repository and cached evidence covers the
-whole ordered registry. Validator-output version 1 remains accepted only for
-legacy single-repository plans.
+whole ordered registry.
+
+Validator-output version 1 remains accepted only for legacy single-repository
+plans, and only while the plan actually is one. The legacy packet names its
+`codebase_root` as the sole bound root and instructs the validator to report any
+path resolving outside it as a `repository-ambiguous` issue. Before a version 1
+packet is built, and again before its output is ingested, `prepare` recomputes
+the plan's repository footprint against that root; a plan reaching a second
+repository is refused with the dedicated reason `repository-footprint` rather
+than `validator-schema`, and the error payload carries the same
+`repository_footprint` object preflight emits. A version 1 payload that itself
+reports `repository-ambiguous` is refused for the same reason.
 
 Explicit workspace replacement is available only for an existing registered
 plan:
@@ -2533,6 +2582,51 @@ arrays. Invalid parsed inputs such as `--limit -1` produce
 `reason: input-error`; catastrophic state-root errors produce
 `reason: state-error`.
 
+`preflight --json`, `split --check --json`, and a refused `expand-ingest --json`
+share one additive `repository_footprint` object. It is present only when the
+plan implicates more than one repository or escapes its bound root, and is
+omitted entirely otherwise:
+
+```json
+{
+  "workspace_root": "/Users/dev/1_dev_projects",
+  "bound_root": "/Users/dev/1_dev_projects/tundra_svc",
+  "registry_present": false,
+  "registry_required": true,
+  "detected": [
+    {
+      "alias": "Kiln",
+      "path": "tundra_Kiln",
+      "origin": "github.com/tundra/Kiln.git",
+      "root": "/Users/dev/1_dev_projects/tundra_Kiln",
+      "evidence": [
+        {"line": 42, "text": "…", "kind": "contract-path", "confidence": "hard"}
+      ]
+    }
+  ],
+  "out_of_root": [
+    {"line": 42, "text": "…", "kind": "contract-path", "confidence": "hard"}
+  ],
+  "unattributed": [{"line": 88, "text": "…", "candidates": ["Kiln", "SVC"]}],
+  "suggested_registry_table": ["| Alias | Path | Origin |", "| --- | --- | --- |"],
+  "suggested_scopes": {"1": {"reads": ["Kiln"], "writes": ["Kiln"]}}
+}
+```
+
+`bound_root` is the root the plan was measured against; `workspace_root` is the
+common parent the suggested registry is expressed relative to. `detected` rows
+are discovered from disk — exact Git worktree roots, `git remote get-url
+origin` normalized to a credential-free identity, and directory basenames
+validated as aliases with deterministic numeric dedup — so nothing in
+`suggested_registry_table` is invented. `kind` is one of `contract-path`,
+`contract-cwd`, `handoff`, or `prose`, and `confidence` is `hard` or `soft`;
+`soft` targets are advisory and never on their own force `registry_required`.
+`out_of_root` lists the targets that escaped `bound_root`. `unattributed` lists
+path prose that resolved to no single repository and is the only part requiring
+a human decision. `suggested_scopes` is keyed by session ID and derived from the
+aliases that session's own checks and handoff entries resolve into, with writes
+only where the session declares a handoff target.
+
 `metrics --json` prints `command: "metrics"`, the resolved `state_root`, the
 window as `since_days`, `window_start`, and `generated_at`, then
 `state_dirs_scanned` and `state_dirs_active` beside the `turns`, `first_pass`,
@@ -2616,7 +2710,10 @@ Common pause reasons:
   `loop-ready` after the runner attempted any eligible derived repair, and the
   run did not pass `--allow-not-loop-ready`. The pause payload includes the
   readiness state, preflight finding summary, and `readiness_gate_repair` when
-  a repair was attempted.
+  a repair was attempted. The same reason also covers the non-bypassable case:
+  when any red finding is in a non-bypassable category the run pauses even with
+  `--allow-not-loop-ready`, and `pause_details.blocker` lists those categories
+  (currently only `repository-footprint`).
 - `unsafe`, `blocked`, `dependent`, `unresolved-prerequisite`: a
   `RUNNER_PAUSE: <reason> - ...` line from the invoked `session-run` skill
   carried a structured pause reason. The runner preserves that reason instead

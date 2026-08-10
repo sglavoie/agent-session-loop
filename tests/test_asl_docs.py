@@ -101,9 +101,18 @@ class SkillInstructionTests(unittest.TestCase):
         )
         self.assertIn("free of upward `..` traversal", split_skill)
         self.assertIn("For a legacy plan", repair_skill)
-        self.assertIn("use an explicit absolute path", repair_skill)
+        # A legacy absolute path is only tolerable inside the bound root; the
+        # old blanket advice to "use an explicit absolute path" is what let a
+        # multi-repository plan stay in single-root mode.
+        self.assertIn(
+            "keep an absolute path only when it resolves inside the bound root",
+            repair_skill,
+        )
         self.assertIn("For a registered plan", repair_skill)
         self.assertIn("every check needs a valid `repo`", repair_skill)
+        self.assertIn(
+            "PREFLIGHT_ITERATE_PAUSE: plan-recreate", repair_skill
+        )
 
     def test_session_expand_auto_marks_loop_ready_before_session_run(self) -> None:
         text = (REPO_ROOT / "skills/session-expand/SKILL.md").read_text(
@@ -220,7 +229,11 @@ class SkillInstructionTests(unittest.TestCase):
         # lints first, repairs, re-checks, and only then stops.
         self.assertIn("### Step 2: Validate and Repair the Source Plan", text)
         self.assertIn("asl split --check --plan-file", text)
-        self.assertIn("asl split --check --inline-stdin --json", text)
+        # --cwd is the root the footprint check measures against, so both
+        # invocations carry it.
+        self.assertIn(
+            'asl split --check --inline-stdin --cwd "$PWD" --json', text
+        )
         self.assertIn("**Repair loop** (at most 3 rounds):", text)
         self.assertIn("non-null `suggested_line`", text)
         self.assertIn("`suggested_line: null`", text)

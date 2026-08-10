@@ -580,20 +580,20 @@ def _generated_review_contract_payload(
     repository_aliases: Sequence[str] = (),
 ) -> dict[str, Any]:
     repository_alias = repository_aliases[0] if repository_aliases else None
-    verify_source = _GENERATED_REVIEW_VERIFY_SOURCE
-    artifact_source = _GENERATED_REVIEW_ARTIFACT_VERIFY_SOURCE
-    cwd = str(plan_dir)
+    review_path = str(plan_dir / review.FINAL_REVIEW_FILENAME)
+    artifact_path = str(plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME)
+    # These checks read plan artifacts, which live outside every repository.
+    # Inlining their absolute paths keeps the command's own cwd at the bound
+    # root instead of pointing it out of the tree the run may touch.
+    verify_source = _GENERATED_REVIEW_VERIFY_SOURCE.replace(
+        repr(review.FINAL_REVIEW_FILENAME), repr(review_path), 1
+    )
+    artifact_source = _GENERATED_REVIEW_ARTIFACT_VERIFY_SOURCE.replace(
+        repr(review.FINAL_REVIEW_FILENAME), repr(review_path), 1
+    ).replace(repr(review.FINAL_REVIEW_ARTIFACT_FILENAME), repr(artifact_path), 1)
+    cwd = "."
     if repository_alias is not None:
-        review_path = str(plan_dir / review.FINAL_REVIEW_FILENAME)
-        artifact_path = str(plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME)
-        verify_source = verify_source.replace(
-            repr(review.FINAL_REVIEW_FILENAME), repr(review_path), 1
-        )
         artifact_source = artifact_source.replace(
-            repr(review.FINAL_REVIEW_FILENAME), repr(review_path), 1
-        ).replace(
-            repr(review.FINAL_REVIEW_ARTIFACT_FILENAME), repr(artifact_path), 1
-        ).replace(
             f"artifact.get('version') != {review.REVIEW_ARTIFACT_VERSION}",
             "artifact.get('version') != "
             f"{review.REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION}",
@@ -617,7 +617,6 @@ def _generated_review_contract_payload(
             "    if finding['severity'] not in tally: sys.exit(1)",
             1,
         )
-        cwd = "."
 
     def command_check(name: str, source: str) -> dict[str, Any]:
         check: dict[str, Any] = {
@@ -2987,7 +2986,7 @@ def _resolve_run_verification_context(
                 "run cwd does not match stored plan metadata: "
                 f"{cwd} != {metadata.cwd}"
             )
-        return verification.VerificationContext.legacy(cwd)
+        return verification.VerificationContext.legacy(cwd, plan_dir=plan_dir)
 
     try:
         workspace = workspaces.resolve_workspace(cwd, registry)
@@ -8063,6 +8062,24 @@ def _readiness_gate_payload(
     }
 
 
+def _non_bypassable_blockers(
+    report: preflight.PreflightReport,
+) -> tuple[str, ...]:
+    """Findings ``--allow-not-loop-ready`` may not wave through.
+
+    A plan that reaches beyond its bound root has no execution root the runner
+    can honour, so running it anyway would write somewhere nobody declared.
+    """
+    return tuple(
+        dict.fromkeys(
+            finding.category
+            for finding in report.findings
+            if finding.severity == "red"
+            and finding.category in preflight.NON_BYPASSABLE_PREFLIGHT_CATEGORIES
+        )
+    )
+
+
 def _readiness_gate_passed(report: preflight.PreflightReport) -> bool:
     if not report.ok:
         return False
@@ -9512,10 +9529,8 @@ def _advance_review_cycle(
         # nothing to repair, treat as clean.
         return record_and_complete(REVIEW_CYCLE_DISPOSITION_ALL_CLEAR)
 
-    if (
-        repair_result.reason
-        == review_repair.REVIEW_REPAIR_REASON_NOT_LOOP_READY
-        and not _allow_not_loop_ready(args)
+    if repair_result.reason == review_repair.REVIEW_REPAIR_REASON_NOT_LOOP_READY and (
+        repair_result.non_bypassable_blockers or not _allow_not_loop_ready(args)
     ):
         _record_review_cycle(
             event_path=event_path,
@@ -9538,6 +9553,7 @@ def _advance_review_cycle(
             details={
                 **session_details,
                 "blockers": list(repair_result.blockers),
+                "blocker": list(repair_result.non_bypassable_blockers),
                 "repair_session_ids": cycle_record["repair_session_ids"],
                 "cycle": cycle_record["cycle"],
             },
@@ -11735,6 +11751,21 @@ def _run_locked(
         _finish_run(event_path, payload, progress, persistence=persistence)
         return finish_run_locked(1, payload)
 
+    non_bypassable = _non_bypassable_blockers(preflight_report)
+    if non_bypassable:
+        with persistence.lock:
+            payload["final_snapshot"] = _snapshot_payload(snapshot)
+        _pause_run(
+            event_path,
+            payload,
+            reason="not-loop-ready",
+            message=_readiness_gate_failure_message(preflight_report),
+            details={**gate_payload, "blocker": list(non_bypassable)},
+            persistence=persistence,
+        )
+        _finish_run(event_path, payload, progress, persistence=persistence)
+        return finish_run_locked(1, payload)
+
     if (
         not gate_passed
         and not allow_not_loop_ready
@@ -13832,11 +13863,7 @@ def _run_locked(
                 run_id=run_id,
                 turn_index=turn_index,
                 total_sessions=total_sessions,
-                verification_context=(
-                    verification_context
-                    if verification_context.workspace is not None
-                    else None
-                ),
+                verification_context=verification_context,
             ):
                 break
 

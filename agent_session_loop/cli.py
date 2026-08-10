@@ -536,6 +536,16 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         ),
     )
     split_parser.add_argument(
+        "--cwd",
+        dest="cwd",
+        default=".",
+        help=(
+            "Root the plan is expected to stay inside; a plan that reaches "
+            "into another repository is refused until it declares a "
+            "`## Repositories` registry (default: current directory)"
+        ),
+    )
+    split_parser.add_argument(
         "--skill-prefix",
         dest="skill_prefix",
         choices=("auto", "codex", "claude", "copilot"),

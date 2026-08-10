@@ -52,16 +52,18 @@ Session detection, boundaries, and heading canonicalization are owned by `agent_
 Validate before authoring anything. `asl split --check` runs the same parser, requires no contracts, writes nothing, and — unlike the fail-fast parser — reports every malformed heading in one payload:
 
 ```bash
-asl split --check --plan-file "<plan-file>" --json
+asl split --check --plan-file "<plan-file>" --cwd "$PWD" --json
 ```
 
-For inline input, pipe the captured content to `asl split --check --inline-stdin --json` instead; `--check` never persists a source file, so re-checking is free.
+For inline input, pipe the captured content to `asl split --check --inline-stdin --cwd "$PWD" --json` instead; `--check` never persists a source file, so re-checking is free. `--cwd` is the root the plan's paths are measured against, so pass it in both forms.
 
 Read the payload:
 
 - `ok: true` — record `session_ids` (the canonical ids to key contracts by in Step 5). When the payload also carries ordered `repositories` and `registry_digest`, retain that registry context through Steps 3–7; the parser has already validated the exact top-level `## Repositories` table and every session's `Reads repositories` / `Writes repositories` scope. Continue to Step 3.
 - `reason: single-session` — apply the Step 4 single-session outcome and stop.
 - `reason: malformed-plan` — repair the plan, then re-check. Each finding carries `line`, `category`, `message`, `source_line`, and `suggested_line`.
+
+**`missing-repository-registry`**: the plan reaches a second repository, or escapes `--cwd`, while declaring no registry. The payload's `repository_footprint` object carries the repair: paste `suggested_registry_table` above the first session heading, add `**Reads repositories**:` / `**Writes repositories**:` lines to each session from `suggested_scopes`, then re-check. If `unattributed` is still non-empty after one pass, stop and ask the user which repository owns those paths — that is the only part ASL cannot decide.
 
 **Repair loop** (at most 3 rounds):
 
@@ -88,12 +90,10 @@ Extract file paths from the plan text, check existence and line counts, and buil
 
 **3a. Extract paths**: Scan for backtick-quoted paths (e.g. `` `src/foo/bar.ts` ``) and bare paths in `**File:**` lines or list items. Deduplicate.
 
-For a registered source, treat `Alias:path` as the canonical prose location and
-resolve it beneath that alias's declared workspace-relative path. Do not guess
-which repository owns an unqualified path that could exist in more than one
-session read alias; record it as ambiguous for contract authoring and final
-preflight. The registry read scope is advisory research context, while the
-write scope is the durable mutation authority the runner will enforce.
+Attribute paths from `repository_footprint.detected[].evidence`; only
+`unattributed` entries need a human decision. The registry read scope is
+advisory research context, while the write scope is the durable mutation
+authority the runner will enforce.
 
 **3b. Probe files**: For each extracted path, run `wc -l <path> 2>/dev/null || echo "NEW"`. Record a tuple `(path, lines | NEW, session_number)` — where `session_number` is the session the reference appeared in (or `0` for context).
 
@@ -184,7 +184,7 @@ Echo the `asl split --json` output as a concise summary:
 
 1. Number of sessions extracted (`session_ids`).
 2. Source plan path (`source_path`), especially when inline content was captured. If Step 2 repaired any heading, also print the user's original path and one `line <N>: <category>` line per repair so the change is auditable.
-3. Output directory (`output_dir`) and its `Plan ID` (`plan_id`). For a registered plan, also print the ordered alias/path registry from `repositories` and its credential-free `registry_digest`; do not print credentials or invent resolved roots during splitting.
+3. Output directory (`output_dir`) and its `Plan ID` (`plan_id`). For a registered plan, also print the ordered alias/path registry from `repositories` and its credential-free `registry_digest`; never print credentials.
 4. File listing (`files`) with approximate sizes.
 5. The ready-to-paste serial execution command (the `## Execution` block from `manifest.md`).
 6. Estimated token savings percentage; if an Execution Weight table was generated, highlight any "heavy" session and suggest splitting it further.

@@ -121,6 +121,7 @@ class ReviewRepairResult:
     detail: str | None = None
     blockers: tuple[str, ...] = ()
     baseline_summary: dict[str, Any] | None = None
+    non_bypassable_blockers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -804,6 +805,7 @@ def _make_children_executable(
         return {
             "loop_ready": False,
             "blockers": blockers,
+            "non_bypassable_blockers": [],
             "baseline_summary": baseline_summary,
         }
 
@@ -820,6 +822,14 @@ def _make_children_executable(
         return {
             "loop_ready": False,
             "blockers": blockers,
+            "non_bypassable_blockers": sorted(
+                {
+                    finding.category
+                    for finding in mark_blockers
+                    if finding.category
+                    in preflight.NON_BYPASSABLE_PREFLIGHT_CATEGORIES
+                }
+            ),
             "baseline_summary": baseline_summary,
         }
     marked, mark_error = preflight._mark_loop_ready(report)
@@ -827,11 +837,13 @@ def _make_children_executable(
         return {
             "loop_ready": False,
             "blockers": [mark_error or "could not mark the plan loop-ready"],
+            "non_bypassable_blockers": [],
             "baseline_summary": baseline_summary,
         }
     return {
         "loop_ready": True,
         "blockers": [],
+        "non_bypassable_blockers": [],
         "baseline_summary": baseline_summary,
     }
 
@@ -1207,6 +1219,7 @@ def _materialize(
 
     loop_ready = False
     blockers: tuple[str, ...] = ()
+    non_bypassable_blockers: tuple[str, ...] = ()
     baseline_summary: dict[str, Any] | None = None
     reason = REVIEW_REPAIR_REASON_OK
     if cwd is not None:
@@ -1215,6 +1228,7 @@ def _materialize(
         )
         loop_ready = gate["loop_ready"]
         blockers = tuple(gate["blockers"])
+        non_bypassable_blockers = tuple(gate["non_bypassable_blockers"])
         baseline_summary = gate["baseline_summary"]
         if not loop_ready:
             reason = REVIEW_REPAIR_REASON_NOT_LOOP_READY
@@ -1227,4 +1241,5 @@ def _materialize(
         loop_ready=loop_ready,
         blockers=blockers,
         baseline_summary=baseline_summary,
+        non_bypassable_blockers=non_bypassable_blockers,
     )

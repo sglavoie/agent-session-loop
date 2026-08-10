@@ -54,6 +54,7 @@ from . import (
     harnesses,
     progress_repair,
     repository_evidence,
+    repository_scope,
     responses,
     state,
     workspaces,
@@ -70,6 +71,7 @@ from .contracts import (
 from .plans import (
     HANDOFF_HEADING,
     PlanError,
+    PlanMetadata,
     PlanSnapshot,
     ProgressEntry,
     ReadinessMetadata,
@@ -78,6 +80,7 @@ from .plans import (
     SessionScopeError,
     canonicalize_path,
     inspect_plan,
+    load_plan_metadata,
     noncanonical_session_file_suggestions,
     parse_readiness_metadata,
     progress_path,
@@ -102,6 +105,7 @@ PreflightCategory = Literal[
     "malformed-contract",
     "ambiguity-sentinel",
     "path-reference",
+    "repository-footprint",
     "verification-scope",
     "verification-duplicate",
     "command-not-runnable",
@@ -135,6 +139,7 @@ PREFLIGHT_CATEGORIES: tuple[PreflightCategory, ...] = (
     "malformed-contract",
     "ambiguity-sentinel",
     "path-reference",
+    "repository-footprint",
     "verification-scope",
     "verification-duplicate",
     "command-not-runnable",
@@ -158,6 +163,13 @@ PREFLIGHT_CATEGORIES: tuple[PreflightCategory, ...] = (
     "env-lock",
     "env-amx",
     "env-turn-budget",
+)
+
+#: Categories no ``--allow-not-loop-ready`` escape hatch may waive. A plan that
+#: reaches outside its bound root has no snapshot covering the other location,
+#: so a run there is unguarded rather than merely unreviewed.
+NON_BYPASSABLE_PREFLIGHT_CATEGORIES: frozenset[str] = frozenset(
+    {"repository-footprint"}
 )
 
 CommitMode = Literal["per-session", "end"]
@@ -327,12 +339,32 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
         check_id="path-reference.normalize",
         severity_hint="yellow",
         message=(
-            "Rewrite the relative contract path to remove '..' traversal, or "
-            "replace it with an explicit absolute path."
+            "Rewrite the relative contract path so it stays beneath the bound "
+            "root without '..' traversal."
         ),
         question_template=(
             "Session {session_id} relative contract path traverses outside "
             "--cwd ({detail}). Rewrite it?"
+        ),
+        fix_category="plan-edit",
+    ),
+    "repository-footprint": RepairHint(
+        category="repository-footprint",
+        check_id="repository-footprint.register",
+        severity_hint="red",
+        message=(
+            "This plan reaches outside the single root it is bound to, so it "
+            "cannot stay in legacy single-repository mode. Migrate it: "
+            "(1) add a `## Repositories` table to manifest.md above the first "
+            "session heading; (2) add **Reads repositories:** and **Writes "
+            "repositories:** lines to every session-N.md; (3) give each "
+            "contract check a `repo` alias and a repository-relative "
+            "`path`/`cwd`; (4) run `asl prepare <plan-dir> --resume "
+            "--rebind-workspace --cwd <workspace-root>`."
+        ),
+        question_template=(
+            "Plan reaches outside its bound root ({detail}). Should I migrate "
+            "it to a registered workspace?"
         ),
         fix_category="plan-edit",
     ),
@@ -670,6 +702,49 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
 
 
 _CATEGORY_HINT_OVERRIDES: dict[str, RepairHint] = {
+    "repository-footprint.multi-repo": RepairHint(
+        category="repository-footprint",
+        check_id="repository-footprint.multi-repo",
+        severity_hint="red",
+        message=(
+            "The plan names locations in more than one Git repository while "
+            "bound to a single root, so nothing snapshots the other "
+            "repositories. Declare them: (1) add a `## Repositories` table to "
+            "manifest.md above the first session heading (preflight's "
+            "`repository_footprint.suggested_registry_table` is ready to "
+            "paste); (2) add **Reads repositories:** and **Writes "
+            "repositories:** lines to every session-N.md; (3) give each "
+            "contract check a `repo` alias and a repository-relative "
+            "`path`/`cwd`; (4) run `asl prepare <plan-dir> --resume "
+            "--rebind-workspace --cwd <workspace-root>`."
+        ),
+        question_template=(
+            "Plan spans several repositories with no registry ({detail}). "
+            "Should I migrate it to a registered workspace?"
+        ),
+        fix_category="plan-edit",
+    ),
+    "repository-footprint.out-of-root": RepairHint(
+        category="repository-footprint",
+        check_id="repository-footprint.out-of-root",
+        severity_hint="red",
+        message=(
+            "A contract check points outside the root this plan is bound to, "
+            "where no snapshot or write guard applies. Either rewrite the "
+            "target as a path beneath the bound root, or declare the other "
+            "location: (1) add a `## Repositories` table to manifest.md above "
+            "the first session heading; (2) add **Reads repositories:** and "
+            "**Writes repositories:** lines to every session-N.md; (3) give "
+            "each contract check a `repo` alias and a repository-relative "
+            "`path`/`cwd`; (4) run `asl prepare <plan-dir> --resume "
+            "--rebind-workspace --cwd <workspace-root>`."
+        ),
+        question_template=(
+            "Contract target escapes the bound root ({detail}). Rewrite it, or "
+            "migrate the plan to a registered workspace?"
+        ),
+        fix_category="plan-edit",
+    ),
     "manifest-readiness.missing": RepairHint(
         category="manifest-readiness",
         check_id="manifest-readiness.missing",
@@ -1000,6 +1075,12 @@ def _override_check_id_for_finding(finding: PreflightFinding) -> str:
         if finding.severity == "yellow":
             return "env-turn-budget.split"
         return ""
+    if finding.category == "repository-footprint":
+        if "escapes the bound root" in finding.message:
+            return "repository-footprint.out-of-root"
+        if "git repositories" in finding.message:
+            return "repository-footprint.multi-repo"
+        return ""
     if finding.category == "command-not-runnable":
         if "executable is not on PATH" in finding.message:
             return "command-not-runnable.executable"
@@ -1061,6 +1142,7 @@ class PreflightReport:
     repository_registry: workspaces.RepositoryRegistry | None = None
     verification_context: VerificationContext | None = None
     repositories: tuple[RepositorySummary, ...] = ()
+    repository_footprint: repository_scope.RepositoryFootprint | None = None
 
     @property
     def ok(self) -> bool:
@@ -1267,7 +1349,11 @@ def _resolve_preflight_context(
     if registry is None:
         if not canonical_cwd.is_dir():
             return None, (), summaries
-        return VerificationContext.legacy(canonical_cwd), (), summaries
+        return (
+            VerificationContext.legacy(canonical_cwd, plan_dir=plan_dir),
+            (),
+            summaries,
+        )
 
     if not canonical_cwd.exists():
         return None, (
@@ -1654,6 +1740,112 @@ def _check_path_references(
                 )
 
     return tuple(findings)
+
+
+def _footprint_targets_by_session(
+    contracts_by_session: dict[str, CompletionContract],
+    snapshot: PlanSnapshot | None,
+) -> dict[str, tuple[repository_scope.PathTarget, ...]]:
+    """Collect contract and prose path evidence, keyed by session id."""
+    targets: dict[str, list[repository_scope.PathTarget]] = {}
+    for session_id, contract in contracts_by_session.items():
+        targets.setdefault(session_id, []).extend(
+            repository_scope.targets_from_checks(contract.verify.checks)
+        )
+    if snapshot is not None:
+        for status in snapshot.sessions:
+            text = _read_session_text(status.session)
+            if text is None:
+                continue
+            targets.setdefault(status.session.id, []).extend(
+                repository_scope.extract_path_targets(text)
+            )
+    return {
+        session_id: tuple(session_targets)
+        for session_id, session_targets in targets.items()
+    }
+
+
+def plan_repository_footprint(
+    plan_dir: str | Path, root: str | Path
+) -> tuple[repository_scope.RepositoryFootprint | None, dict[str, Any] | None]:
+    """Judge a split plan directory against ``root``, contracts included.
+
+    Returns ``(None, None)`` for a registered plan, whose registry already
+    governs where it may reach. The second element is the serialized verdict,
+    non-``None`` exactly when the plan may no longer stay in legacy mode.
+    """
+    canonical_dir = canonicalize_path(plan_dir)
+    registry = read_repository_registry(canonical_dir)
+    if registry is not None:
+        return None, None
+    snapshot = inspect_plan(canonical_dir)
+    _, contracts_by_session = _check_session_contracts(snapshot, registry)
+    targets_by_session = _footprint_targets_by_session(contracts_by_session, snapshot)
+    footprint = repository_scope.resolve_footprint(
+        [target for targets in targets_by_session.values() for target in targets],
+        root,
+        plan_dir=canonical_dir,
+    )
+    payload = repository_scope.footprint_payload(
+        targets_by_session, footprint, registry_present=False
+    )
+    return footprint, payload
+
+
+def _check_repository_footprint(
+    contracts_by_session: dict[str, CompletionContract],
+    snapshot: PlanSnapshot | None,
+    root: str | Path,
+    registry: workspaces.RepositoryRegistry | None,
+    plan_dir: str | Path | None = None,
+) -> tuple[tuple[PreflightFinding, ...], repository_scope.RepositoryFootprint | None]:
+    """Refuse a legacy plan whose evidence reaches outside its bound root.
+
+    A registered plan is already governed by the registry, so it is skipped
+    here. Absolute targets that stay inside ``root`` remain green: the
+    judgement is about reach, not about path style.
+    """
+    if registry is not None:
+        return (), None
+    targets_by_session = _footprint_targets_by_session(contracts_by_session, snapshot)
+    footprint = repository_scope.resolve_footprint(
+        [target for targets in targets_by_session.values() for target in targets],
+        root,
+        plan_dir=plan_dir,
+    )
+    findings: list[PreflightFinding] = []
+    for session_id in sorted(targets_by_session):
+        session_footprint = repository_scope.resolve_footprint(
+            targets_by_session[session_id], footprint.root, plan_dir=plan_dir
+        )
+        for target in session_footprint.out_of_root:
+            findings.append(
+                _finding(
+                    "red",
+                    "repository-footprint",
+                    (
+                        f"session {session_id} {target.kind} target escapes the "
+                        "bound root"
+                    ),
+                    session_id=session_id,
+                    line=target.line or None,
+                    detail=f"{target.value} is outside {footprint.root}",
+                )
+            )
+    if len(footprint.repo_roots) > 1:
+        findings.append(
+            _finding(
+                "red",
+                "repository-footprint",
+                (
+                    f"plan spans {len(footprint.repo_roots)} git repositories "
+                    "but manifest.md declares no `## Repositories` registry"
+                ),
+                detail=", ".join(str(repo) for repo in footprint.repo_roots),
+            )
+        )
+    return tuple(findings), footprint
 
 
 def _check_verification_scope(
@@ -2128,6 +2320,13 @@ def run_core_preflight(plan_dir: str | Path) -> PreflightReport:
 
     findings.extend(_check_ambiguity_sentinels(snapshot))
     findings.extend(_check_path_references(contracts_by_session))
+    footprint_findings, footprint = _check_bound_repository_footprint(
+        canonical_dir,
+        contracts_by_session,
+        snapshot,
+        repository_registry,
+    )
+    findings.extend(footprint_findings)
     findings.extend(_check_verification_scope(contracts_by_session))
     findings.extend(_check_duplicate_verification_commands(contracts_by_session))
     findings.extend(_check_progress_journal(snapshot))
@@ -2141,6 +2340,33 @@ def run_core_preflight(plan_dir: str | Path) -> PreflightReport:
         contracts_by_session=contracts_by_session,
         repository_registry=repository_registry,
         repositories=_repository_summaries(repository_registry),
+        repository_footprint=footprint,
+    )
+
+
+def _check_bound_repository_footprint(
+    plan_dir: Path,
+    contracts_by_session: dict[str, CompletionContract],
+    snapshot: PlanSnapshot | None,
+    registry: workspaces.RepositoryRegistry | None,
+) -> tuple[tuple[PreflightFinding, ...], repository_scope.RepositoryFootprint | None]:
+    """Judge the footprint against the root the plan already recorded.
+
+    The stored v1 ``cwd`` is the root an out-of-root target contradicts, so
+    ``asl preflight <dir>`` catches the escape with no ``--cwd`` argument. With
+    no v1 binding there is no root to judge against, and the check stays
+    silent rather than guessing one.
+    """
+    if registry is not None:
+        return (), None
+    try:
+        metadata = load_plan_metadata(plan_dir)
+    except PlanError:
+        return (), None
+    if not isinstance(metadata, PlanMetadata):
+        return (), None
+    return _check_repository_footprint(
+        contracts_by_session, snapshot, metadata.cwd, registry, plan_dir
     )
 
 
@@ -2575,10 +2801,11 @@ def run_resume_preflight(
     parsing, ambiguity sentinels, path references, verification-scope linting,
     and the per-command runnability probes (~95% of a full preflight).
 
-    The two checks whose inputs live *outside* the readiness hash — the
-    progress journal and recorded baseline evidence — are not covered by that
-    proof and are not skipped by this optimization; they move to
-    :func:`run_unhashed_state_checks`, which a caller runs to decide whether
+    The checks whose inputs live *outside* the readiness hash — the progress
+    journal, recorded baseline evidence, and the repository footprint, which
+    depends on the run's ``cwd`` rather than on plan content alone — are not
+    covered by that proof and are not skipped by this optimization; they move
+    to :func:`run_unhashed_state_checks`, which a caller runs to decide whether
     this reduced report may be trusted.
 
     Returns ``None`` when any precondition fails so callers fall back to the
@@ -2653,6 +2880,8 @@ def run_unhashed_state_checks(
     it silently drops the runner's progress auto-repair and its
     stale-baseline gate. Completion contracts are re-parsed because the
     baseline check needs them and a malformed contract must stay fail-closed.
+    The repository footprint is rechecked for the same reason: the readiness
+    hash covers the plan, not the ``cwd`` the run binds it to.
 
     Any returned finding means the reduced report cannot stand in for a full
     one, so the caller falls back to :func:`run_preflight`.
@@ -2693,6 +2922,15 @@ def run_unhashed_state_checks(
         snapshot,
         resolved_registry,
     )
+    footprint_findings: tuple[PreflightFinding, ...] = ()
+    if cwd is not None:
+        footprint_findings, _footprint = _check_repository_footprint(
+            contracts_by_session,
+            snapshot,
+            cwd,
+            resolved_registry,
+            canonical_dir,
+        )
     baseline_findings: tuple[PreflightFinding, ...] = ()
     if resolved_registry is None or verification_context is not None:
         baseline_findings = _check_baselines(
@@ -2705,6 +2943,7 @@ def run_unhashed_state_checks(
     return (
         workspace_findings
         + contract_findings
+        + footprint_findings
         + _check_progress_journal(snapshot)
         + baseline_findings
     )
@@ -2744,6 +2983,16 @@ def run_preflight(
         repository_registry=core_report.repository_registry,
         verification_context=verification_context,
     )
+    footprint_findings: tuple[PreflightFinding, ...] = ()
+    footprint = core_report.repository_footprint
+    if footprint is None and cwd is not None:
+        footprint_findings, footprint = _check_repository_footprint(
+            core_report.contracts_by_session,
+            core_report.snapshot,
+            cwd,
+            core_report.repository_registry,
+            core_report.plan_dir,
+        )
     command_findings: tuple[PreflightFinding, ...] = ()
     baseline_findings: tuple[PreflightFinding, ...] = ()
     if core_report.repository_registry is None or verification_context is not None:
@@ -2763,6 +3012,7 @@ def run_preflight(
         plan_dir=core_report.plan_dir,
         findings=(
             core_report.findings
+            + footprint_findings
             + workspace_findings
             + env_findings
             + command_findings
@@ -2775,6 +3025,7 @@ def run_preflight(
         repository_registry=core_report.repository_registry,
         verification_context=verification_context,
         repositories=repositories,
+        repository_footprint=footprint,
     )
 
 
@@ -3095,9 +3346,22 @@ def _preflight_payload_fields(
                 ],
             }
         )
+    footprint_payload = _repository_footprint_payload(report)
+    if footprint_payload is not None:
+        fields["repository_footprint"] = footprint_payload
     if mark_error is not None:
         fields["mark_error"] = mark_error
     return fields
+
+
+def _repository_footprint_payload(report: PreflightReport) -> dict[str, Any] | None:
+    if report.repository_footprint is None:
+        return None
+    return repository_scope.footprint_payload(
+        _footprint_targets_by_session(report.contracts_by_session, report.snapshot),
+        report.repository_footprint,
+        registry_present=report.repository_registry is not None,
+    )
 
 
 def _format_finding_text(finding: PreflightFinding) -> str:

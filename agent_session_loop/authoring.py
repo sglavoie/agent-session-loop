@@ -42,7 +42,7 @@ import sys
 from typing import Any
 
 from . import contracts as _contracts
-from . import durability, harnesses, plans, responses
+from . import durability, harnesses, plans, repository_scope, responses
 from .plans import (
     PlanError,
     ReadinessMetadata,
@@ -111,6 +111,7 @@ LINT_DUPLICATE_REPOSITORIES = "duplicate-repositories"
 LINT_MALFORMED_REPOSITORIES = "malformed-repositories"
 LINT_INVALID_REPOSITORY = "invalid-repository"
 LINT_INVALID_SESSION_SCOPE = "invalid-session-scope"
+LINT_MISSING_REPOSITORY_REGISTRY = "missing-repository-registry"
 
 _REPOSITORIES_HEADING_CANDIDATE_RE = re.compile(
     r"^ {0,3}#{1,6}[ \t]+Repositories(?:[ \t]+#+)?[ \t]*$",
@@ -467,6 +468,7 @@ class PlanLintResult:
     findings: tuple[PlanLintFinding, ...]
     session_ids: tuple[str, ...]
     registry: RepositoryRegistry | None = None
+    repository_footprint: dict[str, Any] | None = None
 
 
 def _fence_delimiter(line: str) -> str | None:
@@ -952,13 +954,20 @@ def _suggest_heading_repair(error: SourceHeadingError) -> str | None:
     return suggestion
 
 
-def lint_plan_document(text: str) -> PlanLintResult:
+def lint_plan_document(
+    text: str, *, cwd: str | Path | None = None
+) -> PlanLintResult:
     """Collect every malformed source heading instead of stopping at the first.
 
     :func:`parse_plan_document` fails fast, so repairing a plan through it costs
     one round trip per broken heading. This walks the same fence-aware grammar
     and the same per-heading parser, but accumulates diagnostics so a caller can
     repair a whole plan in one pass.
+
+    With ``cwd``, a registry-free plan is additionally judged against that root:
+    a plan that reaches into a second repository is reported as
+    :data:`LINT_MISSING_REPOSITORY_REGISTRY` rather than being split into a
+    legacy plan nothing can guard.
     """
     findings: list[PlanLintFinding] = []
     session_ids: list[str] = []
@@ -1038,11 +1047,94 @@ def lint_plan_document(text: str) -> PlanLintResult:
                 )
             )
 
+    footprint_payload: dict[str, Any] | None = None
+    if not findings and registry is None and cwd is not None:
+        footprint_payload = plan_footprint_payload(text, cwd)
+        if footprint_payload is not None:
+            heading_line = min(first_id_lines.values(), default=1)
+            findings.append(
+                PlanLintFinding(
+                    line=heading_line,
+                    category=LINT_MISSING_REPOSITORY_REGISTRY,
+                    message=(
+                        "plan reaches outside a single repository but declares "
+                        "no `## Repositories` table; paste "
+                        "`repository_footprint.suggested_registry_table` above "
+                        "the first session heading and add "
+                        "`**Reads repositories:**` / `**Writes repositories:**` "
+                        "lines from `repository_footprint.suggested_scopes`"
+                    ),
+                    source_line=lines[heading_line - 1] if lines else "",
+                    suggested_line=None,
+                )
+            )
+
     return PlanLintResult(
         findings=tuple(sorted(findings, key=lambda finding: finding.line)),
         session_ids=tuple(session_ids),
         registry=registry,
+        repository_footprint=footprint_payload,
     )
+
+
+def plan_footprint_payload(
+    text: str,
+    cwd: str | Path,
+    *,
+    contracts_by_id: Any = None,
+) -> dict[str, Any] | None:
+    """Judge a source plan against ``cwd``, returning ``None`` when it fits.
+
+    ``contracts_by_id`` is the raw ``--contracts-file`` object: its check
+    ``path``/``cwd`` values are the strongest evidence of what a session will
+    touch, and they never appear in the plan prose ``--check`` sees.
+    """
+    try:
+        plan = parse_plan_document(text)
+    except PlanError:
+        return None
+    targets_by_session: dict[str, tuple[repository_scope.PathTarget, ...]] = {}
+    for session in plan.sessions:
+        session_id = session.session_id.value
+        targets = list(
+            repository_scope.extract_path_targets("\n".join(session.lines))
+        )
+        targets.extend(_contract_file_targets(contracts_by_id, session_id))
+        targets_by_session[session_id] = tuple(targets)
+    footprint = repository_scope.resolve_footprint(
+        [target for targets in targets_by_session.values() for target in targets],
+        cwd,
+    )
+    return repository_scope.footprint_payload(
+        targets_by_session, footprint, registry_present=plan.registry is not None
+    )
+
+
+def _contract_file_targets(
+    contracts_by_id: Any, session_id: str
+) -> list[repository_scope.PathTarget]:
+    if not isinstance(contracts_by_id, dict):
+        return []
+    contract = contracts_by_id.get(session_id)
+    if not isinstance(contract, dict):
+        return []
+    verify = contract.get("verify")
+    checks = verify.get("checks") if isinstance(verify, dict) else contract.get("checks")
+    if not isinstance(checks, list):
+        return []
+    targets: list[repository_scope.PathTarget] = []
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        for field_name, kind in (("path", "contract-path"), ("cwd", "contract-cwd")):
+            value = check.get(field_name)
+            if isinstance(value, str) and value:
+                targets.append(
+                    repository_scope.PathTarget(
+                        value=value, kind=kind, line=0, confidence="hard"
+                    )
+                )
+    return targets
 
 
 # ---------------------------------------------------------------------------
@@ -1391,15 +1483,7 @@ def render_manifest_sessions_table(sessions: tuple[ManifestSession, ...]) -> str
 
 def render_repository_registry_table(registry: RepositoryRegistry) -> str:
     """Render the authoritative ordered repository registry as Markdown."""
-    lines = [
-        "| Alias | Path | Origin |",
-        "| --- | --- | --- |",
-    ]
-    lines.extend(
-        f"| {repository.alias} | {repository.path} | {repository.origin} |"
-        for repository in registry
-    )
-    return "\n".join(lines) + "\n"
+    return "\n".join(repository_scope.registry_table_lines(registry)) + "\n"
 
 
 @dataclass(frozen=True)
@@ -2223,7 +2307,10 @@ def check_from_args(args: Any) -> int:
                 source_path=source_path,
             )
 
-    result = lint_plan_document(text)
+    result = lint_plan_document(text, cwd=getattr(args, "cwd", None))
+    footprint_fields: dict[str, Any] = {}
+    if result.repository_footprint is not None:
+        footprint_fields["repository_footprint"] = result.repository_footprint
 
     if result.findings:
         if want_json:
@@ -2238,6 +2325,7 @@ def check_from_args(args: Any) -> int:
                     session_ids=list(result.session_ids),
                     findings=[finding.as_dict() for finding in result.findings],
                     **_registry_payload(result.registry),
+                    **footprint_fields,
                 )
             )
         else:
@@ -2263,6 +2351,7 @@ def check_from_args(args: Any) -> int:
             source_path=source_path,
             session_ids=list(result.session_ids),
             **_registry_payload(result.registry),
+            **footprint_fields,
         )
 
     if want_json:
@@ -2274,6 +2363,7 @@ def check_from_args(args: Any) -> int:
                 session_ids=list(result.session_ids),
                 session_count=len(result.session_ids),
                 **_registry_payload(result.registry),
+                **footprint_fields,
             )
         )
     else:
@@ -2349,6 +2439,32 @@ def split_from_args(args: Any) -> int:
             "contracts file must be a JSON object keyed by session id",
         )
 
+    footprint_fields: dict[str, Any] = {}
+    split_cwd = getattr(args, "cwd", None)
+    if split_cwd is not None:
+        try:
+            plan_text = Path(source_path).read_text(encoding="utf-8")
+        except OSError as error:
+            return _emit_error(
+                SPLIT_REASON_INPUT_ERROR,
+                f"cannot read source plan {source_path}: {error}",
+            )
+        footprint = plan_footprint_payload(
+            plan_text, split_cwd, contracts_by_id=contracts_by_id
+        )
+        if footprint is not None:
+            footprint_fields["repository_footprint"] = footprint
+            if not footprint["registry_present"]:
+                return _emit_error(
+                    SPLIT_REASON_MALFORMED_PLAN,
+                    (
+                        "plan reaches outside a single repository but declares "
+                        "no `## Repositories` table; add the registry and "
+                        "per-session repository scopes before splitting"
+                    ),
+                    **footprint_fields,
+                )
+
     analysis_note: str | None = None
     if args.analysis_file:
         try:
@@ -2392,6 +2508,7 @@ def split_from_args(args: Any) -> int:
         "next_steps": _split_next_steps(result.output_dir),
         "skill_prefix": result.skill_prefix,
         **_registry_payload(result.registry),
+        **footprint_fields,
     }
     if want_json:
         responses.print_json(responses.success_payload("split", **payload))

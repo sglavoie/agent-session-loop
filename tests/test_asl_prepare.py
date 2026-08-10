@@ -1307,6 +1307,134 @@ class PrepareCliTests(unittest.TestCase):
         self.assertIn("**Readiness**: draft", manifest)
 
 
+class LegacyRepositoryFootprintPrepareTests(unittest.TestCase):
+    """A legacy plan reaching two repositories cannot be expanded as v1."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.workspace = self.tmp_path / "workspace"
+        repositories = init_multi_repo_workspace(
+            self.workspace, DEFAULT_MULTI_REPO_SPECS[:2]
+        )
+        self.first = repositories["SVC"]
+        self.second = repositories["OAK"]
+        self.plan_dir = self.tmp_path / "plan"
+        self._write_plan()
+
+    def _write_plan(self) -> None:
+        self.plan_dir.mkdir(parents=True, exist_ok=True)
+        (self.plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
+        (self.plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
+        checks = [
+            {
+                "name": "first",
+                "type": "file_exists",
+                "path": str(self.first / "README.md"),
+            },
+            {
+                "name": "second",
+                "type": "file_exists",
+                "path": str(self.second / "README.md"),
+            },
+        ]
+        (self.plan_dir / "session-1.md").write_text(
+            "\n".join(
+                [
+                    "# Session 1: Test",
+                    "",
+                    authoring.CONTEXT_REFERENCE_LINE,
+                    "",
+                    "---",
+                    "",
+                    "Update the retry helper in `foo/bar.py`.",
+                    "",
+                    "## Completion Contract",
+                    "",
+                    "### Done when",
+                    "",
+                    "- The helper passes tests.",
+                    "",
+                    "### Verify",
+                    "",
+                    "```json",
+                    json.dumps({"session": "1", "checks": checks}),
+                    "```",
+                    "",
+                    "## Handoff",
+                    "",
+                    "- **Status**: pending",
+                    "- **Files modified**: (none yet)",
+                    "- **Key decisions**: (none yet)",
+                    "- **Blockers for next session**: (none)",
+                    "- **Notes**:",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+    def test_build_validation_packet_refuses_a_multi_repo_legacy_plan(self) -> None:
+        with self.assertRaises(prepare.RepositoryFootprintError) as caught:
+            prepare.build_validation_packet(
+                self.plan_dir, ("1",), codebase_root=self.first
+            )
+
+        payload = caught.exception.payload
+        self.assertTrue(payload["registry_required"])
+        self.assertFalse(payload["registry_present"])
+        self.assertTrue(payload["suggested_registry_table"])
+
+    def test_expand_ingest_refuses_a_v1_payload_with_its_own_reason(self) -> None:
+        payload = _validator_payload()
+        payload["codebase_root"] = str(plans.canonicalize_path(self.first))
+        batch = self.tmp_path / "batch.json"
+        batch.write_text(json.dumps(payload), encoding="utf-8")
+        args = cli.build_parser().parse_args(
+            [
+                "expand-ingest",
+                str(self.plan_dir),
+                "--batch-file",
+                str(batch),
+                "--json",
+            ]
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            code = prepare.expand_ingest_from_args(args)
+
+        self.assertEqual(1, code)
+        emitted = json.loads(stdout.getvalue())
+        self.assertEqual(
+            prepare.EXPAND_INGEST_REASON_REPOSITORY_FOOTPRINT, emitted["reason"]
+        )
+        self.assertTrue(emitted["repository_footprint"]["registry_required"])
+        self.assertIsNone(prepare.load_prepare_validation(self.plan_dir))
+
+    def test_expand_ingest_refuses_a_v1_payload_reporting_repository_ambiguity(
+        self,
+    ) -> None:
+        # A plan whose own footprint is clean, so only the validator's report
+        # can refuse it.
+        plan_dir = self.tmp_path / "single-repo-plan"
+        _write_prepare_plan(plan_dir, ("1",))
+        payload = _validator_payload(
+            issues=[
+                {
+                    "issue_type": prepare.REPOSITORY_AMBIGUITY_ISSUE,
+                    "summary": "`foo/bar.py` names more than one repository",
+                    "session_ref": "`foo/bar.py`",
+                    "actual": "the path exists in two sibling repositories",
+                    "fix": "declare a `## Repositories` registry",
+                }
+            ]
+        )
+        payload["codebase_root"] = str(plans.canonicalize_path(self.first))
+        with self.assertRaisesRegex(plans.PlanError, "repository ambiguity"):
+            prepare.ingest_validator_output(plan_dir, payload)
+
+
 class PrepareEndToEndTests(unittest.TestCase):
     """`prepare_plan` end-to-end pipeline behavior."""
 
@@ -1942,6 +2070,48 @@ class PrepareEndToEndTests(unittest.TestCase):
         finally:
             state.release_lock(registered.plan_dir, self.state_dir)
         self.assertEqual(before, self._plan_file_bytes(registered.plan_dir))
+
+    def test_rebind_accepts_a_legacy_binding_once_a_registry_appears(self) -> None:
+        specs = DEFAULT_MULTI_REPO_SPECS[:2]
+        old_workspace = self.tmp_path / "old-workspace"
+        new_workspace = self.tmp_path / "new-workspace"
+        init_multi_repo_workspace(old_workspace, specs)
+        init_multi_repo_workspace(new_workspace, specs)
+        registered = self._prepare(
+            self._write_registered_source(specs),
+            _recording_validator([]),
+            cwd=old_workspace,
+        )
+        assert registered.plan_dir is not None
+        # Simulate the plan that grew a registry only after it was bound in
+        # legacy mode: the binding on disk is still version 1.
+        plans.save_plan_metadata(registered.plan_dir, self.repo)
+
+        rebound = self._prepare(
+            None,
+            _recording_validator([]),
+            cwd=new_workspace,
+            resume_plan_dir=registered.plan_dir,
+            rebind_workspace=True,
+        )
+
+        self.assertTrue(rebound.ok, rebound)
+        assert rebound.workspace_rebind is not None
+        self.assertEqual(
+            str(plans.canonicalize_path(self.repo)),
+            rebound.workspace_rebind["old"]["workspace_root"],
+        )
+        self.assertEqual([], rebound.workspace_rebind["old"]["repositories"])
+        self.assertEqual(
+            str(plans.canonicalize_path(new_workspace)),
+            rebound.workspace_rebind["new"]["workspace_root"],
+        )
+        metadata = plans.load_plan_metadata(registered.plan_dir)
+        self.assertIsInstance(metadata, plans.WorkspacePlanMetadata)
+        assert isinstance(metadata, plans.WorkspacePlanMetadata)
+        self.assertEqual(
+            str(plans.canonicalize_path(new_workspace)), metadata.workspace_root
+        )
 
     def test_repository_ambiguity_issue_prevents_loop_ready(self) -> None:
         specs = DEFAULT_MULTI_REPO_SPECS[:2]

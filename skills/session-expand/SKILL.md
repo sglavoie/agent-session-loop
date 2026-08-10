@@ -40,7 +40,7 @@ Session IDs use `[1-9][0-9]*(\.[1-9][0-9]*)*`; session files are named `session-
 2. Verify the basename matches exactly `session-<ID>.md`.
 3. Process only that file and write the corresponding `session-<ID>.expand.md`.
 
-**Determine the validation root by plan mode.** Without a registry, use the legacy codebase root: derive it from `context.md` and repository/build references, use the current working directory when it matches, and ask for the repository root when a different root is required or the choice is ambiguous. With a registry, use one canonical workspace root containing every declared repository path. Prefer a version 2 `plan-metadata.json` binding when present; otherwise use the current directory only when every registry row resolves beneath it as the exact Git top-level with the expected credential-free origin. Ask for the workspace root when that cannot be established uniquely. The workspace root itself may be a non-Git directory. Never infer it from one child checkout, silently rebind an existing plan, or follow a repository path through a symlink escape.
+**Determine the validation root by plan mode.** Without a registry, use the legacy codebase root: derive it from `context.md` and repository/build references, use the current working directory when it matches, and ask for the repository root when a different root is required or the choice is ambiguous. With a registry, run `asl contract-check <plan-dir> --cwd <candidate> --json` and use its `workspace_root`; stop and ask on any `workspace-root`, `repository-root`, or `repository-origin` finding. Never silently rebind an existing plan.
 
 ### Step 2: Extract Claims from Each Session
 
@@ -83,10 +83,7 @@ Do not re-implement the contract schema. Run the authoritative static checker, w
 asl contract-check <plan-dir> --cwd <root> --json
 ```
 
-Here `<root>` is the legacy repository root or registered workspace root. In
-registered mode, use the returned `workspace_root`, `registry_digest`, and
-ordered resolved `repositories` projection as a cross-check before emitting
-validator output; each contract row must resolve through its declared `repo`.
+Here `<root>` is the legacy repository root or registered workspace root.
 
 (In single-file mode add `--session <ID>`.) Each check produces a row with `status` (`ok`, `schema-error`, `missing-contract`, or `factual-issue`), a `reason` (`command-not-runnable`, `file-missing`, `regex-not-matched`, or `bare-python`), and a human-readable `detail`. For every non-`ok` row, copy its `detail` verbatim into that session's `contract_problems` (Step 6) with `contract_checked: true`:
 
@@ -185,9 +182,9 @@ Registered top-level shape:
 For version 2, every object in `claims`, `issues`, `details`, `patterns`,
 `dependencies`, and `corrections` must also carry a `repo` alias from that
 session's read scope, and all locations are repository-relative or qualified
-when rendered. Report ambiguous unqualified path prose as a
-`repository-ambiguous` issue instead of selecting an alias. Version 1 rejects
-repository fields and remains valid only for plans without a registry.
+when rendered. In either version, report a path that could belong to more than
+one repository, or that resolves outside the bound root, as a
+`repository-ambiguous` issue instead of selecting an alias.
 
 The parser rejects (fail-closed, `PlanError`, nothing written) unknown keys, empty required strings, unknown `claim_type`/`issue_type`/`direction`, invalid/duplicate session ids, and more than 3 `patterns` per session. Claims about code to be _created_ set `"to_be_created": true` (no `line`) and render as "N/A — to be created" instead of being flagged as issues. `contract_problems` requires `contract_checked: true` and takes the Step 3 findings verbatim. `corrections` are exact factual text replacements only (`expected_text != replacement_text`) — never design changes, plan restructuring, or contract-body edits; report those as `issues` or `contract_problems`.
 
@@ -238,7 +235,7 @@ Otherwise (the command exits non-zero, `marked_loop_ready` is false, or the fina
 - New code claims (files or functions to be created) are valid and should not be flagged unless they conflict with existing code.
 - This skill is sequential-by-design: it does not extract or validate `## Parallel Metadata`, emit `## Parallel Safety` sections, or write `parallel-validation.md`. Read any legacy parallel blocks only as context, never as authoritative scheduling guidance, and never regenerate them.
 - All expansion writes, reference-line insertions, and factual fixes flow through `asl expand-ingest` (`agent_session_loop.prepare`) — never hand-write `.expand.md` files or `Edit` session files directly. `prepare-validation.json` is a derived, regenerable aggregate excluded from the stable readiness hash, never authoritative over the session files themselves.
-- Registered expansion output is fail-closed validator v2 evidence: its workspace root and exact ordered repositories must match the plan, every factual entry is repository-attributed within the session read scope, and every rendered location is qualified. Legacy validator v1 remains accepted only for plans without a registry.
+- Emit version 2 whenever the `asl contract-check` payload carries `repositories`; `expand-ingest` refuses version 1 otherwise, with `reason: "repository-footprint"` when the plan reaches beyond one repository while declaring no registry. That refusal is repaired by declaring the registry (its `repository_footprint.suggested_registry_table` is the block to paste), not by re-emitting the payload.
 - Contract validation is owned by `asl contract-check` (`agent_session_loop.contracts.parse_completion_contract`); surface its `detail` verbatim under "Contract Issues" so the wording stays aligned with `asl preflight` and `asl verify`. Contract issues are advisory — do not auto-edit contract bodies or skeleton placeholders.
 - The readiness SHA and manifest-readiness finding are owned by the final `asl preflight` (`agent_session_loop.plans.stable_readiness_sha256`); hash divergence at expansion time almost always means a session file was edited between `session-split` and `session-expand`. The hash ignores legacy `parallel-validation.md`, manifest `## Parallel Execution` blocks, and per-session `## Parallel Metadata` blocks.
 - The `asl preflight --json --mark-loop-ready` invocation ending directory-mode expansion is the readiness gate for `session-run`; red/yellow findings block the ready-to-run command, while green findings (`env-amx`, `env-lock`, `env-turn-budget`) are informational.

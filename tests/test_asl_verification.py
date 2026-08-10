@@ -543,14 +543,13 @@ class VerificationExecutorTests(unittest.TestCase):
             self.assertEqual("pass", result.status)
             self.assertIsNone(result.failure_reason)
 
-    def test_absolute_file_and_regex_paths_resolve_independently_of_repo_root(
+    def test_absolute_file_and_regex_paths_resolve_inside_the_repo_root(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            repo_root = root / "repo"
+            repo_root = Path(tmp) / "repo"
             repo_root.mkdir()
-            target = root / "outside.txt"
+            target = repo_root / "inside.txt"
             target.write_text("absolute target\n", encoding="utf-8")
 
             file_result = verification.run_check(
@@ -568,6 +567,20 @@ class VerificationExecutorTests(unittest.TestCase):
 
             self.assertEqual("pass", file_result.status)
             self.assertEqual("pass", regex_result.status)
+
+    def test_absolute_path_outside_the_repo_root_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_root = root / "repo"
+            repo_root.mkdir()
+            target = root / "outside.txt"
+            target.write_text("absolute target\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(plans.PlanError, "escapes the bound root"):
+                verification.run_check(
+                    contracts.FileExistsCheck(name="absolute-file", path=str(target)),
+                    repo_root=repo_root,
+                )
 
     def test_file_exists_check_fails_when_file_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1624,6 +1637,23 @@ class MultiRepositoryVerificationTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(plans.PlanError, "stay beneath"):
+                verification.run_check(check, context=context)
+
+    def test_legacy_command_cwd_outside_the_bound_root_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bound = root / "repo"
+            bound.mkdir()
+            (root / "elsewhere").mkdir()
+            context = verification.VerificationContext.legacy(bound)
+            check = contracts.CommandCheck(
+                name="escape",
+                argv=(sys.executable, "-c", "pass"),
+                timeout_seconds=10.0,
+                cwd="../elsewhere",
+            )
+
+            with self.assertRaisesRegex(plans.PlanError, "escapes the bound root"):
                 verification.run_check(check, context=context)
 
     def test_parallel_repository_results_stay_in_declared_order(self) -> None:

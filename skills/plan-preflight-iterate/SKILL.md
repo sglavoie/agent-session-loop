@@ -62,11 +62,9 @@ Parse the argument list. Verify the plan directory exists and contains `manifest
 
 Record the optional `--cwd`, `--harness`, `--commit-mode`, `--state-dir`, and `--max-pending-sessions` values. They will be forwarded verbatim to every `asl preflight` invocation so that the same set of checks runs on every iteration.
 
-Read the optional ordered registry from `manifest.md`. For a registered plan,
-never infer `--cwd` from one child checkout: use the prepared version 2
-`workspace_root` or ask the user for the common workspace root. An existing
-binding mismatch is not an invocation typo that this skill may paper over;
-surface the atomic `asl prepare PLAN_DIR --resume --cwd NEW_WORKSPACE
+Take `--cwd` from preflight's `workspace_root` when the payload reports one. An
+existing binding mismatch is not an invocation typo that this skill may paper
+over; surface the atomic `asl prepare PLAN_DIR --resume --cwd NEW_WORKSPACE
 --rebind-workspace` remediation instead.
 
 ### Step 2: Baseline Preflight Run
@@ -181,7 +179,9 @@ recommended/default answer, or continue when the user has not answered.
 
 Apply edits one finding at a time:
 
-- **plan-edit**: Read the session file from `finding.path`. For missing/malformed `## Completion Contract` errors, build the contract scaffold using the parser shape (a `### Done when` bullet list and a fenced ```json``` Verify block whose `session` matches `session_id`). For a registered plan, every check needs a valid `repo` from the session read scope and every `path` / command `cwd` must remain relative beneath that repository; absolute paths and upward traversal are invalid. For a legacy plan, remove unsafe `..` traversal or use an explicit absolute path when that is the intended existing contract. For ambiguity sentinels or repository-ambiguous prose, jump to `finding.line` and use the user's wording or qualified `Alias:path` choice. After every edit, re-read the file to confirm the change landed.
+- **plan-edit**: Read the session file from `finding.path`. For missing/malformed `## Completion Contract` errors, build the contract scaffold using the parser shape (a `### Done when` bullet list and a fenced ```json``` Verify block whose `session` matches `session_id`). For a registered plan, every check needs a valid `repo` from the session read scope and every `path` / command `cwd` must remain relative beneath that repository; absolute paths and upward traversal are invalid. For a legacy plan, remove unsafe `..` traversal or keep an absolute path only when it resolves inside the bound root. For ambiguity sentinels or repository-ambiguous prose, jump to `finding.line` and use the user's wording or qualified `Alias:path` choice. After every edit, re-read the file to confirm the change landed.
+
+- **repository-footprint**: Print the payload's `repository_footprint.suggested_registry_table` and `suggested_scopes`, then stop with `PREFLIGHT_ITERATE_PAUSE: plan-recreate`. Registry rows are durable plan content, so this skill never writes them; the migration ends in `asl prepare --resume --rebind-workspace`, which is outside this loop.
 
 - **manifest-update**: Defer the repair until Step 5 and use `asl preflight --mark-loop-ready`; never hand-edit readiness state, SHA, or timestamp. Registry rows are durable plan content rather than derived readiness metadata, so a registry correction requires an explicit user-approved plan edit followed by fresh preparation evidence.
 

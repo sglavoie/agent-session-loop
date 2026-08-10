@@ -66,9 +66,11 @@ from agent_session_loop.formatting import (
     format_turn_started_message,
 )
 from tests.support import (
+    DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,
     _command_contract,
     _load_script_module,
+    init_multi_repo_workspace,
 )
 
 
@@ -1370,6 +1372,160 @@ class PlanAuthoringTests(unittest.TestCase):
                     (second_dir / name).read_text(),
                     name,
                 )
+
+
+class SplitRepositoryFootprintTests(unittest.TestCase):
+    """`asl split` refuses to write a multi-repository plan without a registry."""
+
+    def setUp(self) -> None:
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.root = Path(self._temp.name)
+        self.workspace = self.root / "workspace"
+        self.repositories = init_multi_repo_workspace(
+            self.workspace, DEFAULT_MULTI_REPO_SPECS[:2]
+        )
+        self.first = self.repositories["SVC"]
+        self.second = self.repositories["OAK"]
+        for repository in (self.first, self.second):
+            (repository / "README.md").write_text("x\n", encoding="utf-8")
+
+    def _write_plan(self, body: str) -> Path:
+        plan_file = self.root / "plan.md"
+        plan_file.write_text(body, encoding="utf-8")
+        return plan_file
+
+    def _check(self, plan_file: Path, cwd: Path) -> dict:
+        args = argparse.Namespace(
+            json=True, inline_stdin=False, plan_file=str(plan_file), cwd=str(cwd)
+        )
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            authoring.check_from_args(args)
+        return json.loads(buffer.getvalue())
+
+    def test_multi_repository_plan_without_a_registry_is_refused(self) -> None:
+        plan_file = self._write_plan(
+            "# Plan\n\n"
+            "## Session 1: First\n\n"
+            f"Edit {self.first}/README.md carefully.\n\n"
+            "## Session 2: Second\n\n"
+            f"Then update {self.second}/README.md too.\n"
+        )
+
+        payload = self._check(plan_file, self.first)
+
+        self.assertEqual("malformed-plan", payload["reason"])
+        self.assertEqual(
+            [authoring.LINT_MISSING_REPOSITORY_REGISTRY],
+            [finding["category"] for finding in payload["findings"]],
+        )
+        footprint = payload["repository_footprint"]
+        self.assertFalse(footprint["registry_present"])
+        self.assertEqual(
+            ["tundra_OAK", "tundra_svc"],
+            sorted(entry["alias"] for entry in footprint["detected"]),
+        )
+        self.assertEqual(
+            ["| Alias | Path | Origin |", "| --- | --- | --- |"],
+            footprint["suggested_registry_table"][:2],
+        )
+
+    def test_single_repository_plan_still_checks_clean(self) -> None:
+        plan_file = self._write_plan(
+            "# Plan\n\n"
+            "## Session 1: First\n\n"
+            f"Edit {self.first}/README.md carefully.\n\n"
+            "## Session 2: Second\n\n"
+            f"Revisit {self.first}/README.md once more.\n"
+        )
+
+        payload = self._check(plan_file, self.first)
+
+        self.assertTrue(payload["ok"])
+        self.assertNotIn("repository_footprint", payload)
+
+    def test_paths_inside_a_fenced_block_are_not_evidence(self) -> None:
+        plan_file = self._write_plan(
+            "# Plan\n\n"
+            "## Session 1: First\n\n"
+            f"Edit {self.first}/README.md carefully.\n\n"
+            "## Session 2: Second\n\n"
+            "```bash\n"
+            f"cd {self.second} && make\n"
+            "```\n"
+        )
+
+        payload = self._check(plan_file, self.first)
+
+        self.assertTrue(payload["ok"])
+
+    def test_write_path_refuses_contracts_that_span_repositories(self) -> None:
+        plan_file = self._write_plan(
+            "# Plan\n\n"
+            "## Session 1: First\n\nDo the first thing.\n\n"
+            "## Session 2: Second\n\nDo the second thing.\n"
+        )
+        contracts_file = self.root / "contracts.json"
+        contracts_file.write_text(
+            json.dumps(
+                {
+                    "1": {
+                        "done_when": ["done"],
+                        "verify": {
+                            "session": "1",
+                            "checks": [
+                                {
+                                    "name": "a",
+                                    "type": "file_exists",
+                                    "path": str(self.first / "README.md"),
+                                }
+                            ],
+                        },
+                    },
+                    "2": {
+                        "done_when": ["done"],
+                        "verify": {
+                            "session": "2",
+                            "checks": [
+                                {
+                                    "name": "b",
+                                    "type": "file_exists",
+                                    "path": str(self.second / "README.md"),
+                                }
+                            ],
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        args = argparse.Namespace(
+            json=True,
+            inline_stdin=False,
+            plan_file=str(plan_file),
+            base_dir=str(self.root / "out"),
+            check=False,
+            contracts_file=str(contracts_file),
+            skill_prefix="claude",
+            analysis_file=None,
+            cwd=str(self.first),
+        )
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            exit_code = authoring.split_from_args(args)
+
+        payload = json.loads(buffer.getvalue())
+        self.assertEqual(1, exit_code)
+        self.assertEqual("malformed-plan", payload["reason"])
+        self.assertEqual(
+            ["tundra_OAK", "tundra_svc"],
+            sorted(
+                entry["alias"]
+                for entry in payload["repository_footprint"]["detected"]
+            ),
+        )
+        self.assertFalse((self.root / "out").exists())
 
 
 class PlanAuthoringResplitTests(unittest.TestCase):
