@@ -6304,12 +6304,20 @@ class _HangAssessment:
     ``confirm_assessment`` rejects the verdict at fold time when output has
     resumed since, so a stale suspicion can never be persisted after a newer
     clear.
+
+    ``cpu_progress`` is the tick's raw CPU sampling result, published whenever
+    a process tree was sampled — including ticks that raise no suspicion at
+    all. A supervisor deciding on idle time alone has no ``suspected`` block to
+    read, and a silent turn whose tree is burning CPU is working, not hung.
+    ``None`` means no fresh sample this tick and must never be read as
+    "not progressing".
     """
 
     suspected: dict[str, Any] | None = None
     transition: str | None = None
     retracted: dict[str, Any] | None = None
     generation: int = 0
+    cpu_progress: dict[str, Any] | None = None
 
 
 class _HangSentinel:
@@ -6465,17 +6473,33 @@ class _HangSentinel:
                 self._zero_cpu_streak = 0
                 self._last_cpu_seconds = None
 
+            checked_at = _isoformat(now)
+            cpu_progress: dict[str, Any] | None = None
+            if tree is not None:
+                cpu_progress = {
+                    "harness_pid": pid,
+                    "progressing": cpu_positive,
+                    "cpu_delta_seconds": cpu_delta,
+                    "confirm_samples": self._zero_cpu_streak,
+                    "last_checked_at": checked_at,
+                }
+
+            # Both classes demand the same proof: a confirmed run of zero-CPU
+            # samples. A received harness result is sticky, so without this the
+            # suspicion re-raises on every later tick and the CPU retraction
+            # below is unreachable — a worker still burning CPU behind a
+            # buffering pipe reads as hung.
+            confirmed = self._zero_cpu_streak >= self._confirm_samples
             reason: str | None = None
-            if result_grace_hit:
+            if result_grace_hit and confirmed:
                 reason = HANG_REASON_RESULT_RECEIVED
             elif (
                 pid is not None
                 and idle_seconds >= self._trigger_idle_seconds
-                and self._zero_cpu_streak >= self._confirm_samples
+                and confirmed
             ):
                 reason = HANG_REASON_ZERO_CPU
 
-            checked_at = _isoformat(now)
             if reason is not None:
                 block: dict[str, Any] = {
                     "reason": reason,
@@ -6503,6 +6527,7 @@ class _HangSentinel:
                     suspected=dict(block),
                     transition="suspected" if previous is None else None,
                     generation=generation,
+                    cpu_progress=cpu_progress,
                 )
             if previous is not None and cpu_positive:
                 self._suspected = None
@@ -6514,6 +6539,7 @@ class _HangSentinel:
                     transition="cleared",
                     retracted=retracted,
                     generation=generation,
+                    cpu_progress=cpu_progress,
                 )
             if previous is not None:
                 # A ps failure (or a streak broken by one) refreshes rather
@@ -6531,8 +6557,9 @@ class _HangSentinel:
                 return _HangAssessment(
                     suspected=dict(refreshed),
                     generation=generation,
+                    cpu_progress=cpu_progress,
                 )
-            return _HangAssessment(generation=generation)
+            return _HangAssessment(generation=generation, cpu_progress=cpu_progress)
 
 
 class _LiveTurn:
@@ -6609,6 +6636,9 @@ class _LiveTurn:
             self._active_turn[char_key] = int(self._active_turn.get(char_key, 0)) + len(
                 text
             )
+            # Resumed output resets the sentinel's CPU baseline, so whatever
+            # was published is no longer a fresh sample.
+            self._active_turn.pop("hang_cpu_progress", None)
             if hang_retracted is not None:
                 self._active_turn.pop("hang_suspected", None)
                 hang_cleared_payload = self._hang_event_payload(hang_retracted, now)
@@ -6791,6 +6821,11 @@ class _LiveTurn:
                     heartbeat["hang_suspected"] = assessment.suspected
                 else:
                     self._active_turn.pop("hang_suspected", None)
+                if assessment.cpu_progress is not None:
+                    self._active_turn["hang_cpu_progress"] = assessment.cpu_progress
+                    heartbeat["hang_cpu_progress"] = assessment.cpu_progress
+                else:
+                    self._active_turn.pop("hang_cpu_progress", None)
                 if assessment.transition == "suspected":
                     assert assessment.suspected is not None
                     hang_event = (
@@ -6880,6 +6915,9 @@ class _LiveTurn:
             "idle_seconds": self._active_turn.get("idle_seconds"),
             "hang_suspected": dict(block),
         }
+        cpu_progress = self._active_turn.get("hang_cpu_progress")
+        if cpu_progress is not None:
+            payload["hang_cpu_progress"] = dict(cpu_progress)
         if self._active_turn.get("session_number") is not None:
             payload["session_number"] = self._active_turn["session_number"]
         return payload

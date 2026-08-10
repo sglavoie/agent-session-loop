@@ -82,6 +82,12 @@ PARSE_STAGE = "parse"
 # the helper and the runner share one list by construction.
 HARNESS_NAMES = _harnesses.HARNESS_NAMES
 
+# Session kinds the runner stamps on `active_turn.session_kind`, re-exported for
+# the same reason. A dual-harness run alternates between them: implementation
+# legs run under `--harness`, review/rereview legs under `--review-harness`.
+SESSION_KIND_IMPLEMENTATION = _runner.SESSION_KIND_IMPLEMENTATION
+SESSION_KIND_REVIEW = _runner.SESSION_KIND_REVIEW
+
 # Shell operators the helper refuses to interpret. The command is executed
 # without a shell, so any of these would either be passed as a literal to the
 # child (surprising) or, if a shell were ever involved, enable injection. We
@@ -146,9 +152,11 @@ DEFAULT_STALL_IDLE_THRESHOLD = 90.0
 # `DEFAULT_HANG_ESCALATION_PROBES`: consecutive heartbeat ticks whose snapshot
 # carries a runner `hang_suspected` block of the result-received class before
 # escalating (~60s at the 30s tick cadence). The runner already confirmed the
-# harness result arrived while the process stays alive, so two corroborating
-# ticks are enough. `DEFAULT_HANG_IDLE_CEILING`: hard idle backstop (seconds);
-# any tick at or above it escalates regardless of hang class. Deliberately
+# harness result arrived, the process stays alive, and its tree burned no CPU
+# across the confirmation samples, so two corroborating ticks are enough.
+# `DEFAULT_HANG_IDLE_CEILING`: hard idle backstop (seconds); a tick at or above
+# it escalates regardless of hang class, unless the runner's live
+# `hang_cpu_progress` sample reports the tree progressing. Deliberately
 # conservative so a legitimate long sleep/network wait below the ceiling never
 # churns — the runner-side block and its AgentMux notification already
 # surfaced the suspicion.
@@ -1384,6 +1392,11 @@ def _status_snapshot(status: object) -> dict:
         hang_suspected = active_turn.get("hang_suspected")
         if isinstance(hang_suspected, dict):
             snapshot["hang_suspected"] = hang_suspected
+        # Published on every sampled tick, suspicion or not, so the idle
+        # ceiling can tell a silent worker from a stopped one.
+        cpu_progress = active_turn.get("hang_cpu_progress")
+        if isinstance(cpu_progress, dict):
+            snapshot["hang_cpu_progress"] = cpu_progress
         return snapshot
 
     active_verification = runner_state.get("active_verification") or status.get(
@@ -1505,6 +1518,11 @@ class _EventsTailer:
             hang_suspected = payload.get("hang_suspected")
             if isinstance(hang_suspected, dict):
                 snapshot["hang_suspected"] = hang_suspected
+            # Same contract for the CPU sample: a heartbeat without the block
+            # means no fresh sample, never stale evidence of progress.
+            cpu_progress = payload.get("hang_cpu_progress")
+            if isinstance(cpu_progress, dict):
+                snapshot["hang_cpu_progress"] = cpu_progress
             update_snapshot(snapshot)
         elif name == "turn_started":
             update_snapshot(
@@ -1524,10 +1542,20 @@ class _EventsTailer:
             hang_suspected = payload.get("hang_suspected")
             if isinstance(hang_suspected, dict):
                 snapshot["hang_suspected"] = hang_suspected
+                cpu_progress = payload.get("hang_cpu_progress")
+                if isinstance(cpu_progress, dict):
+                    snapshot["hang_cpu_progress"] = cpu_progress
+                else:
+                    snapshot.pop("hang_cpu_progress", None)
                 update_snapshot(snapshot)
         elif name == _events.TURN_HANG_CLEARED_EVENT:
             snapshot = dict(self._snapshot)
             snapshot.pop("hang_suspected", None)
+            cpu_progress = payload.get("hang_cpu_progress")
+            if isinstance(cpu_progress, dict):
+                snapshot["hang_cpu_progress"] = cpu_progress
+            else:
+                snapshot.pop("hang_cpu_progress", None)
             # A retraction invalidates the idle reading from any earlier
             # record in the same batch: keeping it would let a pre-clear
             # 900s heartbeat trip the idle ceiling on the very tick the
@@ -1798,6 +1826,19 @@ def _snapshot_idle_seconds(snapshot: dict, block: Optional[dict]):
     return None
 
 
+def _snapshot_cpu_progressing(snapshot: dict) -> Optional[bool]:
+    """Whether the runner's last CPU sample saw the process tree progressing.
+
+    ``None`` means unknown — no fresh sample, or a malformed block. Only a real
+    bool answers the question, so a sampling gap can never read as progress.
+    """
+    block = snapshot.get("hang_cpu_progress")
+    if not isinstance(block, dict):
+        return None
+    progressing = block.get("progressing")
+    return progressing if isinstance(progressing, bool) else None
+
+
 class _HangEscalation:
     """Decide when a runner-suspected worker hang becomes a hard escalation.
 
@@ -1807,16 +1848,24 @@ class _HangEscalation:
 
     - **result-received** (:data:`HANG_CLASS_RESULT_RECEIVED`): the runner's
       ``hang_suspected`` block reports the harness result already arrived
-      while the process stays alive. After ``probes`` consecutive ticks
-      (default 2, ~60s at the 30s cadence) escalate — the turn's real work is
-      done, so waiting longer only blocks the supervising session.
-    - **idle ceiling**: any tick whose idle seconds reach ``idle_ceiling``
+      while the process stays alive *and* its process tree burned no CPU
+      across the runner's confirmation samples. After ``probes`` consecutive
+      ticks (default 2, ~60s at the 30s cadence) escalate — nothing is running
+      and nothing more is coming, so waiting longer only blocks the
+      supervising session. Left ungated on CPU evidence because the runner
+      never publishes this class while the tree progresses.
+    - **idle ceiling**: a tick whose idle seconds reach ``idle_ceiling``
       (default 900s) escalates regardless of hang class —
       :data:`HANG_CLASS_ZERO_CPU` when the runner's block confirms the
-      zero-CPU class, else :data:`HANG_CLASS_IDLE_CEILING`. Deliberately
-      conservative for zero-cpu so a legitimate long sleep/network wait below
-      the ceiling never churns; the runner-side block and AgentMux
-      notification already surfaced it.
+      zero-CPU class, else :data:`HANG_CLASS_IDLE_CEILING` — unless the
+      runner's ``hang_cpu_progress`` sample says the tree is progressing.
+      Silence is not idleness: a worker piping through a buffering consumer
+      writes nothing for minutes while burning real CPU. Unknown (no fresh
+      sample, e.g. ``ps`` unavailable) still escalates, because a runner that
+      cannot sample can never confirm zero CPU either — this bar is that
+      case's only backstop. Deliberately conservative for zero-cpu so a
+      legitimate long sleep/network wait below the ceiling never churns; the
+      runner-side block and AgentMux notification already surfaced it.
 
     Any tick without a result-received block — including an explicit
     ``turn_hang_cleared`` retraction or a heartbeat that dropped the block —
@@ -1860,6 +1909,7 @@ class _HangEscalation:
             self._result_probes = 0
             self._result_episode = None
         idle_seconds = _snapshot_idle_seconds(snapshot, block)
+        progressing = _snapshot_cpu_progressing(snapshot)
 
         def verdict(hang_class: str) -> dict:
             return {
@@ -1871,7 +1921,11 @@ class _HangEscalation:
 
         if self._result_probes >= self._probes_required:
             return verdict(HANG_CLASS_RESULT_RECEIVED)
-        if idle_seconds is not None and idle_seconds >= self._idle_ceiling:
+        if (
+            idle_seconds is not None
+            and idle_seconds >= self._idle_ceiling
+            and progressing is not True
+        ):
             return verdict(
                 HANG_CLASS_ZERO_CPU
                 if reason == HANG_CLASS_ZERO_CPU
@@ -1977,8 +2031,9 @@ def _invoke_run(
 
     Above the soft WARN sit the hard hang bars (see :class:`_HangEscalation`):
     ``hang_escalation_probes`` consecutive ticks carrying a result-received
-    ``hang_suspected`` block, or any tick at/above ``hang_idle_ceiling`` idle
-    seconds, stop the wait loop and return a ``{"_worker_hung": True, ...}``
+    ``hang_suspected`` block, or a tick at/above ``hang_idle_ceiling`` idle
+    seconds whose CPU sample does not report the tree progressing, stop the
+    wait loop and return a ``{"_worker_hung": True, ...}``
     marker (mirroring the ``_invoke_error`` marker) **without killing or
     waiting on the child** — the ``asl run`` process stays alive with the lock
     held, so re-running the same supervision command re-attaches.
@@ -2488,6 +2543,31 @@ def _should_launch_for_status(parsed: dict, status: dict, pending: int) -> bool:
     return review_resume.get("blocker") == "higher-cap-required"
 
 
+def _expected_turn_harness(parsed: dict, active_turn: dict) -> Optional[str]:
+    """Which requested harness should be driving ``active_turn``, if knowable.
+
+    A dual-harness run alternates between `--harness` (implementation) and
+    `--review-harness` (review/rereview), so the flag a live turn must match
+    depends on its `session_kind`. `None` means "no yardstick": the caller must
+    not treat an observed harness as foreign.
+
+    An absent kind is read as implementation, mirroring the runner's own
+    default, so mismatch detection still works against older payloads. An
+    unrecognized kind yields `None` — the helper cannot know which flag governs
+    a leg it does not model, and guessing is what produced the false-mismatch
+    bug. A review turn on a run with no `--review-harness` also yields `None`:
+    plan and state identity already matched, so the lock is ours, and
+    `parsed["harness"]` is the wrong yardstick for a review turn by
+    construction.
+    """
+    kind = active_turn.get("session_kind")
+    if kind == SESSION_KIND_REVIEW:
+        return parsed.get("review_harness")
+    if kind in (SESSION_KIND_IMPLEMENTATION, None):
+        return parsed.get("harness")
+    return None
+
+
 def _classify_lock(parsed: dict, status: dict) -> str:
     """Decide how to treat the current lock: clear/stale/attach/mismatch.
 
@@ -2496,8 +2576,9 @@ def _classify_lock(parsed: dict, status: dict) -> str:
       stale locks before acquiring), so we let the run own the cleanup.
     - ``attach`` – an active lock for the same plan/state; another run is
       already driving this plan, so we poll rather than start a second one.
-    - ``mismatch`` – an active lock for a different plan, or an observably
-      different harness than the user explicitly requested; needs a human.
+    - ``mismatch`` – an active lock for a different plan, or a live turn whose
+      observed harness differs from the one the user requested for that turn's
+      `session_kind` (see `_expected_turn_harness`); needs a human.
     """
     lock = status.get("lock") or {}
     if not lock.get("present") or not lock.get("active"):
@@ -2511,16 +2592,15 @@ def _classify_lock(parsed: dict, status: dict) -> str:
     ):
         return "mismatch"
 
-    wanted_harness = parsed.get("harness")
-    if wanted_harness is not None:
-        active_turn = (
-            (status.get("runner_state") or {}).get("active_turn")
-            or status.get("active_turn")
-            or {}
-        )
-        observed = active_turn.get("harness")
-        if observed is not None and observed != wanted_harness:
-            return "mismatch"
+    active_turn = (
+        (status.get("runner_state") or {}).get("active_turn")
+        or status.get("active_turn")
+        or {}
+    )
+    observed = active_turn.get("harness")
+    expected = _expected_turn_harness(parsed, active_turn)
+    if observed is not None and expected is not None and observed != expected:
+        return "mismatch"
     return "attach"
 
 
@@ -3963,21 +4043,6 @@ class _TerminatedBySignal(SystemExit):
 TERMINATION_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 
 
-def _install_termination_handlers() -> list:
-    """Route SIGTERM/SIGINT into :class:`_TerminatedBySignal`.
-
-    Returns the previous handlers so the caller can restore them.
-    """
-
-    def handler(signal_number, frame):
-        raise _TerminatedBySignal(signal_number)
-
-    return [
-        (number, signal.signal(number, handler))
-        for number in TERMINATION_SIGNALS
-    ]
-
-
 class _DeferredSignals:
     """The first termination signal held pending by a deferral window.
 
@@ -4037,6 +4102,37 @@ def _deferred_termination_signals():
             raise _TerminatedBySignal(signal_number)
 
 
+@contextlib.contextmanager
+def _termination_handlers():
+    """Route SIGTERM/SIGINT into :class:`_TerminatedBySignal` for the body.
+
+    Both seams are masked. Installing the handlers one at a time leaves a
+    window where the first is live and the caller has not yet entered the guard
+    that emits the terminal record, so a signal landing there exits with no
+    record and a leaked disposition; restoring them has the mirror-image
+    window. Blocking across each loop closes both: a signal arriving mid-swap
+    stays pending until the mask lifts, and the resulting
+    :class:`_TerminatedBySignal` is raised where the caller's guard can see it.
+
+    A partial install is still restored, because the ``finally`` opens before
+    the first swap.
+    """
+
+    def handler(signal_number, frame):
+        raise _TerminatedBySignal(signal_number)
+
+    previous: list = []
+    try:
+        with _deferred_termination_signals():
+            for number in TERMINATION_SIGNALS:
+                previous.append((number, signal.signal(number, handler)))
+        yield
+    finally:
+        with _deferred_termination_signals():
+            for number, disposition in reversed(previous):
+                signal.signal(number, disposition)
+
+
 def _termination_detail(exc: BaseException) -> str:
     """Short, bounded identification of what ended supervision."""
     if isinstance(exc, _TerminatedBySignal):
@@ -4053,8 +4149,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     is written and flushed — an agent woken by it can read that output
     immediately — and a failed append is reported in the result without
     touching ``ok`` or the exit code. Emission runs inside the same
-    ``BaseException`` guard as the supervision itself, so a SIGTERM or SIGINT
-    landing in the post-flush window still leaves a record behind. The record
+    ``BaseException`` guard as the supervision itself, and that guard opens
+    outside the handler-installation window, so a SIGTERM or SIGINT landing in
+    the post-flush window — or mid-install — still leaves a record behind. The
+    record
     carries this launch's ``supervision_id`` so an agent supervising a plan
     that an older helper is still exiting cannot mistake that helper's record
     for this one.
@@ -4068,9 +4166,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _mailbox.new_supervision_id()
     )
     emitter = _SupervisionEndEmitter(supervision_id=supervision_id)
-    previous_handlers = _install_termination_handlers()
     try:
-        try:
+        with _termination_handlers():
             result = run_autopilot(args)
             if isinstance(result, dict):
                 result["supervision_id"] = supervision_id
@@ -4089,20 +4186,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 text=text,
                 result=result,
             )
-        except BaseException as exc:
-            # No result to read plan identity from; `parse_command` is pure, so
-            # re-running it recovers the plan (and the `--no-mailbox` opt-out).
-            emitter.emit(
-                parse_command(args.command),
-                outcome=_mailbox.SUPERVISION_OUTCOME_ERROR,
-                text=f"supervision ended: error - {_termination_detail(exc)}",
-            )
-            raise
+    except BaseException as exc:
+        # No result to read plan identity from; `parse_command` is pure, so
+        # re-running it recovers the plan (and the `--no-mailbox` opt-out).
+        # Once-only emission makes this a no-op when a record is already
+        # committed — a signal at the restore seam after a clean run keeps
+        # that record and still exits 128+n.
+        emitter.emit(
+            parse_command(args.command),
+            outcome=_mailbox.SUPERVISION_OUTCOME_ERROR,
+            text=f"supervision ended: error - {_termination_detail(exc)}",
+        )
+        raise
 
-        return 0 if result.get("ok") else 1
-    finally:
-        for signal_number, handler in previous_handlers:
-            signal.signal(signal_number, handler)
+    return 0 if result.get("ok") else 1
 
 
 if __name__ == "__main__":

@@ -6400,6 +6400,103 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
             cleared[0]["payload"]["hang_suspected"]["reason"],
         )
 
+    def _live_turn(self, sample_tree) -> "runner._LiveTurn":
+        sentinel = runner._HangSentinel(
+            sample_tree=sample_tree,
+            monotonic=time.monotonic,
+            trigger_idle_seconds=120.0,
+            confirm_samples=2,
+            cpu_epsilon_seconds=0.5,
+            result_grace_seconds=45.0,
+        )
+        started_at = runner._isoformat(runner._utc_now() - timedelta(seconds=600))
+        active_turn: dict[str, object] = {
+            "run_id": "run-hang",
+            "turn_index": 1,
+            "session": 3,
+            "session_id": "3",
+            "total_sessions": 3,
+            "harness": "claude",
+            "artifact_dir": str(self.tmp_dir),
+            "stdout_path": str(self.tmp_dir / "stdout.log"),
+            "stderr_path": str(self.tmp_dir / "stderr.log"),
+            "last_message_path": str(self.tmp_dir / "last-message.txt"),
+            "result_path": str(self.tmp_dir / "result.json"),
+            "started_at": started_at,
+            "last_activity_at": started_at,
+            "heartbeat_count": 0,
+        }
+        return runner._LiveTurn(
+            payload={"state_path": str(self.state_path)},
+            event_path=self.event_path,
+            progress=mock.Mock(),
+            active_turn=active_turn,
+            hang_sentinel=sentinel,
+        )
+
+    def test_cpu_progress_publishes_without_suspicion_and_clears(self) -> None:
+        # A worker burning CPU behind a buffering pipe: silent past the
+        # trigger, but its tree keeps advancing.
+        samples = [self.tree(cpu) for cpu in (9.0, 12.0, 15.0, 18.0)]
+        live_turn = self._live_turn(lambda pid: samples.pop(0))
+        live_turn.note_harness_pid(4242)
+
+        for _ in range(3):
+            live_turn._record_heartbeat()
+
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        active_turn = state["active_turn"]
+        self.assertNotIn("hang_suspected", active_turn)
+        progress = active_turn["hang_cpu_progress"]
+        self.assertTrue(progress["progressing"])
+        self.assertEqual(4242, progress["harness_pid"])
+        self.assertEqual(3.0, progress["cpu_delta_seconds"])
+        self.assertEqual(0, progress["confirm_samples"])
+        self.assertIn("last_checked_at", progress)
+
+        records = read_jsonl(self.event_path)
+        self.assertEqual(
+            [],
+            [
+                record
+                for record in records
+                if record["name"] == events.TURN_HANG_SUSPECTED_EVENT
+            ],
+        )
+        heartbeats = [
+            record
+            for record in records
+            if record["name"] == events.TURN_HEARTBEAT_EVENT
+        ]
+        self.assertTrue(
+            heartbeats[-1]["payload"]["hang_cpu_progress"]["progressing"],
+        )
+        self.assertNotIn("hang_suspected", heartbeats[-1]["payload"])
+
+        # Resumed output resets the CPU baseline, so the published sample is
+        # no longer fresh and must not linger.
+        live_turn.record_activity("stdout", "resumed output")
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertNotIn("hang_cpu_progress", state["active_turn"])
+
+    def test_cpu_progress_absent_while_the_turn_is_not_sampled(self) -> None:
+        def never_sampled(pid: int):  # pragma: no cover - guard
+            raise AssertionError("a busy turn must not be sampled")
+
+        live_turn = self._live_turn(never_sampled)
+        # No harness pid: the sentinel cannot sample, so it must publish
+        # nothing rather than a stale or invented reading.
+        live_turn._record_heartbeat()
+
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertNotIn("hang_cpu_progress", state["active_turn"])
+        heartbeats = [
+            record
+            for record in read_jsonl(self.event_path)
+            if record["name"] == events.TURN_HEARTBEAT_EVENT
+        ]
+        self.assertNotIn("hang_cpu_progress", heartbeats[-1]["payload"])
+
 
 if __name__ == "__main__":
     unittest.main()

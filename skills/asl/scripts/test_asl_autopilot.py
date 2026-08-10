@@ -17,7 +17,12 @@ import tempfile
 import textwrap
 import time
 import unittest
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from contextlib import (
+    ExitStack,
+    contextmanager,
+    redirect_stderr,
+    redirect_stdout,
+)
 
 MODULE_PATH = os.path.join(os.path.dirname(__file__), "asl_autopilot.py")
 SPEC = importlib.util.spec_from_file_location("asl_autopilot", MODULE_PATH)
@@ -957,6 +962,49 @@ class ClassifyLockTest(unittest.TestCase):
         status = _status_payload(1, lock=_active_lock())
         self.assertEqual(self._classify({"harness": "claude"}, status), "attach")
 
+    def _turn_status(self, **active_turn):
+        status = _status_payload(1, lock=_active_lock())
+        status["runner_state"] = {"active_turn": active_turn}
+        return status
+
+    def test_review_turn_matching_review_harness_is_attach(self) -> None:
+        # A dual-harness run alternates harnesses; a review turn must be
+        # measured against `--review-harness`, not `--harness`.
+        status = self._turn_status(harness="codex", session_kind="review")
+        self.assertEqual(
+            self._classify({"harness": "claude", "review_harness": "codex"}, status),
+            "attach",
+        )
+
+    def test_review_turn_on_a_third_harness_is_mismatch(self) -> None:
+        status = self._turn_status(harness="copilot", session_kind="review")
+        self.assertEqual(
+            self._classify({"harness": "claude", "review_harness": "codex"}, status),
+            "mismatch",
+        )
+
+    def test_implementation_turn_is_measured_against_harness(self) -> None:
+        status = self._turn_status(harness="claude", session_kind="implementation")
+        parsed = {"harness": "claude", "review_harness": "codex"}
+        self.assertEqual(self._classify(parsed, status), "attach")
+
+        status = self._turn_status(harness="codex", session_kind="implementation")
+        self.assertEqual(self._classify(parsed, status), "mismatch")
+
+    def test_review_turn_without_a_review_harness_is_attach(self) -> None:
+        # Plan and state identity already matched, so the lock is ours;
+        # `--harness` is the wrong yardstick for a review turn.
+        status = self._turn_status(harness="codex", session_kind="review")
+        self.assertEqual(self._classify({"harness": "claude"}, status), "attach")
+
+    def test_absent_session_kind_still_detects_a_foreign_harness(self) -> None:
+        status = self._turn_status(harness="codex")
+        self.assertEqual(self._classify({"harness": "claude"}, status), "mismatch")
+
+    def test_unrecognized_session_kind_is_attach(self) -> None:
+        status = self._turn_status(harness="codex", session_kind="verification")
+        self.assertEqual(self._classify({"harness": "claude"}, status), "attach")
+
 
 class SuperviseRunInjectedTest(unittest.TestCase):
     """Drive the supervision loop with injected status/run invokers."""
@@ -1021,6 +1069,34 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["reason"], "complete")
         self.assertEqual(status.calls, 2)
+
+    def test_attach_survives_a_review_turn_on_the_review_harness(self) -> None:
+        # The runner alternates harnesses; a codex review turn under
+        # `--harness claude` used to read as a foreign lock and abort
+        # supervision with `user_required` on a perfectly healthy run.
+        review_turn = _status_payload(1, lock=_active_lock())
+        review_turn["runner_state"] = {
+            "active_turn": {"harness": "codex", "session_kind": "review"}
+        }
+        status = _StatusScript([review_turn, _status_payload(0)])
+        parsed = {
+            "plan_dir": "/tmp/plan",
+            "harness": "claude",
+            "review_harness": "codex",
+            "argv": [
+                "asl",
+                "run",
+                "/tmp/plan",
+                "--harness",
+                "claude",
+                "--review-harness",
+                "codex",
+                "--json",
+            ],
+        }
+        result = self._supervise(status, _never_run, parsed=parsed)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "complete")
 
     def test_all_complete_initial_review_launches_with_review_harness(self) -> None:
         initial = _status_payload(0)
@@ -4528,17 +4604,28 @@ class SupervisionEndEmissionTest(unittest.TestCase):
 
     def test_signal_before_the_terminal_write_emits_error_record(self) -> None:
         real_guard = autopilot._deferred_termination_signals
+        # `_termination_handlers` holds the same guard around its install and
+        # restore loops, so the fake arms itself only for the emitter's window.
+        armed = {"value": False}
 
         @contextmanager
         def signalling_guard():
             with real_guard() as deferred:
-                # Inside the deferral window and before the record is written:
-                # recorded rather than raised, so the outcome flips to error.
-                signal.raise_signal(signal.SIGTERM)
+                if armed["value"]:
+                    armed["value"] = False
+                    # Inside the deferral window and before the record is
+                    # written: recorded rather than raised, so the outcome
+                    # flips to error.
+                    signal.raise_signal(signal.SIGTERM)
                 yield deferred
 
         result = self._complete_result(self.command)
-        self._patch(autopilot, "run_autopilot", lambda args: result)
+
+        def supervision(args):
+            armed["value"] = True
+            return result
+
+        self._patch(autopilot, "run_autopilot", supervision)
         self._patch(autopilot, "_deferred_termination_signals", signalling_guard)
         previous_term = signal.getsignal(signal.SIGTERM)
         previous_int = signal.getsignal(signal.SIGINT)
@@ -4557,6 +4644,148 @@ class SupervisionEndEmissionTest(unittest.TestCase):
             records[0].supervision_outcome,
         )
         self.assertEqual("supervision ended: error - SIGTERM", records[0].text)
+
+    def _counting_signal(self, *, call: int, fire):
+        """Patch ``signal.signal`` to fire ``fire`` on its ``call``-th use.
+
+        ``_termination_handlers`` uses it four times: two installs, then two
+        restores in reverse order (SIGINT, then SIGTERM). Numbering the calls
+        addresses each seam between them.
+        """
+        real_signal = signal.signal
+        seen = {"count": 0}
+
+        def counting_signal(number, handler):
+            seen["count"] += 1
+            if seen["count"] == call:
+                return fire(lambda: real_signal(number, handler))
+            return real_signal(number, handler)
+
+        self.addCleanup(self._restore_signal_state, real_signal)
+        self._patch(autopilot.signal, "signal", counting_signal)
+        return seen
+
+    def _restore_signal_state(self, real_signal) -> None:
+        # A seam test can leave a handler installed or a signal blocked; put
+        # the interpreter back before the next test runs.
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, autopilot.TERMINATION_SIGNALS)
+        for number in autopilot.TERMINATION_SIGNALS:
+            current = signal.getsignal(number)
+            if getattr(current, "__qualname__", "").startswith(
+                "_termination_handlers"
+            ):
+                real_signal(number, signal.SIG_DFL)
+
+    def test_signal_at_an_install_seam_still_emits_one_error_record(self) -> None:
+        # MED-1: the handlers used to go in before `main` opened the guard
+        # that writes the terminal record, so a signal landing between the two
+        # installs exited with no record and a leaked disposition.
+        for call in (1, 2):
+            for number in autopilot.TERMINATION_SIGNALS:
+                with self.subTest(call=call, signal=number.name):
+                    plan_dir, state_dir, command = self._plan(f"seam-{call}-{number}")
+
+                    def fire(swap):
+                        previous = swap()
+                        # Blocked by the install hold, so it stays pending
+                        # until the mask lifts inside `main`'s guard.
+                        signal.raise_signal(number)
+                        return previous
+
+                    self._counting_signal(call=call, fire=fire)
+                    launched: list = []
+                    self._patch(
+                        autopilot, "run_autopilot", lambda args: launched.append(args)
+                    )
+                    previous_term = signal.getsignal(signal.SIGTERM)
+                    previous_int = signal.getsignal(signal.SIGINT)
+
+                    with self.assertRaises(SystemExit) as caught:
+                        with redirect_stdout(io.StringIO()):
+                            autopilot.main(["--command", command, "--json"])
+
+                    self.assertEqual(128 + int(number), caught.exception.code)
+                    self.assertEqual([], launched)
+                    self.assertIs(previous_term, signal.getsignal(signal.SIGTERM))
+                    self.assertIs(previous_int, signal.getsignal(signal.SIGINT))
+                    records = self._supervision_ends(plan_dir, state_dir)
+                    self.assertEqual(1, len(records))
+                    self.assertEqual(
+                        autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+                        records[0].supervision_outcome,
+                    )
+                    self.assertEqual(
+                        f"supervision ended: error - {number.name}",
+                        records[0].text,
+                    )
+
+    def test_failed_install_restores_the_partial_swap(self) -> None:
+        def fire(swap):
+            # The second install never happens, so only SIGTERM was swapped.
+            raise RuntimeError("dispositions are unavailable")
+
+        self._counting_signal(call=2, fire=fire)
+        self._patch(autopilot, "run_autopilot", lambda args: self.fail("launched"))
+        previous_term = signal.getsignal(signal.SIGTERM)
+        previous_int = signal.getsignal(signal.SIGINT)
+
+        with self.assertRaises(RuntimeError):
+            with redirect_stdout(io.StringIO()):
+                autopilot.main(["--command", self.command, "--json"])
+
+        self.assertIs(previous_term, signal.getsignal(signal.SIGTERM))
+        self.assertIs(previous_int, signal.getsignal(signal.SIGINT))
+        records = self._supervision_ends(self.plan_dir, self.state_dir)
+        self.assertEqual(1, len(records))
+        self.assertEqual(
+            autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+            records[0].supervision_outcome,
+        )
+        self.assertEqual(
+            "supervision ended: error - RuntimeError", records[0].text
+        )
+
+    def test_signal_at_the_restore_seam_keeps_the_committed_record(self) -> None:
+        # The accepted nuance: the record is already committed, so the signal
+        # only decides the exit code. In production the restored disposition is
+        # `SIG_DFL` and the kernel ends the process; standing in a raising
+        # handler observes the same outcome without killing the test runner.
+        delivered: list = []
+
+        def prior_term(number, frame):
+            delivered.append(number)
+            raise autopilot._TerminatedBySignal(number)
+
+        real_signal = signal.signal
+        previous_term = real_signal(signal.SIGTERM, prior_term)
+        self.addCleanup(real_signal, signal.SIGTERM, previous_term)
+
+        def fire(swap):
+            # Call 3 restores SIGINT; SIGTERM is still ours until call 4, and
+            # the hold keeps the signal pending across both.
+            previous = swap()
+            signal.raise_signal(signal.SIGTERM)
+            return previous
+
+        self._counting_signal(call=3, fire=fire)
+        result = self._complete_result(self.command)
+        self._patch(autopilot, "run_autopilot", lambda args: result)
+        previous_int = signal.getsignal(signal.SIGINT)
+
+        with self.assertRaises(SystemExit) as caught:
+            with redirect_stdout(io.StringIO()):
+                autopilot.main(["--command", self.command, "--json"])
+
+        self.assertEqual(128 + int(signal.SIGTERM), caught.exception.code)
+        self.assertEqual([int(signal.SIGTERM)], delivered)
+        self.assertIs(prior_term, signal.getsignal(signal.SIGTERM))
+        self.assertIs(previous_int, signal.getsignal(signal.SIGINT))
+        records = self._supervision_ends(self.plan_dir, self.state_dir)
+        self.assertEqual(1, len(records))
+        self.assertEqual(
+            autopilot._mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            records[0].supervision_outcome,
+        )
 
     def test_signal_during_the_terminal_write_records_the_termination(self) -> None:
         real_append = autopilot._mailbox.append_supervision_end
@@ -4696,18 +4925,24 @@ class SupervisionEndEmissionTest(unittest.TestCase):
         # the two installations escaped as `_TerminatedBySignal` with the
         # emitter already spent, so no record was ever written.
         real_guard = autopilot._deferred_termination_signals
-        entries: list = []
+        armed = {"value": False}
 
         @contextmanager
         def interrupted_guard():
-            entries.append(len(entries))
-            if len(entries) == 1:
+            if armed["value"]:
+                armed["value"] = False
                 raise autopilot._TerminatedBySignal(signal.SIGTERM)
             with real_guard() as deferred:
                 yield deferred
 
         result = self._complete_result(self.command)
-        self._patch(autopilot, "run_autopilot", lambda args: result)
+
+        def supervision(args):
+            # Handler installation is done; the next window is the emitter's.
+            armed["value"] = True
+            return result
+
+        self._patch(autopilot, "run_autopilot", supervision)
         self._patch(autopilot, "_deferred_termination_signals", interrupted_guard)
         previous_term = signal.getsignal(signal.SIGTERM)
         previous_int = signal.getsignal(signal.SIGINT)
@@ -4761,12 +4996,9 @@ class DeferredTerminationSignalsTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self.addCleanup(self._restore_signal_state)
-        self.previous = autopilot._install_termination_handlers()
-        self.addCleanup(
-            lambda: [
-                signal.signal(number, handler) for number, handler in self.previous
-            ]
-        )
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(autopilot._termination_handlers())
 
     def test_the_hold_is_atomic_and_leaves_dispositions_alone(self) -> None:
         for signal_number in autopilot.TERMINATION_SIGNALS:
@@ -5806,6 +6038,17 @@ def _hang_block(
     }
 
 
+def _cpu_progress_block(progressing=True, *, delta=0.58, confirm_samples=0):
+    """Runner-shaped ``hang_cpu_progress`` sample."""
+    return {
+        "harness_pid": 4242,
+        "progressing": progressing,
+        "cpu_delta_seconds": delta,
+        "confirm_samples": confirm_samples,
+        "last_checked_at": "2026-07-24T19:03:00+00:00",
+    }
+
+
 def _hung_running_snapshot(idle=162.0, *, reason=autopilot.HANG_CLASS_RESULT_RECEIVED):
     """Tailer-shaped running snapshot carrying a hang_suspected block."""
     return {
@@ -5961,6 +6204,77 @@ class HangEscalationPolicyTest(unittest.TestCase):
         for _ in range(5):
             self.assertIsNone(policy.observe(snapshot))
 
+    def test_idle_ceiling_declines_while_the_tree_burns_cpu(self) -> None:
+        # The defect this gate fixes: a worker piping output through a
+        # buffering `tail` is silent for far longer than the ceiling while
+        # its process tree keeps consuming CPU.
+        policy = autopilot._HangEscalation(probes=2, idle_ceiling=900.0)
+        snapshot = {
+            "state": "running",
+            "idle_seconds": 1200,
+            "hang_cpu_progress": _cpu_progress_block(True),
+        }
+        for _ in range(5):
+            self.assertIsNone(policy.observe(snapshot))
+
+    def test_idle_ceiling_escalates_once_progress_stops(self) -> None:
+        policy = autopilot._HangEscalation(probes=2, idle_ceiling=900.0)
+        self.assertIsNone(
+            policy.observe(
+                {
+                    "state": "running",
+                    "idle_seconds": 1200,
+                    "hang_cpu_progress": _cpu_progress_block(True),
+                }
+            )
+        )
+        verdict = policy.observe(
+            {
+                "state": "running",
+                "idle_seconds": 1200,
+                "hang_cpu_progress": _cpu_progress_block(
+                    False, delta=0.0, confirm_samples=1
+                ),
+            }
+        )
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict["class"], autopilot.HANG_CLASS_IDLE_CEILING)
+        self.assertEqual(verdict["idle_seconds"], 1200.0)
+
+    def test_idle_ceiling_escalates_when_cpu_evidence_is_unusable(self) -> None:
+        # Unknown must stay armed: the runner resets its zero-cpu streak on a
+        # failed `ps`, so it can never confirm, and the ceiling is the only
+        # remaining backstop.
+        policy = autopilot._HangEscalation(probes=2, idle_ceiling=900.0)
+        for label, block in (
+            ("absent", None),
+            ("not-a-dict", "progressing"),
+            ("missing-key", {"harness_pid": 4242}),
+            ("non-bool", {"progressing": "yes"}),
+            ("null", {"progressing": None}),
+        ):
+            with self.subTest(evidence=label):
+                snapshot = {"state": "running", "idle_seconds": 950}
+                if block is not None:
+                    snapshot["hang_cpu_progress"] = block
+                verdict = autopilot._HangEscalation(
+                    probes=2, idle_ceiling=900.0
+                ).observe(snapshot)
+                self.assertIsNotNone(verdict)
+                self.assertEqual(verdict["class"], autopilot.HANG_CLASS_IDLE_CEILING)
+        self.assertIsNone(policy.observe({"state": "running", "idle_seconds": 3}))
+
+    def test_consecutive_probe_bar_stays_ungated_by_cpu_evidence(self) -> None:
+        # The runner no longer publishes a result-received block while the
+        # tree progresses, so the helper trusts that verdict as-is.
+        policy = autopilot._HangEscalation(probes=2, idle_ceiling=900.0)
+        snapshot = _hung_running_snapshot()
+        snapshot["hang_cpu_progress"] = _cpu_progress_block(True)
+        self.assertIsNone(policy.observe(snapshot))
+        verdict = policy.observe(snapshot)
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict["class"], autopilot.HANG_CLASS_RESULT_RECEIVED)
+
 
 class EventsTailerHangTest(unittest.TestCase):
     """The tailer folds hang blocks from heartbeats and one-shot hang events."""
@@ -6077,6 +6391,74 @@ class EventsTailerHangTest(unittest.TestCase):
         self.assertIsNotNone(verdict)
         self.assertEqual(verdict["class"], autopilot.HANG_CLASS_RESULT_RECEIVED)
         self.assertEqual(verdict["probes"], 2)
+
+    def test_heartbeat_carries_cpu_progress_without_suspicion(self) -> None:
+        clock = _clock_from([0.0, 1.0, 2.0, 3.0])
+        progressing = _turn_heartbeat_record(400)
+        progressing["payload"]["hang_cpu_progress"] = _cpu_progress_block(True)
+        tailer = autopilot._EventsTailer(
+            "events.jsonl",
+            clock=clock,
+            follow=_batch_follower([[progressing], [_turn_heartbeat_record(4)]]),
+        )
+        snapshot, _ = tailer.snapshot()
+        self.assertNotIn("hang_suspected", snapshot)
+        self.assertTrue(snapshot["hang_cpu_progress"]["progressing"])
+        # No fresh sample on the next heartbeat: absence must never be read
+        # back as a stale "was progressing".
+        snapshot, _ = tailer.snapshot()
+        self.assertNotIn("hang_cpu_progress", snapshot)
+
+    def test_one_shot_hang_events_carry_and_drop_cpu_progress(self) -> None:
+        clock = _clock_from([0.0, 1.0, 2.0, 3.0, 4.0])
+        suspected = {
+            "name": autopilot._events.TURN_HANG_SUSPECTED_EVENT,
+            "payload": {
+                "hang_suspected": _hang_block(),
+                "hang_cpu_progress": _cpu_progress_block(
+                    False, delta=0.0, confirm_samples=2
+                ),
+            },
+        }
+        cleared = {
+            "name": autopilot._events.TURN_HANG_CLEARED_EVENT,
+            "payload": {"idle_seconds": 0.0},
+        }
+        tailer = autopilot._EventsTailer(
+            "events.jsonl",
+            clock=clock,
+            follow=_batch_follower(
+                [[_turn_heartbeat_record(30)], [suspected], [cleared]]
+            ),
+        )
+        snapshot, _ = tailer.snapshot()
+        self.assertNotIn("hang_cpu_progress", snapshot)
+        snapshot, _ = tailer.snapshot()
+        self.assertFalse(snapshot["hang_cpu_progress"]["progressing"])
+        snapshot, _ = tailer.snapshot()
+        self.assertNotIn("hang_suspected", snapshot)
+        self.assertNotIn("hang_cpu_progress", snapshot)
+
+    def test_clear_republishes_a_fresh_progressing_sample(self) -> None:
+        # The runner clears on positive CPU, so its retraction event is the
+        # one place a `progressing: true` sample and a clear arrive together.
+        clock = _clock_from([0.0, 1.0, 2.0])
+        hung = _turn_heartbeat_record(950)
+        hung["payload"]["hang_suspected"] = _hang_block(
+            autopilot.HANG_CLASS_ZERO_CPU, idle=950.0
+        )
+        cleared = {
+            "name": autopilot._events.TURN_HANG_CLEARED_EVENT,
+            "payload": {"hang_cpu_progress": _cpu_progress_block(True)},
+        }
+        tailer = autopilot._EventsTailer(
+            "events.jsonl",
+            clock=clock,
+            follow=_batch_follower([[hung, cleared]]),
+        )
+        snapshot, _ = tailer.snapshot()
+        self.assertNotIn("hang_suspected", snapshot)
+        self.assertTrue(snapshot["hang_cpu_progress"]["progressing"])
 
     def test_clear_without_idle_drops_the_stale_reading(self) -> None:
         # A cleared payload without the runner's fresh idle (older runners)
@@ -6204,6 +6586,27 @@ class InvokeRunHangEscalationTest(unittest.TestCase):
             {"stdout": None, "stderr": None, "last_message": None, "result": None},
         )
         self.assertNotIn("status", payload)
+
+    def test_idle_ceiling_waits_out_a_busy_tree_then_escalates(self) -> None:
+        busy = {
+            "state": "running",
+            "session_id": "s7",
+            "idle_seconds": 1200,
+            "hang_cpu_progress": _cpu_progress_block(True),
+        }
+        stopped = dict(busy)
+        stopped["hang_cpu_progress"] = _cpu_progress_block(
+            False, delta=0.0, confirm_samples=1
+        )
+        tailer = _FakeTailer([(busy, False), (busy, False), (stopped, False)])
+        payload, beats, _popen = self._run(tailer=tailer, status_probe=None)
+        self.assertTrue(payload["_worker_hung"])
+        self.assertEqual(payload["hang"]["class"], autopilot.HANG_CLASS_IDLE_CEILING)
+        joined = "\n".join(beats)
+        # Two ceiling-crossing ticks passed as ordinary progress heartbeats
+        # before the sample stopped reporting progress.
+        self.assertEqual(joined.count("session s7 | idle 1200s"), 3)
+        self.assertEqual(joined.count("escalating worker_hung"), 1)
 
 
 class SuperviseRunWorkerHungTest(unittest.TestCase):

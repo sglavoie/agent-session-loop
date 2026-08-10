@@ -361,11 +361,16 @@ not.
 
 Two hard hang bars sit above the soft `WARN possibly stalled` line: the
 runner's `result_received_process_alive` suspicion observed on consecutive
-probes, or any probe whose idle time reaches the idle ceiling (classed
+probes, or a probe whose idle time reaches the idle ceiling (classed
 `zero_cpu_idle` when the runner's suspicion says so, else
-`idle_ceiling_exceeded`). When either fires, the helper stops with
-`reason: worker_hung` **without killing or waiting on anything** — the
-supervised `asl run` child stays alive and keeps the plan lock.
+`idle_ceiling_exceeded`). Both rest on the runner's process-tree CPU sampling:
+it raises neither suspicion class while the tree is burning CPU, and the idle
+ceiling stands down whenever the live `hang_cpu_progress` sample reports
+`progressing: true` — a worker piping through a buffering consumer is silent,
+not stalled. An unknown sample (no fresh `ps`) still escalates.
+When either bar fires, the helper stops with `reason: worker_hung`
+**without killing or waiting on anything** — the supervised `asl run` child
+stays alive and keeps the plan lock.
 
 Read `result.hang` first. It carries the `class`, the runner's `hang_suspected`
 block verbatim (including its sampled `process_tree`), `idle_seconds`,

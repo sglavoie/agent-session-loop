@@ -2987,7 +2987,7 @@ class HangSentinelTests(unittest.TestCase):
         resuspected = sentinel.evaluate(idle_seconds=270.0, now=self.NOW)
         self.assertEqual("suspected", resuspected.transition)
 
-    def test_result_grace_without_pid(self) -> None:
+    def test_result_grace_without_pid_never_suspects(self) -> None:
         clock = {"now": 0.0}
         sentinel, calls = self.make_sentinel([], monotonic=lambda: clock["now"])
         sentinel.note_final_result()
@@ -2996,16 +2996,14 @@ class HangSentinelTests(unittest.TestCase):
         early = sentinel.evaluate(idle_seconds=44.9, now=self.NOW)
         self.assertIsNone(early.suspected)
 
+        # No pid means no process tree to sample, so the zero-CPU
+        # confirmation both classes require can never be reached.
         clock["now"] = 45.0
-        assessment = sentinel.evaluate(idle_seconds=45.0, now=self.NOW)
-        self.assertEqual("suspected", assessment.transition)
-        block = assessment.suspected
-        assert block is not None
-        self.assertEqual(runner.HANG_REASON_RESULT_RECEIVED, block["reason"])
-        self.assertIsNone(block["harness_pid"])
-        self.assertIsNone(block["process_tree"])
-        self.assertNotIn("process_tree_error", block)
-        self.assertIsNotNone(block["result_seen_at"])
+        for idle in (45.0, 75.0, 105.0):
+            assessment = sentinel.evaluate(idle_seconds=idle, now=self.NOW)
+            self.assertIsNone(assessment.suspected)
+            self.assertIsNone(assessment.transition)
+            self.assertIsNone(assessment.cpu_progress)
         self.assertEqual([], calls)
 
     def test_result_grace_outranks_zero_cpu(self) -> None:
@@ -3060,21 +3058,143 @@ class HangSentinelTests(unittest.TestCase):
 
         self.assertEqual([None, None, None, None, None, "suspected"], outcomes)
 
-    def test_ps_failure_records_error_on_result_grace_block(self) -> None:
+    def test_ps_failure_never_suspects_on_result_grace(self) -> None:
         clock = {"now": 100.0}
         sentinel, calls = self.make_sentinel([], monotonic=lambda: clock["now"])
         sentinel.note_harness_pid(123)
         sentinel.note_final_result()
 
+        # A failed sample resets the confirmation streak, so a received
+        # result alone raises nothing. The helper's idle ceiling is this
+        # path's backstop precisely because the runner cannot see CPU here.
         clock["now"] = 200.0
-        assessment = sentinel.evaluate(idle_seconds=90.0, now=self.NOW)
+        for idle in (90.0, 120.0, 150.0):
+            assessment = sentinel.evaluate(idle_seconds=idle, now=self.NOW)
+            self.assertIsNone(assessment.suspected)
+            self.assertIsNone(assessment.cpu_progress)
+        self.assertEqual([123] * 3, calls)
 
-        block = assessment.suspected
+    def test_ps_failure_records_error_on_refreshed_block(self) -> None:
+        clock = {"now": 100.0}
+        sentinel, _calls = self.make_sentinel(
+            [self.tree(5.0), self.tree(5.0), self.tree(5.0), None],
+            monotonic=lambda: clock["now"],
+        )
+        sentinel.note_harness_pid(123)
+        sentinel.note_final_result()
+
+        clock["now"] = 200.0
+        for idle in (90.0, 120.0):
+            self.assertIsNone(
+                sentinel.evaluate(idle_seconds=idle, now=self.NOW).suspected
+            )
+        suspected = sentinel.evaluate(idle_seconds=150.0, now=self.NOW)
+        self.assertEqual("suspected", suspected.transition)
+
+        refreshed = sentinel.evaluate(idle_seconds=180.0, now=self.NOW)
+        block = refreshed.suspected
         assert block is not None
         self.assertEqual(runner.HANG_REASON_RESULT_RECEIVED, block["reason"])
         self.assertIsNone(block["process_tree"])
         self.assertEqual("process tree sample failed", block["process_tree_error"])
-        self.assertEqual([123], calls)
+        # A failed sample publishes no CPU evidence at all.
+        self.assertIsNone(refreshed.cpu_progress)
+
+    def test_rising_cpu_never_suspects_after_result(self) -> None:
+        clock = {"now": 100.0}
+        sentinel, _calls = self.make_sentinel(
+            [self.tree(5.0), self.tree(14.0), self.tree(32.0), self.tree(48.0)],
+            monotonic=lambda: clock["now"],
+        )
+        sentinel.note_harness_pid(123)
+        sentinel.note_final_result()
+
+        clock["now"] = 200.0
+        for idle in (90.0, 120.0, 150.0, 180.0):
+            assessment = sentinel.evaluate(idle_seconds=idle, now=self.NOW)
+            self.assertIsNone(assessment.suspected)
+            self.assertIsNone(assessment.transition)
+        progress = assessment.cpu_progress
+        assert progress is not None
+        self.assertTrue(progress["progressing"])
+        self.assertEqual(123, progress["harness_pid"])
+        self.assertEqual(0, progress["confirm_samples"])
+        self.assertAlmostEqual(16.0, progress["cpu_delta_seconds"], places=6)
+
+    def test_result_received_episode_retracts_then_rearms_on_cpu(self) -> None:
+        clock = {"now": 100.0}
+        sentinel, _calls = self.make_sentinel(
+            [
+                self.tree(5.0),
+                self.tree(5.0),
+                self.tree(5.0),
+                self.tree(20.0),
+                self.tree(20.0),
+                self.tree(20.0),
+            ],
+            monotonic=lambda: clock["now"],
+        )
+        sentinel.note_harness_pid(123)
+        sentinel.note_final_result()
+
+        clock["now"] = 200.0
+        sentinel.evaluate(idle_seconds=90.0, now=self.NOW)
+        sentinel.evaluate(idle_seconds=120.0, now=self.NOW)
+        suspected = sentinel.evaluate(idle_seconds=150.0, now=self.NOW)
+        self.assertEqual("suspected", suspected.transition)
+        assert suspected.suspected is not None
+        first_episode = suspected.suspected["detected_at"]
+
+        # A received result is sticky, but the CPU retraction is now
+        # reachable: the tree burning 15s of CPU withdraws the suspicion.
+        cleared = sentinel.evaluate(idle_seconds=180.0, now=self.NOW)
+        self.assertEqual("cleared", cleared.transition)
+        assert cleared.retracted is not None
+        self.assertEqual(
+            runner.HANG_REASON_RESULT_RECEIVED, cleared.retracted["reason"]
+        )
+        assert cleared.cpu_progress is not None
+        self.assertTrue(cleared.cpu_progress["progressing"])
+
+        # Going quiet again re-arms from a fresh baseline with a new episode
+        # id, so a supervisor's probe count cannot span the two.
+        self.assertIsNone(
+            sentinel.evaluate(idle_seconds=210.0, now=self.NOW).suspected
+        )
+        later = self.NOW + timedelta(minutes=5)
+        rearmed = sentinel.evaluate(idle_seconds=240.0, now=later)
+        self.assertEqual("suspected", rearmed.transition)
+        assert rearmed.suspected is not None
+        self.assertNotEqual(first_episode, rearmed.suspected["detected_at"])
+
+    def test_cpu_progress_published_without_suspicion(self) -> None:
+        sentinel, _calls = self.make_sentinel(
+            [self.tree(10.0), self.tree(10.1)]
+        )
+        sentinel.note_harness_pid(123)
+
+        baseline = sentinel.evaluate(idle_seconds=120.0, now=self.NOW)
+        self.assertIsNone(baseline.suspected)
+        assert baseline.cpu_progress is not None
+        self.assertFalse(baseline.cpu_progress["progressing"])
+        # No previous total, so no delta to report yet.
+        self.assertIsNone(baseline.cpu_progress["cpu_delta_seconds"])
+        self.assertEqual(0, baseline.cpu_progress["confirm_samples"])
+
+        second = sentinel.evaluate(idle_seconds=150.0, now=self.NOW)
+        self.assertIsNone(second.suspected)
+        assert second.cpu_progress is not None
+        self.assertFalse(second.cpu_progress["progressing"])
+        self.assertEqual(1, second.cpu_progress["confirm_samples"])
+
+    def test_cpu_progress_absent_when_no_sample_is_taken(self) -> None:
+        sentinel, calls = self.make_sentinel([self.tree(10.0)])
+        sentinel.note_harness_pid(123)
+
+        assessment = sentinel.evaluate(idle_seconds=119.9, now=self.NOW)
+
+        self.assertIsNone(assessment.cpu_progress)
+        self.assertEqual([], calls)
 
     def test_note_activity_retracts_and_resets_counters(self) -> None:
         sentinel, _calls = self.make_sentinel(
@@ -3167,7 +3287,7 @@ class HangSentinelTests(unittest.TestCase):
             tmp_dir = Path(tmp)
             clock = {"now": 0.0}
             sentinel = _AfterEvaluateSentinel(
-                sample_tree=lambda pid: None,
+                sample_tree=lambda pid: HangSentinelTests.tree(5.0),
                 monotonic=lambda: clock["now"],
                 trigger_idle_seconds=120.0,
                 confirm_samples=2,
@@ -3181,11 +3301,9 @@ class HangSentinelTests(unittest.TestCase):
                 active_turn=LiveTurnSchedulerTests.active_turn(),
                 hang_sentinel=sentinel,
             )
+            live_turn.note_harness_pid(123)
             live_turn.note_final_result()
-            clock["now"] = 100.0  # past the 45s result grace: evaluate suspects
-            sentinel.after_evaluate = lambda: live_turn.record_activity(
-                "stdout", "resumed output"
-            )
+            clock["now"] = 100.0  # past the 45s result grace
 
             with mock.patch.object(
                 runner, "_notify_agent_mux_loop_turn_heartbeat"
@@ -3194,6 +3312,14 @@ class HangSentinelTests(unittest.TestCase):
             ) as suspected_notify, mock.patch.object(
                 runner, "_notify_agent_mux_loop_turn_hang_cleared"
             ) as cleared_notify:
+                # Two warm-up ticks bring the zero-CPU streak up to the
+                # confirmation a suspicion now requires; the third would
+                # suspect if output had not resumed mid-flight.
+                live_turn._record_heartbeat()
+                live_turn._record_heartbeat()
+                sentinel.after_evaluate = lambda: live_turn.record_activity(
+                    "stdout", "resumed output"
+                )
                 heartbeat = live_turn._record_heartbeat()
 
             # The verdict sampled a pre-activity generation, so the fold
@@ -3210,7 +3336,7 @@ class HangSentinelTests(unittest.TestCase):
             ]
             # No suspected event — and no orphan cleared for an episode that
             # was never announced.
-            self.assertEqual([events.TURN_HEARTBEAT_EVENT], names)
+            self.assertEqual([events.TURN_HEARTBEAT_EVENT] * 3, names)
             suspected_notify.assert_not_called()
             cleared_notify.assert_not_called()
 
@@ -3221,7 +3347,7 @@ class HangSentinelTests(unittest.TestCase):
             tmp_dir = Path(tmp)
             clock = {"now": 0.0}
             sentinel = _AfterEvaluateSentinel(
-                sample_tree=lambda pid: None,
+                sample_tree=lambda pid: HangSentinelTests.tree(5.0),
                 monotonic=lambda: clock["now"],
                 trigger_idle_seconds=120.0,
                 confirm_samples=2,
@@ -3235,6 +3361,7 @@ class HangSentinelTests(unittest.TestCase):
                 active_turn=LiveTurnSchedulerTests.active_turn(),
                 hang_sentinel=sentinel,
             )
+            live_turn.note_harness_pid(123)
             live_turn.note_final_result()
             clock["now"] = 100.0
 
@@ -3245,9 +3372,11 @@ class HangSentinelTests(unittest.TestCase):
             ) as suspected_notify, mock.patch.object(
                 runner, "_notify_agent_mux_loop_turn_hang_cleared"
             ) as cleared_notify:
-                # Tick 1 announces the suspicion.
+                # Ticks 1-2 confirm the flat CPU streak; tick 3 announces.
                 live_turn._record_heartbeat()
-                # Tick 2's refresh verdict goes stale when output resumes
+                live_turn._record_heartbeat()
+                live_turn._record_heartbeat()
+                # The next refresh verdict goes stale when output resumes
                 # between evaluate() and the fold.
                 sentinel.after_evaluate = lambda: live_turn.record_activity(
                     "stdout", "resumed output"
