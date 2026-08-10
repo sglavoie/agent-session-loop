@@ -1278,7 +1278,20 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         "--include",
         choices=("questions", "notices", "all"),
         default="questions",
-        help="Record kinds that wake and populate the wait (default: questions)",
+        help=(
+            "Record kinds that wake and populate the wait; 'all' also wakes on "
+            "the terminal supervision-end record and reports it through "
+            "supervision_ended (default: questions)"
+        ),
+    )
+    outbox_wait_parser.add_argument(
+        "--supervision-id",
+        metavar="UUID",
+        help=(
+            "Report supervision_ended only for the terminal record carrying "
+            "this launch identity; records from other supervising launches "
+            "still advance the cursor (default: any terminal record ends)"
+        ),
     )
     outbox_wait_parser.add_argument(
         "--since",

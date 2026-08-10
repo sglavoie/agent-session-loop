@@ -13,6 +13,7 @@ an actively supervised run from stale mailbox files.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import fcntl
@@ -88,11 +89,19 @@ MessageKind = Literal[
     "wait-start",
     "wait-end",
     "receipt",
+    "supervision-end",
 ]
 ResolutionAction = Literal["continue", "pause"]
 WaiterOrigin = Literal["worker", "runner"]
 DeliveryMode = Literal["async", "wait"]
 WaitEndReason = Literal["timeout", "closure", "error"]
+SupervisionOutcome = Literal[
+    "complete",
+    "paused",
+    "stopped",
+    "blocked",
+    "error",
+]
 KIND_GUIDANCE: MessageKind = "guidance"
 KIND_QUESTION: MessageKind = "question"
 KIND_REPLY: MessageKind = "reply"
@@ -102,6 +111,7 @@ KIND_ACK: MessageKind = "ack"
 KIND_WAIT_START: MessageKind = "wait-start"
 KIND_WAIT_END: MessageKind = "wait-end"
 KIND_RECEIPT: MessageKind = "receipt"
+KIND_SUPERVISION_END: MessageKind = "supervision-end"
 MESSAGE_KINDS: tuple[MessageKind, ...] = (
     KIND_GUIDANCE,
     KIND_QUESTION,
@@ -112,6 +122,7 @@ MESSAGE_KINDS: tuple[MessageKind, ...] = (
     KIND_WAIT_START,
     KIND_WAIT_END,
     KIND_RECEIPT,
+    KIND_SUPERVISION_END,
 )
 V2_MESSAGE_KINDS: tuple[MessageKind, ...] = (
     KIND_GUIDANCE,
@@ -146,6 +157,18 @@ WAIT_END_REASONS: tuple[WaitEndReason, ...] = (
     WAIT_END_REASON_TIMEOUT,
     WAIT_END_REASON_CLOSURE,
     WAIT_END_REASON_ERROR,
+)
+SUPERVISION_OUTCOME_COMPLETE: SupervisionOutcome = "complete"
+SUPERVISION_OUTCOME_PAUSED: SupervisionOutcome = "paused"
+SUPERVISION_OUTCOME_STOPPED: SupervisionOutcome = "stopped"
+SUPERVISION_OUTCOME_BLOCKED: SupervisionOutcome = "blocked"
+SUPERVISION_OUTCOME_ERROR: SupervisionOutcome = "error"
+SUPERVISION_OUTCOMES: tuple[SupervisionOutcome, ...] = (
+    SUPERVISION_OUTCOME_COMPLETE,
+    SUPERVISION_OUTCOME_PAUSED,
+    SUPERVISION_OUTCOME_STOPPED,
+    SUPERVISION_OUTCOME_BLOCKED,
+    SUPERVISION_OUTCOME_ERROR,
 )
 RESOLUTION_ACTION_CONTINUE: ResolutionAction = "continue"
 RESOLUTION_ACTION_PAUSE: ResolutionAction = "pause"
@@ -184,6 +207,8 @@ REJECT_INVALID_ACTION = "invalid-action"
 REJECT_INVALID_NOTE = "invalid-note"
 REJECT_INVALID_ACKNOWLEDGEMENT = "invalid-acknowledgement"
 REJECT_INVALID_DELIVERY_MODE = "invalid-delivery-mode"
+REJECT_INVALID_SUPERVISION_OUTCOME = "invalid-supervision-outcome"
+REJECT_INVALID_SUPERVISION_ID = "invalid-supervision-id"
 REJECT_QUESTION_NOT_WAITING = "question-not-waiting"
 REJECT_QUESTION_ALREADY_WAITING = "question-already-waiting"
 REJECT_INVALID_WAIT_ID = "invalid-wait-id"
@@ -257,6 +282,8 @@ class MailboxMessage:
     wait_id: str | None = None
     wait_end_reason: WaitEndReason | None = None
     closure_id: str | None = None
+    supervision_outcome: SupervisionOutcome | None = None
+    supervision_id: str | None = None
     version: int = MAILBOX_SCHEMA_VERSION
 
     def to_record(self) -> dict[str, Any]:
@@ -293,6 +320,11 @@ class MailboxMessage:
             payload["reason"] = self.wait_end_reason
         if self.closure_id is not None:
             payload["closure_id"] = self.closure_id
+        if self.kind == KIND_SUPERVISION_END:
+            if self.supervision_outcome is not None:
+                payload["outcome"] = self.supervision_outcome
+            if self.supervision_id is not None:
+                payload["supervision_id"] = self.supervision_id
         return payload
 
     def to_payload(self) -> dict[str, Any]:
@@ -337,6 +369,7 @@ class MailboxCounts:
     wait_starts: int
     wait_ends: int
     receipts: int
+    supervision_ends: int
     pending_guidance: int
     unanswered_questions: int
     rejected: int
@@ -356,11 +389,17 @@ class MailboxCounts:
         # Preserve the exact legacy summary shape for logs without v3
         # lifecycle activity while exposing additive counts as soon as they
         # are meaningful.
-        if self.wait_starts or self.wait_ends or self.receipts:
+        if (
+            self.wait_starts
+            or self.wait_ends
+            or self.receipts
+            or self.supervision_ends
+        ):
             payload.update(
                 wait_starts=self.wait_starts,
                 wait_ends=self.wait_ends,
                 receipts=self.receipts,
+                supervision_ends=self.supervision_ends,
             )
         return payload
 
@@ -424,6 +463,14 @@ class MailboxView:
                 return message
         return None
 
+    @property
+    def latest_supervision_end(self) -> MailboxMessage | None:
+        """Return the highest-sequence supervision-end record, if any."""
+        for message in reversed(self.messages):
+            if message.kind == KIND_SUPERVISION_END:
+                return message
+        return None
+
     def receipt_for_closure(self, closure_id: str) -> MailboxMessage | None:
         for message in self.messages:
             if message.kind == KIND_RECEIPT and message.closure_id == closure_id:
@@ -479,6 +526,9 @@ class MailboxView:
             ),
             receipts=sum(
                 message.kind == KIND_RECEIPT for message in self.messages
+            ),
+            supervision_ends=sum(
+                message.kind == KIND_SUPERVISION_END for message in self.messages
             ),
             pending_guidance=len(self.pending_guidance),
             unanswered_questions=len(self.unanswered_questions),
@@ -706,6 +756,16 @@ def _is_uuid(value: object) -> bool:
     return True
 
 
+def is_supervision_id(value: object) -> bool:
+    """Return whether ``value`` can identify one supervising launch."""
+    return _is_uuid(value)
+
+
+def new_supervision_id() -> str:
+    """Mint a correlation identity for one supervising launch."""
+    return str(uuid.uuid4())
+
+
 def _valid_run_id(value: object) -> bool:
     """Return whether ``value`` is a bounded, nonblank run identifier."""
     return (
@@ -914,8 +974,16 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
         wait_id: str | None = None
         wait_end_reason: WaitEndReason | None = None
         closure_id: str | None = None
+        supervision_outcome: SupervisionOutcome | None = None
+        supervision_id: str | None = None
 
-        if kind in (KIND_GUIDANCE, KIND_QUESTION, KIND_REPLY, KIND_NOTICE):
+        if kind in (
+            KIND_GUIDANCE,
+            KIND_QUESTION,
+            KIND_REPLY,
+            KIND_NOTICE,
+            KIND_SUPERVISION_END,
+        ):
             text_value = payload.get("text")
             if not isinstance(text_value, str) or text_value.strip() == "":
                 _reject(
@@ -1020,6 +1088,39 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
             run_id = run_value
             session_id = session_value
             turn_index = turn_value
+
+        if kind == KIND_SUPERVISION_END:
+            outcome_value = payload.get("outcome")
+            if outcome_value not in SUPERVISION_OUTCOMES:
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_INVALID_SUPERVISION_OUTCOME,
+                    raw=raw,
+                    detail=str(outcome_value),
+                )
+                continue
+            if "run_id" in payload:
+                if not _valid_run_id(payload.get("run_id")):
+                    _reject(
+                        rejected,
+                        seq=seq,
+                        reason=REJECT_INVALID_RUN_ID,
+                        raw=raw,
+                    )
+                    continue
+                run_id = payload["run_id"]
+            if "supervision_id" in payload:
+                if not _is_uuid(payload.get("supervision_id")):
+                    _reject(
+                        rejected,
+                        seq=seq,
+                        reason=REJECT_INVALID_SUPERVISION_ID,
+                        raw=raw,
+                    )
+                    continue
+                supervision_id = payload["supervision_id"]
+            supervision_outcome = outcome_value
 
         if kind in CLOSURE_KINDS:
             target_value = payload.get("to")
@@ -1316,6 +1417,8 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
             wait_id=wait_id,
             wait_end_reason=wait_end_reason,
             closure_id=closure_id,
+            supervision_outcome=supervision_outcome,
+            supervision_id=supervision_id,
             version=version,
         )
         messages.append(message)
@@ -1371,6 +1474,8 @@ def _message_from_record(record: dict[str, Any], seq: int) -> MailboxMessage:
         wait_id=record.get("wait_id"),
         wait_end_reason=record.get("reason"),
         closure_id=record.get("closure_id"),
+        supervision_outcome=record.get("outcome"),
+        supervision_id=record.get("supervision_id"),
         version=record["version"],
     )
 
@@ -1555,6 +1660,8 @@ def _normalize_append_record(
     wait_id: str | None = None,
     wait_end_reason: WaitEndReason | str | None = None,
     closure_id: str | None = None,
+    supervision_outcome: SupervisionOutcome | str | None = None,
+    supervision_id: str | None = None,
 ) -> dict[str, Any]:
     if kind not in MESSAGE_KINDS:
         raise MailboxError(REJECT_UNKNOWN_KIND, str(kind))
@@ -1571,7 +1678,13 @@ def _normalize_append_record(
         "kind": kind,
         "version": MAILBOX_SCHEMA_VERSION,
     }
-    if kind in (KIND_GUIDANCE, KIND_QUESTION, KIND_REPLY, KIND_NOTICE):
+    if kind in (
+        KIND_GUIDANCE,
+        KIND_QUESTION,
+        KIND_REPLY,
+        KIND_NOTICE,
+        KIND_SUPERVISION_END,
+    ):
         if not isinstance(text, str) or text.strip() == "":
             raise MailboxError(REJECT_MISSING_TEXT)
         record["text"] = text
@@ -1610,6 +1723,22 @@ def _normalize_append_record(
         record["run_id"] = run_id
         record["session_id"] = session_id
         record["turn_index"] = turn_index
+
+    if kind == KIND_SUPERVISION_END:
+        if supervision_outcome not in SUPERVISION_OUTCOMES:
+            raise MailboxError(
+                REJECT_INVALID_SUPERVISION_OUTCOME,
+                str(supervision_outcome),
+            )
+        record["outcome"] = supervision_outcome
+        if run_id is not None:
+            if not _valid_run_id(run_id):
+                raise MailboxError(REJECT_INVALID_RUN_ID)
+            record["run_id"] = run_id
+        if supervision_id is not None:
+            if not _is_uuid(supervision_id):
+                raise MailboxError(REJECT_INVALID_SUPERVISION_ID)
+            record["supervision_id"] = supervision_id
 
     if kind in CLOSURE_KINDS:
         if not _is_uuid(target):
@@ -1695,29 +1824,31 @@ def _append_record(
     wait_id: str | None = None,
     wait_end_reason: WaitEndReason | str | None = None,
     closure_id: str | None = None,
+    supervision_outcome: SupervisionOutcome | str | None = None,
+    supervision_id: str | None = None,
+    commit_fields: Callable[[], Mapping[str, Any]] | None = None,
 ) -> MailboxMessage:
-    record = _normalize_append_record(
-        kind=kind,
-        text=text,
-        target=target,
-        upto=upto,
-        message_id=message_id,
-        created_at=created_at,
-        run_id=run_id,
-        session_id=session_id,
-        turn_index=turn_index,
-        waiter_origin=waiter_origin,
-        action=action,
-        note=note,
-        delivery_mode=delivery_mode,
-        wait_id=wait_id,
-        wait_end_reason=wait_end_reason,
-        closure_id=closure_id,
-    )
-    encoded_record = (
-        json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        + b"\n"
-    )
+    fields: dict[str, Any] = {
+        "kind": kind,
+        "text": text,
+        "target": target,
+        "upto": upto,
+        "message_id": message_id,
+        "created_at": created_at,
+        "run_id": run_id,
+        "session_id": session_id,
+        "turn_index": turn_index,
+        "waiter_origin": waiter_origin,
+        "action": action,
+        "note": note,
+        "delivery_mode": delivery_mode,
+        "wait_id": wait_id,
+        "wait_end_reason": wait_end_reason,
+        "closure_id": closure_id,
+        "supervision_outcome": supervision_outcome,
+        "supervision_id": supervision_id,
+    }
+    record = _normalize_append_record(**fields)
     mailbox_path = mailbox_path_for_plan(plan_dir, state_dir)
     try:
         mailbox_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1912,9 +2043,12 @@ def _append_record(
                 )
 
         separator = b"\n" if existing and not existing.endswith(b"\n") else b""
-        append_bytes = separator + encoded_record
         original_size = os.fstat(fd).st_size
         if kind == KIND_RECEIPT:
+            effective_max_bytes = MAILBOX_MAX_BYTES
+        elif kind == KIND_SUPERVISION_END:
+            # Refusing the terminal signal on a full mailbox would strand the
+            # supervising agent in the dead wait this record exists to end.
             effective_max_bytes = MAILBOX_MAX_BYTES
         elif kind == KIND_WAIT_END:
             effective_max_bytes = (
@@ -1932,29 +2066,71 @@ def _append_record(
             effective_max_bytes = (
                 MAILBOX_MAX_BYTES - MAILBOX_CLOSURE_RESERVE_BYTES
             )
-        if original_size + len(append_bytes) > effective_max_bytes:
-            raise MailboxError(
-                ERROR_MAILBOX_FULL,
-                f"append would exceed {effective_max_bytes} bytes",
-                path=mailbox_path,
+        # One correction is enough for a resolver that settles once, which is
+        # what the terminal supervision record needs: it flips to `error` and
+        # stays there. The bound keeps a resolver that never settles from
+        # spinning while it holds the exclusive lock.
+        corrections_left = 1
+        committed: dict[str, Any] = {}
+        while True:
+            if commit_fields is not None:
+                # Resolved with the lock held and every validation passed, so a
+                # caller whose record can still change while the append is in
+                # flight commits what was true at the write rather than at the
+                # call. The identity and timestamp stay pinned to the first
+                # normalization: only the resolved fields move.
+                committed = dict(commit_fields())
+                fields.update(committed)
+                fields["message_id"] = record["id"]
+                fields["created_at"] = record["created_at"]
+                record = _normalize_append_record(**fields)
+            encoded_record = (
+                json.dumps(
+                    record, separators=(",", ":"), sort_keys=True
+                ).encode("utf-8")
+                + b"\n"
             )
-        try:
-            written = os.write(fd, append_bytes)
-            if written != len(append_bytes):
-                os.ftruncate(fd, original_size)
-                raise OSError(
-                    f"short mailbox append: wrote {written} of "
-                    f"{len(append_bytes)} bytes"
+            append_bytes = separator + encoded_record
+            if original_size + len(append_bytes) > effective_max_bytes:
+                raise MailboxError(
+                    ERROR_MAILBOX_FULL,
+                    f"append would exceed {effective_max_bytes} bytes",
+                    path=mailbox_path,
                 )
-            durability.fullsync(fd)
-        except OSError:
-            # A regular-file write should be all-or-error, but restoring the
-            # original length also fails safe on an observable short write.
             try:
-                os.ftruncate(fd, original_size)
+                written = os.write(fd, append_bytes)
+                if written != len(append_bytes):
+                    os.ftruncate(fd, original_size)
+                    raise OSError(
+                        f"short mailbox append: wrote {written} of "
+                        f"{len(append_bytes)} bytes"
+                    )
+                durability.fullsync(fd)
+                if (
+                    commit_fields is not None
+                    and corrections_left
+                    and dict(commit_fields()) != committed
+                ):
+                    # The resolution moved during the write or the durability
+                    # barrier, the windows no decision taken before them can
+                    # see. The line is rolled back and rewritten while the
+                    # exclusive lock is still held, and the rewrite is synced
+                    # in turn, so the superseded value never becomes the
+                    # durable record and is never readable: every reader takes
+                    # a shared lock on this same file.
+                    corrections_left -= 1
+                    os.ftruncate(fd, original_size)
+                    continue
             except OSError:
-                pass
-            raise
+                # A regular-file write should be all-or-error, but restoring
+                # the original length also fails safe on an observable short
+                # write.
+                try:
+                    os.ftruncate(fd, original_size)
+                except OSError:
+                    pass
+                raise
+            break
     except MailboxError:
         raise
     except OSError as error:
@@ -1988,6 +2164,8 @@ def _append_record(
         wait_id=record.get("wait_id"),
         wait_end_reason=record.get("reason"),
         closure_id=record.get("closure_id"),
+        supervision_outcome=record.get("outcome"),
+        supervision_id=record.get("supervision_id"),
         version=record["version"],
     )
 
@@ -2366,6 +2544,57 @@ def append_notice(
         turn_index=turn_index,
         message_id=message_id,
         created_at=created_at,
+    )
+
+
+def append_supervision_end(
+    plan_dir: str | Path,
+    text: str,
+    *,
+    outcome: SupervisionOutcome | str,
+    run_id: str | None = None,
+    supervision_id: str | None = None,
+    state_dir: str | Path | None = None,
+    message_id: str | None = None,
+    created_at: str | None = None,
+    resolve_at_commit: Callable[[], tuple[SupervisionOutcome | str, str]]
+    | None = None,
+) -> MailboxMessage:
+    """Append the terminal record marking the end of supervised work.
+
+    ``supervision_id`` identifies the supervising launch that is ending, so a
+    reader can tell this helper's exit from a record left by an overlapping
+    helper on the same plan; physical sequence alone cannot.
+
+    ``resolve_at_commit`` returns the ``(outcome, text)`` to persist. It is
+    called immediately before the bytes are written and again once the line
+    has cleared its durability barrier, and a line whose resolution moved
+    across either is rolled back and rewritten — and resynced — under the
+    lock. The emitting helper can be killed while this append is in flight —
+    waiting on the lock, reading the log, inside the write or the sync itself
+    — and only a decision taken that late reports the termination instead of
+    the outcome the caller started with. It must be side-effect free and
+    settle after at most one change; only its first change is honoured.
+    """
+
+    def commit_fields() -> dict[str, Any]:
+        resolved_outcome, resolved_text = resolve_at_commit()
+        return {
+            "supervision_outcome": resolved_outcome,
+            "text": resolved_text,
+        }
+
+    return _append_record(
+        plan_dir,
+        kind=KIND_SUPERVISION_END,
+        state_dir=state_dir,
+        text=text,
+        supervision_outcome=outcome,
+        supervision_id=supervision_id,
+        run_id=run_id,
+        message_id=message_id,
+        created_at=created_at,
+        commit_fields=None if resolve_at_commit is None else commit_fields,
     )
 
 

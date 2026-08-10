@@ -63,6 +63,11 @@ def message_json(message: mailbox.MailboxMessage) -> str:
         payload["action"] = message.action
         if message.note is not None:
             payload["note"] = message.note
+    elif message.kind == mailbox.KIND_SUPERVISION_END:
+        payload["text"] = message.text or ""
+        payload["outcome"] = message.supervision_outcome
+        if message.supervision_id is not None:
+            payload["supervision_id"] = message.supervision_id
     else:
         payload["text"] = message.text or ""
     return ascii_json(payload)

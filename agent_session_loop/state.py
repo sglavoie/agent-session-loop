@@ -1007,6 +1007,7 @@ def _mailbox_status_payload(
         "open_questions": 0,
         "resolutions": 0,
         "notices": 0,
+        "supervision_ends": 0,
         "rejected_records": 0,
         "error": None,
         "lease_updated_at": None,
@@ -1032,6 +1033,7 @@ def _mailbox_status_payload(
         payload["open_questions"] = None
         payload["resolutions"] = None
         payload["notices"] = None
+        payload["supervision_ends"] = None
         payload["rejected_records"] = None
         payload["error"] = str(error)
     else:
@@ -1054,6 +1056,7 @@ def _mailbox_status_payload(
                 "open_questions": len(view.open_questions(active_run_id)),
                 "resolutions": counts.resolutions,
                 "notices": counts.notices,
+                "supervision_ends": counts.supervision_ends,
                 "rejected_records": counts.rejected,
             }
         )
@@ -1712,6 +1715,7 @@ def _print_text_status(payload: dict[str, Any]) -> None:
                 f"{open_questions} open questions{history_suffix}, "
                 f"{mailbox_status.get('resolutions')} resolutions, "
                 f"{mailbox_status.get('notices')} notices, "
+                f"{mailbox_status.get('supervision_ends')} supervision ends, "
                 f"{mailbox_status.get('size_bytes')}/"
                 f"{mailbox_status.get('max_bytes')} bytes"
             )

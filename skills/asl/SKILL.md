@@ -73,10 +73,23 @@ asl prepare PLAN_DIR --resume --cwd NEW_WORKSPACE --rebind-workspace
 The helper ships beside this skill at `<skill-dir>/scripts/asl-autopilot.py`,
 where `<skill-dir>` is the directory containing this `SKILL.md`. Harnesses expose
 the shared skill through a symlink, so resolve the real path before invoking.
-Run it with the user's exact command:
+Before launching it, mint a **launch identity** — one fresh UUID, kept for the
+whole supervision:
 
 ```text
-<skill-dir>/scripts/asl-autopilot.py --command '<exact asl run command>' --json
+uuidgen
+```
+
+That identity is the only thing that separates this helper's terminal record
+from one appended by another helper on the same plan. A helper may attach to an
+already-active matching run, so two helper lifetimes can overlap and a mailbox
+sequence captured at launch cannot tell a still-alive older helper's later exit
+from this one's.
+
+Then run the helper with the user's exact command, passing the identity:
+
+```text
+<skill-dir>/scripts/asl-autopilot.py --command '<exact asl run command>' --supervision-id <launch-identity> --json
 ```
 
 Supervision is a strict turn-lifetime invariant: **never end the agent turn
@@ -85,14 +98,31 @@ returns a session/cell identifier. Supervise by blocking on `asl outbox wait`,
 which long-polls the mailbox and returns the moment a record lands:
 
 ```text
-asl outbox wait <plan-dir> --include all --since <next_since> --timeout 550 [--state-dir DIR] --json
+asl outbox wait <plan-dir> --include all --supervision-id <launch-identity> --since <next_since> --timeout 550 [--state-dir DIR] --json
 ```
 
-- Start at `--since 0`, then feed each response's `next_since` into the next
-  call.
-- `timed_out: true` with empty `questions` and `notices` means nothing happened —
-  reissue immediately. `timed_out: false` means records are present; handle them
-  before reissuing.
+- Pass the same `--supervision-id` on every call. It scopes `supervision_ended`
+  to this launch and changes nothing else about the wait.
+- Start at `--since 0` so questions that were already open before the launch
+  stay visible, then feed each response's `next_since` into the next call.
+- `supervision_ended: true` means the batch carries this launch's own terminal
+  record: stop the wait loop, read the helper's `--json` result on stdout, and
+  do not reissue. The helper writes and flushes that result before appending the
+  record, so it is already complete when the wait returns.
+- A `supervision-end` record in `supervision_ends` while `supervision_ended` is
+  `false` belongs to another helper on this plan — an earlier invocation or one
+  whose lifetime overlapped this launch. Handle nothing, let `next_since`
+  advance past it, and keep waiting.
+- The record is durable log content read through a sequence cursor, not a live
+  notification, so a helper that already exited before the first wait was issued
+  returns it on that first call instead of after the full timeout.
+- Absence of the record is **not** proof that the helper is alive: `--no-mailbox`,
+  SIGKILL, and a machine crash leave nothing behind. Keep both fallbacks — the
+  bounded stdout tail below, and the `--timeout 550` loop as the backstop.
+- Anything else means supervision continues. `timed_out: true` with empty
+  `questions`, `notices`, and `supervision_ends` means nothing happened — reissue
+  immediately. `timed_out: false` with `supervision_ended: false` means some
+  other producer woke the wait; handle those records and reissue as before.
 - The wait returns on a five-second internal cadence, so a question surfaces
   within seconds rather than at the next poll boundary.
 - A returned question that is still open also refreshes the body-free
@@ -109,8 +139,9 @@ asl outbox wait <plan-dir> --include all --since <next_since> --timeout 550 [--s
 Cadence matters because the runner's first wait is five minutes: any polling
 interval near or above 300 seconds can let a question open and expire entirely
 between two observations. Tailing the helper's background output is the fallback
-for when the mailbox is unavailable — not the primary path; when relying on it,
-poll at least every 30 seconds until the helper reaches a terminal result.
+for when the mailbox is unavailable, or when no terminal record can ever arrive
+(`--no-mailbox`, SIGKILL, machine crash) — not the primary path; when relying on
+it, poll at least every 30 seconds until the helper reaches a terminal result.
 
 `outbox wait` selects on sequence and kind only, with no answer-state filter, so
 it re-returns a question whose seq is past the cursor even when that question was
@@ -270,8 +301,12 @@ on stdin. The helper launches `asl run --reply-stdin`; the reply never appears
 in argv:
 
 ```text
-printf '%s' '<reply text>' | <skill-dir>/scripts/asl-autopilot.py --command '<same exact command>' --json --reply-stdin
+printf '%s' '<reply text>' | <skill-dir>/scripts/asl-autopilot.py --command '<same exact command>' --supervision-id <new-launch-identity> --json --reply-stdin
 ```
+
+Every helper launch is its own supervision: mint a fresh launch identity for it
+and use that identity in the wait loop that follows, so the previous launch's
+terminal record cannot end this one.
 
 If the helper reports `reason: user_required` (a foreign active lock) or a
 `blocked` / `status-error` stop, surface that to the user rather than resuming. A
@@ -303,7 +338,7 @@ A `quota-exhausted` pause is fail-closed by default — the helper stops
 provider's reset instead:
 
 ```text
-<skill-dir>/scripts/asl-autopilot.py --command '<exact asl run command>' --json --wait-quota-reset
+<skill-dir>/scripts/asl-autopilot.py --command '<exact asl run command>' --supervision-id <launch-identity> --json --wait-quota-reset
 ```
 
 It waits only when every guard passes: the pause is `quota-exhausted`, the

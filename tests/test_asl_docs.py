@@ -954,6 +954,93 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
                 msg=f"skill omits lease heartbeat marker: {marker!r}",
             )
 
+    def test_asl_skill_ends_wait_loop_on_terminal_supervision_record(
+        self,
+    ) -> None:
+        skill = self._read("skills/asl/SKILL.md")
+        normalized = " ".join(skill.split())
+
+        for marker in (
+            "mint a **launch identity** — one fresh UUID",
+            "--supervision-id <launch-identity>",
+            "two helper lifetimes can overlap and a mailbox sequence captured "
+            "at launch cannot tell a still-alive older helper's later exit "
+            "from this one's",
+            "Pass the same `--supervision-id` on every call",
+            "Start at `--since 0` so questions that were already open before "
+            "the launch stay visible",
+            "`supervision_ended: true` means the batch carries this launch's "
+            "own terminal record: stop the wait loop",
+            "while `supervision_ended` is `false` belongs to another helper "
+            "on this plan",
+            "let `next_since` advance past it, and keep waiting",
+            "Absence of the record is **not** proof that the helper is alive",
+            "Keep both fallbacks — the bounded stdout tail below, and the "
+            "`--timeout 550` loop as the backstop",
+            "`timed_out: false` with `supervision_ended: false` means some "
+            "other producer woke the wait",
+            "when no terminal record can ever arrive (`--no-mailbox`, "
+            "SIGKILL, machine crash)",
+        ):
+            self.assertIn(
+                marker,
+                normalized,
+                msg=f"asl skill omits supervision-end marker: {marker!r}",
+            )
+
+    def test_docs_describe_terminal_supervision_record(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        readme = self._read("agent_session_loop/README.md")
+        normalized_docs = " ".join(docs.split())
+        normalized_readme = " ".join(readme.split())
+
+        for marker in (
+            "`notice`, `supervision-end`, worker `ack`",
+            "A `supervision-end` record is the mailbox's terminal signal",
+            "a required `outcome` from the closed enum `complete`, `paused`, "
+            "`stopped`, `blocked`, `error`, an optional `run_id` validated "
+            "only when present, and an optional `supervision_id`",
+            "Every helper launch carries a `supervision_id`",
+            "a reader treats only the record carrying its own launch identity "
+            "as terminal",
+            "`--supervision-id UUID` scopes that scalar to one supervising "
+            "launch",
+            "A record from another launch is still returned and still "
+            "advances `next_since`",
+            "Only the Autopilot helper writes the record, at most once per "
+            "helper process and only after its own `--json` result has been "
+            "written and flushed",
+            "The runner deliberately does not emit one",
+            "appends at the full file-cap tier alongside `receipt`",
+            "`--include all` wakes on questions, notices, or the terminal "
+            "`supervision-end` record",
+            "returns separate `questions`, `notices`, and `supervision_ends` "
+            "arrays plus the `supervision_ended` scalar",
+            "A wake that carries only `supervision-end` records emits no "
+            "Agent Mux handoff and writes no lease question projection",
+        ):
+            self.assertIn(
+                marker,
+                normalized_docs,
+                msg=f"docs omit supervision-end marker: {marker!r}",
+            )
+
+        for marker in (
+            "the Autopilot helper appends one terminal `supervision-end` "
+            "message",
+            "`asl outbox wait --include all` wakes on it and reports it "
+            "through `supervision_ends` and `supervision_ended`",
+            "The runner emits no such record",
+            "every launch carries a `supervision_id`",
+            "reports `supervision_ended` only for that launch's own record "
+            "while another launch's record still advances the cursor",
+        ):
+            self.assertIn(
+                marker,
+                normalized_readme,
+                msg=f"README omits supervision-end marker: {marker!r}",
+            )
+
     def test_docs_describe_guidance_rendering_bounds(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
         mailbox_docs = docs.split(

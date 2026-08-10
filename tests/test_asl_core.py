@@ -46,6 +46,7 @@ from agent_session_loop import (
     harnesses,
     install_verify,
     mailbox,
+    mailbox_rendering,
     pause_policy,
     plans,
     preflight,
@@ -3013,6 +3014,31 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertIn("1 open questions (2 unanswered historical)", output)
             self.assertIn("1 resolutions, 1 notices", output)
 
+    def test_status_payload_projects_supervision_ends(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            mailbox.append_supervision_end(
+                plan_dir,
+                "reason=complete",
+                outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                run_id="RUN-LIVE",
+                state_dir=state_dir,
+            )
+
+            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+
+            status = payload["mailbox"]
+            self.assertEqual(1, status["supervision_ends"])
+            self.assertEqual(0, status["rejected_records"])
+            self.assertIsNone(status["error"])
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                state._print_text_status(payload)
+            output = buffer.getvalue()
+            self.assertIn("0 notices, 1 supervision ends", output)
+
     def test_status_payload_retires_open_questions_once_the_run_ends(
         self,
     ) -> None:
@@ -3411,6 +3437,540 @@ class ParserAndStateTests(unittest.TestCase):
             )
             self.assertFalse(
                 mailbox.mailbox_path_for_plan(plan_dir, state_dir).exists()
+            )
+
+    def test_supervision_end_round_trips_with_and_without_a_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+
+            unattributed = mailbox.append_supervision_end(
+                plan_dir,
+                "reason=complete",
+                outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                state_dir=state_dir,
+            )
+            attributed = mailbox.append_supervision_end(
+                plan_dir,
+                "reason=worker_hung",
+                outcome=mailbox.SUPERVISION_OUTCOME_BLOCKED,
+                run_id="run-A",
+                state_dir=state_dir,
+            )
+
+            view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+            self.assertEqual((), view.rejected)
+            self.assertEqual((unattributed, attributed), view.messages)
+            self.assertIsNone(unattributed.run_id)
+            self.assertEqual("run-A", attributed.run_id)
+            self.assertEqual(
+                mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                unattributed.supervision_outcome,
+            )
+            self.assertEqual(attributed, view.latest_supervision_end)
+            self.assertEqual(
+                attributed,
+                view.messages_since(
+                    unattributed.seq,
+                    kinds=(mailbox.KIND_SUPERVISION_END,),
+                )[0],
+            )
+            payload = unattributed.to_payload()
+            self.assertEqual(
+                mailbox.SUPERVISION_OUTCOME_COMPLETE, payload["outcome"]
+            )
+            self.assertEqual("reason=complete", payload["text"])
+            self.assertNotIn("run_id", payload)
+            self.assertNotIn("supervision_id", payload)
+            self.assertEqual(
+                mailbox.MAILBOX_SCHEMA_VERSION, payload["version"]
+            )
+
+    def test_supervision_end_round_trips_a_launch_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            launch = mailbox.new_supervision_id()
+
+            appended = mailbox.append_supervision_end(
+                plan_dir,
+                "reason=complete",
+                outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                supervision_id=launch,
+                state_dir=state_dir,
+            )
+
+            view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+            self.assertEqual((), view.rejected)
+            self.assertEqual((appended,), view.messages)
+            self.assertEqual(launch, view.messages[0].supervision_id)
+            self.assertEqual(launch, appended.to_payload()["supervision_id"])
+            self.assertEqual(
+                launch,
+                json.loads(mailbox_rendering.message_json(appended))[
+                    "supervision_id"
+                ],
+            )
+
+    def test_supervision_end_appends_reject_malformed_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            cases = (
+                (
+                    mailbox.REJECT_INVALID_SUPERVISION_OUTCOME,
+                    {"text": "done", "outcome": "finished"},
+                ),
+                (
+                    mailbox.REJECT_INVALID_SUPERVISION_OUTCOME,
+                    {"text": "done", "outcome": None},
+                ),
+                (
+                    mailbox.REJECT_MISSING_TEXT,
+                    {"text": "   ", "outcome": "complete"},
+                ),
+                (
+                    mailbox.REJECT_MISSING_TEXT,
+                    {"text": None, "outcome": "complete"},
+                ),
+                (
+                    mailbox.REJECT_INVALID_RUN_ID,
+                    {"text": "done", "outcome": "complete", "run_id": " "},
+                ),
+                (
+                    mailbox.REJECT_INVALID_RUN_ID,
+                    {
+                        "text": "done",
+                        "outcome": "complete",
+                        "run_id": "r"
+                        * (mailbox.MAILBOX_MAX_RUN_ID_CHARS + 1),
+                    },
+                ),
+                (
+                    mailbox.REJECT_INVALID_SUPERVISION_ID,
+                    {
+                        "text": "done",
+                        "outcome": "complete",
+                        "supervision_id": "helper-1",
+                    },
+                ),
+            )
+
+            for reason, kwargs in cases:
+                with self.subTest(reason=reason, kwargs=kwargs):
+                    with self.assertRaises(mailbox.MailboxError) as raised:
+                        mailbox.append_supervision_end(
+                            plan_dir,
+                            kwargs["text"],
+                            outcome=kwargs["outcome"],
+                            run_id=kwargs.get("run_id"),
+                            supervision_id=kwargs.get("supervision_id"),
+                            state_dir=state_dir,
+                        )
+                    self.assertEqual(reason, raised.exception.reason)
+
+            self.assertFalse(
+                mailbox.mailbox_path_for_plan(plan_dir, state_dir).exists()
+            )
+
+    def test_persisted_supervision_ends_reject_malformed_and_old_versions(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
+            mailbox_path.parent.mkdir(parents=True, exist_ok=True)
+            created_at = "0001-01-01T00:00:00+00:00"
+            expected: list[str] = []
+            lines: list[str] = []
+            cases = (
+                (
+                    mailbox.REJECT_UNKNOWN_KIND,
+                    {"version": mailbox.MAILBOX_LEGACY_SCHEMA_VERSION},
+                ),
+                (
+                    mailbox.REJECT_UNKNOWN_KIND,
+                    {"version": mailbox.MAILBOX_PREVIOUS_SCHEMA_VERSION},
+                ),
+                (
+                    mailbox.REJECT_INVALID_SUPERVISION_OUTCOME,
+                    {"outcome": "finished"},
+                ),
+                (mailbox.REJECT_INVALID_SUPERVISION_OUTCOME, {"outcome": None}),
+                (mailbox.REJECT_MISSING_TEXT, {"text": "  "}),
+                (mailbox.REJECT_MISSING_TEXT, {"text": None}),
+                (mailbox.REJECT_INVALID_RUN_ID, {"run_id": ""}),
+                (mailbox.REJECT_INVALID_RUN_ID, {"run_id": 7}),
+                (
+                    mailbox.REJECT_INVALID_SUPERVISION_ID,
+                    {"supervision_id": "helper-1"},
+                ),
+                (mailbox.REJECT_INVALID_SUPERVISION_ID, {"supervision_id": 7}),
+            )
+            for index, (reason, overrides) in enumerate(cases):
+                record = {
+                    "created_at": created_at,
+                    "id": f"00000000-0000-4000-8000-{index:012d}",
+                    "kind": mailbox.KIND_SUPERVISION_END,
+                    "outcome": mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                    "text": "supervision over",
+                    "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                }
+                record.update(overrides)
+                lines.append(
+                    json.dumps(
+                        {
+                            key: value
+                            for key, value in record.items()
+                            if value is not None
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                )
+                expected.append(reason)
+            mailbox_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+
+            self.assertEqual((), view.messages)
+            self.assertEqual(
+                expected, [record.reason for record in view.rejected]
+            )
+            self.assertIsNone(view.latest_supervision_end)
+
+    def test_supervision_end_appends_where_a_notice_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            created_at = "0001-01-01T00:00:00+00:00"
+            message_id = "00000000-0000-4000-8000-000000000001"
+            empty_text_record = {
+                "created_at": created_at,
+                "id": message_id,
+                "kind": mailbox.KIND_GUIDANCE,
+                "text": "",
+                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+            }
+            record_overhead = len(
+                json.dumps(
+                    empty_text_record,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+                + b"\n"
+            )
+            non_closure_cap = (
+                mailbox.MAILBOX_MAX_BYTES
+                - mailbox.MAILBOX_CLOSURE_RESERVE_BYTES
+            )
+            mailbox.append_guidance(
+                plan_dir,
+                "x" * (non_closure_cap - record_overhead),
+                state_dir=state_dir,
+                message_id=message_id,
+                created_at=created_at,
+            )
+            self.assertEqual(
+                non_closure_cap,
+                mailbox.read_mailbox(plan_dir, state_dir=state_dir).size_bytes,
+            )
+
+            with self.assertRaises(mailbox.MailboxError) as raised:
+                mailbox.append_notice(
+                    plan_dir,
+                    "supervision over",
+                    run_id="run-A",
+                    session_id="1",
+                    turn_index=1,
+                    state_dir=state_dir,
+                )
+            self.assertEqual(mailbox.ERROR_MAILBOX_FULL, raised.exception.reason)
+
+            appended = mailbox.append_supervision_end(
+                plan_dir,
+                "reason=complete",
+                outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                state_dir=state_dir,
+            )
+
+            view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+            self.assertEqual(appended, view.latest_supervision_end)
+            self.assertGreater(view.size_bytes, non_closure_cap)
+
+    def test_supervision_end_counts_extend_the_legacy_counts_payload(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            mailbox.append_guidance(plan_dir, "keep going", state_dir=state_dir)
+
+            legacy_payload = mailbox.read_mailbox(
+                plan_dir, state_dir=state_dir
+            ).counts.to_payload()
+            self.assertEqual(
+                {
+                    "acknowledgements",
+                    "guidance",
+                    "pending_guidance",
+                    "questions",
+                    "rejected",
+                    "replies",
+                    "resolutions",
+                    "notices",
+                    "unanswered_questions",
+                },
+                set(legacy_payload),
+            )
+
+            mailbox.append_supervision_end(
+                plan_dir,
+                "reason=complete",
+                outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                state_dir=state_dir,
+            )
+
+            counts = mailbox.read_mailbox(plan_dir, state_dir=state_dir).counts
+            self.assertEqual(1, counts.supervision_ends)
+            payload = counts.to_payload()
+            self.assertEqual(1, payload["supervision_ends"])
+            self.assertEqual(0, payload["wait_starts"])
+            self.assertEqual(0, payload["wait_ends"])
+            self.assertEqual(0, payload["receipts"])
+            self.assertEqual(
+                legacy_payload,
+                {
+                    key: value
+                    for key, value in payload.items()
+                    if key in legacy_payload
+                },
+            )
+
+    def test_supervision_end_outcome_can_be_resolved_at_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+
+            appended = mailbox.append_supervision_end(
+                plan_dir,
+                "supervision ended: complete",
+                outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                supervision_id=mailbox.new_supervision_id(),
+                state_dir=state_dir,
+                resolve_at_commit=lambda: (
+                    mailbox.SUPERVISION_OUTCOME_ERROR,
+                    "supervision ended: error - SIGTERM",
+                ),
+            )
+
+            self.assertEqual(
+                mailbox.SUPERVISION_OUTCOME_ERROR, appended.supervision_outcome
+            )
+            self.assertEqual("supervision ended: error - SIGTERM", appended.text)
+            view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+            self.assertEqual((), view.rejected)
+            self.assertEqual(appended, view.latest_supervision_end)
+
+    def test_commit_time_resolution_keeps_the_record_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            message_id = "00000000-0000-4000-8000-00000000000a"
+            created_at = "0001-01-01T00:00:00+00:00"
+
+            appended = mailbox.append_supervision_end(
+                plan_dir,
+                "supervision ended: complete",
+                outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                state_dir=state_dir,
+                message_id=message_id,
+                created_at=created_at,
+                resolve_at_commit=lambda: (
+                    mailbox.SUPERVISION_OUTCOME_ERROR,
+                    "supervision ended: error - SIGINT",
+                ),
+            )
+
+            self.assertEqual(message_id, appended.id)
+            self.assertEqual(created_at, appended.created_at)
+
+    def test_commit_time_resolution_is_validated_like_any_append(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+
+            with self.assertRaises(mailbox.MailboxError) as raised:
+                mailbox.append_supervision_end(
+                    plan_dir,
+                    "supervision ended: complete",
+                    outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                    state_dir=state_dir,
+                    resolve_at_commit=lambda: ("not-an-outcome", "late text"),
+                )
+
+            self.assertEqual(
+                mailbox.REJECT_INVALID_SUPERVISION_OUTCOME,
+                raised.exception.reason,
+            )
+            self.assertEqual(
+                (),
+                mailbox.read_mailbox(plan_dir, state_dir=state_dir).messages,
+            )
+
+    def test_resolution_that_moves_at_the_write_is_rolled_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            written: list[int] = []
+            real_write = mailbox.os.write
+
+            def writing(fd: int, data: bytes) -> int:
+                # The resolution moves inside the write itself, the seam no
+                # pre-write decision can observe.
+                if b'"kind":"supervision-end"' in data:
+                    written.append(fd)
+                return real_write(fd, data)
+
+            def resolve() -> tuple:
+                if written:
+                    return (
+                        mailbox.SUPERVISION_OUTCOME_ERROR,
+                        "supervision ended: error - SIGTERM",
+                    )
+                return (
+                    mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                    "supervision ended: complete",
+                )
+
+            with mock.patch.object(mailbox.os, "write", writing):
+                appended = mailbox.append_supervision_end(
+                    plan_dir,
+                    "supervision ended: complete",
+                    outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                    supervision_id=mailbox.new_supervision_id(),
+                    state_dir=state_dir,
+                    resolve_at_commit=resolve,
+                )
+
+            self.assertEqual(
+                mailbox.SUPERVISION_OUTCOME_ERROR, appended.supervision_outcome
+            )
+            self.assertEqual("supervision ended: error - SIGTERM", appended.text)
+            view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+            self.assertEqual((), view.rejected)
+            self.assertEqual((appended,), view.messages)
+            self.assertEqual(2, len(written))
+
+    def test_resolution_that_moves_at_the_sync_is_rolled_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            synced: list[int] = []
+            real_fullsync = mailbox.durability.fullsync
+
+            def fullsync(fd: int) -> None:
+                # The resolution moves inside the durability barrier, after the
+                # bytes are written and after every decision that precedes it.
+                synced.append(fd)
+                real_fullsync(fd)
+
+            def resolve() -> tuple:
+                if synced:
+                    return (
+                        mailbox.SUPERVISION_OUTCOME_ERROR,
+                        "supervision ended: error - SIGTERM",
+                    )
+                return (
+                    mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                    "supervision ended: complete",
+                )
+
+            with mock.patch.object(mailbox.durability, "fullsync", fullsync):
+                appended = mailbox.append_supervision_end(
+                    plan_dir,
+                    "supervision ended: complete",
+                    outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                    supervision_id=mailbox.new_supervision_id(),
+                    state_dir=state_dir,
+                    resolve_at_commit=resolve,
+                )
+
+            self.assertEqual(
+                mailbox.SUPERVISION_OUTCOME_ERROR, appended.supervision_outcome
+            )
+            self.assertEqual("supervision ended: error - SIGTERM", appended.text)
+            view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+            self.assertEqual((), view.rejected)
+            self.assertEqual((appended,), view.messages)
+            # The corrected line clears its own barrier rather than riding out
+            # the lock unsynced.
+            self.assertEqual(2, len(synced))
+
+    def test_resolution_that_never_settles_still_writes_one_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            calls: list[int] = []
+
+            def resolve() -> tuple:
+                calls.append(len(calls))
+                return (
+                    mailbox.SUPERVISION_OUTCOME_ERROR,
+                    f"supervision ended: error - {len(calls)}",
+                )
+
+            appended = mailbox.append_supervision_end(
+                plan_dir,
+                "supervision ended: complete",
+                outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                state_dir=state_dir,
+                resolve_at_commit=resolve,
+            )
+
+            view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+            self.assertEqual((), view.rejected)
+            self.assertEqual((appended,), view.messages)
+
+    def test_message_json_renders_supervision_end_outcome_as_ascii_json(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            message = mailbox.append_supervision_end(
+                plan_dir,
+                "reason=terminé",
+                outcome=mailbox.SUPERVISION_OUTCOME_PAUSED,
+                state_dir=state_dir,
+            )
+
+            rendered = mailbox_rendering.message_json(message)
+
+            self.assertTrue(rendered.isascii())
+            self.assertNotIn("\n", rendered)
+            self.assertEqual(
+                {
+                    "id": message.id,
+                    "seq": message.seq,
+                    "text": "reason=terminé",
+                    "outcome": mailbox.SUPERVISION_OUTCOME_PAUSED,
+                },
+                json.loads(rendered),
             )
 
     def test_closure_reserve_cannot_be_consumed_by_non_closure_records(

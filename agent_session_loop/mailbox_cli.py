@@ -77,6 +77,7 @@ class _LeaseSupervision:
 class _OutboxWaitResult:
     questions: tuple[mailbox.MailboxMessage, ...]
     notices: tuple[mailbox.MailboxMessage, ...]
+    supervision_ends: tuple[mailbox.MailboxMessage, ...]
     include: str
     supervisor_id: str
     next_since: int
@@ -367,6 +368,78 @@ def _outbox_notice_text_lines(
     return list(bounded.lines)
 
 
+def _outbox_supervision_end_text_lines(
+    supervision_ends: tuple[mailbox.MailboxMessage, ...],
+) -> list[str]:
+    """Render terminal supervision records under the notice bounds."""
+
+    def supervision_end_section(
+        records: Sequence[mailbox_rendering.RenderedMessage],
+        record_cap_omitted: Sequence[mailbox.MailboxMessage],
+        individually_oversized: Sequence[mailbox.MailboxMessage],
+        aggregate_budget_omitted: Sequence[mailbox.MailboxMessage],
+    ) -> list[str]:
+        lines: list[str] = []
+        if records:
+            for message, record_json in records:
+                lines.extend(
+                    (
+                        f"Supervision end {message.id} (seq {message.seq}):",
+                        MAILBOX_MESSAGE_BEGIN,
+                        record_json,
+                        MAILBOX_MESSAGE_END,
+                    )
+                )
+        else:
+            lines.append(
+                "No selected supervision end records fit within the "
+                f"{mailbox_rendering.MAX_RENDERED_NOTICE_BYTES:,}-byte "
+                "text rendering budget."
+            )
+
+        omission_notices: list[str] = []
+        if record_cap_omitted:
+            omission_notices.append(
+                f"{len(record_cap_omitted)} older selected supervision end "
+                f"records were omitted by the "
+                f"{mailbox_rendering.MAX_RENDERED_NOTICES}-record cap: "
+                f"{_message_references(record_cap_omitted)}."
+            )
+        if individually_oversized:
+            omission_notices.append(
+                f"{len(individually_oversized)} selected supervision end "
+                "record(s) exceeded the text byte budget individually and "
+                f"were omitted in full: "
+                f"{_message_references(individually_oversized)}."
+            )
+        if aggregate_budget_omitted:
+            omission_notices.append(
+                f"{len(aggregate_budget_omitted)} oldest remaining selected "
+                "supervision end record(s) were omitted in full to keep the "
+                "rendered section within the text byte budget: "
+                f"{_message_references(aggregate_budget_omitted)}."
+            )
+        if omission_notices:
+            lines.extend(
+                (
+                    "",
+                    " ".join(omission_notices),
+                    "The physical cursor advances through every mailbox "
+                    "record, including records filtered out or omitted from "
+                    "text rendering.",
+                )
+            )
+        return lines
+
+    bounded = mailbox_rendering.render_bounded_messages(
+        supervision_ends,
+        supervision_end_section,
+        max_rendered=mailbox_rendering.MAX_RENDERED_NOTICES,
+        max_bytes=mailbox_rendering.MAX_RENDERED_NOTICE_BYTES,
+    )
+    return list(bounded.lines)
+
+
 def _mailbox_error_details(error: mailbox.MailboxError) -> dict[str, Any]:
     return {} if error.path is None else {"path": str(error.path)}
 
@@ -592,6 +665,28 @@ def _validated_include(
         )
         return None
     return value
+
+
+def _validated_supervision_id(
+    args: argparse.Namespace,
+    *,
+    command_name: str,
+    text_label: str,
+) -> tuple[str | None, bool]:
+    """Return the launch correlation filter and whether it validated."""
+    value = getattr(args, "supervision_id", None)
+    if value is None:
+        return None, True
+    if not mailbox.is_supervision_id(value):
+        _print_input_error(
+            args,
+            command_name=command_name,
+            text_label=text_label,
+            reason="invalid-supervision-id",
+            error="--supervision-id must be a UUID",
+        )
+        return None, False
+    return value, True
 
 
 def _resolve(
@@ -2034,7 +2129,11 @@ def _wait_for_questions(
     kinds = {
         OUTBOX_INCLUDE_QUESTIONS: (mailbox.KIND_QUESTION,),
         OUTBOX_INCLUDE_NOTICES: (mailbox.KIND_NOTICE,),
-        OUTBOX_INCLUDE_ALL: (mailbox.KIND_QUESTION, mailbox.KIND_NOTICE),
+        OUTBOX_INCLUDE_ALL: (
+            mailbox.KIND_QUESTION,
+            mailbox.KIND_NOTICE,
+            mailbox.KIND_SUPERVISION_END,
+        ),
     }[include]
 
     # Initial establishment remains fail-closed: without it the caller has no
@@ -2078,6 +2177,11 @@ def _wait_for_questions(
                             for message in selected
                             if message.kind == mailbox.KIND_NOTICE
                         ),
+                        supervision_ends=tuple(
+                            message
+                            for message in selected
+                            if message.kind == mailbox.KIND_SUPERVISION_END
+                        ),
                         include=include,
                         supervisor_id=landed_supervisor_id,
                         next_since=max(since, view.last_seq),
@@ -2103,6 +2207,7 @@ def _wait_for_questions(
             return _OutboxWaitResult(
                 questions=(),
                 notices=(),
+                supervision_ends=(),
                 include=include,
                 supervisor_id=landed_supervisor_id,
                 next_since=next_since,
@@ -2156,6 +2261,13 @@ def outbox_wait_from_args(args: argparse.Namespace) -> int:
     )
     if include is None:
         return 1
+    supervision_id, supervision_id_ok = _validated_supervision_id(
+        args,
+        command_name=COMMAND_OUTBOX_WAIT,
+        text_label="outbox wait",
+    )
+    if not supervision_id_ok:
+        return 1
     timeout = _validated_timeout(
         args,
         value=args.timeout,
@@ -2198,6 +2310,14 @@ def outbox_wait_from_args(args: argparse.Namespace) -> int:
     )
     _notify_agent_mux_mailbox_question(context, question_projection)
 
+    # Without a correlation filter every terminal record reads as terminal,
+    # which is exactly what an overlapping helper's record must not do.
+    own_supervision_ends = tuple(
+        supervision_end
+        for supervision_end in wait_result.supervision_ends
+        if supervision_id is None
+        or supervision_end.supervision_id == supervision_id
+    )
     payload = responses.success_payload(
         COMMAND_OUTBOX_WAIT,
         plan_dir=str(context.snapshot.plan_dir),
@@ -2219,6 +2339,12 @@ def outbox_wait_from_args(args: argparse.Namespace) -> int:
             _message_payload(notice)
             for notice in wait_result.notices
         ],
+        supervision_ends=[
+            _message_payload(supervision_end)
+            for supervision_end in wait_result.supervision_ends
+        ],
+        supervision_ended=bool(own_supervision_ends),
+        supervision_id=supervision_id,
         lease_supervision=wait_result.lease_supervision.to_payload(),
     )
     if args.json:
@@ -2236,11 +2362,15 @@ def outbox_wait_from_args(args: argparse.Namespace) -> int:
                 f"{failures} time(s); {health}.",
                 file=sys.stderr,
             )
-        if not wait_result.questions and not wait_result.notices:
+        if (
+            not wait_result.questions
+            and not wait_result.notices
+            and not wait_result.supervision_ends
+        ):
             selected_label = {
                 OUTBOX_INCLUDE_QUESTIONS: "questions",
                 OUTBOX_INCLUDE_NOTICES: "notices",
-                OUTBOX_INCLUDE_ALL: "questions or notices",
+                OUTBOX_INCLUDE_ALL: "questions, notices, or supervision ends",
             }[wait_result.include]
             print(f"No {selected_label} after seq {since}; timed out.")
         else:
@@ -2252,5 +2382,18 @@ def outbox_wait_from_args(args: argparse.Namespace) -> int:
                 )
             if wait_result.notices:
                 print("\n".join(_outbox_notice_text_lines(wait_result.notices)))
+            if wait_result.supervision_ends:
+                print(
+                    "\n".join(
+                        _outbox_supervision_end_text_lines(
+                            wait_result.supervision_ends
+                        )
+                    )
+                )
+                if supervision_id is not None and not own_supervision_ends:
+                    print(
+                        "No supervision end record matches supervision id "
+                        f"{supervision_id}; supervision continues."
+                    )
             print(f"Next cursor: {wait_result.next_since}")
     return 0

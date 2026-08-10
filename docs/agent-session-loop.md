@@ -428,7 +428,7 @@ asl inbox resolve PLAN_DIR_OR_ID --to QUESTION_ID --action continue|pause [--not
 asl inbox read PLAN_DIR_OR_ID [--peek] [--state-dir DIR] [--json]
 asl ask PLAN_DIR_OR_ID (TEXT | --question-id QUESTION_ID) [--wait] [--wait-timeout SECONDS] [--state-dir DIR] [--json]
 asl notify PLAN_DIR_OR_ID (TEXT | --text-stdin) [--state-dir DIR] [--json]
-asl outbox wait PLAN_DIR_OR_ID [--include questions|notices|all] [--since SEQ] [--timeout SECONDS] [--state-dir DIR] [--json]
+asl outbox wait PLAN_DIR_OR_ID [--include questions|notices|all] [--supervision-id UUID] [--since SEQ] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl control stop-after-current PLAN_DIR_OR_ID [--state-dir DIR] [--json]
 asl control select-harness PLAN_DIR_OR_ID --harness codex|claude|copilot [--state-dir DIR] [--json]
 asl control set-model PLAN_DIR_OR_ID [--harness codex|claude|copilot] [--harness-model MODEL|--clear-harness-model] [--effort EFFORT|--clear-effort] [--state-dir DIR] [--json]
@@ -446,9 +446,9 @@ changing the selected session or converting every question into a terminal
 pause. It adds exactly two files below the canonical per-plan state directory:
 
 - `mailbox.jsonl` is a non-destructive JSONL log containing `guidance`,
-  `question`, `reply`, `resolution`, `notice`, worker `ack`, `wait-start`,
-  `wait-end`, and `receipt` records. New appends use schema v3 while reads
-  remain compatible with legacy v1/v2 and mixed logs. Physical 1-based line
+  `question`, `reply`, `resolution`, `notice`, `supervision-end`, worker `ack`,
+  `wait-start`, `wait-end`, and `receipt` records. New appends use schema v3
+  while reads remain compatible with legacy v1/v2 and mixed logs. Physical 1-based line
   number is the durable sequence, including
   malformed lines. Appends are locked, the file is never truncated or rotated,
   and an append that would exceed 4 MiB
@@ -483,6 +483,43 @@ pause. It adds exactly two files below the canonical per-plan state directory:
 Both files are created and repaired to mode `0600`. They live under
 `<state-root>/<plan-path-sha256>/`; they are not stored in the plan directory
 or repository.
+
+A `supervision-end` record is the mailbox's terminal signal: the Autopilot
+helper process that was supervising this plan has exited, so no further worker
+questions or notices are coming. Beyond the common `id`, `kind`, `created_at`,
+and `version` fields it carries a required non-empty `text` holding the helper's
+raw exit reason, a required `outcome` from the closed enum `complete`, `paused`,
+`stopped`, `blocked`, `error`, an optional `run_id` validated only when
+present, and an optional `supervision_id` — a UUID naming the supervising
+launch that ended, rejected as `invalid-supervision-id` when it is present and
+malformed. The kind is schema v3 only, so a v1 or v2 line claiming it is rejected
+as an unknown kind for its version. Only the Autopilot helper writes the record,
+at most once per helper process and only after its own `--json` result has been
+written and flushed, so an agent woken by the record can read that result
+immediately; the helper attaches no `run_id`, because one helper supervises
+several sequential `asl run` children and a single run id would be ambiguous.
+The helper maps its raw reason onto the enum — `complete`/`review_findings` to
+`complete`, `paused`/`needs_agent_reply` to `paused`, `max-sessions`/`stopped`
+to `stopped`, every other terminal reason to `blocked`, and a raised exception
+or termination signal to `error` — while the raw reason stays readable in `text`.
+The runner deliberately does not emit one: a single supervised session launches
+several sequential `asl run` children, so a per-run signal would wake the
+supervisor at every chunk boundary and cost an agent turn each time; only the
+helper's own exit means supervision is over. The record appends at the full
+file-cap tier alongside `receipt`, so an otherwise full mailbox still accepts
+the terminal signal rather than stranding a supervisor in the dead wait the
+record exists to end. `--no-mailbox`, a SIGKILLed helper, and a machine crash
+leave no record at all; those cases keep the existing stdout-tail fallback.
+
+Every helper launch carries a `supervision_id`: the launching agent passes
+`--supervision-id UUID` to the helper, and a launch that omits it gets a freshly
+minted one reported back in the helper's `--json` result. Because helpers may
+attach to an already-active matching run, two helper lifetimes can overlap on
+one plan, and a physical sequence baseline captured at launch cannot tell a
+still-alive older helper's later record from this launch's own exit. The
+identity can: a reader treats only the record carrying its own launch identity
+as terminal. Records left by pre-correlation helpers carry no `supervision_id`
+and are therefore never another launch's terminal signal.
 
 ### Activation and precedence
 
@@ -600,8 +637,21 @@ The seven mailbox commands share normal plan-reference, `--state-dir`, and
 - `asl outbox wait` lets a supervisor long-poll after the stateless physical
   `--since` cursor. `--include questions` is the compatibility-preserving
   default; `--include notices` wakes only for notices, and `--include all`
-  wakes for either kind. JSON always returns separate `questions` and `notices`
-  arrays plus the selected `include` mode. Its default timeout is 300 seconds,
+  wakes on questions, notices, or the terminal `supervision-end` record. JSON
+  always returns separate `questions`, `notices`, and `supervision_ends` arrays
+  plus the `supervision_ended` scalar and the selected `include` mode. The third
+  array and the scalar are emitted in every include mode, staying empty and
+  `false` under `--include questions` and `--include notices`, so a supervisor
+  can branch on one field without first inspecting `include`.
+  `--supervision-id UUID` scopes that scalar to one supervising launch:
+  `supervision_ended` is then true only for a returned record whose
+  `supervision_id` matches, and the echoed `supervision_id` key reports the
+  filter in effect (`null` when none was supplied, which keeps the original
+  behavior of treating any terminal record as terminal). A record from another
+  launch is still returned and still advances `next_since`, so an overlapping
+  helper's exit moves the cursor without ending this launch's wait loop. A
+  malformed value fails with `invalid-supervision-id`.
+  Its default timeout is 300 seconds,
   its maximum is 1800, and `next_since` advances through every physical mailbox
   line on a return or timeout, so filtered records, guidance,
   acknowledgements, and malformed records cannot replay.
@@ -619,9 +669,17 @@ The seven mailbox commands share normal plan-reference, `--state-dir`, and
   records never emit the marker. Projection-write, Agent Mux discovery,
   delivery, timeout, or acknowledgement failure is fail-open: the normal text
   and JSON results are unchanged, including the JSON schema.
+  A wake that carries only `supervision-end` records emits no Agent Mux handoff
+  and writes no lease question projection, because both are driven by the
+  returned open questions alone: the lease keeps its `run_id`,
+  `projection_seq`, and `unanswered_questions` unset. A batch holding both a
+  question and the terminal record still projects and emits for the question.
   Text-mode notice output renders at most the newest 20 selected notices under
-  a 65,536-byte complete-section budget; omitted records are identified by
-  sequence and message ID, while JSON remains complete.
+  a 65,536-byte complete-section budget, and selected `supervision-end` records
+  render under those same two bounds; omitted records are identified by
+  sequence and message ID, while JSON remains complete. Under `--include all` an
+  empty timeout reports `No questions, notices, or supervision ends after seq
+  N; timed out.`
 
 In text mode, `asl inbox read`, `asl ask`, and `asl outbox wait` retain their
 human-readable record headers and command trailers but render each message as
@@ -644,7 +702,8 @@ With `--json`, failures use the common error envelope and the following stable
   receives neither or both question text and `--question-id`,
   `invalid-target` when a closure target is not a valid question UUID,
   `invalid-since` when the outbox cursor is not a non-negative integer,
-  `invalid-include` when the outbox include mode is unsupported, and
+  `invalid-include` when the outbox include mode is unsupported,
+  `invalid-supervision-id` when the outbox launch identity is not a UUID, and
   `invalid-timeout` when a timeout is outside 0 through 1800 seconds or
   `--wait-timeout` is supplied without its corresponding `--wait` or
   `--wait-consumed`. Lifecycle end reasons include `timeout`.

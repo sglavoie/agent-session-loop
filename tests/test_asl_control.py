@@ -6727,6 +6727,502 @@ class MailboxCliTests(unittest.TestCase):
             bounded,
         )
 
+    def test_outbox_wait_all_returns_an_existing_supervision_end(self) -> None:
+        record = mailbox.append_supervision_end(
+            self.plan_dir,
+            "helper exited: complete",
+            outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+
+        code, payload = self.payload_from(
+            mailbox_cli.outbox_wait_from_args,
+            self.args(timeout=0, include=mailbox_cli.OUTBOX_INCLUDE_ALL),
+        )
+
+        self.assertEqual(0, code)
+        self.assertFalse(payload["timed_out"])
+        self.assertTrue(payload["supervision_ended"])
+        self.assertEqual(
+            [record.id],
+            [item["id"] for item in payload["supervision_ends"]],
+        )
+        self.assertEqual(
+            mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            payload["supervision_ends"][0]["outcome"],
+        )
+        self.assertEqual([], payload["questions"])
+        self.assertEqual([], payload["notices"])
+        self.assertEqual(record.seq, payload["next_since"])
+
+    def test_historical_supervision_end_never_ends_a_correlated_wait(
+        self,
+    ) -> None:
+        # Left behind by a helper that exited before this launch started.
+        historical = mailbox.append_supervision_end(
+            self.plan_dir,
+            "helper exited: complete",
+            outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            state_dir=self.state_dir,
+            supervision_id=mailbox.new_supervision_id(),
+        )
+        launch = mailbox.new_supervision_id()
+
+        code, payload = self.payload_from(
+            mailbox_cli.outbox_wait_from_args,
+            self.args(
+                timeout=0,
+                include=mailbox_cli.OUTBOX_INCLUDE_ALL,
+                supervision_id=launch,
+            ),
+        )
+
+        self.assertEqual(0, code)
+        self.assertFalse(payload["supervision_ended"])
+        self.assertEqual(launch, payload["supervision_id"])
+        self.assertEqual(
+            [historical.id],
+            [item["id"] for item in payload["supervision_ends"]],
+        )
+        self.assertEqual(historical.seq, payload["next_since"])
+
+    def test_overlapping_helper_supervision_end_advances_but_does_not_end(
+        self,
+    ) -> None:
+        launch = mailbox.new_supervision_id()
+        baseline = mailbox.read_mailbox(
+            self.plan_dir, state_dir=self.state_dir
+        ).last_seq
+        # A helper that was already alive at launch, exiting above the baseline
+        # a sequence-only rule would have trusted.
+        overlapping = mailbox.append_supervision_end(
+            self.plan_dir,
+            "helper exited: stopped",
+            outcome=mailbox.SUPERVISION_OUTCOME_STOPPED,
+            state_dir=self.state_dir,
+            supervision_id=mailbox.new_supervision_id(),
+        )
+        self.assertGreater(overlapping.seq, baseline)
+
+        code, payload = self.payload_from(
+            mailbox_cli.outbox_wait_from_args,
+            self.args(
+                since=baseline,
+                timeout=0,
+                include=mailbox_cli.OUTBOX_INCLUDE_ALL,
+                supervision_id=launch,
+            ),
+        )
+
+        self.assertEqual(0, code)
+        self.assertFalse(payload["supervision_ended"])
+        self.assertEqual(
+            [overlapping.id],
+            [item["id"] for item in payload["supervision_ends"]],
+        )
+        self.assertEqual(overlapping.seq, payload["next_since"])
+
+    def test_own_supervision_end_ends_the_correlated_wait(self) -> None:
+        launch = mailbox.new_supervision_id()
+        mailbox.append_supervision_end(
+            self.plan_dir,
+            "helper exited: stopped",
+            outcome=mailbox.SUPERVISION_OUTCOME_STOPPED,
+            state_dir=self.state_dir,
+            supervision_id=mailbox.new_supervision_id(),
+        )
+        own = mailbox.append_supervision_end(
+            self.plan_dir,
+            "helper exited: complete",
+            outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            state_dir=self.state_dir,
+            supervision_id=launch,
+        )
+
+        code, payload = self.payload_from(
+            mailbox_cli.outbox_wait_from_args,
+            self.args(
+                timeout=0,
+                include=mailbox_cli.OUTBOX_INCLUDE_ALL,
+                supervision_id=launch,
+            ),
+        )
+
+        self.assertEqual(0, code)
+        self.assertTrue(payload["supervision_ended"])
+        self.assertEqual(
+            [launch],
+            [
+                item["supervision_id"]
+                for item in payload["supervision_ends"]
+                if item["id"] == own.id
+            ],
+        )
+        self.assertEqual(own.seq, payload["next_since"])
+
+    def test_unidentified_supervision_end_never_ends_a_correlated_wait(
+        self,
+    ) -> None:
+        # A record from a helper predating launch correlation carries no id.
+        record = mailbox.append_supervision_end(
+            self.plan_dir,
+            "helper exited: complete",
+            outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            state_dir=self.state_dir,
+        )
+
+        code, payload = self.payload_from(
+            mailbox_cli.outbox_wait_from_args,
+            self.args(
+                timeout=0,
+                include=mailbox_cli.OUTBOX_INCLUDE_ALL,
+                supervision_id=mailbox.new_supervision_id(),
+            ),
+        )
+
+        self.assertEqual(0, code)
+        self.assertFalse(payload["supervision_ended"])
+        self.assertNotIn("supervision_id", payload["supervision_ends"][0])
+        self.assertEqual(record.seq, payload["next_since"])
+
+    def test_uncorrelated_wait_keeps_treating_any_record_as_terminal(
+        self,
+    ) -> None:
+        record = mailbox.append_supervision_end(
+            self.plan_dir,
+            "helper exited: complete",
+            outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            state_dir=self.state_dir,
+            supervision_id=mailbox.new_supervision_id(),
+        )
+
+        code, payload = self.payload_from(
+            mailbox_cli.outbox_wait_from_args,
+            self.args(timeout=0, include=mailbox_cli.OUTBOX_INCLUDE_ALL),
+        )
+
+        self.assertEqual(0, code)
+        self.assertTrue(payload["supervision_ended"])
+        self.assertIsNone(payload["supervision_id"])
+        self.assertEqual(record.seq, payload["next_since"])
+
+    def test_outbox_wait_rejects_a_malformed_supervision_id(self) -> None:
+        code, payload = self.payload_from(
+            mailbox_cli.outbox_wait_from_args,
+            self.args(
+                timeout=0,
+                include=mailbox_cli.OUTBOX_INCLUDE_ALL,
+                supervision_id="not-a-uuid",
+            ),
+        )
+
+        self.assertEqual(1, code)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("invalid-supervision-id", payload["reason"])
+
+    def test_outbox_wait_text_reports_an_uncorrelated_supervision_end(
+        self,
+    ) -> None:
+        record = mailbox.append_supervision_end(
+            self.plan_dir,
+            "helper exited: complete",
+            outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            state_dir=self.state_dir,
+            supervision_id=mailbox.new_supervision_id(),
+        )
+        launch = mailbox.new_supervision_id()
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            code = mailbox_cli.outbox_wait_from_args(
+                self.args(
+                    json=False,
+                    timeout=0,
+                    include=mailbox_cli.OUTBOX_INCLUDE_ALL,
+                    supervision_id=launch,
+                )
+            )
+
+        self.assertEqual(0, code)
+        lines = stdout.getvalue().splitlines()
+        self.assertIn(
+            f"Supervision end {record.id} (seq {record.seq}):",
+            lines,
+        )
+        self.assertIn(
+            f"No supervision end record matches supervision id {launch}; "
+            "supervision continues.",
+            lines,
+        )
+        self.assertEqual(f"Next cursor: {record.seq}", lines[-1])
+
+    def test_outbox_wait_all_wakes_on_a_supervision_end_mid_wait(self) -> None:
+        mailbox_path = mailbox.mailbox_path_for_plan(
+            self.plan_dir, self.state_dir
+        )
+        empty = mailbox.MailboxView(mailbox_path=mailbox_path)
+        record = mailbox.MailboxMessage(
+            seq=1,
+            id=str(uuid.uuid4()),
+            kind=mailbox.KIND_SUPERVISION_END,
+            created_at="2026-08-10T12:00:00+00:00",
+            text="helper exited: complete",
+            supervision_outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+        )
+        landed = mailbox.MailboxView(
+            mailbox_path=mailbox_path,
+            messages=(record,),
+            last_seq=1,
+        )
+        with mock.patch.object(
+            mailbox_cli.mailbox,
+            "read_mailbox",
+            side_effect=[empty, landed],
+        ), mock.patch.object(
+            mailbox,
+            "mailbox_change_token",
+            side_effect=[(1, 2, 0, 3), (1, 2, 1, 4)],
+        ), mock.patch.object(
+            mailbox_cli,
+            "_write_supervisor_lease",
+        ), mock.patch.object(
+            mailbox_cli.time,
+            "monotonic",
+            side_effect=[0.0, 5.0],
+        ), mock.patch.object(mailbox_cli.time, "sleep") as sleep:
+            result = mailbox_cli._wait_for_questions(
+                self.plan_dir,
+                state_dir=self.state_dir,
+                since=0,
+                timeout=60,
+                supervisor_id=str(uuid.uuid4()),
+                include=mailbox_cli.OUTBOX_INCLUDE_ALL,
+            )
+
+        self.assertEqual((record,), result.supervision_ends)
+        self.assertEqual((), result.questions)
+        self.assertFalse(result.timed_out)
+        self.assertEqual(1, result.next_since)
+        self.assertEqual(
+            [mock.call(mailbox_cli.OUTBOX_WAIT_POLL_INTERVAL_SECONDS)],
+            sleep.call_args_list,
+        )
+
+    def test_supervision_end_leaves_question_and_notice_waits_unchanged(
+        self,
+    ) -> None:
+        baselines = {}
+        for include in (
+            mailbox_cli.OUTBOX_INCLUDE_QUESTIONS,
+            mailbox_cli.OUTBOX_INCLUDE_NOTICES,
+        ):
+            code, baselines[include] = self.payload_from(
+                mailbox_cli.outbox_wait_from_args,
+                self.args(timeout=0, include=include),
+            )
+            self.assertEqual(0, code)
+
+        record = mailbox.append_supervision_end(
+            self.plan_dir,
+            "helper exited: complete",
+            outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            state_dir=self.state_dir,
+        )
+
+        # The cursor advances through every physical record and the supervisor
+        # id is minted per wait; nothing else may move.
+        volatile = {"supervisor_id", "next_since"}
+        for include, baseline in baselines.items():
+            with self.subTest(include=include):
+                code, payload = self.payload_from(
+                    mailbox_cli.outbox_wait_from_args,
+                    self.args(timeout=0, include=include),
+                )
+                self.assertEqual(0, code)
+                self.assertTrue(payload["timed_out"])
+                self.assertEqual([], payload["supervision_ends"])
+                self.assertFalse(payload["supervision_ended"])
+                self.assertEqual(record.seq, payload["next_since"])
+                self.assertEqual(
+                    {
+                        key: value
+                        for key, value in baseline.items()
+                        if key not in volatile
+                    },
+                    {
+                        key: value
+                        for key, value in payload.items()
+                        if key not in volatile
+                    },
+                )
+
+    def test_supervision_end_and_question_in_one_batch_both_return(
+        self,
+    ) -> None:
+        self.write_active_turn(run_id="run-live")
+        question = mailbox.append_question(
+            self.plan_dir,
+            "Proceed?",
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+        record = mailbox.append_supervision_end(
+            self.plan_dir,
+            "helper exited: paused",
+            outcome=mailbox.SUPERVISION_OUTCOME_PAUSED,
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+
+        with mock.patch.object(
+            agent_mux_delivery,
+            "notify",
+            return_value={"final_status": "accepted"},
+        ) as notify:
+            code, payload = self.payload_from(
+                mailbox_cli.outbox_wait_from_args,
+                self.args(timeout=0, include=mailbox_cli.OUTBOX_INCLUDE_ALL),
+            )
+
+        self.assertEqual(0, code)
+        self.assertEqual(
+            [question.id],
+            [item["id"] for item in payload["questions"]],
+        )
+        self.assertEqual(
+            [record.id],
+            [item["id"] for item in payload["supervision_ends"]],
+        )
+        self.assertTrue(payload["supervision_ended"])
+        self.assertEqual(record.seq, payload["next_since"])
+        notify.assert_called_once()
+        self.assertEqual(
+            question.id,
+            notify.call_args.kwargs["extra"]["question_id"],
+        )
+        lease = self._lease_on_disk()
+        self.assertEqual("run-live", lease.run_id)
+        self.assertEqual(1, lease.unanswered_questions)
+
+    def test_terminal_only_wake_projects_nothing_and_notifies_nobody(
+        self,
+    ) -> None:
+        self.write_active_turn(run_id="run-live")
+        record = mailbox.append_supervision_end(
+            self.plan_dir,
+            "helper exited: complete",
+            outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+
+        with mock.patch.object(agent_mux_delivery, "notify") as notify:
+            code, payload = self.payload_from(
+                mailbox_cli.outbox_wait_from_args,
+                self.args(timeout=0, include=mailbox_cli.OUTBOX_INCLUDE_ALL),
+            )
+
+        self.assertEqual(0, code)
+        self.assertTrue(payload["supervision_ended"])
+        self.assertEqual([], payload["questions"])
+        self.assertEqual(record.seq, payload["next_since"])
+        notify.assert_not_called()
+        lease = self._lease_on_disk()
+        self.assertIsNone(lease.run_id)
+        self.assertIsNone(lease.projection_seq)
+        self.assertIsNone(lease.unanswered_questions)
+
+    def test_outbox_wait_text_renders_the_supervision_end(self) -> None:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            code = mailbox_cli.outbox_wait_from_args(
+                self.args(
+                    json=False,
+                    timeout=0,
+                    include=mailbox_cli.OUTBOX_INCLUDE_ALL,
+                )
+            )
+        self.assertEqual(0, code)
+        self.assertIn(
+            "No questions, notices, or supervision ends after seq 0",
+            stdout.getvalue(),
+        )
+
+        record = mailbox.append_supervision_end(
+            self.plan_dir,
+            "helper exited: complete",
+            outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            state_dir=self.state_dir,
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            code = mailbox_cli.outbox_wait_from_args(
+                self.args(
+                    json=False,
+                    timeout=0,
+                    include=mailbox_cli.OUTBOX_INCLUDE_ALL,
+                )
+            )
+
+        self.assertEqual(0, code)
+        lines = stdout.getvalue().splitlines()
+        self.assertIn(
+            f"Supervision end {record.id} (seq {record.seq}):",
+            lines,
+        )
+        rendered = json.loads(
+            lines[lines.index(mailbox_cli.MAILBOX_MESSAGE_BEGIN) + 1]
+        )
+        self.assertEqual(
+            {
+                "id": record.id,
+                "seq": record.seq,
+                "text": "helper exited: complete",
+                "outcome": mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            },
+            rendered,
+        )
+        self.assertEqual(f"Next cursor: {record.seq}", lines[-1])
+
+    def test_outbox_supervision_end_text_is_bounded(self) -> None:
+        appended = [
+            mailbox.append_supervision_end(
+                self.plan_dir,
+                f"{index:02d}:" + ("S" * 40000),
+                outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                state_dir=self.state_dir,
+            )
+            for index in range(30)
+        ]
+
+        bounded_lines = mailbox_cli._outbox_supervision_end_text_lines(
+            tuple(appended)
+        )
+        bounded = "\n".join(bounded_lines)
+        self.assertLessEqual(
+            len(bounded.encode("utf-8")),
+            mailbox_rendering.MAX_RENDERED_NOTICE_BYTES,
+        )
+        bounded_records = [
+            json.loads(bounded_lines[index + 1])
+            for index, line in enumerate(bounded_lines)
+            if line == mailbox_cli.MAILBOX_MESSAGE_BEGIN
+        ]
+        self.assertEqual(
+            [appended[-1].id],
+            [item["id"] for item in bounded_records],
+        )
+        self.assertIn(
+            "10 older selected supervision end records were omitted by the "
+            f"{mailbox_rendering.MAX_RENDERED_NOTICES}-record cap",
+            bounded,
+        )
+        self.assertIn(
+            f"seq {appended[-2].seq} (id {appended[-2].id})",
+            bounded,
+        )
+
     def test_outbox_retries_transient_reads(self) -> None:
         question = mailbox.append_question(
             self.plan_dir,

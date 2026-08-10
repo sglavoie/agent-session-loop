@@ -10,12 +10,14 @@ import itertools
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 
 MODULE_PATH = os.path.join(os.path.dirname(__file__), "asl_autopilot.py")
 SPEC = importlib.util.spec_from_file_location("asl_autopilot", MODULE_PATH)
@@ -4067,6 +4069,751 @@ class AutopilotMailboxPolicyTest(unittest.TestCase):
         self.assertIn("Relay ambiguous decisions to the user", text)
         self.assertIn("Resolve `pause` only", text)
         self.assertIn("Do not use a fake", text)
+
+
+class _OrderRecordingStdout(io.StringIO):
+    """Stdout replacement that records when the helper flushes its result."""
+
+    def __init__(self, events: list) -> None:
+        super().__init__()
+        self._events = events
+
+    def flush(self) -> None:
+        self._events.append(("flush", self.getvalue()))
+        super().flush()
+
+
+class SupervisionEndEmissionTest(unittest.TestCase):
+    """`main()` marks the end of supervision exactly once, after its output."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="asl-autopilot-supervision-end-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.plan_dir, self.state_dir, self.command = self._plan("plan")
+
+    def _plan(self, name: str) -> tuple:
+        plan_dir = os.path.join(self.tmp, name)
+        os.makedirs(plan_dir, exist_ok=True)
+        state_dir = os.path.join(self.tmp, f"{name}-state")
+        return plan_dir, state_dir, f"asl run {plan_dir} --state-dir {state_dir}"
+
+    def _patch(self, owner, name: str, value) -> None:
+        original = getattr(owner, name)
+        setattr(owner, name, value)
+        self.addCleanup(setattr, owner, name, original)
+
+    def _supervision_ends(self, plan_dir: str, state_dir: str) -> list:
+        view = autopilot._mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+        self.assertEqual((), view.rejected)
+        return [
+            message
+            for message in view.messages
+            if message.kind == autopilot._mailbox.KIND_SUPERVISION_END
+        ]
+
+    def _run_main(self, command: str, supervision, *extra_argv: str) -> tuple:
+        self._patch(autopilot, "run_autopilot", supervision)
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            exit_code = autopilot.main(
+                ["--command", command, "--json", *extra_argv]
+            )
+        return exit_code, buffer.getvalue()
+
+    def test_each_terminal_reason_appends_one_mapped_record(self) -> None:
+        outcomes = autopilot._mailbox
+        cases = (
+            ("complete", True, outcomes.SUPERVISION_OUTCOME_COMPLETE),
+            ("review_findings", False, outcomes.SUPERVISION_OUTCOME_COMPLETE),
+            ("paused", False, outcomes.SUPERVISION_OUTCOME_PAUSED),
+            ("needs_agent_reply", False, outcomes.SUPERVISION_OUTCOME_PAUSED),
+            ("max-sessions", True, outcomes.SUPERVISION_OUTCOME_STOPPED),
+            ("stopped", True, outcomes.SUPERVISION_OUTCOME_STOPPED),
+            ("blocked", False, outcomes.SUPERVISION_OUTCOME_BLOCKED),
+            ("user_required", False, outcomes.SUPERVISION_OUTCOME_BLOCKED),
+            ("worker_hung", False, outcomes.SUPERVISION_OUTCOME_BLOCKED),
+            # Unmapped terminal reasons stay `blocked`: `error` is reserved for
+            # an exception or a signal.
+            ("status-error", False, outcomes.SUPERVISION_OUTCOME_BLOCKED),
+            ("run-error", False, outcomes.SUPERVISION_OUTCOME_BLOCKED),
+            ("empty-reply", False, outcomes.SUPERVISION_OUTCOME_BLOCKED),
+        )
+        for index, (reason, ok, outcome) in enumerate(cases):
+            with self.subTest(reason=reason):
+                plan_dir, state_dir, command = self._plan(f"plan-{index}")
+                result = {
+                    "ok": ok,
+                    "stage": autopilot.RUN_STAGE,
+                    "reason": reason,
+                    "command": autopilot.parse_command(command),
+                }
+                exit_code, _ = self._run_main(command, lambda args: result)
+
+                self.assertEqual(0 if ok else 1, exit_code)
+                records = self._supervision_ends(plan_dir, state_dir)
+                self.assertEqual(1, len(records))
+                self.assertEqual(outcome, records[0].supervision_outcome)
+                self.assertEqual(f"supervision ended: {reason}", records[0].text)
+                self.assertIsNone(records[0].run_id)
+                self.assertNotIn("supervision_end", result)
+
+    def test_question_context_post_processing_still_emits_once(self) -> None:
+        real_run_autopilot = autopilot.run_autopilot
+
+        def supervision(args):
+            return real_run_autopilot(
+                args,
+                supervisor=lambda parsed, **kwargs: {
+                    "ok": False,
+                    "stage": autopilot.RUN_STAGE,
+                    "reason": "paused",
+                },
+                questioner=lambda parsed: {"ok": True, "prompt": "answer me"},
+            )
+
+        exit_code, stdout = self._run_main(self.command, supervision)
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual("needs_agent_reply", json.loads(stdout)["reason"])
+        records = self._supervision_ends(self.plan_dir, self.state_dir)
+        self.assertEqual(1, len(records))
+        self.assertEqual(
+            autopilot._mailbox.SUPERVISION_OUTCOME_PAUSED,
+            records[0].supervision_outcome,
+        )
+        self.assertEqual("supervision ended: needs_agent_reply", records[0].text)
+
+    def test_review_context_post_processing_still_emits_once(self) -> None:
+        real_run_autopilot = autopilot.run_autopilot
+        command = f"{self.command} --review-harness codex"
+
+        def supervision(args):
+            return real_run_autopilot(
+                args,
+                supervisor=lambda parsed, **kwargs: {
+                    "ok": True,
+                    "stage": autopilot.RUN_STAGE,
+                    "reason": "complete",
+                    "status": {},
+                },
+                review_reader=lambda parsed: {
+                    "ok": True,
+                    "outcome": "findings",
+                    "status_line": "2 findings remain",
+                },
+            )
+
+        exit_code, stdout = self._run_main(command, supervision)
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual("review_findings", json.loads(stdout)["reason"])
+        records = self._supervision_ends(self.plan_dir, self.state_dir)
+        self.assertEqual(1, len(records))
+        self.assertEqual(
+            autopilot._mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            records[0].supervision_outcome,
+        )
+        self.assertEqual("supervision ended: review_findings", records[0].text)
+
+    def test_supplied_supervision_id_lands_on_the_terminal_record(self) -> None:
+        launch = autopilot._mailbox.new_supervision_id()
+        result = {
+            "ok": True,
+            "stage": autopilot.RUN_STAGE,
+            "reason": "complete",
+            "command": autopilot.parse_command(self.command),
+        }
+
+        exit_code, stdout = self._run_main(
+            self.command,
+            lambda args: result,
+            "--supervision-id",
+            launch,
+        )
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(launch, json.loads(stdout)["supervision_id"])
+        records = self._supervision_ends(self.plan_dir, self.state_dir)
+        self.assertEqual([launch], [record.supervision_id for record in records])
+
+    def test_launch_without_a_supervision_id_still_mints_one(self) -> None:
+        result = {
+            "ok": True,
+            "stage": autopilot.RUN_STAGE,
+            "reason": "complete",
+            "command": autopilot.parse_command(self.command),
+        }
+
+        exit_code, stdout = self._run_main(self.command, lambda args: result)
+
+        self.assertEqual(0, exit_code)
+        minted = json.loads(stdout)["supervision_id"]
+        self.assertTrue(autopilot._mailbox.is_supervision_id(minted))
+        records = self._supervision_ends(self.plan_dir, self.state_dir)
+        self.assertEqual([minted], [record.supervision_id for record in records])
+
+    def test_overlapping_launches_leave_distinguishable_records(self) -> None:
+        # Two helpers on one plan: sequence cannot tell their records apart,
+        # the launch identity can.
+        launches = [
+            autopilot._mailbox.new_supervision_id() for _ in range(2)
+        ]
+        for launch in launches:
+            result = {
+                "ok": True,
+                "stage": autopilot.RUN_STAGE,
+                "reason": "complete",
+                "command": autopilot.parse_command(self.command),
+            }
+            exit_code, _ = self._run_main(
+                self.command,
+                lambda args, result=result: result,
+                "--supervision-id",
+                launch,
+            )
+            self.assertEqual(0, exit_code)
+
+        records = self._supervision_ends(self.plan_dir, self.state_dir)
+        self.assertEqual(launches, [record.supervision_id for record in records])
+
+    def test_error_path_record_carries_the_launch_identity(self) -> None:
+        launch = autopilot._mailbox.new_supervision_id()
+
+        def supervision(args):
+            raise RuntimeError("supervisor exploded")
+
+        self._patch(autopilot, "run_autopilot", supervision)
+        with self.assertRaises(RuntimeError):
+            with redirect_stdout(io.StringIO()):
+                autopilot.main(
+                    [
+                        "--command",
+                        self.command,
+                        "--json",
+                        "--supervision-id",
+                        launch,
+                    ]
+                )
+
+        records = self._supervision_ends(self.plan_dir, self.state_dir)
+        self.assertEqual([launch], [record.supervision_id for record in records])
+        self.assertEqual(
+            autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+            records[0].supervision_outcome,
+        )
+
+    def test_malformed_supervision_id_is_refused_before_supervision(self) -> None:
+        with self.assertRaises(SystemExit) as raised:
+            with redirect_stderr(io.StringIO()):
+                autopilot.main(
+                    [
+                        "--command",
+                        self.command,
+                        "--json",
+                        "--supervision-id",
+                        "not-a-uuid",
+                    ]
+                )
+
+        self.assertEqual(2, raised.exception.code)
+        self.assertFalse(
+            autopilot._mailbox.mailbox_path_for_plan(
+                self.plan_dir, self.state_dir
+            ).exists()
+        )
+
+    def test_emitter_refuses_a_second_record_for_the_same_process(self) -> None:
+        appended = []
+        emitter = autopilot._SupervisionEndEmitter(
+            supervision_id=autopilot._mailbox.new_supervision_id(),
+            append=lambda *args, **kwargs: appended.append((args, kwargs)),
+        )
+        parsed = autopilot.parse_command(self.command)
+
+        self.assertTrue(
+            emitter.emit(
+                parsed,
+                outcome=autopilot._mailbox.SUPERVISION_OUTCOME_COMPLETE,
+                text="supervision ended: complete",
+            )
+        )
+        self.assertFalse(
+            emitter.emit(
+                parsed,
+                outcome=autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+                text="supervision ended: error - RuntimeError",
+            )
+        )
+        self.assertEqual(1, len(appended))
+
+    def test_no_mailbox_command_emits_nothing(self) -> None:
+        command = f"{self.command} --no-mailbox"
+        result = {
+            "ok": True,
+            "stage": autopilot.RUN_STAGE,
+            "reason": "complete",
+            "command": autopilot.parse_command(command),
+        }
+
+        exit_code, _ = self._run_main(command, lambda args: result)
+
+        self.assertEqual(0, exit_code)
+        self.assertFalse(
+            autopilot._mailbox.mailbox_path_for_plan(
+                self.plan_dir, self.state_dir
+            ).exists()
+        )
+
+    def test_parse_failure_emits_nothing(self) -> None:
+        # `plan_dir` is untrustworthy when the command never parsed, so nothing
+        # is appended even though the failing command names a real plan.
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            exit_code = autopilot.main(
+                ["--command", f"{self.command} | cat", "--json"]
+            )
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual("shell-syntax", json.loads(buffer.getvalue())["reason"])
+        self.assertFalse(
+            autopilot._mailbox.mailbox_path_for_plan(
+                self.plan_dir, self.state_dir
+            ).exists()
+        )
+
+    def test_raised_supervisor_exception_emits_error_and_propagates(self) -> None:
+        def supervision(args):
+            raise RuntimeError("supervisor exploded")
+
+        self._patch(autopilot, "run_autopilot", supervision)
+        with self.assertRaises(RuntimeError):
+            with redirect_stdout(io.StringIO()):
+                autopilot.main(["--command", self.command, "--json"])
+
+        records = self._supervision_ends(self.plan_dir, self.state_dir)
+        self.assertEqual(1, len(records))
+        self.assertEqual(
+            autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+            records[0].supervision_outcome,
+        )
+        self.assertEqual("supervision ended: error - RuntimeError", records[0].text)
+
+    def test_append_failure_leaves_result_and_exit_code_untouched(self) -> None:
+        def boom(*args, **kwargs):
+            raise OSError("mailbox is unwritable")
+
+        self._patch(autopilot._mailbox, "append_supervision_end", boom)
+        result = {
+            "ok": True,
+            "stage": autopilot.RUN_STAGE,
+            "reason": "complete",
+            "command": autopilot.parse_command(self.command),
+        }
+
+        exit_code, stdout = self._run_main(self.command, lambda args: result)
+
+        self.assertEqual(0, exit_code)
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            {"emitted": False, "error": "OSError: mailbox is unwritable"},
+            result["supervision_end"],
+        )
+        # The result was already on stdout when the append failed, so the
+        # failure note is reported in-process only.
+        self.assertNotIn("supervision_end", json.loads(stdout))
+
+    def test_termination_signal_emits_and_restores_handlers(self) -> None:
+        def supervision(args):
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(5)
+            raise AssertionError("SIGTERM was never delivered")
+
+        previous_term = signal.getsignal(signal.SIGTERM)
+        previous_int = signal.getsignal(signal.SIGINT)
+        self._patch(autopilot, "run_autopilot", supervision)
+        with self.assertRaises(SystemExit) as caught:
+            with redirect_stdout(io.StringIO()):
+                autopilot.main(["--command", self.command, "--json"])
+
+        self.assertEqual(128 + int(signal.SIGTERM), caught.exception.code)
+        self.assertIs(previous_term, signal.getsignal(signal.SIGTERM))
+        self.assertIs(previous_int, signal.getsignal(signal.SIGINT))
+        records = self._supervision_ends(self.plan_dir, self.state_dir)
+        self.assertEqual(1, len(records))
+        self.assertEqual(
+            autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+            records[0].supervision_outcome,
+        )
+        self.assertEqual("supervision ended: error - SIGTERM", records[0].text)
+
+    def test_record_is_appended_after_the_result_is_flushed(self) -> None:
+        events: list = []
+        stdout = _OrderRecordingStdout(events)
+        real_append = autopilot._mailbox.append_supervision_end
+
+        def recording_append(*args, **kwargs):
+            events.append(("append", stdout.getvalue()))
+            return real_append(*args, **kwargs)
+
+        self._patch(autopilot._mailbox, "append_supervision_end", recording_append)
+        result = {
+            "ok": True,
+            "stage": autopilot.RUN_STAGE,
+            "reason": "complete",
+            "command": autopilot.parse_command(self.command),
+        }
+        self._patch(autopilot, "run_autopilot", lambda args: result)
+
+        with redirect_stdout(stdout):
+            exit_code = autopilot.main(["--command", self.command, "--json"])
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(["flush", "append"], [event[0] for event in events])
+        flushed = events[1][1]
+        self.assertTrue(flushed.endswith("\n"))
+        self.assertEqual("complete", json.loads(flushed)["reason"])
+        self.assertEqual(1, len(self._supervision_ends(self.plan_dir, self.state_dir)))
+
+    def _complete_result(self, command: str) -> dict:
+        return {
+            "ok": True,
+            "stage": autopilot.RUN_STAGE,
+            "reason": "complete",
+            "command": autopilot.parse_command(command),
+        }
+
+    def test_signal_after_result_flush_still_emits_error_record(self) -> None:
+        # `_supervision_end_fields` is the first statement the helper runs once
+        # the result is flushed, so firing from it lands the signal exactly in
+        # the window that used to sit outside the `BaseException` guard.
+        def terminated_fields(signal_number):
+            def fields(result):
+                signal.raise_signal(signal_number)
+                raise AssertionError("the termination signal was never delivered")
+
+            return fields
+
+        for signal_number in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=signal_number):
+                plan_dir, state_dir, command = self._plan(f"flush-{signal_number:d}")
+                result = self._complete_result(command)
+                self._patch(autopilot, "run_autopilot", lambda args: result)
+                self._patch(
+                    autopilot,
+                    "_supervision_end_fields",
+                    terminated_fields(signal_number),
+                )
+                previous_term = signal.getsignal(signal.SIGTERM)
+                previous_int = signal.getsignal(signal.SIGINT)
+                stdout = io.StringIO()
+
+                with self.assertRaises(SystemExit) as caught:
+                    with redirect_stdout(stdout):
+                        autopilot.main(["--command", command, "--json"])
+
+                self.assertEqual(128 + int(signal_number), caught.exception.code)
+                self.assertIs(previous_term, signal.getsignal(signal.SIGTERM))
+                self.assertIs(previous_int, signal.getsignal(signal.SIGINT))
+                self.assertEqual("complete", json.loads(stdout.getvalue())["reason"])
+                records = self._supervision_ends(plan_dir, state_dir)
+                self.assertEqual(1, len(records))
+                self.assertEqual(
+                    autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+                    records[0].supervision_outcome,
+                )
+                self.assertEqual(
+                    f"supervision ended: error - {signal.Signals(signal_number).name}",
+                    records[0].text,
+                )
+
+    def test_signal_before_the_terminal_write_emits_error_record(self) -> None:
+        real_guard = autopilot._deferred_termination_signals
+
+        @contextmanager
+        def signalling_guard():
+            with real_guard() as deferred:
+                # Inside the deferral window and before the record is written:
+                # recorded rather than raised, so the outcome flips to error.
+                signal.raise_signal(signal.SIGTERM)
+                yield deferred
+
+        result = self._complete_result(self.command)
+        self._patch(autopilot, "run_autopilot", lambda args: result)
+        self._patch(autopilot, "_deferred_termination_signals", signalling_guard)
+        previous_term = signal.getsignal(signal.SIGTERM)
+        previous_int = signal.getsignal(signal.SIGINT)
+
+        with self.assertRaises(SystemExit) as caught:
+            with redirect_stdout(io.StringIO()):
+                autopilot.main(["--command", self.command, "--json"])
+
+        self.assertEqual(128 + int(signal.SIGTERM), caught.exception.code)
+        self.assertIs(previous_term, signal.getsignal(signal.SIGTERM))
+        self.assertIs(previous_int, signal.getsignal(signal.SIGINT))
+        records = self._supervision_ends(self.plan_dir, self.state_dir)
+        self.assertEqual(1, len(records))
+        self.assertEqual(
+            autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+            records[0].supervision_outcome,
+        )
+        self.assertEqual("supervision ended: error - SIGTERM", records[0].text)
+
+    def test_signal_during_the_terminal_write_records_the_termination(self) -> None:
+        real_append = autopilot._mailbox.append_supervision_end
+
+        def signalling_append(*args, **kwargs):
+            # The append has begun and can still be waiting on the lock or
+            # reading the log; the outcome is resolved after all of that.
+            signal.raise_signal(signal.SIGINT)
+            return real_append(*args, **kwargs)
+
+        result = self._complete_result(self.command)
+        self._patch(autopilot, "run_autopilot", lambda args: result)
+        self._patch(autopilot._mailbox, "append_supervision_end", signalling_append)
+
+        with self.assertRaises(SystemExit) as caught:
+            with redirect_stdout(io.StringIO()):
+                autopilot.main(["--command", self.command, "--json"])
+
+        self.assertEqual(128 + int(signal.SIGINT), caught.exception.code)
+        # `_supervision_ends` refuses rejected lines, so one record here means
+        # the deferral carried the write through whole.
+        records = self._supervision_ends(self.plan_dir, self.state_dir)
+        self.assertEqual(1, len(records))
+        self.assertEqual(
+            autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+            records[0].supervision_outcome,
+        )
+        self.assertEqual("supervision ended: error - SIGINT", records[0].text)
+
+    def test_signal_at_the_mailbox_write_still_records_the_termination(
+        self,
+    ) -> None:
+        real_write = autopilot._mailbox.os.write
+
+        def signalling_write(signal_number):
+            def write(fd, data):
+                # Fired after the commit-time resolver has already answered and
+                # the record's bytes exist: the mask holds the signal, so only
+                # a decision taken after the write can see it.
+                if b'"kind":"supervision-end"' in data:
+                    signal.raise_signal(signal_number)
+                return real_write(fd, data)
+
+            return write
+
+        for signal_number in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=signal_number):
+                plan_dir, state_dir, command = self._plan(f"write-{signal_number:d}")
+                result = self._complete_result(command)
+                self._patch(autopilot, "run_autopilot", lambda args: result)
+                self._patch(
+                    autopilot._mailbox.os,
+                    "write",
+                    signalling_write(signal_number),
+                )
+                previous_term = signal.getsignal(signal.SIGTERM)
+                previous_int = signal.getsignal(signal.SIGINT)
+                stdout = io.StringIO()
+
+                with self.assertRaises(SystemExit) as caught:
+                    with redirect_stdout(stdout):
+                        autopilot.main(["--command", command, "--json"])
+
+                self.assertEqual(128 + int(signal_number), caught.exception.code)
+                self.assertIs(previous_term, signal.getsignal(signal.SIGTERM))
+                self.assertIs(previous_int, signal.getsignal(signal.SIGINT))
+                self.assertEqual("complete", json.loads(stdout.getvalue())["reason"])
+                records = self._supervision_ends(plan_dir, state_dir)
+                self.assertEqual(1, len(records))
+                self.assertEqual(
+                    autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+                    records[0].supervision_outcome,
+                )
+                self.assertEqual(
+                    f"supervision ended: error - {signal.Signals(signal_number).name}",
+                    records[0].text,
+                )
+
+    def test_signal_at_the_durability_barrier_still_records_the_termination(
+        self,
+    ) -> None:
+        real_fullsync = autopilot._mailbox.durability.fullsync
+
+        def signalling_fullsync(signal_number):
+            fired: list[int] = []
+
+            def fullsync(fd):
+                # Only the terminal append holds termination, so a blocked
+                # signal is what identifies this sync as the record's own. The
+                # injection lands after the resolver that precedes the write
+                # has already answered `complete`.
+                held = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+                if not fired and signal_number in held:
+                    fired.append(fd)
+                    signal.raise_signal(signal_number)
+                return real_fullsync(fd)
+
+            return fullsync
+
+        for signal_number in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=signal_number):
+                plan_dir, state_dir, command = self._plan(f"sync-{signal_number:d}")
+                result = self._complete_result(command)
+                self._patch(autopilot, "run_autopilot", lambda args: result)
+                self._patch(
+                    autopilot._mailbox.durability,
+                    "fullsync",
+                    signalling_fullsync(signal_number),
+                )
+                previous_term = signal.getsignal(signal.SIGTERM)
+                previous_int = signal.getsignal(signal.SIGINT)
+                stdout = io.StringIO()
+
+                with self.assertRaises(SystemExit) as caught:
+                    with redirect_stdout(stdout):
+                        autopilot.main(["--command", command, "--json"])
+
+                self.assertEqual(128 + int(signal_number), caught.exception.code)
+                self.assertIs(previous_term, signal.getsignal(signal.SIGTERM))
+                self.assertIs(previous_int, signal.getsignal(signal.SIGINT))
+                self.assertEqual("complete", json.loads(stdout.getvalue())["reason"])
+                records = self._supervision_ends(plan_dir, state_dir)
+                self.assertEqual(1, len(records))
+                self.assertEqual(
+                    autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+                    records[0].supervision_outcome,
+                )
+                self.assertEqual(
+                    f"supervision ended: error - {signal.Signals(signal_number).name}",
+                    records[0].text,
+                )
+
+    def test_signal_while_the_hold_is_taken_still_emits_one_error_record(
+        self,
+    ) -> None:
+        # The hold used to be a two-step handler swap: a signal landing between
+        # the two installations escaped as `_TerminatedBySignal` with the
+        # emitter already spent, so no record was ever written.
+        real_guard = autopilot._deferred_termination_signals
+        entries: list = []
+
+        @contextmanager
+        def interrupted_guard():
+            entries.append(len(entries))
+            if len(entries) == 1:
+                raise autopilot._TerminatedBySignal(signal.SIGTERM)
+            with real_guard() as deferred:
+                yield deferred
+
+        result = self._complete_result(self.command)
+        self._patch(autopilot, "run_autopilot", lambda args: result)
+        self._patch(autopilot, "_deferred_termination_signals", interrupted_guard)
+        previous_term = signal.getsignal(signal.SIGTERM)
+        previous_int = signal.getsignal(signal.SIGINT)
+
+        with self.assertRaises(SystemExit) as caught:
+            with redirect_stdout(io.StringIO()):
+                autopilot.main(["--command", self.command, "--json"])
+
+        self.assertEqual(128 + int(signal.SIGTERM), caught.exception.code)
+        self.assertIs(previous_term, signal.getsignal(signal.SIGTERM))
+        self.assertIs(previous_int, signal.getsignal(signal.SIGINT))
+        records = self._supervision_ends(self.plan_dir, self.state_dir)
+        self.assertEqual(1, len(records))
+        self.assertEqual(
+            autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
+            records[0].supervision_outcome,
+        )
+        self.assertEqual("supervision ended: error - SIGTERM", records[0].text)
+
+    def test_failed_append_still_reports_a_deferred_signal(self) -> None:
+        def boom(*args, **kwargs):
+            signal.raise_signal(signal.SIGTERM)
+            raise OSError("mailbox is unwritable")
+
+        result = self._complete_result(self.command)
+        self._patch(autopilot, "run_autopilot", lambda args: result)
+        self._patch(autopilot._mailbox, "append_supervision_end", boom)
+
+        with self.assertRaises(SystemExit) as caught:
+            with redirect_stdout(io.StringIO()):
+                autopilot.main(["--command", self.command, "--json"])
+
+        # The record is lost with the mailbox, but the signal is not: an
+        # operator who sent SIGTERM still sees the process die of it.
+        self.assertEqual(128 + int(signal.SIGTERM), caught.exception.code)
+        self.assertFalse(
+            autopilot._mailbox.mailbox_path_for_plan(
+                self.plan_dir, self.state_dir
+            ).exists()
+        )
+
+
+class DeferredTerminationSignalsTest(unittest.TestCase):
+    """The deferral window holds both signals without touching dispositions."""
+
+    def _restore_signal_state(self) -> None:
+        blocked = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+        held = blocked & set(autopilot.TERMINATION_SIGNALS)
+        if held:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, held)
+
+    def setUp(self) -> None:
+        self.addCleanup(self._restore_signal_state)
+        self.previous = autopilot._install_termination_handlers()
+        self.addCleanup(
+            lambda: [
+                signal.signal(number, handler) for number, handler in self.previous
+            ]
+        )
+
+    def test_the_hold_is_atomic_and_leaves_dispositions_alone(self) -> None:
+        for signal_number in autopilot.TERMINATION_SIGNALS:
+            with self.subTest(signal=signal_number):
+                dispositions = {
+                    number: signal.getsignal(number)
+                    for number in autopilot.TERMINATION_SIGNALS
+                }
+
+                with self.assertRaises(SystemExit) as caught:
+                    with autopilot._deferred_termination_signals() as deferred:
+                        # Held, not trapped: nothing is raised here and the
+                        # process-wide handlers are exactly the ones the caller
+                        # installed.
+                        signal.raise_signal(signal_number)
+                        self.assertEqual(
+                            signal.Signals(signal_number).name,
+                            deferred.signal_name,
+                        )
+                        self.assertEqual(
+                            dispositions,
+                            {
+                                number: signal.getsignal(number)
+                                for number in autopilot.TERMINATION_SIGNALS
+                            },
+                        )
+
+                self.assertEqual(128 + int(signal_number), caught.exception.code)
+                self.assertEqual(
+                    dispositions,
+                    {
+                        number: signal.getsignal(number)
+                        for number in autopilot.TERMINATION_SIGNALS
+                    },
+                )
+
+    def test_an_unsignalled_window_leaves_the_mask_untouched(self) -> None:
+        before = signal.pthread_sigmask(signal.SIG_BLOCK, ())
+
+        with autopilot._deferred_termination_signals() as deferred:
+            self.assertIsNone(deferred.signal_name)
+            self.assertTrue(
+                set(autopilot.TERMINATION_SIGNALS)
+                <= signal.pthread_sigmask(signal.SIG_BLOCK, ())
+            )
+
+        self.assertEqual(before, signal.pthread_sigmask(signal.SIG_BLOCK, ()))
 
 
 class AttachedMailboxWatcherTest(unittest.TestCase):
