@@ -106,9 +106,21 @@ asl outbox wait <plan-dir> --include all --supervision-id <launch-identity> --si
 - Start at `--since 0` so questions that were already open before the launch
   stay visible, then feed each response's `next_since` into the next call.
 - `supervision_ended: true` means the batch carries this launch's own terminal
-  record: stop the wait loop, read the helper's `--json` result on stdout, and
-  do not reissue. The helper writes and flushes that result before appending the
-  record, so it is already complete when the wait returns.
+  record: stop the wait loop and do not reissue. Read that record's `outcome`
+  before trusting stdout. Every outcome except `error` means the helper wrote
+  and flushed its complete `--json` result before appending the record, so it
+  is already parseable when the wait returns.
+- `outcome: error` means the helper died abnormally — a raised exception or a
+  termination signal — so its stdout may be missing, truncated mid-write, or
+  complete but unproven. Never require parseable JSON there: take the
+  termination detail from the record's `text`, recover run state with
+  `asl status <plan-dir> --json`, and report the abnormal exit instead of a
+  result.
+- The record ends this supervision, not necessarily the run. It proves the
+  helper exited, not that the `asl run` child is quiescent: a `worker_hung` stop
+  leaves that child alive holding the plan lock (see "reason: worker_hung" in
+  Step 2), so worker questions and notices can still land after the terminal
+  record. Check `asl status <plan-dir> --json` before treating the plan as idle.
 - A `supervision-end` record in `supervision_ends` while `supervision_ended` is
   `false` belongs to another helper on this plan — an earlier invocation or one
   whose lifetime overlapped this launch. Handle nothing, let `next_since`
@@ -370,7 +382,9 @@ ceiling stands down whenever the live `hang_cpu_progress` sample reports
 not stalled. An unknown sample (no fresh `ps`) still escalates.
 When either bar fires, the helper stops with `reason: worker_hung`
 **without killing or waiting on anything** — the supervised `asl run` child
-stays alive and keeps the plan lock.
+stays alive and keeps the plan lock. Its terminal `supervision-end` record
+therefore marks the end of supervision only: that live child can still publish
+mailbox questions and notices after the record lands.
 
 Read `result.hang` first. It carries the `class`, the runner's `hang_suspected`
 block verbatim (including its sampled `process_tree`), `idle_seconds`,

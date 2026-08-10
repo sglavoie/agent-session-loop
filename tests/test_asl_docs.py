@@ -970,7 +970,16 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "Start at `--since 0` so questions that were already open before "
             "the launch stay visible",
             "`supervision_ended: true` means the batch carries this launch's "
-            "own terminal record: stop the wait loop",
+            "own terminal record: stop the wait loop and do not reissue. Read "
+            "that record's `outcome` before trusting stdout",
+            "Every outcome except `error` means the helper wrote and flushed "
+            "its complete `--json` result before appending the record",
+            "`outcome: error` means the helper died abnormally",
+            "its stdout may be missing, truncated mid-write, or complete but "
+            "unproven",
+            "Never require parseable JSON there: take the termination detail "
+            "from the record's `text`, recover run state with "
+            "`asl status <plan-dir> --json`",
             "while `supervision_ended` is `false` belongs to another helper "
             "on this plan",
             "let `next_since` advance past it, and keep waiting",
@@ -1008,8 +1017,17 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "A record from another launch is still returned and still "
             "advances `next_since`",
             "Only the Autopilot helper writes the record, at most once per "
-            "helper process and only after its own `--json` result has been "
-            "written and flushed",
+            "helper process",
+            "On every outcome except `error`, the record is appended only "
+            "after the complete `--json` result has been written and flushed",
+            "`error` is the abnormal-exit outcome and carries no stdout "
+            "guarantee",
+            "the result may be absent, truncated, or complete but unproven",
+            "must therefore decide from the record alone — the termination "
+            "detail is in `text` — and recover run state from "
+            "`asl status <plan-dir> --json` rather than parsing helper stdout",
+            "`error` never comes from an ordinary terminal reason, so the "
+            "outcome alone separates the two cases",
             "The runner deliberately does not emit one",
             "appends at the full file-cap tier alongside `receipt`",
             "`--include all` wakes on questions, notices, or the terminal "
@@ -1028,6 +1046,10 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         for marker in (
             "the Autopilot helper appends one terminal `supervision-end` "
             "message",
+            "Every outcome except `error` is appended after the helper "
+            "flushed its complete result",
+            "`error` marks an abnormal exit whose stdout may be missing, "
+            "truncated, or unproven and must be decided from the record alone",
             "`asl outbox wait --include all` wakes on it and reports it "
             "through `supervision_ends` and `supervision_ended`",
             "The runner emits no such record",
@@ -1039,6 +1061,63 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
                 marker,
                 normalized_readme,
                 msg=f"README omits supervision-end marker: {marker!r}",
+            )
+
+    def test_docs_separate_helper_termination_from_run_termination(
+        self,
+    ) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        readme = self._read("agent_session_loop/README.md")
+        skill = self._read("skills/asl/SKILL.md")
+        normalized_docs = " ".join(docs.split())
+        normalized_readme = " ".join(readme.split())
+        normalized_skill = " ".join(skill.split())
+
+        self.assertNotIn(
+            "has exited, so no further worker questions or notices are coming",
+            normalized_docs,
+        )
+        for marker in (
+            "the mailbox's terminal signal for one supervision lifetime",
+            "It ends the helper's lifetime and does not prove the supervised "
+            "run is quiescent",
+            "`worker_hung` deliberately stops the helper without killing or "
+            "waiting on that child, which stays alive holding the plan lock "
+            "and can publish questions and notices after the terminal record",
+            "asks `asl status <plan-dir> --json`; the record answers only "
+            "whether this supervision is over",
+        ):
+            self.assertIn(
+                marker,
+                normalized_docs,
+                msg=f"docs omit supervision-lifetime marker: {marker!r}",
+            )
+
+        self.assertIn(
+            "That record ends the helper's supervision lifetime and does not "
+            "prove the supervised run is quiescent: a `worker_hung` stop "
+            "leaves the `asl run` child alive holding the plan lock, so later "
+            "worker questions and notices can still land after the terminal "
+            "record",
+            normalized_readme,
+        )
+
+        for marker in (
+            "The record ends this supervision, not necessarily the run. It "
+            "proves the helper exited, not that the `asl run` child is "
+            "quiescent",
+            "a `worker_hung` stop leaves that child alive holding the plan "
+            "lock",
+            "Check `asl status <plan-dir> --json` before treating the plan as "
+            "idle",
+            "Its terminal `supervision-end` record therefore marks the end of "
+            "supervision only: that live child can still publish mailbox "
+            "questions and notices after the record lands",
+        ):
+            self.assertIn(
+                marker,
+                normalized_skill,
+                msg=f"asl skill omits supervision-lifetime marker: {marker!r}",
             )
 
     def test_docs_describe_guidance_rendering_bounds(self) -> None:

@@ -4145,17 +4145,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     Every exit path appends exactly one ``supervision-end`` mailbox record, so
     an agent blocked on ``asl outbox wait`` wakes when this process is done
-    instead of burning its timeout. The record lands *after* the helper result
-    is written and flushed — an agent woken by it can read that output
-    immediately — and a failed append is reported in the result without
-    touching ``ok`` or the exit code. Emission runs inside the same
-    ``BaseException`` guard as the supervision itself, and that guard opens
-    outside the handler-installation window, so a SIGTERM or SIGINT landing in
-    the post-flush window — or mid-install — still leaves a record behind. The
-    record
-    carries this launch's ``supervision_id`` so an agent supervising a plan
-    that an older helper is still exiting cannot mistake that helper's record
-    for this one.
+    instead of burning its timeout. The record's outcome says what that
+    process's stdout is worth: every outcome except ``error`` lands *after* the
+    complete result was written and flushed, so an agent woken by one can parse
+    that output immediately, while ``error`` marks an abnormal exit — a raised
+    exception or a termination signal — whose result may be absent, partial,
+    or (when the signal landed after the flush) complete but unproven. An
+    ``error`` record therefore has to be decidable on its own, which is why it
+    carries the termination detail in its text. A failed append is reported in
+    the result without touching ``ok`` or the exit code. Emission runs inside
+    the same ``BaseException`` guard as the supervision itself, and that guard
+    opens outside the handler-installation window, so a SIGTERM or SIGINT
+    landing in the post-flush window — or mid-install — still leaves a record
+    behind. The record carries this launch's ``supervision_id`` so an agent
+    supervising a plan that an older helper is still exiting cannot mistake
+    that helper's record for this one.
     """
     parser = build_arg_parser()
     args = parser.parse_args(argv)
@@ -4173,10 +4177,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 result["supervision_id"] = supervision_id
 
             if args.json:
-                json.dump(result, sys.stdout)
-                sys.stdout.write("\n")
+                # Serialized whole before any of it reaches stdout, so a
+                # serialization failure leaves no half-written object behind
+                # for a supervisor to parse.
+                payload = f"{json.dumps(result)}\n"
             else:
-                sys.stdout.write(f"{_human_summary(result)}\n")
+                payload = f"{_human_summary(result)}\n"
+            sys.stdout.write(payload)
             sys.stdout.flush()
 
             outcome, text = _supervision_end_fields(result)

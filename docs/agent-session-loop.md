@@ -484,9 +484,15 @@ Both files are created and repaired to mode `0600`. They live under
 `<state-root>/<plan-path-sha256>/`; they are not stored in the plan directory
 or repository.
 
-A `supervision-end` record is the mailbox's terminal signal: the Autopilot
-helper process that was supervising this plan has exited, so no further worker
-questions or notices are coming. Beyond the common `id`, `kind`, `created_at`,
+A `supervision-end` record is the mailbox's terminal signal for one supervision
+lifetime: the Autopilot helper process that was supervising this plan has
+exited. It ends the helper's lifetime and does not prove the supervised run is
+quiescent. Most terminal reasons do leave the `asl run` child finished, but
+`worker_hung` deliberately stops the helper without killing or waiting on that
+child, which stays alive holding the plan lock and can publish questions and
+notices after the terminal record. A reader that needs to know whether work is
+still running asks `asl status <plan-dir> --json`; the record answers only
+whether this supervision is over. Beyond the common `id`, `kind`, `created_at`,
 and `version` fields it carries a required non-empty `text` holding the helper's
 raw exit reason, a required `outcome` from the closed enum `complete`, `paused`,
 `stopped`, `blocked`, `error`, an optional `run_id` validated only when
@@ -494,10 +500,22 @@ present, and an optional `supervision_id` — a UUID naming the supervising
 launch that ended, rejected as `invalid-supervision-id` when it is present and
 malformed. The kind is schema v3 only, so a v1 or v2 line claiming it is rejected
 as an unknown kind for its version. Only the Autopilot helper writes the record,
-at most once per helper process and only after its own `--json` result has been
-written and flushed, so an agent woken by the record can read that result
-immediately; the helper attaches no `run_id`, because one helper supervises
-several sequential `asl run` children and a single run id would be ambiguous.
+at most once per helper process; the helper attaches no `run_id`, because one
+helper supervises several sequential `asl run` children and a single run id
+would be ambiguous.
+
+The `outcome` also states what the helper's stdout is worth. On every outcome
+except `error`, the record is appended only after the complete `--json` result
+has been written and flushed, so an agent woken by one of those records can
+parse that result immediately. `error` is the abnormal-exit outcome and carries
+no stdout guarantee: a raised exception or a termination signal can end the
+helper before the write, mid-write, or after the flush but before the record,
+so the result may be absent, truncated, or complete but unproven. A supervisor
+woken by its own `error` record must therefore decide from the record alone —
+the termination detail is in `text` — and recover run state from
+`asl status <plan-dir> --json` rather than parsing helper stdout. `error` never
+comes from an ordinary terminal reason, so the outcome alone separates the two
+cases.
 The helper maps its raw reason onto the enum — `complete`/`review_findings` to
 `complete`, `paused`/`needs_agent_reply` to `paused`, `max-sessions`/`stopped`
 to `stopped`, every other terminal reason to `blocked`, and a raised exception
