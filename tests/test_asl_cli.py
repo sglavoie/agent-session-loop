@@ -3931,6 +3931,14 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             workspace_root, plan_dir, repositories = self._workspace_plan(tmp_dir)
+            registry = plans.read_repository_registry(plan_dir)
+            assert registry is not None
+            plans.save_workspace_plan_metadata(
+                plan_dir,
+                workspace_root,
+                registry.digest,
+                ("Library/Protected.dv",),
+            )
             metadata_before = (plan_dir / plans.PLAN_METADATA_FILE_NAME).read_bytes()
             completed = self._run(
                 plan_dir, workspace_root, tmp_dir / "state", "--dry-run"
@@ -3945,6 +3953,14 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             self.assertEqual(root, payload["workspace_root"])
             self.assertEqual(root, payload["run_config"]["workspace_root"])
             self.assertEqual(root, payload["planned"]["workspace_root"])
+            self.assertEqual(
+                ["Library/Protected.dv"],
+                payload["workspace_inventory_excludes"],
+            )
+            self.assertEqual(
+                ["Library/Protected.dv"],
+                payload["run_config"]["workspace_inventory_excludes"],
+            )
             invocation = payload["planned"]["invocation"]
             self.assertEqual(root, invocation["cwd"])
             self.assertEqual(root, invocation["workspace_root"])
@@ -4994,6 +5010,14 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             tmp_dir = Path(tmp)
             state_dir = tmp_dir / "state"
             workspace_root, plan_dir, _repositories = self._workspace_plan(tmp_dir)
+            registry = plans.read_repository_registry(plan_dir)
+            assert registry is not None
+            plans.save_workspace_plan_metadata(
+                plan_dir,
+                workspace_root,
+                registry.digest,
+                ("Library/Protected.dv",),
+            )
             before_run = state.status_payload(
                 plans.inspect_plan(plan_dir),
                 state_dir,
@@ -5002,6 +5026,10 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                 str(workspace_root.resolve()), before_run["workspace_root"]
             )
             self.assertEqual(before_run["workspace_root"], before_run["cwd"])
+            self.assertEqual(
+                ["Library/Protected.dv"],
+                before_run["workspace_inventory_excludes"],
+            )
             run_completed = self._run(
                 plan_dir, workspace_root, state_dir, "--dry-run"
             )
@@ -5028,6 +5056,10 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             self.assertEqual(
                 payload["workspace_root"],
                 payload["runner_state"]["workspace_root"],
+            )
+            self.assertEqual(
+                ["Library/Protected.dv"],
+                payload["workspace_inventory_excludes"],
             )
             self.assertEqual(
                 ["SVC", "OAK"],

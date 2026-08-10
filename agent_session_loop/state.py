@@ -956,6 +956,9 @@ def _runner_state_payload(
                 "workspace_root": raw.get("workspace_root"),
                 "registry_digest": raw.get("registry_digest"),
                 "repositories": raw.get("repositories"),
+                "workspace_inventory_excludes": raw.get(
+                    "workspace_inventory_excludes"
+                ),
             }
             if raw.get("workspace_root") is not None
             else {}
@@ -1547,7 +1550,12 @@ def status_payload(
     ).to_payload()
     workspace_fields = {
         key: runner_state.get(key)
-        for key in ("workspace_root", "registry_digest", "repositories")
+        for key in (
+            "workspace_root",
+            "registry_digest",
+            "repositories",
+            "workspace_inventory_excludes",
+        )
         if runner_state.get(key) is not None
     }
     if not workspace_fields:
@@ -1560,6 +1568,9 @@ def status_payload(
             workspace_fields = {
                 "workspace_root": str(workspace_root),
                 "registry_digest": metadata.registry_digest,
+                "workspace_inventory_excludes": list(
+                    metadata.workspace_inventory_excludes
+                ),
                 "repositories": [
                     {
                         "alias": repository.alias,
@@ -1574,6 +1585,18 @@ def status_payload(
                     for repository in registry.repositories
                 ],
             }
+    elif "workspace_inventory_excludes" not in workspace_fields:
+        metadata = plans.load_plan_metadata(snapshot.plan_dir)
+        if (
+            isinstance(metadata, plans.WorkspacePlanMetadata)
+            and workspace_fields.get("workspace_root")
+            == metadata.workspace_root
+            and workspace_fields.get("registry_digest")
+            == metadata.registry_digest
+        ):
+            workspace_fields["workspace_inventory_excludes"] = list(
+                metadata.workspace_inventory_excludes
+            )
     cwd_fields = (
         {"cwd": workspace_fields["workspace_root"]}
         if workspace_fields

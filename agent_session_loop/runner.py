@@ -1167,6 +1167,9 @@ def _workspace_payload_fields(
         "workspace_root": str(context.root),
         "registry_digest": context.registry_digest,
         "repositories": _resolved_repositories_payload(context.workspace),
+        "workspace_inventory_excludes": list(
+            context.workspace_inventory_excludes
+        ),
     }
 
 
@@ -3007,7 +3010,10 @@ def _resolve_run_verification_context(
         raise plans.PlanError(
             "run workspace does not match the prepared workspace binding"
         )
-    return verification.VerificationContext.resolved_workspace(workspace)
+    return verification.VerificationContext.resolved_workspace(
+        workspace,
+        inventory_excludes=metadata.workspace_inventory_excludes,
+    )
 
 
 def _validate_resume_workspace_binding(
@@ -3028,7 +3034,14 @@ def _validate_resume_workspace_binding(
             )
         return
     current = _workspace_payload_fields(context)
-    for key in ("workspace_root", "registry_digest", "repositories"):
+    keys = ["workspace_root", "registry_digest", "repositories"]
+    # Run state written before metadata v3 has no inventory-policy field. An
+    # operator may deliberately prepare that policy before resuming the old
+    # run, so absence adopts the current durable binding. Once persisted, the
+    # field is authoritative and mismatches still fail closed.
+    if "workspace_inventory_excludes" in persisted:
+        keys.append("workspace_inventory_excludes")
+    for key in keys:
         if persisted.get(key) != current[key]:
             raise plans.PlanError(
                 "resume workspace binding does not match the persisted run"
@@ -10009,6 +10022,7 @@ def _capture_workspace_write_guard_snapshot(
     plan_dir: Path,
     exclude: tuple[str, ...],
     include_ignored: bool,
+    inventory_excludes: tuple[str, ...] = (),
 ) -> repository_evidence.WorkspaceSnapshot:
     """Capture every registered and unregistered worktree in ``workspace``.
 
@@ -10021,6 +10035,7 @@ def _capture_workspace_write_guard_snapshot(
         workspace.root,
         plan_dir,
         default_exclude=exclude,
+        inventory_excludes=inventory_excludes,
         include_ignored=include_ignored,
         _run_git_fn=_run_git,
         _run_git_bytes_fn=_run_git_bytes,
@@ -10125,6 +10140,7 @@ def _workspace_write_guard_evidence(
     comparison: Mapping[str, Any],
     exclude: tuple[str, ...],
     include_ignored: bool,
+    inventory_excludes: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Classify workspace-vector changes against one session's write scope."""
     registered = {
@@ -10217,6 +10233,7 @@ def _workspace_write_guard_evidence(
         "unavailable": unavailable_payload,
         "violations": violations,
         "excluded": list(exclude),
+        "inventory_excluded": list(inventory_excludes),
         "include_ignored": include_ignored,
     }
 
@@ -10342,6 +10359,7 @@ def _enforce_workspace_write_guard(
     after: plans.PlanSnapshot | None,
     snapshot_before: repository_evidence.WorkspaceSnapshot,
     exclude: tuple[str, ...],
+    inventory_excludes: tuple[str, ...],
     include_ignored: bool,
     session_id: str,
     session_label: str,
@@ -10356,6 +10374,7 @@ def _enforce_workspace_write_guard(
             workspace=workspace,
             plan_dir=before.plan_dir,
             exclude=exclude,
+            inventory_excludes=inventory_excludes,
             include_ignored=include_ignored,
         )
     except repository_evidence.RepositoryEvidenceError as error:
@@ -10382,6 +10401,7 @@ def _enforce_workspace_write_guard(
         scope=scope,
         comparison=comparison,
         exclude=exclude,
+        inventory_excludes=inventory_excludes,
         include_ignored=include_ignored,
     )
     if evidence["passed"]:
@@ -11353,6 +11373,9 @@ def _run_locked(
     mailbox_enabled = bool(mailbox_activation["enabled"])
     review_guard_excludes = _review_guard_excludes(args)
     review_guard_include_ignored = _review_guard_include_ignored(args)
+    workspace_inventory_excludes = (
+        verification_context.workspace_inventory_excludes
+    )
 
     # Detect state stranded under a moved plan's old path hash *before* this
     # run writes its own state.json (which would suppress the scan). A scan
@@ -12385,6 +12408,9 @@ def _run_locked(
                                     workspace=review_workspace,
                                     plan_dir=snapshot.plan_dir,
                                     exclude=review_guard_excludes,
+                                    inventory_excludes=(
+                                        workspace_inventory_excludes
+                                    ),
                                     include_ignored=(
                                         review_guard_include_ignored
                                     ),
@@ -12610,6 +12636,9 @@ def _run_locked(
                                     workspace=review_workspace,
                                     plan_dir=snapshot.plan_dir,
                                     exclude=review_guard_excludes,
+                                    inventory_excludes=(
+                                        workspace_inventory_excludes
+                                    ),
                                     include_ignored=(
                                         review_guard_include_ignored
                                     ),
@@ -13039,6 +13068,7 @@ def _run_locked(
                                 workspace=workspace,
                                 plan_dir=before.plan_dir,
                                 exclude=review_guard_excludes,
+                                inventory_excludes=workspace_inventory_excludes,
                                 include_ignored=review_guard_include_ignored,
                             )
                         )
@@ -13072,6 +13102,9 @@ def _run_locked(
                         "read_aliases": list(session_scope.reads),
                         "write_aliases": list(session_scope.writes),
                         "excluded": list(review_guard_excludes),
+                        "inventory_excluded": list(
+                            workspace_inventory_excludes
+                        ),
                         "include_ignored": review_guard_include_ignored,
                     }
                     with persistence.lock:
@@ -13113,6 +13146,7 @@ def _run_locked(
                             scope=session_scope,
                             comparison=repair_comparison,
                             exclude=review_guard_excludes,
+                            inventory_excludes=workspace_inventory_excludes,
                             include_ignored=review_guard_include_ignored,
                         )
                     else:
@@ -13408,6 +13442,7 @@ def _run_locked(
                     after=after,
                     snapshot_before=workspace_snapshot_before,
                     exclude=review_guard_excludes,
+                    inventory_excludes=workspace_inventory_excludes,
                     include_ignored=review_guard_include_ignored,
                     session_id=session_id,
                     session_label=session_label,
@@ -14207,6 +14242,7 @@ def _run_locked(
                     after=after,
                     snapshot_before=guard_context["snapshot_before"],
                     exclude=review_guard_excludes,
+                    inventory_excludes=workspace_inventory_excludes,
                     include_ignored=review_guard_include_ignored,
                     session_id=str(guard_context["session_id"]),
                     session_label=str(guard_context["session_label"]),
@@ -14369,6 +14405,9 @@ def _error_payload(
                     "cwd": str(workspace_root),
                     "workspace_root": str(workspace_root),
                     "registry_digest": metadata.registry_digest,
+                    "workspace_inventory_excludes": list(
+                        metadata.workspace_inventory_excludes
+                    ),
                     "repositories": [
                         {
                             "alias": repository.alias,
@@ -14740,9 +14779,14 @@ def _apply_resume_config(
         )
     explicit = _explicit_resume_dests(run_argv)
     args._resume_workspace_config = {
-        key: run_config.get(key)
-        for key in ("workspace_root", "registry_digest", "repositories")
+        "workspace_root": run_config.get("workspace_root"),
+        "registry_digest": run_config.get("registry_digest"),
+        "repositories": run_config.get("repositories"),
     }
+    if "workspace_inventory_excludes" in run_config:
+        args._resume_workspace_config["workspace_inventory_excludes"] = (
+            run_config.get("workspace_inventory_excludes")
+        )
     for dest in _RESUME_OVERLAY_DESTS:
         if dest in explicit or dest not in run_config:
             continue

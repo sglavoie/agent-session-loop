@@ -79,6 +79,7 @@ class VerificationContext:
 
     root: Path
     workspace: workspaces.ResolvedWorkspace | None = None
+    workspace_inventory_excludes: tuple[str, ...] = ()
     #: Plan-owned directory a legacy check may also reach. ASL's own generated
     #: review contracts verify plan artifacts, which live here rather than in
     #: any repository.
@@ -89,6 +90,23 @@ class VerificationContext:
         if self.workspace is not None and canonical_root != self.workspace.root:
             raise plans.PlanError(
                 "verification workspace root does not match the resolved workspace"
+            )
+        if self.workspace is None and self.workspace_inventory_excludes:
+            raise plans.PlanError(
+                "legacy verification contexts cannot exclude workspace inventory"
+            )
+        if self.workspace is not None:
+            try:
+                inventory_excludes = (
+                    workspaces.normalize_workspace_inventory_excludes(
+                        self.workspace_inventory_excludes,
+                        self.workspace.registry,
+                    )
+                )
+            except workspaces.WorkspaceError as error:
+                raise plans.PlanError(str(error)) from error
+            object.__setattr__(
+                self, "workspace_inventory_excludes", inventory_excludes
             )
         object.__setattr__(self, "root", canonical_root)
         if self.plan_dir is not None:
@@ -102,9 +120,16 @@ class VerificationContext:
 
     @classmethod
     def resolved_workspace(
-        cls, workspace: workspaces.ResolvedWorkspace
+        cls,
+        workspace: workspaces.ResolvedWorkspace,
+        *,
+        inventory_excludes: tuple[str, ...] = (),
     ) -> "VerificationContext":
-        return cls(root=workspace.root, workspace=workspace)
+        return cls(
+            root=workspace.root,
+            workspace=workspace,
+            workspace_inventory_excludes=inventory_excludes,
+        )
 
     @classmethod
     def from_plan(
@@ -118,7 +143,18 @@ class VerificationContext:
             workspace = workspaces.resolve_workspace(cwd, registry)
         except workspaces.WorkspaceError as error:
             raise plans.PlanError(f"invalid verification workspace: {error}") from error
-        return cls.resolved_workspace(workspace)
+        metadata = plans.load_plan_metadata(plan_dir)
+        inventory_excludes = (
+            metadata.workspace_inventory_excludes
+            if isinstance(metadata, plans.WorkspacePlanMetadata)
+            and metadata.workspace_root == str(workspace.root)
+            and metadata.registry_digest == registry.digest
+            else ()
+        )
+        return cls.resolved_workspace(
+            workspace,
+            inventory_excludes=inventory_excludes,
+        )
 
     @property
     def registry_digest(self) -> str | None:

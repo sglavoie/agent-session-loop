@@ -413,8 +413,8 @@ asl verify PLAN_DIR --session ID [--cwd ROOT] [--artifact-dir DIR] [--json]
 asl contract-check PLAN_DIR [--session ID] [--cwd ROOT] [--json]
 asl baseline PLAN_DIR [--cwd ROOT] [--per-check-timeout SECONDS] [--total-timeout SECONDS] [--json]
 asl split (--plan-file PATH | --inline-stdin) --contracts-file PATH [--cwd ROOT] [--base-dir DIR] [--skill-prefix auto|codex|claude|copilot] [--analysis-file PATH] [--json]
-asl prepare PLAN.md [--cwd ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--validator-harness H] [--review-harness H] [--review-harness-model MODEL] [--base-dir DIR] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--json]
-asl prepare --resume PLAN_DIR [--rebind-workspace ...]
+asl prepare PLAN.md [--cwd ROOT] [--workspace-inventory-exclude PATH ...|--clear-workspace-inventory-excludes] [--harness codex|claude|copilot] [--harness-model MODEL] [--validator-harness H] [--review-harness H] [--review-harness-model MODEL] [--base-dir DIR] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--json]
+asl prepare --resume PLAN_DIR [--workspace-inventory-exclude PATH ...|--clear-workspace-inventory-excludes] [--rebind-workspace ...]
 asl expand-ingest PLAN_DIR --batch-file PATH [--json]
 asl status PLAN_DIR_OR_ID [--state-dir DIR] [--json]
 asl questions PLAN_DIR [--state-dir DIR] [--json]
@@ -1031,7 +1031,14 @@ Unavailable inventory or fingerprint evidence pauses as
 contents, restore the handoff to pending, record qualified evidence, and run
 before verification or commit. Scope violations require a durable scope repair
 and fresh expansion/preflight before continuing. The workspace write guard
-shares the `--review-guard-include-ignored` setting with the review mutation
+prunes only subtrees listed in the plan's persisted
+`workspace_inventory_excludes` policy before traversal. This policy is for
+uninspectable non-repository workspace content; it cannot name, contain, or be
+contained by a registered repository. Other inventory and Git errors remain
+fail-closed. Guard evidence reports these paths as `inventory_excluded`,
+separately from repo-content `excluded` paths supplied by
+`--review-guard-exclude`. The guard shares the
+`--review-guard-include-ignored` setting with the review mutation
 guard. By default it cannot observe untracked paths hidden by Git ignore rules,
 including ignored cache/build output; tracked changes remain observable. Pass
 `--review-guard-include-ignored` to include ignored untracked paths in both
@@ -1850,7 +1857,7 @@ plan:
 asl prepare PLAN_DIR --resume --cwd NEW_WORKSPACE --rebind-workspace
 ```
 
-The replacement root must differ from the current version 2 binding, every
+The replacement root must differ from the current registered binding, every
 declared repository must resolve beneath it as an exact Git top-level with the
 expected credential-free origin, and the plan must have no active runner lock.
 New preparation, legacy plans, unchanged bindings, and ordinary `asl run`
@@ -1878,6 +1885,25 @@ relative `published_files` list on success. Failed rebind guidance retains
 the distinct `workspace-rebind-failed` reason and include `workspace_rebind`
 context rather than being classified as input errors.
 
+A registered plan may persist explicit workspace inventory exclusions during
+preparation:
+
+```text
+asl prepare PLAN_DIR --resume --cwd WORKSPACE_ROOT \
+  --workspace-inventory-exclude 'Library/Application Support/Protected.dv'
+```
+
+The option is repeatable. Supplied values replace the existing policy after
+being normalized as literal workspace-relative POSIX paths, sorted, and
+deduplicated. Absolute paths, `..` traversal, the workspace root, and any path
+that equals, contains, or sits beneath a registered repository are rejected.
+ASL never discovers or adds these exclusions automatically. An ordinary
+same-root resume with neither policy option preserves the stored list;
+`--clear-workspace-inventory-excludes` empties it. A deliberate workspace
+rebind clears the old list unless replacement exclusions are supplied, because
+the paths belong to the old root. The two policy options are mutually
+exclusive.
+
 `asl expand-ingest` is the standalone ingestion step `prepare` runs internally,
 exposed for the manual `session-expand` path: it reads one validator-output
 batch file (`--batch-file`), parses it fail-closed, merges it into the stored
@@ -1904,16 +1930,19 @@ schema:
 }
 ```
 
-Registered plans write version 2 with `workspace_root` and the ordered registry
-digest. On ordinary resume, `prepare` refuses to rebind when the stored root,
+Registered plans write version 3 with `workspace_root`, the ordered registry
+digest, and `workspace_inventory_excludes`. Version 2 remains readable and is
+interpreted as an empty exclusion list; the next prepare metadata write uses
+version 3. On ordinary resume, `prepare` refuses to rebind when the stored root,
 digest, or validation aggregate differs from the resolved workspace; the
 explicit staged replacement flow above is the only exception. `asl run` also
 refuses a root or registry mismatch and never rewrites an existing binding;
 only an unbound legacy plan is backfilled on a non-dry run. `--dry-run` does not
 write metadata. Registered runner state and JSON surfaces add `workspace_root`,
-`registry_digest`, and ordered resolved `repositories`, while retaining `cwd`
-as the workspace-root compatibility alias. Resume validates those persisted
-workspace fields against the current durable binding before continuing. The
+`registry_digest`, ordered resolved `repositories`, and
+`workspace_inventory_excludes`, while retaining `cwd` as the workspace-root
+compatibility alias. Resume validates those persisted workspace fields against
+the current durable binding before continuing. The
 metadata file is not plan prose and is excluded from both the plan content and
 stable readiness hashes.
 
@@ -2837,6 +2866,9 @@ Common pause reasons:
   implementation turn. A before-turn failure spends no harness turn. An
   after-turn failure retains content, returns the handoff to pending, and
   outranks every harness-result branch because the runner cannot prove scope.
+  An operator may prepare an explicit persisted inventory exclusion only when
+  the failing subtree is outside every registered repository; all other
+  evidence failures stay fail-closed.
 - `review-mutated-worktree`: the review harness changed repo content outside
   the plan directory. The pre/post fingerprint covers the working tree's
   `HEAD`, tracked diff, the separate `--cached` (index) diff — so staging a

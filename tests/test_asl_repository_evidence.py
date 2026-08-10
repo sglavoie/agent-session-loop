@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from agent_session_loop import plans, repository_evidence, runner, workspaces
 from tests.support import (
@@ -198,6 +199,39 @@ class WorkspaceInventoryTests(unittest.TestCase):
                 self.workspace, max_repositories=23
             )
 
+    def test_inventory_prunes_approved_subtree_before_permission_error(self) -> None:
+        visible = self.workspace / "visible"
+        blocked = self.workspace / "blocked"
+        init_git_repo(visible)
+        blocked.mkdir()
+
+        def fake_walk(root, *, topdown, onerror, followlinks):
+            walk_root = Path(root)
+            directory_names = ["blocked", "visible"]
+            yield str(walk_root), directory_names, []
+            if "blocked" in directory_names:
+                onerror(
+                    PermissionError(
+                        1, "not permitted", str(walk_root / "blocked")
+                    )
+                )
+            if "visible" in directory_names:
+                yield str(walk_root / "visible"), [".git"], []
+
+        with mock.patch.object(repository_evidence.os, "walk", fake_walk):
+            discovered = repository_evidence.discover_git_worktrees(
+                self.workspace,
+                inventory_excludes=("blocked",),
+            )
+        self.assertEqual((visible.resolve(),), discovered)
+
+        with mock.patch.object(repository_evidence.os, "walk", fake_walk):
+            with self.assertRaisesRegex(
+                repository_evidence.RepositoryEvidenceError,
+                "workspace inventory unreadable",
+            ):
+                repository_evidence.discover_git_worktrees(self.workspace)
+
     def test_comparison_covers_tracked_staged_deleted_renamed_and_untracked(
         self,
     ) -> None:
@@ -289,10 +323,14 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
             comparison=comparison,
             exclude=(),
             include_ignored=False,
+            inventory_excludes=("Library/Protected.dv",),
         )
 
         self.assertFalse(evidence["passed"])
         self.assertEqual(["SVC"], evidence["authorized_aliases"])
+        self.assertEqual(
+            ["Library/Protected.dv"], evidence["inventory_excluded"]
+        )
         self.assertEqual(
             [
                 "unregistered-repository",

@@ -52,6 +52,7 @@ from typing import Any, Literal
 from . import (
     baseline,
     harnesses,
+    plans,
     progress_repair,
     repository_evidence,
     repository_scope,
@@ -1387,7 +1388,44 @@ def _resolve_preflight_context(
             ),
         ), summaries
 
-    context = VerificationContext.resolved_workspace(workspace)
+    inventory_excludes: tuple[str, ...] = ()
+    try:
+        metadata = load_plan_metadata(plan_dir)
+    except PlanError as error:
+        return None, (
+            _finding(
+                "red",
+                "workspace-root",
+                str(error),
+                path=str(plan_dir / plans.PLAN_METADATA_FILE_NAME),
+            ),
+        ), summaries
+    if (
+        isinstance(metadata, plans.WorkspacePlanMetadata)
+        and metadata.workspace_root == str(workspace.root)
+        and metadata.registry_digest == registry.digest
+    ):
+        try:
+            inventory_excludes = (
+                workspaces.normalize_workspace_inventory_excludes(
+                    metadata.workspace_inventory_excludes,
+                    registry,
+                )
+            )
+        except workspaces.WorkspaceError as error:
+            return None, (
+                _finding(
+                    "red",
+                    "workspace-root",
+                    str(error),
+                    path=str(plan_dir / plans.PLAN_METADATA_FILE_NAME),
+                ),
+            ), summaries
+
+    context = VerificationContext.resolved_workspace(
+        workspace,
+        inventory_excludes=inventory_excludes,
+    )
     summaries = _repository_summaries(registry, context)
     inventory_findings: list[PreflightFinding] = []
     registered_by_path = {
@@ -1420,6 +1458,7 @@ def _resolve_preflight_context(
         inventory = repository_evidence.capture_workspace_snapshot(
             canonical_cwd,
             plan_dir,
+            inventory_excludes=inventory_excludes,
         )
     except repository_evidence.RepositoryEvidenceError as error:
         inventory_findings.append(
@@ -1453,6 +1492,17 @@ def _resolve_preflight_context(
                     ),
                 )
             )
+    if inventory_excludes:
+        inventory_findings.append(
+            _finding(
+                "green",
+                "repository-root",
+                "workspace repository inventory uses operator-approved "
+                "subtree exclusions",
+                path=str(canonical_cwd),
+                detail=", ".join(inventory_excludes),
+            )
+        )
     return context, tuple(inventory_findings), summaries
 
 
@@ -3344,6 +3394,11 @@ def _preflight_payload_fields(
                 "repositories": [
                     asdict(repository) for repository in report.repositories
                 ],
+                "workspace_inventory_excludes": list(
+                    report.verification_context.workspace_inventory_excludes
+                    if report.verification_context is not None
+                    else ()
+                ),
             }
         )
     footprint_payload = _repository_footprint_payload(report)

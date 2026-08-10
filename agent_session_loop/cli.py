@@ -607,6 +607,22 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
             "(default: current directory)"
         ),
     )
+    prepare_inventory_policy = prepare_parser.add_mutually_exclusive_group()
+    prepare_inventory_policy.add_argument(
+        "--workspace-inventory-exclude",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Workspace-relative subtree omitted from unregistered-repository "
+            "inventory; repeat to replace the prepared plan's exclusion policy"
+        ),
+    )
+    prepare_inventory_policy.add_argument(
+        "--clear-workspace-inventory-excludes",
+        action="store_true",
+        help="Clear the prepared plan's workspace inventory exclusions",
+    )
     prepare_parser.add_argument(
         "--harness",
         choices=harnesses.HARNESS_NAMES,

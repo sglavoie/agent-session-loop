@@ -1196,9 +1196,13 @@ def _qualified_paths(repository: str, changes: Mapping[str, Any]) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
-def _inventory_candidates(workspace_root: Path) -> tuple[list[Path], list[OSError]]:
+def _inventory_candidates(
+    workspace_root: Path,
+    inventory_excludes: tuple[str, ...] = (),
+) -> tuple[list[Path], list[OSError]]:
     candidates: list[Path] = []
     errors: list[OSError] = []
+    excluded = set(inventory_excludes)
 
     def record_error(error: OSError) -> None:
         errors.append(error)
@@ -1221,7 +1225,10 @@ def _inventory_candidates(workspace_root: Path) -> tuple[list[Path], list[OSErro
         directory_names[:] = sorted(
             name
             for name in directory_names
-            if name != ".git" and not (current / name).is_symlink()
+            if name != ".git"
+            and _workspace_relative(root=workspace_root, repository=current / name)
+            not in excluded
+            and not (current / name).is_symlink()
         )
         if marker_present:
             # A .git file is the linked-worktree form; a directory is an
@@ -1233,6 +1240,7 @@ def _inventory_candidates(workspace_root: Path) -> tuple[list[Path], list[OSErro
 def discover_git_worktrees(
     workspace_root: str | Path,
     *,
+    inventory_excludes: tuple[str, ...] = (),
     max_repositories: int = 1024,
 ) -> tuple[Path, ...]:
     """Recursively find exact Git worktree roots without following symlinks.
@@ -1247,7 +1255,7 @@ def discover_git_worktrees(
         )
     if max_repositories < 1:
         raise ValueError("max_repositories must be positive")
-    candidates, errors = _inventory_candidates(root)
+    candidates, errors = _inventory_candidates(root, inventory_excludes)
     if errors:
         raise RepositoryEvidenceError(
             f"workspace inventory unreadable: {errors[0]}"
@@ -1294,6 +1302,7 @@ def capture_workspace_snapshot(
     *,
     exclude: Mapping[str, tuple[str, ...]] | None = None,
     default_exclude: tuple[str, ...] = (),
+    inventory_excludes: tuple[str, ...] = (),
     include_ignored: bool = False,
     max_repositories: int = 1024,
     _run_git_fn: GitRunner | None = None,
@@ -1311,7 +1320,9 @@ def capture_workspace_snapshot(
     bytes_token = _GIT_BYTES_RUNNER.set(_run_git_bytes_fn)
     try:
         repositories = discover_git_worktrees(
-            root, max_repositories=max_repositories
+            root,
+            inventory_excludes=inventory_excludes,
+            max_repositories=max_repositories,
         )
         snapshot: WorkspaceSnapshot = OrderedDict()
         per_repository_excludes = exclude or {}

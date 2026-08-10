@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import json
 from pathlib import Path
@@ -9,7 +10,7 @@ import subprocess
 import tempfile
 import unittest
 
-from agent_session_loop import authoring, plans, workspaces
+from agent_session_loop import authoring, plans, runner, verification, workspaces
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     init_git_repo,
@@ -359,7 +360,7 @@ class WorkspaceResolutionTests(unittest.TestCase):
 
 
 class WorkspaceMetadataTests(unittest.TestCase):
-    def test_v2_round_trip_uses_workspace_root_and_registry_digest(self) -> None:
+    def test_v3_round_trip_includes_inventory_exclusions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             plan_dir = root / "plan"
@@ -369,7 +370,10 @@ class WorkspaceMetadataTests(unittest.TestCase):
             digest = _registry().digest
 
             path = plans.save_workspace_plan_metadata(
-                plan_dir, workspace_root / ".." / "workspace", digest
+                plan_dir,
+                workspace_root / ".." / "workspace",
+                digest,
+                ("Library/Protected.dv",),
             )
             metadata = plans.load_plan_metadata(plan_dir)
 
@@ -377,19 +381,23 @@ class WorkspaceMetadataTests(unittest.TestCase):
                 plans.WorkspacePlanMetadata(
                     workspace_root=str(workspace_root.resolve()),
                     registry_digest=digest,
+                    workspace_inventory_excludes=("Library/Protected.dv",),
                 ),
                 metadata,
             )
             self.assertEqual(
                 {
                     "registry_digest": digest,
-                    "version": 2,
+                    "version": 3,
+                    "workspace_inventory_excludes": ["Library/Protected.dv"],
                     "workspace_root": str(workspace_root.resolve()),
                 },
                 json.loads(path.read_text(encoding="utf-8")),
             )
 
-    def test_v2_loader_is_strict_and_does_not_change_plan_hashes(self) -> None:
+    def test_v2_loader_defaults_inventory_exclusions_and_hashes_stay_stable(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             plan_dir = root / "plan"
@@ -399,16 +407,29 @@ class WorkspaceMetadataTests(unittest.TestCase):
             content_before = plans.plan_content_sha256(plan_dir)
             readiness_before = plans.stable_readiness_sha256(plan_dir)
 
-            plans.save_workspace_plan_metadata(
-                plan_dir, workspace_root, _registry().digest
+            metadata_path = plan_dir / plans.PLAN_METADATA_FILE_NAME
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "workspace_root": str(workspace_root.resolve()),
+                        "registry_digest": _registry().digest,
+                    }
+                ),
+                encoding="utf-8",
             )
+
+            metadata = plans.load_plan_metadata(plan_dir)
+            self.assertIsInstance(metadata, plans.WorkspacePlanMetadata)
+            assert isinstance(metadata, plans.WorkspacePlanMetadata)
+            self.assertEqual(2, metadata.version)
+            self.assertEqual((), metadata.workspace_inventory_excludes)
 
             self.assertEqual(content_before, plans.plan_content_sha256(plan_dir))
             self.assertEqual(
                 readiness_before, plans.stable_readiness_sha256(plan_dir)
             )
-            path = plan_dir / plans.PLAN_METADATA_FILE_NAME
-            path.write_text(
+            metadata_path.write_text(
                 json.dumps(
                     {
                         "version": 2,
@@ -420,6 +441,77 @@ class WorkspaceMetadataTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(plans.PlanError, "SHA-256"):
                 plans.load_plan_metadata(plan_dir)
+
+    def test_v3_loader_requires_inventory_exclusions_field(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan_dir = root / "plan"
+            workspace_root = root / "workspace"
+            plan_dir.mkdir()
+            workspace_root.mkdir()
+            (plan_dir / plans.PLAN_METADATA_FILE_NAME).write_text(
+                json.dumps(
+                    {
+                        "version": plans.PLAN_METADATA_V3_SCHEMA_VERSION,
+                        "workspace_root": str(workspace_root.resolve()),
+                        "registry_digest": "0" * 64,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                plans.PlanError,
+                "missing required field 'workspace_inventory_excludes'",
+            ):
+                plans.load_plan_metadata(plan_dir)
+
+    def test_inventory_exclusions_reject_registered_repository_overlap(self) -> None:
+        registry = _registry()
+        for candidate in (
+            "tundra_svc",
+            "tundra_svc/cache",
+            ".",
+        ):
+            with self.subTest(candidate=candidate):
+                with self.assertRaises(workspaces.WorkspaceError):
+                    workspaces.normalize_workspace_inventory_excludes(
+                        (candidate,), registry
+                    )
+
+    def test_pre_v3_run_binding_adopts_prepared_inventory_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_root = Path(tmp) / "workspace"
+            specs = DEFAULT_MULTI_REPO_SPECS[:2]
+            init_multi_repo_workspace(workspace_root, specs)
+            resolved = workspaces.resolve_workspace(
+                workspace_root,
+                _registry(specs),
+            )
+            context = verification.VerificationContext.resolved_workspace(
+                resolved,
+                inventory_excludes=("Library/Protected.dv",),
+            )
+            legacy_run_binding = runner._workspace_payload_fields(context)
+            legacy_run_binding.pop("workspace_inventory_excludes")
+
+            runner._validate_resume_workspace_binding(
+                argparse.Namespace(
+                    _resume_workspace_config=legacy_run_binding
+                ),
+                context,
+            )
+
+            with self.assertRaisesRegex(plans.PlanError, "persisted run"):
+                runner._validate_resume_workspace_binding(
+                    argparse.Namespace(
+                        _resume_workspace_config={
+                            **legacy_run_binding,
+                            "workspace_inventory_excludes": [],
+                        }
+                    ),
+                    context,
+                )
 
     def test_v1_serializer_and_parser_remain_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

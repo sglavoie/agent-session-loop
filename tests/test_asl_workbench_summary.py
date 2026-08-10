@@ -91,7 +91,12 @@ class WorkbenchSummaryTests(unittest.TestCase):
             write_multi_repo_plan(plan_dir, ("pending",), specs=specs)
             registry = plans.read_repository_registry(plan_dir)
             assert registry is not None
-            plans.save_workspace_plan_metadata(plan_dir, workspace_root, registry.digest)
+            plans.save_workspace_plan_metadata(
+                plan_dir,
+                workspace_root,
+                registry.digest,
+                ("Library/Protected.dv",),
+            )
 
             payload = workbench.build_workbench_summary(
                 _discovered(plan_dir), state_dir=tmp_path / "state"
@@ -100,6 +105,10 @@ class WorkbenchSummaryTests(unittest.TestCase):
             self.assertEqual(str(workspace_root.resolve()), payload["cwd"])
             self.assertEqual(str(workspace_root.resolve()), payload["workspace_root"])
             self.assertEqual(2, payload["repository_count"])
+            self.assertEqual(
+                ["Library/Protected.dv"],
+                payload["workspace_inventory_excludes"],
+            )
             self.assertEqual(["SVC", "OAK"], [row["alias"] for row in payload["repositories"]])
 
     def test_invalid_when_plan_directory_does_not_exist(self) -> None:

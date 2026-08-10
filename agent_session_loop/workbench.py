@@ -65,17 +65,33 @@ def _workspace_projection(
     """Project a plan's exact workspace binding for operator-facing APIs.
 
     Runtime state wins because it records the resolved vector used by the run.
-    Before the first run, prepared v2 metadata plus the manifest registry gives
-    the same ordered, credential-free projection without probing Git. Legacy
-    plans intentionally return an empty mapping so their payloads stay additive.
+    Before the first run, prepared workspace metadata plus the manifest
+    registry gives the same ordered, credential-free projection without probing
+    Git. Legacy plans intentionally return an empty mapping so their payloads
+    stay additive.
     """
     runtime_payload = runtime or {}
     workspace_root = runtime_payload.get("workspace_root")
     repositories = _repository_rows(runtime_payload.get("repositories"))
     if isinstance(workspace_root, str) and workspace_root and repositories:
+        inventory_excludes = runtime_payload.get(
+            "workspace_inventory_excludes"
+        )
+        if inventory_excludes is None:
+            metadata = plans.load_plan_metadata(plan_dir)
+            if (
+                isinstance(metadata, plans.WorkspacePlanMetadata)
+                and metadata.workspace_root == workspace_root
+                and metadata.registry_digest
+                == runtime_payload.get("registry_digest")
+            ):
+                inventory_excludes = metadata.workspace_inventory_excludes
         return {
             "workspace_root": workspace_root,
             "registry_digest": runtime_payload.get("registry_digest"),
+            "workspace_inventory_excludes": list(
+                inventory_excludes or ()
+            ),
             "repositories": [dict(row) for row in repositories],
             "repository_count": len(repositories),
         }
@@ -97,6 +113,9 @@ def _workspace_projection(
     return {
         "workspace_root": str(root),
         "registry_digest": metadata.registry_digest,
+        "workspace_inventory_excludes": list(
+            metadata.workspace_inventory_excludes
+        ),
         "repositories": rows,
         "repository_count": len(rows),
     }
@@ -113,6 +132,9 @@ def _workspace_payload(
         "cwd": cwd if cwd is not None else workspace_root,
         "workspace_root": workspace_root,
         "registry_digest": workspace.get("registry_digest"),
+        "workspace_inventory_excludes": list(
+            workspace.get("workspace_inventory_excludes") or ()
+        ),
         "repositories": [
             dict(row)
             for row in _repository_rows(workspace.get("repositories"))
@@ -2156,6 +2178,7 @@ class WorkbenchSummary:
     cwd: str | None
     workspace_root: str | None
     registry_digest: str | None
+    workspace_inventory_excludes: tuple[str, ...]
     repositories: tuple[dict[str, Any], ...]
     repository_count: int
     pause_reason: str | None
@@ -2226,6 +2249,9 @@ class WorkbenchSummary:
                 {
                     "workspace_root": self.workspace_root,
                     "registry_digest": self.registry_digest,
+                    "workspace_inventory_excludes": (
+                        self.workspace_inventory_excludes
+                    ),
                     "repositories": self.repositories,
                     "repository_count": self.repository_count,
                 },
@@ -2815,6 +2841,9 @@ def _build_recovery_context(
             "cwd": workspace.get("workspace_root"),
             "workspace_root": workspace.get("workspace_root"),
             "registry_digest": workspace.get("registry_digest"),
+            "workspace_inventory_excludes": workspace.get(
+                "workspace_inventory_excludes", []
+            ),
             "repositories": workspace.get("repositories", []),
         },
         stale_unfinished=stale_unfinished,
@@ -4669,6 +4698,9 @@ def _build_invalid_summary(
         ),
         workspace_root=workspace.get("workspace_root"),
         registry_digest=workspace.get("registry_digest"),
+        workspace_inventory_excludes=tuple(
+            workspace.get("workspace_inventory_excludes") or ()
+        ),
         repositories=_repository_rows(workspace.get("repositories")),
         repository_count=int(workspace.get("repository_count") or 0),
         pause_reason=None,
@@ -4874,6 +4906,9 @@ def build_workbench_summary(
             cwd=str(summary_cwd) if summary_cwd is not None else None,
             workspace_root=workspace.get("workspace_root"),
             registry_digest=workspace.get("registry_digest"),
+            workspace_inventory_excludes=tuple(
+                workspace.get("workspace_inventory_excludes") or ()
+            ),
             repositories=_repository_rows(workspace.get("repositories")),
             repository_count=int(workspace.get("repository_count") or 0),
             pause_reason=pause_reason,
@@ -5277,6 +5312,7 @@ class LaunchResult:
     cwd: str | None = None
     workspace_root: str | None = None
     registry_digest: str | None = None
+    workspace_inventory_excludes: tuple[str, ...] = ()
     repositories: tuple[dict[str, Any], ...] = ()
 
     def to_payload(self) -> dict[str, Any]:
@@ -5292,6 +5328,9 @@ class LaunchResult:
             "cwd": self.cwd,
             "workspace_root": self.workspace_root,
             "registry_digest": self.registry_digest,
+            "workspace_inventory_excludes": list(
+                self.workspace_inventory_excludes
+            ),
             "repositories": [dict(row) for row in self.repositories],
         }
 
@@ -5540,6 +5579,9 @@ def launch_plan(
         cwd=validated.cwd,
         workspace_root=workspace.get("workspace_root"),
         registry_digest=workspace.get("registry_digest"),
+        workspace_inventory_excludes=tuple(
+            workspace.get("workspace_inventory_excludes") or ()
+        ),
         repositories=_repository_rows(workspace.get("repositories")),
     )
 

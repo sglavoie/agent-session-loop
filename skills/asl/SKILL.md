@@ -335,7 +335,12 @@ not generic retry candidates:
   worktrees. Do not revert or adopt that delta; the operator must restore it or
   durably repair scope and refresh preparation evidence.
 - `workspace-write-guard-unavailable` means complete Git evidence could not be
-  captured. Treat it fail-closed and surface the affected aliases/topology.
+  captured. Treat it fail-closed and surface the affected aliases/topology. If
+  the failure is an uninspectable subtree outside every registered repository,
+  the operator may persist that exact subtree with `asl prepare PLAN_DIR
+  --resume --cwd WORKSPACE_ROOT --workspace-inventory-exclude PATH`, then
+  preflight and resume. Never add an inventory exclusion automatically, and do
+  not use one for missing Git evidence inside a registered repository.
 - `commit-failed` may represent a partial multi-repository commit group. Read
   the unresolved group, successful per-repository SHAs, failed alias, remaining
   aliases, and qualified artifacts from status/recovery output. Never undo or
