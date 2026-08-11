@@ -38,7 +38,7 @@ the discipline ``asl verify`` already uses for its JSON ``ok`` field.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +55,7 @@ from . import (
     plans,
     progress_repair,
     repository_evidence,
+    repository_intent,
     repository_scope,
     responses,
     state,
@@ -90,6 +91,7 @@ from .plans import (
     stable_readiness_sha256,
     write_readiness_metadata,
 )
+from .repository_intent import RepositoryIntent
 from .verification import (
     VerificationContext,
     diagnose_command,
@@ -107,6 +109,7 @@ PreflightCategory = Literal[
     "ambiguity-sentinel",
     "path-reference",
     "repository-footprint",
+    "repository-registry-required",
     "verification-scope",
     "verification-duplicate",
     "command-not-runnable",
@@ -141,6 +144,7 @@ PREFLIGHT_CATEGORIES: tuple[PreflightCategory, ...] = (
     "ambiguity-sentinel",
     "path-reference",
     "repository-footprint",
+    "repository-registry-required",
     "verification-scope",
     "verification-duplicate",
     "command-not-runnable",
@@ -168,9 +172,12 @@ PREFLIGHT_CATEGORIES: tuple[PreflightCategory, ...] = (
 
 #: Categories no ``--allow-not-loop-ready`` escape hatch may waive. A plan that
 #: reaches outside its bound root has no snapshot covering the other location,
-#: so a run there is unguarded rather than merely unreviewed.
+#: so a run there is unguarded rather than merely unreviewed. The same holds for
+#: a plan whose declared intent reaches several repositories without a registry:
+#: the missing registry is what would have bound those repositories in the first
+#: place, so no readiness marking can stand in for it.
 NON_BYPASSABLE_PREFLIGHT_CATEGORIES: frozenset[str] = frozenset(
-    {"repository-footprint"}
+    {"repository-footprint", "repository-registry-required"}
 )
 
 CommitMode = Literal["per-session", "end"]
@@ -366,6 +373,29 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
         question_template=(
             "Plan reaches outside its bound root ({detail}). Should I migrate "
             "it to a registered workspace?"
+        ),
+        fix_category="plan-edit",
+    ),
+    "repository-registry-required": RepairHint(
+        category="repository-registry-required",
+        check_id="repository-registry-required.declare",
+        severity_hint="red",
+        message=(
+            "This plan intends to reach more than one Git repository, so it "
+            "cannot run in legacy single-repository mode and no single child "
+            "checkout may be selected as its root. Declare the registry: "
+            "(1) add a top-level `## Repositories` table to manifest.md above "
+            "the first session heading, one row per repository; (2) give every "
+            "session-N.md per-session **Reads repositories:** and **Writes "
+            "repositories:** scopes; (3) attribute every contract check to a "
+            "repository with a `repo` alias and a repository-relative "
+            "`path`/`cwd`; (4) run `asl prepare <plan-dir> --resume "
+            "--rebind-workspace --cwd <workspace-root>`."
+        ),
+        question_template=(
+            "Plan intends to reach several Git repositories with no "
+            "`## Repositories` registry ({detail}). Should I declare the "
+            "registry and per-session repository scopes?"
         ),
         fix_category="plan-edit",
     ),
@@ -1144,6 +1174,7 @@ class PreflightReport:
     verification_context: VerificationContext | None = None
     repositories: tuple[RepositorySummary, ...] = ()
     repository_footprint: repository_scope.RepositoryFootprint | None = None
+    repository_intent: RepositoryIntent | None = None
 
     @property
     def ok(self) -> bool:
@@ -1898,6 +1929,126 @@ def _check_repository_footprint(
     return tuple(findings), footprint
 
 
+def _repository_intent_candidates(
+    plan_dir: Path | None,
+    contracts_by_session: dict[str, CompletionContract],
+    snapshot: PlanSnapshot | None,
+    root: str | Path,
+) -> tuple[repository_intent.IntentCandidate, ...]:
+    """Collect every location a legacy plan declares it will reach.
+
+    Unlike footprint targets, these include locations that do not exist yet:
+    a contract ``path`` naming a file a session has still to create resolves
+    through its nearest existing ancestor, so the repository owning it is
+    nameable before the session runs.
+    """
+    candidates: list[repository_intent.IntentCandidate] = []
+    for session_id in sorted(contracts_by_session):
+        candidates.extend(
+            repository_intent.candidates_from_checks(
+                contracts_by_session[session_id].verify.checks
+            )
+        )
+    if snapshot is not None:
+        for status in snapshot.sessions:
+            text = _read_session_text(status.session)
+            if text is not None:
+                candidates.extend(repository_intent.candidates_from_text(text))
+    if plan_dir is not None:
+        for name in ("context.md", "manifest.md"):
+            try:
+                text = (plan_dir / name).read_text(encoding="utf-8")
+            except OSError:
+                continue
+            candidates.extend(repository_intent.candidates_from_text(text))
+        try:
+            metadata = load_plan_metadata(plan_dir)
+        except PlanError:
+            metadata = None
+        if metadata is not None:
+            candidates.extend(
+                repository_intent.candidates_from_plan_metadata(
+                    metadata.to_dict()
+                )
+            )
+    candidates.extend(repository_intent.candidates_from_execution_roots([root]))
+    return tuple(candidates)
+
+
+def _check_repository_intent(
+    contracts_by_session: dict[str, CompletionContract],
+    snapshot: PlanSnapshot | None,
+    root: str | Path,
+    registry: workspaces.RepositoryRegistry | None,
+    plan_dir: Path | None = None,
+) -> tuple[tuple[PreflightFinding, ...], RepositoryIntent | None]:
+    """Refuse a legacy plan that intends to reach several repositories.
+
+    A registered plan already names its repositories, so it is skipped here.
+    The verdict is a property of the whole plan rather than of one session:
+    the registry that is missing is a plan-level declaration.
+    """
+    if registry is not None:
+        return (), None
+    intent = repository_intent.resolve_intent(
+        _repository_intent_candidates(
+            plan_dir, contracts_by_session, snapshot, root
+        ),
+        root=root,
+        exempt_roots=() if plan_dir is None else (plan_dir,),
+    )
+    if not intent.registry_required:
+        return (), intent
+    finding = _finding(
+        "red",
+        "repository-registry-required",
+        (
+            f"plan intends to reach {len(intent.git_roots)} git repositories "
+            "but manifest.md declares no `## Repositories` table"
+        ),
+        detail=", ".join(
+            repository_intent.redact_credentials(str(git_root))
+            for git_root in intent.git_roots
+        ),
+    )
+    return (finding,), intent
+
+
+def plan_repository_intent(
+    plan_dir: str | Path,
+    root: str | Path,
+    *,
+    extra_exempt_roots: Iterable[str | Path] = (),
+) -> tuple[RepositoryIntent | None, dict[str, Any] | None]:
+    """Judge a split plan directory's repository intent against ``root``.
+
+    Returns ``(None, None)`` for a registered plan, whose registry already
+    names every repository it may reach. The second element is the serialized
+    intent report, non-``None`` exactly when a registry is required.
+
+    ``extra_exempt_roots`` names further trees that are ASL's own artifacts
+    rather than plan-owned source — the runner passes its state and run
+    directories, which an operator may legitimately keep inside an unrelated
+    checkout.
+    """
+    canonical_dir = canonicalize_path(plan_dir)
+    registry = read_repository_registry(canonical_dir)
+    if registry is not None:
+        return None, None
+    snapshot = inspect_plan(canonical_dir)
+    _, contracts_by_session = _check_session_contracts(snapshot, registry)
+    intent = repository_intent.resolve_intent(
+        _repository_intent_candidates(
+            canonical_dir, contracts_by_session, snapshot, root
+        ),
+        root=root,
+        exempt_roots=(canonical_dir, *extra_exempt_roots),
+    )
+    if not intent.registry_required:
+        return intent, None
+    return intent, repository_intent.intent_report(intent)
+
+
 def _check_verification_scope(
     contracts_by_session: dict[str, CompletionContract],
 ) -> tuple[PreflightFinding, ...]:
@@ -2377,6 +2528,13 @@ def run_core_preflight(plan_dir: str | Path) -> PreflightReport:
         repository_registry,
     )
     findings.extend(footprint_findings)
+    intent_findings, intent = _check_bound_repository_intent(
+        canonical_dir,
+        contracts_by_session,
+        snapshot,
+        repository_registry,
+    )
+    findings.extend(intent_findings)
     findings.extend(_check_verification_scope(contracts_by_session))
     findings.extend(_check_duplicate_verification_commands(contracts_by_session))
     findings.extend(_check_progress_journal(snapshot))
@@ -2391,6 +2549,7 @@ def run_core_preflight(plan_dir: str | Path) -> PreflightReport:
         repository_registry=repository_registry,
         repositories=_repository_summaries(repository_registry),
         repository_footprint=footprint,
+        repository_intent=intent,
     )
 
 
@@ -2416,6 +2575,30 @@ def _check_bound_repository_footprint(
     if not isinstance(metadata, PlanMetadata):
         return (), None
     return _check_repository_footprint(
+        contracts_by_session, snapshot, metadata.cwd, registry, plan_dir
+    )
+
+
+def _check_bound_repository_intent(
+    plan_dir: Path,
+    contracts_by_session: dict[str, CompletionContract],
+    snapshot: PlanSnapshot | None,
+    registry: workspaces.RepositoryRegistry | None,
+) -> tuple[tuple[PreflightFinding, ...], RepositoryIntent | None]:
+    """Judge repository intent against the root the plan already recorded.
+
+    With no v1 binding there is no root to anchor relative declarations
+    against, and the check stays silent rather than guessing one.
+    """
+    if registry is not None:
+        return (), None
+    try:
+        metadata = load_plan_metadata(plan_dir)
+    except PlanError:
+        return (), None
+    if not isinstance(metadata, PlanMetadata):
+        return (), None
+    return _check_repository_intent(
         contracts_by_session, snapshot, metadata.cwd, registry, plan_dir
     )
 
@@ -2973,8 +3156,16 @@ def run_unhashed_state_checks(
         resolved_registry,
     )
     footprint_findings: tuple[PreflightFinding, ...] = ()
+    intent_findings: tuple[PreflightFinding, ...] = ()
     if cwd is not None:
         footprint_findings, _footprint = _check_repository_footprint(
+            contracts_by_session,
+            snapshot,
+            cwd,
+            resolved_registry,
+            canonical_dir,
+        )
+        intent_findings, _intent = _check_repository_intent(
             contracts_by_session,
             snapshot,
             cwd,
@@ -2994,6 +3185,7 @@ def run_unhashed_state_checks(
         workspace_findings
         + contract_findings
         + footprint_findings
+        + intent_findings
         + _check_progress_journal(snapshot)
         + baseline_findings
     )
@@ -3043,6 +3235,16 @@ def run_preflight(
             core_report.repository_registry,
             core_report.plan_dir,
         )
+    intent_findings: tuple[PreflightFinding, ...] = ()
+    intent = core_report.repository_intent
+    if intent is None and cwd is not None:
+        intent_findings, intent = _check_repository_intent(
+            core_report.contracts_by_session,
+            core_report.snapshot,
+            cwd,
+            core_report.repository_registry,
+            core_report.plan_dir,
+        )
     command_findings: tuple[PreflightFinding, ...] = ()
     baseline_findings: tuple[PreflightFinding, ...] = ()
     if core_report.repository_registry is None or verification_context is not None:
@@ -3063,6 +3265,7 @@ def run_preflight(
         findings=(
             core_report.findings
             + footprint_findings
+            + intent_findings
             + workspace_findings
             + env_findings
             + command_findings
@@ -3076,6 +3279,7 @@ def run_preflight(
         verification_context=verification_context,
         repositories=repositories,
         repository_footprint=footprint,
+        repository_intent=intent,
     )
 
 
@@ -3404,6 +3608,9 @@ def _preflight_payload_fields(
     footprint_payload = _repository_footprint_payload(report)
     if footprint_payload is not None:
         fields["repository_footprint"] = footprint_payload
+    intent_payload = _repository_intent_payload(report)
+    if intent_payload is not None:
+        fields["repository_intent"] = intent_payload
     if mark_error is not None:
         fields["mark_error"] = mark_error
     return fields
@@ -3417,6 +3624,19 @@ def _repository_footprint_payload(report: PreflightReport) -> dict[str, Any] | N
         report.repository_footprint,
         registry_present=report.repository_registry is not None,
     )
+
+
+def _repository_intent_payload(report: PreflightReport) -> dict[str, Any] | None:
+    """Serialize intent only when it is the reason a plan is refused.
+
+    Every plan has an intent; only a multi-repository one is news, and the
+    report is bounded so a wide plan cannot flood the payload.
+    """
+    if report.repository_intent is None:
+        return None
+    if not report.repository_intent.registry_required:
+        return None
+    return repository_intent.intent_report(report.repository_intent)
 
 
 def _format_finding_text(finding: PreflightFinding) -> str:
@@ -3515,6 +3735,20 @@ def _format_auto_repair_text(repair: AutoRepair) -> str:
 def _mark_loop_ready(
     report: PreflightReport,
 ) -> tuple[bool, str | None]:
+    non_bypassable = sorted(
+        {
+            finding.category
+            for finding in report.findings
+            if finding.severity == "red"
+            and finding.category in NON_BYPASSABLE_PREFLIGHT_CATEGORIES
+        }
+    )
+    if non_bypassable:
+        return False, (
+            "preflight raised a non-bypassable finding "
+            f"({', '.join(non_bypassable)}); readiness cannot be marked until "
+            "it is resolved"
+        )
     if report.expected_readiness_sha256 is None:
         return False, "no readiness sha-256 was computed; cannot mark loop-ready"
     metadata = ReadinessMetadata(

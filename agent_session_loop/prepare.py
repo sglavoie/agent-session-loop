@@ -64,6 +64,7 @@ from . import (
     harnesses,
     plans,
     preflight,
+    repository_intent,
     responses,
     state,
     workspaces,
@@ -408,6 +409,38 @@ def _require_legacy_repository_footprint(
         "plan reaches beyond the bound root "
         f"{root} but manifest.md declares no `## Repositories` registry; "
         "declare the registry and per-session repository scopes first",
+        payload=payload,
+    )
+
+
+class RepositoryRegistryRequiredError(PlanError):
+    """A legacy plan intends to reach more than one Git repository.
+
+    Distinct from :class:`RepositoryFootprintError`: reach is judged against
+    paths that already exist, while intent also counts locations the plan has
+    still to create. Carries the serialized intent report so the caller can
+    name the repositories instead of only the condition.
+    """
+
+    def __init__(self, message: str, *, payload: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.payload = payload
+
+
+def _require_legacy_repository_intent(
+    plan_dir: str | Path, root: str | Path
+) -> None:
+    """Refuse a legacy plan that intends to reach several repositories."""
+    _, payload = preflight.plan_repository_intent(plan_dir, root)
+    if payload is None:
+        return
+    git_roots = ", ".join(payload.get("git_roots", ()))
+    raise RepositoryRegistryRequiredError(
+        f"plan intends to reach {payload.get('git_root_count', 0)} git "
+        f"repositories ({git_roots}) but manifest.md declares no top-level "
+        "`## Repositories` table; declare the registry, give every session "
+        "read and write repository scopes, and attribute every contract "
+        "check to a repository before preparing this plan",
         payload=payload,
     )
 
@@ -1076,6 +1109,7 @@ def build_validation_packet(
         packet_version = PREPARE_VALIDATION_VERSION
     else:
         _require_legacy_repository_footprint(canonical_dir, codebase_root)
+        _require_legacy_repository_intent(canonical_dir, codebase_root)
 
     session_paths: list[str] = []
     session_read_repositories: list[tuple[ValidatorRepository, ...]] = []
@@ -1208,6 +1242,7 @@ def _validate_validation_authority(
         if validation.version != LEGACY_PREPARE_VALIDATION_VERSION:
             raise _fail("validator v2 is only valid for a registered plan")
         _require_legacy_repository_footprint(canonical_dir, validation.codebase_root)
+        _require_legacy_repository_intent(canonical_dir, validation.codebase_root)
         ambiguous = sorted(
             {
                 session.session_id.value
@@ -1956,6 +1991,9 @@ PREPARE_EXIT_REASON_INPUT_ERROR = "input-error"
 PREPARE_EXIT_REASON_CWD_ERROR = "cwd-error"
 PREPARE_EXIT_REASON_PLAN_STRUCTURE = "plan-structure"
 PREPARE_EXIT_REASON_WORKSPACE_REBIND_FAILED = "workspace-rebind-failed"
+PREPARE_EXIT_REASON_REGISTRY_REQUIRED = (
+    repository_intent.REASON_REPOSITORY_REGISTRY_REQUIRED
+)
 
 #: Pipeline stage names, in execution order.
 PREPARE_STAGE_STRUCTURE = "structure"
@@ -3242,6 +3280,18 @@ def prepare_plan(
             validator=selected_validator,
             batch_size=batch_size,
         )
+    except RepositoryRegistryRequiredError as error:
+        blockers.append(
+            PrepareBlocker(
+                stage=PREPARE_STAGE_VALIDATION,
+                category=repository_intent.REASON_REPOSITORY_REGISTRY_REQUIRED,
+                message=str(error),
+            )
+        )
+        steps.append(
+            PrepareStep(PREPARE_STAGE_VALIDATION, PREPARE_STEP_FAILED, str(error))
+        )
+        return _failed(PREPARE_EXIT_REASON_REGISTRY_REQUIRED)
     except (PlanError, harnesses.HarnessError) as error:
         blockers.append(
             PrepareBlocker(stage=PREPARE_STAGE_VALIDATION, message=str(error))
@@ -3682,6 +3732,11 @@ EXPAND_INGEST_REASON_INPUT_ERROR = "input-error"
 #: The plan reaches more than one repository while still in legacy mode. The
 #: payload is well-formed; the plan is the thing that must change.
 EXPAND_INGEST_REASON_REPOSITORY_FOOTPRINT = "repository-footprint"
+#: The plan intends to reach more than one repository while still in legacy
+#: mode, including locations no session has created yet.
+EXPAND_INGEST_REASON_REGISTRY_REQUIRED = (
+    repository_intent.REASON_REPOSITORY_REGISTRY_REQUIRED
+)
 
 
 def expand_ingest_from_args(args: Any) -> int:
@@ -3742,6 +3797,12 @@ def expand_ingest_from_args(args: Any) -> int:
             EXPAND_INGEST_REASON_REPOSITORY_FOOTPRINT,
             str(error),
             repository_footprint=error.payload,
+        )
+    except RepositoryRegistryRequiredError as error:
+        return _emit_error(
+            EXPAND_INGEST_REASON_REGISTRY_REQUIRED,
+            str(error),
+            repository_intent=error.payload,
         )
     except PlanError as error:
         return _emit_error(EXPAND_INGEST_REASON_VALIDATOR_SCHEMA, str(error))

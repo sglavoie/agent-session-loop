@@ -2332,6 +2332,10 @@ GENERIC_RECOVERY_PAUSE_REASONS: tuple[str, ...] = (
     # The retained repository changes need a durable scope repair plus fresh
     # expansion/preflight, not an operator reply to the paused harness turn.
     "workspace-write-scope-violation",
+    # The plan must declare a repository registry and per-session scopes and be
+    # re-prepared. No operator reply resolves it, and marking readiness cannot
+    # either, so this is not the `not-loop-ready` recovery kind.
+    "repository-registry-required",
     # Review repair-cycle materialization failed closed (Session 18); the
     # review artifacts or plan structure need inspection, not a reply.
     "malformed-review-repair",

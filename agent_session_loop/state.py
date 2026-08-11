@@ -367,6 +367,72 @@ def resolve_plan_reference(raw_value: str, state_root: Path) -> Path:
     raise AmbiguousPlanError(raw_value, list(matches.values()), state_root)
 
 
+@dataclass(frozen=True)
+class RunLocation:
+    """Where one run's artifacts live, and which plan produced them."""
+
+    run_id: str
+    state_dir: Path
+    plan_dir: Path | None
+
+    @property
+    def plan_id(self) -> str | None:
+        """The compact plan label, or ``None`` when no plan dir was recorded."""
+        return None if self.plan_dir is None else self.plan_dir.name
+
+
+def _recorded_plan_dir(state_dir: Path) -> Path | None:
+    for raw_plan_dir in _collect_plan_dir_strings(state_dir):
+        try:
+            return plans.canonicalize_path(raw_plan_dir)
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def find_run_locations(
+    run_id: str,
+    *,
+    state_dir: str | Path | None = None,
+    plan_dir: str | Path | None = None,
+) -> list[RunLocation]:
+    """Return every plan state directory that holds a run directory for ``run_id``.
+
+    Run IDs are minted per plan, so the corpus is the only thing that can say
+    which plan a bare run ID belongs to. Passing ``plan_dir`` restricts the scan
+    to that one plan, which is how an ID that several plans happen to share is
+    disambiguated. Discovery is read-only, and a run ID that could name anything
+    other than a single directory entry matches nothing rather than escaping the
+    state root.
+    """
+    if not run_id or run_id in {".", ".."} or "/" in run_id or os.sep in run_id:
+        return []
+    root = state_root(state_dir)
+    if plan_dir is not None:
+        candidates = [plan_state_dir(plan_dir, state_dir)]
+    else:
+        candidates = list(_iter_plan_state_dirs(root))
+    located: list[RunLocation] = []
+    for candidate in candidates:
+        try:
+            if not (candidate / RUNS_DIR_NAME / run_id).is_dir():
+                continue
+        except OSError:
+            continue
+        located.append(
+            RunLocation(
+                run_id=run_id,
+                state_dir=candidate,
+                plan_dir=(
+                    plans.canonicalize_path(plan_dir)
+                    if plan_dir is not None
+                    else _recorded_plan_dir(candidate)
+                ),
+            )
+        )
+    return located
+
+
 def is_pid_running(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -943,6 +1009,10 @@ def _runner_state_payload(
     if not isinstance(run_config, dict):
         run_config = {}
 
+    assurance = raw.get("assurance")
+    if not isinstance(assurance, dict):
+        assurance = None
+
     return {
         "present": True,
         "path": str(state_path),
@@ -950,6 +1020,8 @@ def _runner_state_payload(
         "run_id": raw.get("run_id"),
         "harness": raw.get("harness"),
         "review_harness": run_config.get("review_harness"),
+        "supervisor_audit": run_config.get("supervisor_audit"),
+        "assurance": assurance,
         **(
             {
                 "cwd": raw.get("cwd"),

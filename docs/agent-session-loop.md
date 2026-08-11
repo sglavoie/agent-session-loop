@@ -407,7 +407,7 @@ before any `--review-harness` work.
 ## Commands
 
 ```text
-asl run PLAN_DIR [--cwd ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--review-harness codex|claude|copilot] [--review-harness-model MODEL] [--effort EFFORT] [--timeout SEC] [--max-sessions N] [--max-pending-sessions N] [--max-review-fix-cycles N] [--review-guard-exclude PATH] [--review-guard-include-ignored] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--no-mailbox] [--allow-not-loop-ready] [--reply TEXT|--reply-stdin] [--json] [--dry-run]
+asl run PLAN_DIR [--cwd ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--review-harness codex|claude|copilot] [--review-harness-model MODEL] [--effort EFFORT] [--timeout SEC] [--audit-harness codex|claude|copilot] [--audit-harness-model MODEL] [--audit-effort EFFORT] [--audit-timeout SEC] [--supervisor-audit|--no-supervisor-audit] [--max-sessions N] [--max-pending-sessions N] [--max-review-fix-cycles N] [--review-guard-exclude PATH] [--review-guard-include-ignored] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--no-mailbox] [--allow-not-loop-ready] [--reply TEXT|--reply-stdin] [--json] [--dry-run]
 asl preflight PLAN_DIR [--cwd ROOT] [--harness codex|claude|copilot] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--max-pending-sessions N] [--mark-loop-ready] [--json]
 asl verify PLAN_DIR --session ID [--cwd ROOT] [--artifact-dir DIR] [--json]
 asl contract-check PLAN_DIR [--session ID] [--cwd ROOT] [--json]
@@ -429,6 +429,13 @@ asl inbox read PLAN_DIR_OR_ID [--peek] [--state-dir DIR] [--json]
 asl ask PLAN_DIR_OR_ID (TEXT | --question-id QUESTION_ID) [--wait] [--wait-timeout SECONDS] [--state-dir DIR] [--json]
 asl notify PLAN_DIR_OR_ID (TEXT | --text-stdin) [--state-dir DIR] [--json]
 asl outbox wait PLAN_DIR_OR_ID [--include questions|notices|all] [--supervision-id UUID] [--since SEQ] [--timeout SECONDS] [--state-dir DIR] [--json]
+asl assurance list [--limit ROWS|--all] [--state open|resolved|dismissed|accepted-risk] [--severity low|medium|high|critical] [--state-dir DIR] [--json]
+asl assurance show ISSUE [--state-dir DIR] [--json]
+asl assurance resolve ISSUE [--note TEXT] [--state-dir DIR] [--json]
+asl assurance dismiss ISSUE [--note TEXT] [--state-dir DIR] [--json]
+asl assurance accept-risk ISSUE [--note TEXT] [--state-dir DIR] [--json]
+asl assurance merge ISSUE TARGET [--note TEXT] [--yes] [--state-dir DIR] [--json]
+asl assurance closeout RUN_ID --outcome accepted|reworked|escaped [--rework-minutes N] [--issue ISSUE ...] [--note TEXT] [--plan PLAN_DIR_OR_ID] [--replace] [--state-dir DIR] [--json]
 asl control stop-after-current PLAN_DIR_OR_ID [--state-dir DIR] [--json]
 asl control select-harness PLAN_DIR_OR_ID --harness codex|claude|copilot [--state-dir DIR] [--json]
 asl control set-model PLAN_DIR_OR_ID [--harness codex|claude|copilot] [--harness-model MODEL|--clear-harness-model] [--effort EFFORT|--clear-effort] [--state-dir DIR] [--json]
@@ -997,6 +1004,35 @@ with repository-qualified commit artifacts. Legacy single-repository commits
 use the same coordinator, which also makes a failed per-session commit
 retryable on resume.
 
+The runner is the last authority on which repositories a run may reach, and it
+enforces that independently of preflight. A plan whose `**Readiness**` is
+already `loop-ready` short-circuits core preflight, and a legacy plan can skip
+`asl prepare` altogether, so a gate that rides on either stage is no gate at
+all. Immediately after root and workspace resolution, and before the run lock
+is taken or any harness, review, verification, or commit subprocess starts,
+`run` re-derives the plan's repository intent against the bound root. Reaching
+more than one Git top-level pauses the run with
+`pause_reason: repository-registry-required` and a bounded,
+credential-redacted `pause_details.repository_intent` object naming the
+conflicting roots. The gate is deliberately independent of
+`--allow-not-loop-ready`: that flag waives readiness, and no readiness marking
+substitutes for the registry that would have bound the second repository.
+
+Each session task packet is rechecked the same way just before its turn
+launches. The run-level gate judges the plan as split, but a turn carries more:
+expansion notes, `context.md`, the predecessor handoff, live mailbox guidance,
+an operator reply, and repair references all reach the worker through the
+rendered prompt or the files it points at. The packet recheck reads the
+rendered prompt and the contents of every artifact the packet tells the worker
+to open, so a redirect that appears only in `session-N.expand.md` — a surface
+the plan-level scan deliberately excludes — still pauses the run before the
+harness starts. Both gates exempt registered workspaces, whose registry
+already names every repository, and both exempt the runner's own trees: the
+plan directory, the state root, and the run directory, which an operator may
+legitimately keep inside an unrelated checkout. Repository identity is the
+resolved Git top-level and never the origin URL, so two clones of one remote
+sitting side by side are two repositories.
+
 The implementation worker and runner have deliberately separate validation
 ownership. The worker runs focused checks while iterating, but does not rerun
 the full completion recipe solely to make the final gate decision. After the
@@ -1222,6 +1258,30 @@ the run is started without `--review-harness`, the run pauses with
 `Review: PLAN_DIR/final-review.md` followed by the `Status:` line as the final
 summary line.
 
+The supervisor audit that grades ASL's own control plane is configured by
+`--supervisor-audit`/`--no-supervisor-audit`, `--audit-harness`,
+`--audit-harness-model`, `--audit-effort`, and `--audit-timeout`. Audits are
+enabled by default and `--audit-timeout` defaults to `600` seconds, applied
+independently to each of the at most two agent attempts rather than as one
+shared budget. `--audit-harness` must differ from `--harness`, since a harness
+cannot grade its own turns; the run exits with `reason: input-error` when it
+does not. It may equal `--review-harness`, which was already independent of the
+implementation. Without an explicit `--audit-harness`, the audit role is
+inherited from the effective review harness together with its model;
+`--audit-harness-model` overrides that inherited model as well as the audit
+harness's own default, so it deliberately does not require `--audit-harness`.
+`--audit-effort` never inherits from `--effort`. When no independent role can be
+resolved — no explicit audit harness and no review harness — the configuration
+stays valid and enabled and the run's assurance ends `unavailable` with reason
+`no-independent-role`; ASL never silently audits itself. All six settings are
+persisted in `run_config`, restored by `--resume` unless passed explicitly, and
+re-emitted in the reconstructed resume command. A run persists an initial
+assurance state of `pending` only once it is eligible (it has a run ID and a run
+directory); `--no-supervisor-audit` persists `skipped` with reason `opted-out`
+immediately, and `--dry-run` persists `skipped` with reason `dry-run` while
+still reporting the role, timeout, and attempt budget a real run would have used
+under `planned.audit`. Text runs print a `Supervisor audit: STATE` summary line.
+
 After a review session completes with structured findings, the runner drives
 bounded same-plan repair/rereview cycles: it materializes one pending repair
 child per `repair_group` beneath the review session (`N.1`, `N.2`, ... via
@@ -1403,7 +1463,8 @@ The stable finding categories are `plan-structure`, `canonical-session-id`,
 `baseline-unexpected`, `baseline-timeout`, `baseline-near-timeout`,
 `workspace-root`, `repository-registry`, `repository-root`,
 `repository-origin`, `repository-overlap`, `repository-scope`,
-`repository-contract`, `repository-footprint`, `env-repo-root`, `env-git`,
+`repository-contract`, `repository-footprint`,
+`repository-registry-required`, `env-repo-root`, `env-git`,
 `env-harness`, `env-spec`, `env-lock`, `env-amx`, and `env-turn-budget`.
 Consumers should branch on these
 category values and the paired repair hint rather than parsing message prose.
@@ -1414,13 +1475,36 @@ targets resolve into more than one Git repository. An absolute path that stays
 inside the bound root is accepted, so plans predating repo-relative authoring
 keep passing. The finding is derived from the plan's stored `cwd` when
 `plan-metadata.json` is present, so `asl preflight PLAN_DIR --json` reports it
-without `--cwd`. It is also the only non-bypassable category: `asl run
+without `--cwd`. It is one of two non-bypassable categories: `asl run
 --allow-not-loop-ready` still pauses with `pause_reason: not-loop-ready` and
-`pause_details.blocker: ["repository-footprint"]`, and `verification` refuses
+the category listed in `pause_details.blocker`, and `verification` refuses
 the escaping check at run time even if the gate is skipped. The JSON payload
 carries a `repository_footprint` object (described under JSON Output) whose
 `suggested_registry_table` is the exact `## Repositories` block to paste. The
 fix is to declare the registry and per-session scopes, not to widen `--cwd`.
+
+`repository-registry-required` is the second non-bypassable category. It is
+red-only, applies to legacy plans, and fires when the plan *intends* to reach
+more than one Git repository — including contract targets no session has
+created yet, which `repository-footprint` structurally cannot see because it
+only counts paths that already exist. Candidates are collected from session
+prose, `context.md`, `manifest.md`, parsed contracts, and stored plan
+metadata, resolved through symlinks to the nearest existing ancestor, and
+anchored to the plan's stored `cwd` or an explicit `--cwd`. Its repair hint
+(`repository-registry-required.declare`) names the three missing declarations:
+a top-level `## Repositories` table, per-session **Reads repositories:** and
+**Writes repositories:** scopes, and a `repo` alias on every contract check.
+The JSON payload carries a bounded, credential-redacted `repository_intent`
+object whose `git_roots` names the repositories to register. Neither
+`--mark-loop-ready` nor generic auto-repair can silence it: `_mark_loop_ready`
+refuses outright while any non-bypassable category is red, and no auto-repair
+step targets the category. `asl prepare` refuses the same plan before
+publishing any change with exit reason `repository-registry-required`, and
+`asl expand-ingest` emits the same reason with the `repository_intent`
+payload. Never resolve the condition by selecting one child checkout as the
+root. The runner re-derives the same verdict independently, so the invariant
+holds even when preflight never runs — see the repository hard gate under
+Command Behavior.
 For a registered plan, `--cwd` is the non-Git-capable common workspace root.
 Preflight resolves the ordered registry once; validates child existence,
 directory type, exact Git top-level, origin, disjointness, scope, and contract
@@ -1850,6 +1934,16 @@ than `validator-schema`, and the error payload carries the same
 `repository_footprint` object preflight emits. A version 1 payload that itself
 reports `repository-ambiguous` is refused for the same reason.
 
+The plan's repository *intent* is recomputed at the same two points, and is
+refused with the reason `repository-registry-required` carrying the bounded
+`repository_intent` object. Intent counts locations the plan has still to
+create, so it catches the multi-repository plan a footprint scan reads as
+single-repository. Because the check sits on the validation-authority path,
+which prepare runs before the baseline and preflight stages and re-runs against
+the stored aggregate on `--resume`, validation ingest, baseline publication,
+readiness marking, and resume preparation are all refused before any plan file
+is written.
+
 Explicit workspace replacement is available only for an existing registered
 plan:
 
@@ -2087,6 +2181,84 @@ process listing. `--reply` and `--reply-stdin` are mutually exclusive. This is
 the channel the `$asl` autopilot skill drives when it resumes a paused run (see
 [Autopilot skill](#autopilot-skill-asl)); operators typically use `--reply TEXT`
 directly.
+
+`asl assurance list` and `asl assurance show` are the read-only operator surface
+over the assurance inbox. Both read the append-only `assurance-inbox.jsonl`
+ledger through the same projection every other consumer uses, under a shared
+lock; neither appends a record, mints an issue id, rebuilds the index cache, or
+repairs a malformed line, so browsing a damaged inbox reports the damage instead
+of quietly rewriting it. A missing ledger is an empty inbox, not an error.
+
+`list` answers the default triage question — what is still open — by printing
+the 50 most recently observed open issues, newest sighting first, with the
+issue id, severity, state, occurrence count, last-seen timestamp, component, and
+a one-line summary preview per row. `--limit ROWS` widens or narrows the cap and
+`--state`/`--severity` re-aim the filters; `--all` is the negation of the whole
+default, meaning every state with no row cap, and is refused in combination with
+`--limit` or `--state` rather than silently picking a winner. When the cap hides
+matching issues the text form says how many and how to see them. Unusable filter
+values exit `1` with `reason: input-error` before the ledger is opened.
+
+`show ISSUE` prints everything the ledger records about one issue: current
+state, the fingerprint metadata it deduplicates by (category, component,
+invariant key, lane, schema version), the full summary and recommendation,
+observation history with the run and audit artifact behind each sighting,
+recorded dispositions, absorbed ids, reopen count, improvement plan drafts, and
+the affected runs with their artifact references and closeouts. Occurrence
+history is capped the same way rows are, with the newest kept and the remainder
+counted. Because a merge redirects an id rather than deleting it, showing a
+merged-away id succeeds and reports both the id asked for and the id it landed
+on. An id that names nothing exits `1` with `reason: unknown-issue`.
+
+Both commands accept the canonical `ASI-42` and the documented bare `42`
+shorthand, and both always emit the canonical form, so any id printed by `run`,
+`status`, or `list` pastes straight into `show`. One payload builder feeds the
+text and JSON renderers, so the two surfaces cannot disagree about what an issue
+is. Ledger lines the projection could not read are reported as warnings rather
+than failures — on stderr in the text form, and as `warnings`, `warning_count`,
+`warnings_omitted`, `rejected_count`, and `anomaly_count` in the JSON payload —
+because the rest of the file is still history a human needs and hiding the
+rejected lines would hide the only evidence that the ledger is damaged. `show`
+prints those warnings before an `unknown-issue` error, since a rejected line is
+often the reason a legitimately copied id no longer resolves.
+
+`asl assurance resolve`, `dismiss`, and `accept-risk` are how an issue is
+managed. Each appends one record carrying the decision and an optional
+`--note TEXT`; nothing is edited and nothing is deleted, so revising a decision
+leaves both records and the order they were reached in on file. None of them
+removes the issue, and the printed confirmation says what the new state claims
+about the future rather than that the issue is gone: a recurrence after
+`resolve` reopens it, while a recurrence after `dismiss` or `accept-risk` is
+recorded without reopening it. A disposition aimed at a merged-away id lands on
+the issue that owns its history today and reports both ids. An id that names
+nothing exits `1` with `reason: unknown-issue`.
+
+`asl assurance merge ISSUE TARGET` moves one issue's whole history into
+another. It cannot be undone, so a person at a terminal is asked to confirm
+first; `--yes` skips that prompt, and a piped or `--json` invocation is treated
+as a deliberate one and is never prompted. Declining exits `1` with
+`reason: cancelled` and writes nothing. Every refusal reports the projection's
+own reason — `merge-self`, `merge-unknown-source`, `merge-unknown-target`,
+`merge-source-already-merged`, `merge-target-already-merged`, or `merge-cycle`.
+
+`asl assurance closeout RUN_ID --outcome accepted|reworked|escaped` records what
+one audited run's findings were worth, with optional `--rework-minutes N`,
+repeatable `--issue ISSUE`, `--note TEXT`, `--plan PLAN_DIR_OR_ID`, and
+`--replace`. The run id resolves through the state corpus: plan attribution is
+recovered from whichever plan state directory holds the run, and `--plan` is
+required only when several plans hold the same id, which exits `1` with
+`reason: ambiguous-run` and lists the candidates. A `--plan` that never produced
+the run exits `1` with `reason: unknown-run`, and a run directory that has been
+pruned is not an obstacle, because the ledger rather than the filesystem decides
+what can be closed out. An outcome outside the vocabulary and a negative or
+non-finite `--rework-minutes` exit `1` with `reason: input-error` before the
+ledger is opened; a run with no audit record exits `1` with
+`reason: unknown-run`, an `--issue` the inbox never opened exits `1` with
+`reason: unknown-issue`, and a run that already has a closeout exits `1` with
+`reason: duplicate-closeout` unless `--replace` is passed. Replacing is an
+append like everything else: the new record names the ledger line holding the
+closeout it supersedes as `seq-N`, both verdicts stay readable, and the later
+one is the one in force.
 
 ## Harness Commands
 
@@ -2819,7 +2991,7 @@ Common pause reasons:
   a repair was attempted. The same reason also covers the non-bypassable case:
   when any red finding is in a non-bypassable category the run pauses even with
   `--allow-not-loop-ready`, and `pause_details.blocker` lists those categories
-  (currently only `repository-footprint`).
+  (currently `repository-footprint` and `repository-registry-required`).
 - `unsafe`, `blocked`, `dependent`, `unresolved-prerequisite`: a
   `RUNNER_PAUSE: <reason> - ...` line from the invoked `session-run` skill
   carried a structured pause reason. The runner preserves that reason instead
@@ -2861,6 +3033,15 @@ Common pause reasons:
   timeout/failure/pause and all verification/commit work, and carries a
   `workspace_write_guard` block with alias-qualified paths, topology changes,
   read/write aliases, and the required scope/expansion/preflight repair flags.
+- `repository-registry-required`: a legacy run resolved declarations reaching
+  more than one Git top-level. Raised by the runner's own repository hard gate,
+  either at run entry (after root and workspace resolution, before the lock and
+  before any subprocess) or per session task packet (before its turn launches),
+  so it fires even when a `loop-ready` plan short-circuits preflight. It is not
+  waived by `--allow-not-loop-ready`. `pause_details.repository_intent` is the
+  bounded, credential-redacted intent report; its `git_roots` names the
+  conflicting repositories. The fix is to declare the registry and per-session
+  scopes, never to widen `--cwd` to their common parent.
 - `workspace-write-guard-unavailable`: the runner could not inventory the
   workspace or capture complete Git evidence before or after a registered
   implementation turn. A before-turn failure spends no harness turn. An

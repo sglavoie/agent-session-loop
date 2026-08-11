@@ -42,7 +42,14 @@ import sys
 from typing import Any
 
 from . import contracts as _contracts
-from . import durability, harnesses, plans, repository_scope, responses
+from . import (
+    durability,
+    harnesses,
+    plans,
+    repository_intent,
+    repository_scope,
+    responses,
+)
 from .plans import (
     PlanError,
     ReadinessMetadata,
@@ -1110,6 +1117,14 @@ def plan_footprint_payload(
     )
 
 
+def _plan_declares_registry(text: str) -> bool:
+    """Whether a source plan carries a parseable ``## Repositories`` table."""
+    try:
+        return parse_plan_document(text).registry is not None
+    except PlanError:
+        return False
+
+
 def _contract_file_targets(
     contracts_by_id: Any, session_id: str
 ) -> list[repository_scope.PathTarget]:
@@ -2014,6 +2029,18 @@ SPLIT_REASON_OK = "ok"
 SPLIT_REASON_SINGLE_SESSION = "single-session"
 SPLIT_REASON_MALFORMED_PLAN = "malformed-plan"
 SPLIT_REASON_INPUT_ERROR = "input-error"
+SPLIT_REASON_REGISTRY_REQUIRED = (
+    repository_intent.REASON_REPOSITORY_REGISTRY_REQUIRED
+)
+
+#: Emitted when a plan's resolved locations reach a second Git repository.
+#: Distinct from the out-of-root refusal: one root outside ``--cwd`` is a
+#: binding mistake, while two roots cannot execute in legacy mode at all.
+MULTI_REPOSITORY_MESSAGE = (
+    "plan reaches more than one Git repository but declares no "
+    "`## Repositories` table; add the registry and per-session repository "
+    "scopes before splitting"
+)
 
 #: Message emitted when a plan has fewer than two sessions.
 SINGLE_SESSION_MESSAGE = "splitting is not needed"
@@ -2307,17 +2334,34 @@ def check_from_args(args: Any) -> int:
                 source_path=source_path,
             )
 
-    result = lint_plan_document(text, cwd=getattr(args, "cwd", None))
+    check_cwd = getattr(args, "cwd", None)
+    result = lint_plan_document(text, cwd=check_cwd)
     footprint_fields: dict[str, Any] = {}
     if result.repository_footprint is not None:
         footprint_fields["repository_footprint"] = result.repository_footprint
+
+    # Source-only evidence is conclusive when the plan's own prose already
+    # resolves into two repositories. Anything less waits for the
+    # contract-aware write path, which also sees the contracts file.
+    registry_required = False
+    if check_cwd is not None and result.registry is None:
+        intent = repository_intent.plan_intent(text, root=check_cwd)
+        registry_required = intent.registry_required
+        if registry_required:
+            footprint_fields["repository_intent"] = (
+                repository_intent.intent_report(intent)
+            )
 
     if result.findings:
         if want_json:
             responses.print_json(
                 responses.error_payload(
                     "split",
-                    reason=SPLIT_REASON_MALFORMED_PLAN,
+                    reason=(
+                        SPLIT_REASON_REGISTRY_REQUIRED
+                        if registry_required
+                        else SPLIT_REASON_MALFORMED_PLAN
+                    ),
                     error=result.findings[0].message,
                     paused=False,
                     checked=True,
@@ -2341,6 +2385,17 @@ def check_from_args(args: Any) -> int:
                         f"    suggested: {finding.suggested_line}", file=sys.stderr
                     )
         return 1
+
+    if registry_required:
+        return _emit_split_error(
+            SPLIT_REASON_REGISTRY_REQUIRED,
+            MULTI_REPOSITORY_MESSAGE,
+            want_json=want_json,
+            checked=True,
+            source_path=source_path,
+            session_ids=list(result.session_ids),
+            **footprint_fields,
+        )
 
     if len(result.session_ids) < 2:
         return _emit_split_error(
@@ -2454,16 +2509,33 @@ def split_from_args(args: Any) -> int:
         )
         if footprint is not None:
             footprint_fields["repository_footprint"] = footprint
-            if not footprint["registry_present"]:
-                return _emit_error(
-                    SPLIT_REASON_MALFORMED_PLAN,
-                    (
-                        "plan reaches outside a single repository but declares "
-                        "no `## Repositories` table; add the registry and "
-                        "per-session repository scopes before splitting"
-                    ),
-                    **footprint_fields,
-                )
+        registry_declared = _plan_declares_registry(plan_text)
+        # The contracts file names locations the prose never mentions, and a
+        # contract target routinely does not exist yet, so this verdict can be
+        # conclusive where `--check` was not. It runs before the output
+        # directory is resolved, so a refusal leaves nothing behind.
+        intent = repository_intent.plan_intent(
+            plan_text, root=split_cwd, contracts_by_id=contracts_by_id
+        )
+        if intent.registry_required and not registry_declared:
+            footprint_fields["repository_intent"] = (
+                repository_intent.intent_report(intent)
+            )
+            return _emit_error(
+                SPLIT_REASON_REGISTRY_REQUIRED,
+                MULTI_REPOSITORY_MESSAGE,
+                **footprint_fields,
+            )
+        if footprint is not None and not footprint["registry_present"]:
+            return _emit_error(
+                SPLIT_REASON_MALFORMED_PLAN,
+                (
+                    "plan reaches outside a single repository but declares "
+                    "no `## Repositories` table; add the registry and "
+                    "per-session repository scopes before splitting"
+                ),
+                **footprint_fields,
+            )
 
     analysis_note: str | None = None
     if args.analysis_file:

@@ -437,6 +437,18 @@ def parse_command(command: str) -> dict:
         child_args += ["--effort", namespace.effort]
     if namespace.timeout is not None:
         child_args += ["--timeout", str(namespace.timeout)]
+    if namespace.audit_harness is not None:
+        child_args += ["--audit-harness", namespace.audit_harness]
+    if namespace.audit_harness_model is not None:
+        child_args += ["--audit-harness-model", namespace.audit_harness_model]
+    if namespace.audit_effort is not None:
+        child_args += ["--audit-effort", namespace.audit_effort]
+    if namespace.audit_timeout is not None:
+        child_args += ["--audit-timeout", str(namespace.audit_timeout)]
+    if namespace.supervisor_audit is True:
+        child_args.append("--supervisor-audit")
+    elif namespace.supervisor_audit is False:
+        child_args.append("--no-supervisor-audit")
     if namespace.max_sessions is not None:
         child_args += ["--max-sessions", str(namespace.max_sessions)]
     if namespace.max_pending_sessions is not None:

@@ -114,6 +114,61 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
         help="Per-session harness timeout in seconds",
     ),
     RunFlag(
+        dest="audit_harness",
+        option_strings=("--audit-harness",),
+        choices=harnesses.HARNESS_NAMES,
+        help=(
+            "Harness the supervisor audit runs as; must differ from --harness "
+            "and may equal --review-harness. Defaults to the effective review "
+            "harness when omitted"
+        ),
+    ),
+    RunFlag(
+        dest="audit_harness_model",
+        option_strings=("--audit-harness-model",),
+        help=(
+            "Supervisor audit model to request; wins over a model inherited "
+            "from the review role and over the audit harness native default"
+        ),
+    ),
+    RunFlag(
+        dest="audit_effort",
+        option_strings=("--audit-effort",),
+        help=(
+            "Supervisor audit reasoning effort; independent of --effort and "
+            "left at the harness native default when omitted"
+        ),
+    ),
+    RunFlag(
+        dest="audit_timeout",
+        option_strings=("--audit-timeout",),
+        type=int,
+        cli_default=600,
+        help=(
+            "Supervisor audit timeout in seconds, applied independently to "
+            "each of at most two agent attempts (default: 600)"
+        ),
+    ),
+    RunFlag(
+        dest="supervisor_audit",
+        option_strings=("--supervisor-audit",),
+        action="store_true",
+        cli_default=True,
+        mutex_group="supervisor_audit",
+        help="Audit ASL's own supervision after the loop finishes (default)",
+    ),
+    RunFlag(
+        dest="supervisor_audit",
+        option_strings=("--no-supervisor-audit",),
+        action="store_false",
+        cli_default=True,
+        mutex_group="supervisor_audit",
+        help=(
+            "Skip the supervisor audit; the skip is recorded and no assurance "
+            "issue is created"
+        ),
+    ),
+    RunFlag(
         dest="max_sessions",
         option_strings=("--max-sessions",),
         type=int,
@@ -427,5 +482,23 @@ def validate_run_namespace(
         and not defer_resume_dependent
     ):
         errors.append(FlagError("--review-harness-model requires --review-harness"))
+
+    audit_timeout = getattr(ns, "audit_timeout", None)
+    if audit_timeout is not None and audit_timeout <= 0:
+        errors.append(FlagError("--audit-timeout must be a positive integer"))
+
+    # An audit harness that equals the implementation harness would grade its
+    # own turns. It may equal the review harness, which was already independent
+    # of the implementation, and --audit-harness-model deliberately carries no
+    # --audit-harness requirement: it also overrides the model an inherited
+    # review role would have supplied.
+    audit_harness = getattr(ns, "audit_harness", None)
+    if audit_harness is not None and audit_harness == harness:
+        errors.append(
+            FlagError(
+                "--audit-harness must differ from --harness "
+                f"(both set to {harness!r})"
+            )
+        )
 
     return errors

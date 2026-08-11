@@ -320,7 +320,7 @@ def resolve_footprint(
             continue
         if not is_descendant(resolved, bound_root, allow_equal=True):
             out_of_root.append(target)
-        git_root = _nearest_git_root(resolved, git_root_cache)
+        git_root = nearest_git_root(resolved, git_root_cache)
         if git_root is not None:
             repo_roots[git_root] = None
 
@@ -367,12 +367,13 @@ def _resolve_target(target: PathTarget, root: Path) -> Path | None:
     candidate = Path(os.path.expanduser(value))
     if not candidate.is_absolute():
         candidate = root / candidate
-    if _is_system_path(candidate):
+    if is_system_path(candidate):
         return None
     return canonicalize_filesystem_path(candidate)
 
 
-def _is_system_path(path: Path) -> bool:
+def is_system_path(path: Path) -> bool:
+    """Return whether ``path`` names an interpreter or toolchain location."""
     text = Path(os.path.abspath(path)).as_posix()
     return any(
         text == prefix or text.startswith(f"{prefix}/")
@@ -380,8 +381,12 @@ def _is_system_path(path: Path) -> bool:
     )
 
 
-def _nearest_git_root(path: Path, cache: dict[Path, Path | None]) -> Path | None:
+def nearest_git_root(
+    path: Path, cache: dict[Path, Path | None] | None = None
+) -> Path | None:
     """Walk up to the nearest ``.git`` marker without invoking Git."""
+    if cache is None:
+        cache = {}
     start = path if path.is_dir() else path.parent
     chain: list[Path] = []
     current = start
@@ -568,7 +573,7 @@ def suggest_scopes(
             resolved = _resolve_target(target, bound_root)
             if resolved is None or not resolved.exists():
                 continue
-            git_root = _nearest_git_root(resolved, git_root_cache)
+            git_root = nearest_git_root(resolved, git_root_cache)
             alias = alias_by_root.get(git_root) if git_root is not None else None
             if alias is None:
                 continue
@@ -668,7 +673,7 @@ def _evidence_by_root(
             resolved = _resolve_target(target, root)
             if resolved is None or not resolved.exists():
                 continue
-            git_root = _nearest_git_root(resolved, git_root_cache)
+            git_root = nearest_git_root(resolved, git_root_cache)
             if git_root is None:
                 continue
             evidence.setdefault(git_root, []).append(target)

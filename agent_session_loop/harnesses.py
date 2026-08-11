@@ -33,6 +33,26 @@ HARNESS_NAMES: tuple[HarnessName, ...] = ("codex", "claude", "copilot")
 StreamName = Literal["stdout", "stderr"]
 StreamCallback = Callable[[StreamName, str], None]
 
+AccessProfileName = Literal["worker", "audit-read-only"]
+
+#: Claude tools that read or search without mutating anything.
+CLAUDE_AUDIT_TOOLS = "Read,Glob,Grep"
+
+#: Claude tools denied outright, so an audit turn cannot edit, shell out, reach
+#: the network, spawn a subagent, or write session state.
+CLAUDE_AUDIT_DENIED_TOOLS = (
+    "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task,TodoWrite"
+)
+
+#: Copilot tools that read or search. Verified against the installed CLI rather
+#: than inferred from its help text, because an unknown name in
+#: ``--available-tools`` silently yields an agent with no tools at all.
+COPILOT_AUDIT_TOOLS = "view,rg,glob"
+
+#: Copilot tool families denied outright. Denial beats any allow rule, so these
+#: hold even if a future default widens ``--available-tools``.
+COPILOT_AUDIT_DENIED_TOOLS = ("write", "shell", "url")
+
 
 # A dead harness process closes its pipes, so the reader threads see EOF at
 # once. This bound only exists for a descendant that outlives the harness and
@@ -127,6 +147,58 @@ def _join_readers(
 
 class HarnessError(Exception):
     """Raised when a harness adapter cannot build or run a command."""
+
+
+@dataclass(frozen=True)
+class AccessProfile:
+    """What one harness turn is allowed to reach.
+
+    This is deliberately separate from ``unsafe_bypass``: bypass widens a worker
+    turn, while the profile decides which access model the turn runs under at
+    all. Folding the audit profile into the bypass flag would make "not
+    bypassed" mean two different things and let a worker default leak into an
+    audit.
+    """
+
+    name: AccessProfileName
+    read_roots: tuple[Path, ...] = ()
+
+    @property
+    def is_audit(self) -> bool:
+        return self.name == "audit-read-only"
+
+
+#: The profile every implementation and review turn runs under.
+WORKER_ACCESS = AccessProfile(name="worker")
+
+
+def audit_read_only_access(read_roots: tuple[Path, ...] | list[Path]) -> AccessProfile:
+    """Build the restricted profile an auditor runs under.
+
+    ``read_roots`` are the directories the auditor may read outside its own
+    working directory — the evidence bundle and the read-only ASL and skill
+    trees. They are never writable roots, and the application workspace is
+    never among them.
+    """
+    return AccessProfile(name="audit-read-only", read_roots=tuple(read_roots))
+
+
+def audit_read_only_unavailable_reason(name: str) -> str | None:
+    """Say why ``name`` cannot run an audit read-only turn, or ``None``.
+
+    A harness that cannot enforce the profile must be declared unavailable
+    rather than run under a weaker one, so this returns a reason instead of a
+    fallback.
+    """
+    try:
+        adapter = get_adapter(name)
+    except HarnessError:
+        return "unsupported-harness"
+    if not adapter.enforces_audit_read_only:
+        return "profile-unenforceable"
+    if adapter.resolve_executable() is None:
+        return "harness-not-installed"
+    return None
 
 
 @dataclass(frozen=True)
@@ -365,6 +437,11 @@ class HarnessAdapter:
     name: HarnessName
     skill_prefix: str
 
+    #: Whether this adapter can express the audit read-only profile in argv
+    #: alone. An adapter that cannot must leave this false so callers declare
+    #: the audit unavailable instead of running it with worker access.
+    enforces_audit_read_only: bool = False
+
     def __init__(self, executable: str | None = None) -> None:
         try:
             self.executable = executable or config.configured_harness_executable(
@@ -380,16 +457,56 @@ class HarnessAdapter:
     def output_processor(self) -> _OutputProcessor:
         return _OutputProcessor()
 
+    def _worker_plan_dir(self, plan_dir: Path | None) -> str:
+        """The worker's writable grant, refusing to stringify a missing one.
+
+        Every worker branch renders ``plan_dir`` through here so a ``None``
+        cannot reach argv as the literal ``"None"`` — a path the harness would
+        create rather than reject.
+        """
+        if plan_dir is None:
+            raise HarnessError(f"{self.name} worker turns require a plan_dir")
+        return str(plan_dir)
+
+    def check_access(
+        self,
+        access: AccessProfile,
+        *,
+        plan_dir: Path | None,
+        unsafe_bypass: bool,
+    ) -> None:
+        """Reject a turn whose access profile this adapter will not honor.
+
+        Raising here rather than dropping a flag is the point: a misconfigured
+        audit must fail loudly instead of quietly running with worker access.
+        """
+        if not access.is_audit:
+            self._worker_plan_dir(plan_dir)
+            return
+        if unsafe_bypass:
+            raise HarnessError(
+                f"{self.name} audit turns cannot inherit unsafe bypass access"
+            )
+        if plan_dir is not None:
+            raise HarnessError(
+                f"{self.name} audit turns take read roots, not a writable plan_dir"
+            )
+        if not self.enforces_audit_read_only:
+            raise HarnessError(
+                f"{self.name} cannot enforce the audit read-only access profile"
+            )
+
     def build_argv(
         self,
         *,
         cwd: Path,
-        plan_dir: Path,
+        plan_dir: Path | None,
         prompt: str,
         unsafe_bypass: bool = False,
         last_message_path: Path | None = None,
         model: str | None = None,
         effort: str | None = None,
+        access: AccessProfile = WORKER_ACCESS,
     ) -> list[str]:
         raise NotImplementedError
 
@@ -397,13 +514,15 @@ class HarnessAdapter:
         self,
         *,
         cwd: Path,
-        plan_dir: Path,
+        plan_dir: Path | None,
         prompt: str,
         unsafe_bypass: bool = False,
         last_message_path: Path | None = None,
         model: str | None = None,
         effort: str | None = None,
+        access: AccessProfile = WORKER_ACCESS,
     ) -> HarnessInvocation:
+        self.check_access(access, plan_dir=plan_dir, unsafe_bypass=unsafe_bypass)
         return HarnessInvocation(
             name=self.name,
             argv=self.build_argv(
@@ -414,6 +533,7 @@ class HarnessAdapter:
                 last_message_path=last_message_path,
                 model=model,
                 effort=effort,
+                access=access,
             ),
             cwd=cwd,
             last_message_path=last_message_path,
@@ -425,7 +545,7 @@ class HarnessAdapter:
         self,
         *,
         cwd: Path,
-        plan_dir: Path,
+        plan_dir: Path | None,
         prompt: str,
         unsafe_bypass: bool = False,
         last_message_path: Path | None = None,
@@ -435,6 +555,7 @@ class HarnessAdapter:
         effort: str | None = None,
         on_spawn: Callable[[int], None] | None = None,
         on_final_result: Callable[[], None] | None = None,
+        access: AccessProfile = WORKER_ACCESS,
     ) -> HarnessResult:
         invocation = self.build_invocation(
             cwd=cwd,
@@ -444,6 +565,7 @@ class HarnessAdapter:
             last_message_path=last_message_path,
             model=model,
             effort=effort,
+            access=access,
         )
         if invocation.last_message_path is not None:
             invocation.last_message_path.parent.mkdir(parents=True, exist_ok=True)
@@ -642,33 +764,50 @@ class HarnessAdapter:
 class CodexAdapter(HarnessAdapter):
     name = "codex"
     skill_prefix = "$"
+    enforces_audit_read_only = True
 
     def build_argv(
         self,
         *,
         cwd: Path,
-        plan_dir: Path,
+        plan_dir: Path | None,
         prompt: str,
         unsafe_bypass: bool = False,
         last_message_path: Path | None = None,
         model: str | None = None,
         effort: str | None = None,
+        access: AccessProfile = WORKER_ACCESS,
     ) -> list[str]:
         if last_message_path is None:
             raise HarnessError("codex adapter requires a last_message_path")
 
-        argv = [
-            self.executable,
-            "exec",
-            "-C",
-            str(cwd),
-            "--add-dir",
-            str(plan_dir),
-        ]
-        if unsafe_bypass:
-            argv.append("--dangerously-bypass-approvals-and-sandbox")
+        if access.is_audit:
+            # No ``--add-dir``: for codex it grants *write* access, and the
+            # read-only sandbox already permits reading outside the cwd, so the
+            # read roots need no flag at all. ``--skip-git-repo-check`` lets the
+            # audit run from a dedicated directory that is not a repository.
+            argv = [
+                self.executable,
+                "exec",
+                "-C",
+                str(cwd),
+                "-s",
+                "read-only",
+                "--skip-git-repo-check",
+            ]
         else:
-            argv.extend(["-s", "workspace-write"])
+            argv = [
+                self.executable,
+                "exec",
+                "-C",
+                str(cwd),
+                "--add-dir",
+                self._worker_plan_dir(plan_dir),
+            ]
+            if unsafe_bypass:
+                argv.append("--dangerously-bypass-approvals-and-sandbox")
+            else:
+                argv.extend(["-s", "workspace-write"])
         if model is not None:
             argv.extend(["--model", model])
         if effort is not None:
@@ -680,6 +819,7 @@ class CodexAdapter(HarnessAdapter):
 class ClaudeAdapter(HarnessAdapter):
     name = "claude"
     skill_prefix = "/"
+    enforces_audit_read_only = True
 
     def output_processor(self) -> _OutputProcessor:
         return _ClaudeStreamJsonOutputProcessor()
@@ -688,15 +828,15 @@ class ClaudeAdapter(HarnessAdapter):
         self,
         *,
         cwd: Path,
-        plan_dir: Path,
+        plan_dir: Path | None,
         prompt: str,
         unsafe_bypass: bool = False,
         last_message_path: Path | None = None,
         model: str | None = None,
         effort: str | None = None,
+        access: AccessProfile = WORKER_ACCESS,
     ) -> list[str]:
         del cwd, last_message_path
-        permission_mode = "bypassPermissions" if unsafe_bypass else "dontAsk"
         argv = [
             self.executable,
             "--print",
@@ -704,11 +844,34 @@ class ClaudeAdapter(HarnessAdapter):
             "--output-format",
             "stream-json",
             "--include-partial-messages",
-            "--add-dir",
-            str(plan_dir),
-            "--permission-mode",
-            permission_mode,
         ]
+        if access.is_audit:
+            for root in access.read_roots:
+                argv.extend(["--add-dir", str(root)])
+            argv.extend(
+                [
+                    "--permission-mode",
+                    "plan",
+                    "--tools",
+                    CLAUDE_AUDIT_TOOLS,
+                    "--allowed-tools",
+                    CLAUDE_AUDIT_TOOLS,
+                    "--disallowed-tools",
+                    CLAUDE_AUDIT_DENIED_TOOLS,
+                    "--strict-mcp-config",
+                    "--no-session-persistence",
+                    "--disable-slash-commands",
+                ]
+            )
+        else:
+            argv.extend(
+                [
+                    "--add-dir",
+                    self._worker_plan_dir(plan_dir),
+                    "--permission-mode",
+                    "bypassPermissions" if unsafe_bypass else "dontAsk",
+                ]
+            )
         if model is not None:
             argv.extend(["--model", model])
         if effort is not None:
@@ -720,28 +883,48 @@ class ClaudeAdapter(HarnessAdapter):
 class CopilotAdapter(HarnessAdapter):
     name = "copilot"
     skill_prefix = "/"
+    enforces_audit_read_only = True
 
     def build_argv(
         self,
         *,
         cwd: Path,
-        plan_dir: Path,
+        plan_dir: Path | None,
         prompt: str,
         unsafe_bypass: bool = False,
         last_message_path: Path | None = None,
         model: str | None = None,
         effort: str | None = None,
+        access: AccessProfile = WORKER_ACCESS,
     ) -> list[str]:
         del last_message_path
         argv = [
             self.executable,
             "-C",
             str(cwd),
-            "--add-dir",
-            str(plan_dir),
         ]
-        if unsafe_bypass:
-            argv.extend(["--allow-all-tools", "--allow-all-paths"])
+        if access.is_audit:
+            for root in access.read_roots:
+                argv.extend(["--add-dir", str(root)])
+            argv.append(f"--available-tools={COPILOT_AUDIT_TOOLS}")
+            # The ``=`` form is load-bearing: ``--deny-tool`` takes a variadic
+            # value, so the space form can swallow the next argument.
+            argv.extend(
+                f"--deny-tool={denied}" for denied in COPILOT_AUDIT_DENIED_TOOLS
+            )
+            argv.extend(
+                [
+                    "--disable-builtin-mcps",
+                    "--no-custom-instructions",
+                    "--no-remote",
+                    "--no-remote-export",
+                    "--disallow-temp-dir",
+                ]
+            )
+        else:
+            argv.extend(["--add-dir", self._worker_plan_dir(plan_dir)])
+            if unsafe_bypass:
+                argv.extend(["--allow-all-tools", "--allow-all-paths"])
         argv.extend(["--no-ask-user", "--silent"])
         if model is not None:
             argv.extend(["--model", model])
@@ -775,7 +958,7 @@ def run_harness(
     name: str,
     *,
     cwd: Path,
-    plan_dir: Path,
+    plan_dir: Path | None,
     prompt: str,
     unsafe_bypass: bool = False,
     last_message_path: Path | None = None,
@@ -785,6 +968,7 @@ def run_harness(
     effort: str | None = None,
     on_spawn: Callable[[int], None] | None = None,
     on_final_result: Callable[[], None] | None = None,
+    access: AccessProfile = WORKER_ACCESS,
 ) -> HarnessResult:
     """Run one harness turn through the selected adapter."""
     return get_adapter(name).run(
@@ -799,6 +983,7 @@ def run_harness(
         effort=effort,
         on_spawn=on_spawn,
         on_final_result=on_final_result,
+        access=access,
     )
 
 

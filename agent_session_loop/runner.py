@@ -48,6 +48,7 @@ from . import (
     progress_repair,
     qna,
     repository_evidence,
+    repository_intent,
     responses,
     review,
     review_continuation,
@@ -55,6 +56,7 @@ from . import (
     run_control,
     run_flags,
     state,
+    supervisor_audit,
     tail,
     verification,
     workspaces,
@@ -3046,6 +3048,111 @@ def _validate_resume_workspace_binding(
             raise plans.PlanError(
                 "resume workspace binding does not match the persisted run"
             )
+
+
+def _runner_owned_roots(
+    plan_dir: Path,
+    state_dir_arg: str | None,
+    *,
+    run_dir: Path | None = None,
+) -> tuple[Path, ...]:
+    """Trees ASL owns, which never count as a repository the run reaches.
+
+    An operator may legitimately keep the plan directory, the state root, or a
+    run directory inside an unrelated checkout. Those are the runner's own
+    bookkeeping, not the work whose destination this gate decides.
+    """
+    roots = [plan_dir, state.state_root(state_dir_arg)]
+    if run_dir is not None:
+        roots.append(run_dir)
+    return tuple(roots)
+
+
+def _repository_intent_message(
+    report: Mapping[str, Any], *, subject: str = "run"
+) -> str:
+    """Name the conflicting roots. ``report`` is already credential-redacted."""
+    git_roots = ", ".join(report.get("git_roots", ()))
+    return (
+        f"{subject} reaches {report.get('git_root_count', 0)} git repositories "
+        f"({git_roots}) but manifest.md declares no top-level `## Repositories` "
+        "table; declare the registry, give every session read and write "
+        "repository scopes, and prepare the workspace before running this plan"
+    )
+
+
+def _run_repository_intent_report(
+    plan_dir: Path,
+    context: verification.VerificationContext,
+    *,
+    state_dir_arg: str | None,
+) -> dict[str, Any] | None:
+    """Judge the repositories this run intends to reach, or ``None`` if one.
+
+    This is the final authority: preflight can be skipped by a loop-ready
+    short circuit and prepare can be skipped entirely by a legacy plan, so a
+    run that never re-derives the verdict here has no gate at all. A registered
+    workspace is exempt because its registry already names every repository.
+    """
+    if context.workspace is not None:
+        return None
+    _, report = preflight.plan_repository_intent(
+        plan_dir,
+        context.root,
+        extra_exempt_roots=_runner_owned_roots(plan_dir, state_dir_arg),
+    )
+    return report
+
+
+def _task_packet_artifact_paths(
+    plan_dir: Path,
+    session_id: str,
+    predecessor_id: str | None,
+) -> tuple[Path, ...]:
+    """Every artifact a task packet tells the worker to open and act on."""
+    selected = plans.parse_session_id(session_id)
+    paths = [
+        plan_dir / selected.filename,
+        plan_dir / selected.expansion_filename,
+        plan_dir / "context.md",
+        plan_dir / plans.PROGRESS_FILE_NAME,
+    ]
+    if predecessor_id is not None:
+        paths.append(plan_dir / plans.parse_session_id(predecessor_id).filename)
+    return tuple(paths)
+
+
+def _task_packet_repository_intent_report(
+    prompt: str,
+    *,
+    root: Path,
+    artifact_paths: Sequence[Path],
+    exempt_roots: Sequence[Path],
+) -> dict[str, Any] | None:
+    """Re-derive the verdict from what this turn actually hands the worker.
+
+    The run-level gate judges the plan as split. A turn can carry more than
+    that: expansion notes, shared context, a predecessor handoff, live mailbox
+    guidance, an operator reply, and repair references all reach the worker
+    through the rendered prompt or through the files it points at. Reading
+    them here is what stops a location that no plan file declared from
+    redirecting a legacy turn into a second repository.
+    """
+    candidates = list(repository_intent.candidates_from_text(prompt))
+    candidates.extend(repository_intent.candidates_from_task_packet(artifact_paths))
+    for path in artifact_paths:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        candidates.extend(repository_intent.candidates_from_text(text))
+    candidates.extend(repository_intent.candidates_from_execution_roots([root]))
+    intent = repository_intent.resolve_intent(
+        candidates, root=root, exempt_roots=exempt_roots
+    )
+    if not intent.registry_required:
+        return None
+    return repository_intent.intent_report(intent)
 
 
 def _ensure_legacy_run_metadata(
@@ -10348,6 +10455,46 @@ def _workspace_scope_repair_is_fresh(
     )
 
 
+def _workspace_scope_repair_comparison(
+    comparison: Mapping[str, Any],
+    inventory_excludes: tuple[str, ...],
+) -> tuple[dict[str, Any], list[str]]:
+    """Acknowledge repositories hidden by a newly prepared inventory policy.
+
+    A retained-scope repair compares the original pre-turn snapshot with a
+    newly captured baseline. When the operator durably excludes an unrelated
+    subtree after the pause, repositories below that subtree intentionally
+    disappear from the new inventory. Treating that disappearance as a real
+    repository removal would make the explicit exclusion unusable for repair.
+
+    Registered repositories cannot overlap inventory exclusions (enforced by
+    workspace metadata validation), so suppressing these repair-only topology
+    removals cannot hide removal of an in-scope repository.
+    """
+    repaired = dict(comparison)
+    raw_removed = comparison.get("removed")
+    if not isinstance(raw_removed, Sequence) or isinstance(
+        raw_removed, (str, bytes)
+    ):
+        return repaired, []
+
+    exclusion_parts = [PurePosixPath(path).parts for path in inventory_excludes]
+    suppressed: list[str] = []
+    retained: list[str] = []
+    for raw_repository in raw_removed:
+        repository = str(raw_repository)
+        repository_parts = PurePosixPath(repository).parts
+        if any(
+            repository_parts[: len(parts)] == parts
+            for parts in exclusion_parts
+        ):
+            suppressed.append(repository)
+        else:
+            retained.append(repository)
+    repaired["removed"] = retained
+    return repaired, suppressed
+
+
 def _enforce_workspace_write_guard(
     *,
     event_path: Path,
@@ -11047,6 +11194,7 @@ def _run_config_payload(
         "note": getattr(args, "note", None),
         "cwd": str(cwd),
         "state_dir_override": getattr(args, "state_dir", None),
+        **supervisor_audit.config_from_namespace(args).to_run_config(),
         **_workspace_payload_fields(context),
     }
 
@@ -11075,6 +11223,13 @@ def _initial_payload(
         if review_requested
         else None
     )
+    # A dry run never becomes audit-eligible: eligibility starts with the run ID
+    # and run directory of a loop that actually executes.
+    assurance = supervisor_audit.initial_summary(
+        supervisor_audit.plan_audit(args),
+        run_id=run_id,
+        eligible=not args.dry_run,
+    )
     return responses.success_payload(
         "run",
         paused=False,
@@ -11102,6 +11257,7 @@ def _initial_payload(
             commit_mode=commit_mode,
             verification_context=context,
         ),
+        assurance=assurance.to_dict(),
         no_mailbox=_no_mailbox(args),
         mailbox_enabled=bool(mailbox_activation.get("enabled")),
         mailbox_activation=dict(mailbox_activation),
@@ -11172,6 +11328,7 @@ def _dry_run_payload(
         plan_dir=snapshot.plan_dir,
         state_dir_arg=getattr(args, "state_dir", None),
     )
+    audit = supervisor_audit.plan_audit(args).to_dict()
     if next_pending is None:
         model_effort = _selected_model_effort_payload(args)
         return {
@@ -11182,6 +11339,7 @@ def _dry_run_payload(
             "resolver_prompt": None,
             "prompt_kind": "session",
             "reply_source": None,
+            "audit": audit,
             "no_mailbox": _no_mailbox(args),
             "mailbox_enabled": mailbox_enabled,
             "mailbox_activation": dict(mailbox_activation),
@@ -11325,6 +11483,7 @@ def _dry_run_payload(
         "resolver_prompt": resolver_prompt,
         "prompt_kind": prompt_kind,
         "reply_source": reply_source,
+        "audit": audit,
         "no_mailbox": _no_mailbox(args),
         "mailbox_enabled": mailbox_enabled,
         "mailbox_activation": dict(mailbox_activation),
@@ -12967,6 +13126,40 @@ def _run_locked(
                 reply_source_meta = None
                 resolution_source_meta = None
                 persisted_prompt = prompt
+            packet_intent_report = (
+                None
+                if workspace is not None
+                else _task_packet_repository_intent_report(
+                    prompt,
+                    root=cwd,
+                    artifact_paths=_task_packet_artifact_paths(
+                        before.plan_dir, session_id, predecessor_id
+                    ),
+                    exempt_roots=_runner_owned_roots(
+                        before.plan_dir, args.state_dir, run_dir=run_dir
+                    ),
+                )
+            )
+            if packet_intent_report is not None:
+                with persistence.lock:
+                    payload["final_snapshot"] = _snapshot_payload(before)
+                _pause_run(
+                    event_path,
+                    payload,
+                    reason=(
+                        events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED
+                    ),
+                    message=_repository_intent_message(
+                        packet_intent_report,
+                        subject=f"task packet for {session_label}",
+                    ),
+                    details={
+                        **session_details,
+                        "repository_intent": packet_intent_report,
+                    },
+                    persistence=persistence,
+                )
+                break
             turn_started_at = _utc_now()
             turn_started_at_text = _isoformat(turn_started_at)
             idle_seconds_since_previous_turn = (
@@ -13141,6 +13334,13 @@ def _run_locked(
                                 prior_snapshot, workspace_snapshot_before
                             )
                         )
+                        (
+                            repair_comparison,
+                            repair_inventory_excluded,
+                        ) = _workspace_scope_repair_comparison(
+                            repair_comparison,
+                            workspace_inventory_excludes,
+                        )
                         repair_evidence = _workspace_write_guard_evidence(
                             workspace=workspace,
                             scope=session_scope,
@@ -13148,6 +13348,9 @@ def _run_locked(
                             exclude=review_guard_excludes,
                             inventory_excludes=workspace_inventory_excludes,
                             include_ignored=review_guard_include_ignored,
+                        )
+                        repair_evidence["repair_inventory_excluded"] = (
+                            repair_inventory_excluded
                         )
                     else:
                         repair_evidence = {
@@ -14511,6 +14714,9 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
 
     if payload.get("dry_run") and payload["ok"]:
         planned = payload.get("planned", {})
+        planned_audit_line = supervisor_audit.status_line(planned.get("audit"))
+        if planned_audit_line:
+            print(planned_audit_line)
         next_pending = planned.get("next_pending")
         if next_pending is None:
             print("Next pending: none")
@@ -14526,6 +14732,10 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
         for arg in planned["invocation"]["argv"]:
             print(f"  {arg}")
         return
+
+    audit_line = supervisor_audit.status_line(payload.get("assurance"))
+    if audit_line:
+        print(audit_line)
 
     for session_number in payload["completed_sessions"]:
         print(f"Completed session {session_number}")
@@ -14642,6 +14852,11 @@ _RESUME_OVERLAY_DESTS: tuple[str, ...] = (
     "unsafe_bypass",
     "no_mailbox",
     "allow_not_loop_ready",
+    "supervisor_audit",
+    "audit_harness",
+    "audit_harness_model",
+    "audit_effort",
+    "audit_timeout",
 )
 
 
@@ -14728,7 +14943,40 @@ def _reconstruct_resume_command(
         argv += ["--note", str(note)]
     if payload.get("allow_not_loop_ready") is True:
         argv.append("--allow-not-loop-ready")
+    argv += _reconstructed_audit_flags(payload.get("assurance"))
     return shlex.join(argv)
+
+
+def _reconstructed_audit_flags(assurance: Any) -> list[str]:
+    """Recover the audit flags from the assurance object state persisted.
+
+    An inherited role needs no ``--audit-harness``: rebuilding ``--review-harness``
+    reproduces it. Its resolved model is re-stated explicitly, which yields the
+    same effective role because an explicit audit model wins over an inherited one.
+    """
+    if not isinstance(assurance, Mapping):
+        return []
+    argv: list[str] = []
+    if assurance.get("state") == "skipped" and (
+        assurance.get("reason") == supervisor_audit.REASON_OPTED_OUT
+    ):
+        return ["--no-supervisor-audit"]
+    role = assurance.get("role")
+    if not isinstance(role, Mapping):
+        return argv
+    if role.get("source") == "explicit" and role.get("harness"):
+        argv += ["--audit-harness", str(role["harness"])]
+    if role.get("model"):
+        argv += ["--audit-harness-model", str(role["model"])]
+    if role.get("effort"):
+        argv += ["--audit-effort", str(role["effort"])]
+    timeout = role.get("timeout_seconds")
+    if (
+        isinstance(timeout, (int, float))
+        and int(timeout) != supervisor_audit.DEFAULT_AUDIT_TIMEOUT_SECONDS
+    ):
+        argv += ["--audit-timeout", str(int(timeout))]
+    return argv
 
 
 def _load_resume_state(
@@ -14905,6 +15153,30 @@ def run_from_args(
             cwd=cwd,
             snapshot=initial_snapshot,
         )
+        _emit_run_payload(args, payload)
+        return 1
+
+    # After root/workspace resolution and before anything this run launches.
+    # Deliberately independent of `--allow-not-loop-ready`: the flag waives
+    # readiness, and no readiness marking can stand in for the registry that
+    # would have bound a second repository in the first place.
+    intent_report = _run_repository_intent_report(
+        initial_snapshot.plan_dir,
+        verification_context,
+        state_dir_arg=args.state_dir,
+    )
+    if intent_report is not None:
+        payload = _error_payload(
+            args,
+            reason=events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED,
+            message=_repository_intent_message(intent_report),
+            paused=True,
+            cwd=verification_context.root,
+            snapshot=initial_snapshot,
+        )
+        details = {"repository_intent": intent_report}
+        payload["details"] = details
+        payload["pause_details"] = dict(details)
         _emit_run_payload(args, payload)
         return 1
 

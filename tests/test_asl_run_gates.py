@@ -460,6 +460,42 @@ class RunReadinessGateTests(unittest.TestCase):
     def test_allow_not_loop_ready_does_not_bypass_repository_footprint(
         self,
     ) -> None:
+        # A non-Git sibling escapes the bound root without adding a second
+        # repository, so the readiness gate — not the hard intent gate — is
+        # what has to refuse it.
+        external = self.tmp_path / "external"
+        external.mkdir()
+        (external / "README.md").write_text("external\n", encoding="utf-8")
+        self._write_plan(
+            ("pending",),
+            contracts_by_id={
+                "1": _contract_block(
+                    json.dumps(
+                        {
+                            "type": "file_exists",
+                            "path": str(external / "README.md"),
+                            "name": "out-of-root",
+                        }
+                    ),
+                    session="1",
+                )
+            },
+        )
+
+        completed, payload = self._run(allow_not_loop_ready=True)
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("not-loop-ready", payload["pause_reason"])
+        self.assertEqual(
+            ["repository-footprint"],
+            payload["pause_details"]["blocker"],
+        )
+        self.assertEqual([], payload["turns"])
+
+    def test_allow_not_loop_ready_does_not_bypass_repository_intent(
+        self,
+    ) -> None:
         other_repo = self.tmp_path / "other"
         init_git_repo(other_repo)
         self._write_plan(
@@ -482,11 +518,101 @@ class RunReadinessGateTests(unittest.TestCase):
 
         self.assertEqual(1, completed.returncode, completed.stderr)
         self.assertTrue(payload["paused"])
-        self.assertEqual("not-loop-ready", payload["pause_reason"])
         self.assertEqual(
-            ["repository-footprint"], payload["pause_details"]["blocker"]
+            events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED,
+            payload["pause_reason"],
+        )
+        report = payload["pause_details"]["repository_intent"]
+        self.assertEqual(2, report["git_root_count"])
+        self.assertEqual(
+            sorted(
+                str(plans.canonicalize_path(path))
+                for path in (self.repo_root, other_repo)
+            ),
+            sorted(report["git_roots"]),
         )
         self.assertEqual([], payload["turns"])
+        self.assertFalse(payload["pause_policy"]["recoverable"])
+
+    def test_hard_gate_refuses_a_loop_ready_plan_that_skips_preflight(
+        self,
+    ) -> None:
+        # A loop-ready plan short-circuits core preflight, so the readiness
+        # gate never re-derives the verdict. The run-level gate must.
+        other_repo = self.tmp_path / "other"
+        init_git_repo(other_repo)
+        self._write_plan(("pending",))
+        session = self.plan_dir / "session-1.md"
+        session.write_text(
+            session.read_text(encoding="utf-8").replace(
+                "Instructions.",
+                f"Instructions. Write the helper into {other_repo}/src/new.py.",
+            ),
+            encoding="utf-8",
+        )
+        sha = plans.stable_readiness_sha256(self.plan_dir)
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=sha,
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+
+        completed, payload = self._run()
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertEqual(
+            events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED,
+            payload["pause_reason"],
+        )
+        self.assertEqual([], payload["turns"])
+        self.assertEqual(
+            2, payload["pause_details"]["repository_intent"]["git_root_count"]
+        )
+
+    def test_hard_gate_exempts_the_runner_own_plan_and_state_trees(self) -> None:
+        # An operator may keep the plan and the state root inside a checkout
+        # unrelated to the work. That is ASL's bookkeeping, not a second
+        # repository the run intends to reach.
+        other_repo = self.tmp_path / "other"
+        init_git_repo(other_repo)
+        self.plan_dir = other_repo / "plans" / "current"
+        self.state_dir = other_repo / "state"
+        self._write_plan(("pending",))
+
+        completed, payload = self._run()
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertFalse(payload["paused"])
+        self.assertEqual("all-complete", payload["reason"])
+
+    def test_task_packet_recheck_catches_a_redirect_only_expansion_notes_carry(
+        self,
+    ) -> None:
+        # Expansion notes are outside the plan-level scan, so the packet
+        # recheck is the only surface that sees this redirect.
+        other_repo = self.tmp_path / "other"
+        init_git_repo(other_repo)
+        self._write_plan(("pending",))
+        (self.plan_dir / "session-1.expand.md").write_text(
+            "# Session 1 Expansion\n\n"
+            f"- Corrected location: {other_repo}/src/new.py\n",
+            encoding="utf-8",
+        )
+
+        completed, payload = self._run()
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertEqual(
+            events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED,
+            payload["pause_reason"],
+        )
+        self.assertEqual([], payload["turns"])
+        report = payload["pause_details"]["repository_intent"]
+        self.assertEqual(2, report["git_root_count"])
+        self.assertEqual(1, payload["pause_details"]["session"])
 
     def test_run_rejects_mismatched_prepared_root_without_overwriting_binding(
         self,

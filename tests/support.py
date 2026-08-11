@@ -322,6 +322,19 @@ DEFAULT_MULTI_REPO_SPECS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+#: Two clones of one remote, checked out side by side. Repository identity is
+#: the resolved Git top-level, so these are two repositories even though
+#: ``workspaces.origins_equal`` holds between them.
+KILN_TWIN_REPO_SPECS: tuple[tuple[str, str, str], ...] = (
+    ("Kiln", "tundra_Kiln", "git@github.com:tundra/Kiln.git"),
+    (
+        "KilnTesting",
+        "tundra_Kiln_testing",
+        "git@github.com:tundra/Kiln.git",
+    ),
+)
+
+
 def init_multi_repo_workspace(
     workspace_dir: Path,
     specs: tuple[tuple[str, str, str], ...] = DEFAULT_MULTI_REPO_SPECS,

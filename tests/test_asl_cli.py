@@ -4745,6 +4745,93 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                 )
             )
 
+    def test_multi_repo_scope_violation_can_be_repaired_by_inventory_exclusion(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            state_dir = tmp_dir / "state"
+            workspace_root, plan_dir, _repositories = self._workspace_plan(tmp_dir)
+            unrelated = workspace_root / "unrelated-active-work"
+            unrelated.mkdir()
+            subprocess.run(
+                ["git", "init", "-q", str(unrelated)],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            first = self._run(
+                plan_dir,
+                workspace_root,
+                state_dir,
+                env_overrides=self._fake_codex_env(
+                    tmp_dir,
+                    FAKE_CODEX_MUTATION_PATH=str(unrelated / "concurrent.txt"),
+                ),
+            )
+            self.assertEqual(1, first.returncode, first.stderr)
+            first_guard = json.loads(first.stdout)["turns"][0][
+                "workspace_write_guard"
+            ]
+            self.assertEqual(
+                "unregistered-repository",
+                first_guard["violations"][0]["kind"],
+            )
+
+            registry = plans.read_repository_registry(plan_dir)
+            assert registry is not None
+            plans.save_workspace_plan_metadata(
+                plan_dir,
+                workspace_root,
+                registry.digest,
+                ("unrelated-active-work",),
+            )
+            (plan_dir / "session-1.expand.md").write_text(
+                "# Refreshed expansion after inventory exclusion\n",
+                encoding="utf-8",
+            )
+            plans.write_readiness_metadata(
+                plan_dir,
+                plans.ReadinessMetadata(
+                    state="loop-ready",
+                    readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                    checked_at="2026-08-08T00:00:00Z",
+                ),
+            )
+
+            repaired = self._run(
+                plan_dir,
+                workspace_root,
+                state_dir,
+                env_overrides=self._fake_codex_env(tmp_dir),
+            )
+
+            self.assertEqual(0, repaired.returncode, repaired.stderr)
+            repaired_payload = json.loads(repaired.stdout)
+            self.assertTrue(
+                repaired_payload["turns"][0]["workspace_write_guard"]["passed"]
+            )
+            records = [
+                json.loads(line)
+                for line in Path(repaired_payload["events_path"])
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            repair_records = [
+                record
+                for record in records
+                if record["name"] == events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT
+            ]
+            self.assertEqual(1, len(repair_records))
+            repair_guard = repair_records[0]["payload"]["details"][
+                "workspace_write_guard"
+            ]
+            self.assertEqual(
+                ["unrelated-active-work"],
+                repair_guard["repair_inventory_excluded"],
+            )
+            self.assertEqual([], repair_guard["removed"])
+
     def test_multi_repo_read_only_session_has_empty_write_set(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)

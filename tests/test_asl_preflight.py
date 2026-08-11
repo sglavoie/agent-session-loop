@@ -1562,6 +1562,184 @@ class RepositoryFootprintPreflightTests(unittest.TestCase):
         self.assertIsNone(report.repository_footprint)
 
 
+class RepositoryIntentPreflightTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.root = Path(self._temp.name)
+        self.workspace = self.root / "workspace"
+        self.repositories = init_multi_repo_workspace(
+            self.workspace, DEFAULT_MULTI_REPO_SPECS[:2]
+        )
+        self.first = self.repositories["SVC"]
+        self.second = self.repositories["OAK"]
+        for repository in (self.first, self.second):
+            (repository / "README.md").write_text("x\n", encoding="utf-8")
+        self.plan_dir = self.root / "plan"
+
+    def _write_plan(self, *paths: Path) -> None:
+        contract = _contract_block(
+            ", ".join(
+                json.dumps(
+                    {
+                        "type": "file_exists",
+                        "path": str(path),
+                        "name": f"check-{index}",
+                    }
+                )
+                for index, path in enumerate(paths)
+            ),
+            session="1",
+        )
+        _write_loop_ready_plan(
+            self.plan_dir, ("pending",), contracts_by_id={"1": contract}
+        )
+
+    def _intent_findings(
+        self, report: preflight.PreflightReport
+    ) -> list[preflight.PreflightFinding]:
+        return [
+            finding
+            for finding in report.findings
+            if finding.category == "repository-registry-required"
+        ]
+
+    def test_target_a_session_has_yet_to_create_still_names_its_repository(
+        self,
+    ) -> None:
+        self._write_plan(
+            self.first / "README.md", self.second / "src" / "new_module.py"
+        )
+        plans.save_plan_metadata(self.plan_dir, str(self.first))
+
+        report = preflight.run_core_preflight(self.plan_dir)
+
+        findings = self._intent_findings(report)
+        self.assertEqual(1, len(findings))
+        self.assertEqual("red", findings[0].severity)
+        self.assertIn("2 git repositories", findings[0].message)
+        self.assertIn("`## Repositories`", findings[0].message)
+        self.assertEqual(
+            "repository-registry-required.declare",
+            preflight.repair_hint_for_finding(findings[0]).check_id,
+        )
+        # The footprint check cannot see a path that does not exist yet, which
+        # is exactly the gap the intent check closes.
+        self.assertFalse(report.repository_footprint.registry_required)
+
+    def test_repair_guidance_names_the_table_scopes_and_attribution(self) -> None:
+        message = preflight.REPAIR_HINTS["repository-registry-required"].message
+        self.assertIn("`## Repositories` table", message)
+        self.assertIn("Reads repositories:", message)
+        self.assertIn("Writes repositories:", message)
+        self.assertIn("`repo` alias", message)
+
+    def test_single_repository_legacy_plan_is_unchanged(self) -> None:
+        self._write_plan(self.first / "README.md", self.first / "src" / "new.py")
+        plans.save_plan_metadata(self.plan_dir, str(self.first))
+
+        report = preflight.run_core_preflight(self.plan_dir)
+
+        self.assertEqual([], self._intent_findings(report))
+        self.assertFalse(report.repository_intent.registry_required)
+
+    def test_registered_multi_repository_plan_passes(self) -> None:
+        write_multi_repo_plan(
+            self.plan_dir, ("pending",), specs=DEFAULT_MULTI_REPO_SPECS[:2]
+        )
+
+        report = preflight.run_core_preflight(self.plan_dir)
+
+        self.assertEqual([], self._intent_findings(report))
+        self.assertIsNone(report.repository_intent)
+
+    def test_explicit_cwd_supplies_the_root_without_plan_metadata(self) -> None:
+        self._write_plan(
+            self.first / "README.md", self.second / "src" / "new_module.py"
+        )
+
+        core_report = preflight.run_core_preflight(self.plan_dir)
+        self.assertEqual([], self._intent_findings(core_report))
+
+        report = preflight.run_preflight(self.plan_dir, cwd=self.first)
+
+        self.assertTrue(self._intent_findings(report))
+
+    def test_payload_reports_the_repositories_the_plan_intends_to_reach(
+        self,
+    ) -> None:
+        self._write_plan(
+            self.first / "README.md", self.second / "src" / "new_module.py"
+        )
+        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        report = preflight.run_core_preflight(self.plan_dir)
+
+        payload = preflight._preflight_payload_fields(
+            report,
+            plan_dir_arg=str(self.plan_dir),
+            cwd=None,
+            harness=None,
+            commit_mode=None,
+            state_dir=None,
+            max_pending_sessions=None,
+            mark_loop_ready=False,
+        )["repository_intent"]
+
+        self.assertTrue(payload["registry_required"])
+        self.assertEqual("repository-registry-required", payload["reason"])
+        self.assertEqual(2, payload["git_root_count"])
+        self.assertEqual(
+            sorted(
+                str(workspaces.canonicalize_filesystem_path(path))
+                for path in (self.first, self.second)
+            ),
+            sorted(payload["git_roots"]),
+        )
+
+    def test_mark_loop_ready_cannot_silence_the_invariant(self) -> None:
+        self._write_plan(
+            self.first / "README.md", self.second / "src" / "new_module.py"
+        )
+        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        report = preflight.run_core_preflight(self.plan_dir)
+
+        blockers = preflight._mark_loop_ready_blockers(report)
+        self.assertIn(
+            "repository-registry-required",
+            {blocker.category for blocker in blockers},
+        )
+
+        marked, error = preflight._mark_loop_ready(report)
+
+        self.assertFalse(marked)
+        self.assertIn("non-bypassable", error)
+        self.assertIn("repository-registry-required", error)
+
+    def test_generic_auto_repair_offers_no_step_that_clears_it(self) -> None:
+        self._write_plan(
+            self.first / "README.md", self.second / "src" / "new_module.py"
+        )
+        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        report = preflight.run_core_preflight(self.plan_dir)
+
+        steps = preflight.build_auto_repair_plan(
+            report, plan_dir=str(self.plan_dir)
+        )
+
+        self.assertEqual(
+            [], [step for step in steps if "--mark-loop-ready" in step["command"]]
+        )
+        pause = preflight.build_suggested_pause(report, plan_dir=str(self.plan_dir))
+        self.assertIsNotNone(pause)
+        self.assertIn("repository-registry-required", pause["detail"])
+
+    def test_category_is_not_bypassable(self) -> None:
+        self.assertIn(
+            "repository-registry-required",
+            preflight.NON_BYPASSABLE_PREFLIGHT_CATEGORIES,
+        )
+
+
 class PreflightRepairHintTests(unittest.TestCase):
     def test_every_preflight_category_has_a_default_hint(self) -> None:
         for category in preflight.PREFLIGHT_CATEGORIES:

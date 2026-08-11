@@ -106,12 +106,13 @@ class _PythonScriptCopilotAdapter(harnesses.CopilotAdapter):
         self,
         *,
         cwd: Path,
-        plan_dir: Path,
+        plan_dir: Path | None,
         prompt: str,
         unsafe_bypass: bool = False,
         last_message_path: Path | None = None,
         model: str | None = None,
         effort: str | None = None,
+        access: harnesses.AccessProfile = harnesses.WORKER_ACCESS,
     ) -> list[str]:
         argv = super().build_argv(
             cwd=cwd,
@@ -121,6 +122,7 @@ class _PythonScriptCopilotAdapter(harnesses.CopilotAdapter):
             last_message_path=last_message_path,
             model=model,
             effort=effort,
+            access=access,
         )
         return [argv[0], str(self.script), *argv[1:]]
 
@@ -6496,6 +6498,178 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
             if record["name"] == events.TURN_HEARTBEAT_EVENT
         ]
         self.assertNotIn("hang_cpu_progress", heartbeats[-1]["payload"])
+
+
+class AuditAccessProfileTests(unittest.TestCase):
+    """The read-only profile expressed in argv, per adapter.
+
+    Real sandbox enforcement lives inside the installed harnesses and cannot be
+    exercised offline. What is testable — and what actually decides whether the
+    boundary holds — is that every audit invocation asks for the restricted
+    mode, names no writable root, and carries no widening flag.
+    """
+
+    #: Flags that widen a harness past its default sandbox, by any spelling.
+    BYPASS_TOKENS = (
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--allow-all-tools",
+        "--allow-all-paths",
+        "bypassPermissions",
+        "workspace-write",
+        "dontAsk",
+    )
+
+    def _audit_argv(self, name: str, read_roots: tuple[Path, ...]) -> list[str]:
+        return harnesses.get_adapter(name).build_argv(
+            cwd=Path("/audit"),
+            plan_dir=None,
+            prompt="audit",
+            last_message_path=Path("/audit/last.txt"),
+            access=harnesses.audit_read_only_access(read_roots),
+        )
+
+    def _granted_dirs(self, argv: list[str]) -> list[str]:
+        return [
+            argv[index + 1] for index, token in enumerate(argv) if token == "--add-dir"
+        ]
+
+    def test_worker_argv_is_byte_for_byte_what_it_always_was(self) -> None:
+        expected = {
+            "codex": (
+                "codex exec -C /work --add-dir /plan -s workspace-write "
+                "-o /work/last.txt prompt"
+            ).split(),
+            "claude": (
+                "claude --print --verbose --output-format stream-json "
+                "--include-partial-messages --add-dir /plan "
+                "--permission-mode dontAsk prompt"
+            ).split(),
+            "copilot": (
+                "copilot -C /work --add-dir /plan --no-ask-user --silent -p prompt"
+            ).split(),
+        }
+
+        for name, argv in expected.items():
+            with self.subTest(harness=name):
+                self.assertEqual(
+                    argv,
+                    harnesses.get_adapter(name).build_argv(
+                        cwd=Path("/work"),
+                        plan_dir=Path("/plan"),
+                        prompt="prompt",
+                        last_message_path=Path("/work/last.txt"),
+                    ),
+                )
+
+    def test_audit_argv_never_carries_a_bypass_flag(self) -> None:
+        for name in harnesses.HARNESS_NAMES:
+            with self.subTest(harness=name):
+                argv = self._audit_argv(name, (Path("/evidence"),))
+
+                for token in self.BYPASS_TOKENS:
+                    self.assertNotIn(token, argv)
+
+    def test_codex_audits_run_in_its_read_only_sandbox(self) -> None:
+        argv = self._audit_argv("codex", (Path("/evidence"), Path("/skills")))
+
+        self.assertEqual(["-s", "read-only"], argv[4:6])
+        self.assertIn("--skip-git-repo-check", argv)
+        # For codex ``--add-dir`` grants *write* access, so read roots must not
+        # be passed through it; its read-only sandbox already reads anywhere.
+        self.assertNotIn("--add-dir", argv)
+
+    def test_claude_audits_expose_only_read_and_search_tools(self) -> None:
+        argv = self._audit_argv("claude", (Path("/evidence"), Path("/skills")))
+
+        self.assertEqual(["--permission-mode", "plan"], argv[10:12])
+        self.assertEqual(
+            ["--tools", "Read,Glob,Grep", "--allowed-tools", "Read,Glob,Grep"],
+            argv[12:16],
+        )
+        self.assertEqual(
+            [
+                "Bash",
+                "Edit",
+                "Write",
+                "NotebookEdit",
+                "WebFetch",
+                "WebSearch",
+                "Task",
+                "TodoWrite",
+            ],
+            argv[argv.index("--disallowed-tools") + 1].split(","),
+        )
+        for flag in (
+            "--strict-mcp-config",
+            "--no-session-persistence",
+            "--disable-slash-commands",
+        ):
+            self.assertIn(flag, argv)
+        self.assertEqual(["/evidence", "/skills"], self._granted_dirs(argv))
+
+    def test_copilot_audits_deny_write_shell_and_url_access(self) -> None:
+        argv = self._audit_argv("copilot", (Path("/evidence"), Path("/skills")))
+
+        self.assertIn("--available-tools=view,rg,glob", argv)
+        for denied in ("write", "shell", "url"):
+            self.assertIn(f"--deny-tool={denied}", argv)
+        for flag in (
+            "--disable-builtin-mcps",
+            "--no-custom-instructions",
+            "--no-remote",
+            "--no-remote-export",
+            "--disallow-temp-dir",
+        ):
+            self.assertIn(flag, argv)
+        self.assertEqual(["/evidence", "/skills"], self._granted_dirs(argv))
+
+    def test_an_audit_invocation_refuses_worker_grants(self) -> None:
+        adapter = harnesses.get_adapter("codex")
+        audit = harnesses.audit_read_only_access((Path("/evidence"),))
+
+        with self.assertRaises(harnesses.HarnessError) as bypass:
+            adapter.build_invocation(
+                cwd=Path("/audit"),
+                plan_dir=None,
+                prompt="audit",
+                unsafe_bypass=True,
+                last_message_path=Path("/audit/last.txt"),
+                access=audit,
+            )
+        with self.assertRaises(harnesses.HarnessError) as writable:
+            adapter.build_invocation(
+                cwd=Path("/audit"),
+                plan_dir=Path("/plan"),
+                prompt="audit",
+                last_message_path=Path("/audit/last.txt"),
+                access=audit,
+            )
+
+        self.assertIn("unsafe bypass", str(bypass.exception))
+        self.assertIn("writable plan_dir", str(writable.exception))
+
+    def test_a_harness_that_cannot_enforce_the_profile_refuses_to_build(
+        self,
+    ) -> None:
+        self.addCleanup(
+            setattr, harnesses.CodexAdapter, "enforces_audit_read_only", True
+        )
+        harnesses.CodexAdapter.enforces_audit_read_only = False
+
+        with self.assertRaises(harnesses.HarnessError) as refused:
+            harnesses.get_adapter("codex").build_invocation(
+                cwd=Path("/audit"),
+                plan_dir=None,
+                prompt="audit",
+                last_message_path=Path("/audit/last.txt"),
+                access=harnesses.audit_read_only_access((Path("/evidence"),)),
+            )
+
+        self.assertIn("cannot enforce", str(refused.exception))
+        self.assertEqual(
+            "profile-unenforceable",
+            harnesses.audit_read_only_unavailable_reason("codex"),
+        )
 
 
 if __name__ == "__main__":
