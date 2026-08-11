@@ -32,6 +32,7 @@ import uuid
 
 from . import (
     agent_mux_delivery,
+    assurance_report,
     commit_groups,
     config,
     contracts,
@@ -4211,7 +4212,8 @@ def _run_finished_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
     Carries the run outcome, duration, session counts, review summary, and
     artifact references instead of duplicating the entire state payload (which
-    embeds every turn and, transitively, raw verification output).
+    embeds every turn and, transitively, raw verification output). The assurance
+    object is bounded the same way: issue IDs and counts, never findings.
     """
     counts: dict[str, Any] | None = None
     final_snapshot = payload.get("final_snapshot")
@@ -4246,6 +4248,8 @@ def _run_finished_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "review_reopen": payload.get("review_reopen"),
         "state_path": payload.get("state_path"),
         "events_path": payload.get("events_path"),
+        "assurance": payload.get("assurance"),
+        "assurance_report": payload.get("assurance_report"),
         **(
             {
                 "cwd": payload.get("cwd"),
@@ -7857,6 +7861,144 @@ def _finish_run(
         _notify_agent_mux_loop_finished(payload, persistence)
     if progress is not None:
         progress.run_finished(payload)
+
+
+#: The one ending that closes without an audit: a dry run rehearsed a loop and
+#: produced no run to audit. Every other persisted ending is a supervisor
+#: decision — a pause and an interruption most of all — and grading those is
+#: what the audit exists for.
+_UNAUDITED_TERMINAL_OUTCOMES = frozenset({"dry-run"})
+
+#: Assurance states a terminating run still owes an audit for. ``skipped`` is a
+#: settled decision to run no checks; anything else is already a verdict.
+_AUDITABLE_ASSURANCE_STATES = frozenset({"pending", "unavailable"})
+
+
+@dataclass(frozen=True)
+class _TerminalAuditContext:
+    """Everything the terminal audit needs, resolved once per run."""
+
+    plan: supervisor_audit.AuditPlan
+    run_dir: Path
+    state_dir: Path
+    plan_dir: Path
+    workspace_root: Path
+    #: The state root holding the one shared assurance ledger, not this plan's
+    #: state directory. ``None`` resolves to the default root.
+    ledger_state_dir: Path | None = None
+    inventory_excludes: tuple[str, ...] = ()
+
+
+def _terminal_outcome(payload: Mapping[str, Any]) -> str:
+    """Name the ending a terminating run reached.
+
+    ``all-complete`` covers two different endings an operator reads
+    differently: a run that did the plan's remaining work, and one that found
+    nothing left to do. The turn list is what separates them.
+    """
+    if payload.get("paused"):
+        return "paused"
+    reason = str(payload.get("reason") or "")
+    if reason == "dry-run":
+        return "dry-run"
+    if reason == "all-complete":
+        return "complete" if payload.get("turns") else "no-work"
+    return reason or "stopped"
+
+
+def _attach_terminal_assurance(
+    payload: dict[str, Any],
+    context: _TerminalAuditContext,
+    persistence: _RunPersistence,
+) -> None:
+    """Audit the run, publish the verdict, and attach the bounded summary.
+
+    A run that resolved no independent role starts ``unavailable`` and is still
+    audited, because the deterministic half needs no agent and the reason the
+    run could not be graded belongs in the shared inbox rather than only in its
+    own state.
+    """
+    assurance = payload.get("assurance")
+    if not isinstance(assurance, Mapping) or not assurance.get("eligible"):
+        return
+    if assurance.get("state") not in _AUDITABLE_ASSURANCE_STATES:
+        return
+    with persistence.lock:
+        state_payload = _compact_state_payload(payload)
+    try:
+        summary = supervisor_audit.audit_terminal_run(
+            context.plan,
+            run_id=str(payload.get("run_id")),
+            run_dir=context.run_dir,
+            state_dir=context.state_dir,
+            plan_dir=context.plan_dir,
+            workspace_root=context.workspace_root,
+            ledger_state_dir=context.ledger_state_dir,
+            state_payload=state_payload,
+            inventory_excludes=context.inventory_excludes,
+        )
+    except KeyboardInterrupt:
+        # Cancelling an advisory audit cancels the audit alone: the outcome and
+        # the exit code were decided before this ran, and the terminal record
+        # they belong to has still not been written.
+        summary = supervisor_audit.cancelled_summary(
+            context.plan, run_id=str(payload.get("run_id"))
+        )
+    with persistence.lock:
+        payload["assurance"] = summary.to_dict()
+
+
+def _attach_assurance_report(
+    payload: dict[str, Any],
+    context: _TerminalAuditContext,
+    persistence: _RunPersistence,
+) -> None:
+    """Attach the additive operator projection of this run's assurance object.
+
+    Written beside the assurance object rather than inside it: the per-run
+    object is a validated schema that rejects unknown keys, while this block is
+    a derived view whose open-issue count is a fact about the whole inbox at the
+    moment the run ended.
+    """
+    with persistence.lock:
+        assurance = payload.get("assurance")
+        run_dir = payload.get("run_dir")
+    report = assurance_report.build_run_report(
+        assurance,
+        run_dir=run_dir,
+        state_dir=context.ledger_state_dir,
+    )
+    if report is None:
+        return
+    with persistence.lock:
+        payload["assurance_report"] = report
+
+
+def _terminalize_run(
+    *,
+    outcome: str,
+    exit_code: int,
+    event_path: Path,
+    payload: dict[str, Any],
+    progress: _ProgressReporter | None = None,
+    persistence: _RunPersistence | None = None,
+    audit_context: _TerminalAuditContext | None = None,
+) -> int:
+    """Close one run: audit it, then finalize it. Returns ``exit_code`` as given.
+
+    The outcome and the exit code are decided before a run gets here, and this
+    coordinator changes neither — auditing is advisory, so an audit that fails
+    or finds something still leaves the run's own verdict alone. The audit runs
+    first so its artifacts and ledger records exist before ``run_finished``
+    carries the summary that names them; readiness, the terminal event, the
+    state projection, AgentMux, and the final output all follow unchanged.
+    """
+    if audit_context is not None and outcome not in _UNAUDITED_TERMINAL_OUTCOMES:
+        resolved_persistence = _run_persistence(persistence)
+        _attach_terminal_assurance(payload, audit_context, resolved_persistence)
+        _attach_assurance_report(payload, audit_context, resolved_persistence)
+    _finish_run(event_path, payload, progress, persistence=persistence)
+    return exit_code
 
 
 def _final_readiness_state_from_payload(
@@ -11535,6 +11677,21 @@ def _run_locked(
     workspace_inventory_excludes = (
         verification_context.workspace_inventory_excludes
     )
+    audit_context = _TerminalAuditContext(
+        plan=supervisor_audit.plan_audit(args),
+        run_dir=run_dir,
+        state_dir=state_dir,
+        plan_dir=snapshot.plan_dir,
+        workspace_root=(
+            cwd
+            if verification_context.workspace is None
+            else verification_context.workspace.root
+        ),
+        ledger_state_dir=(
+            None if args.state_dir is None else Path(args.state_dir)
+        ),
+        inventory_excludes=tuple(workspace_inventory_excludes),
+    )
 
     # Detect state stranded under a moved plan's old path hash *before* this
     # run writes its own state.json (which would suppress the scan). A scan
@@ -11622,6 +11779,29 @@ def _run_locked(
         state_dir=args.state_dir,
         output=output,
     )
+
+    def terminalize(exit_code: int) -> tuple[int, dict[str, Any]]:
+        """Close this run through the one coordinator every ending shares.
+
+        The refusals above the loop end runs as truly as the loop's own exits
+        do, so they terminalize here rather than finalizing on their own; the
+        exit code each one already decided passes through untouched.
+        """
+        with persistence.lock:
+            outcome = _terminal_outcome(payload)
+        return finish_run_locked(
+            _terminalize_run(
+                outcome=outcome,
+                exit_code=exit_code,
+                event_path=event_path,
+                payload=payload,
+                progress=progress,
+                persistence=persistence,
+                audit_context=audit_context,
+            ),
+            payload,
+        )
+
     persistence.append_event(
         event_path,
         "run_started",
@@ -11673,8 +11853,7 @@ def _run_locked(
             details=details,
             persistence=persistence,
         )
-        _finish_run(event_path, payload, progress, persistence=persistence)
-        return finish_run_locked(1, payload)
+        return terminalize(1)
 
     if commit_group_load_error is not None:
         with persistence.lock:
@@ -11687,8 +11866,7 @@ def _run_locked(
             details={"error": commit_group_load_error},
             persistence=persistence,
         )
-        _finish_run(event_path, payload, progress, persistence=persistence)
-        return finish_run_locked(1, payload)
+        return terminalize(1)
 
     if unresolved_commit_group is not None and args.dry_run:
         with persistence.lock:
@@ -11753,8 +11931,7 @@ def _run_locked(
                 },
                 persistence=persistence,
             )
-            _finish_run(event_path, payload, progress, persistence=persistence)
-            return finish_run_locked(1, payload)
+            return terminalize(1)
 
     review_requested = getattr(args, "review_harness", None) is not None
     max_review_fix_cycles = _max_review_fix_cycles(args)
@@ -11779,13 +11956,11 @@ def _run_locked(
                 details={"snapshot": _snapshot_payload(snapshot)},
                 persistence=persistence,
             )
-            _finish_run(event_path, payload, progress, persistence=persistence)
-            return finish_run_locked(1, payload)
+            return terminalize(1)
         if not review_requested:
             with persistence.lock:
                 payload["reason"] = "all-complete"
-            _finish_run(event_path, payload, progress, persistence=persistence)
-            return finish_run_locked(0, payload)
+            return terminalize(0)
 
     if not review_requested:
         pending_review = find_pending_generated_review_session(snapshot.plan_dir)
@@ -11806,8 +11981,7 @@ def _run_locked(
                 },
                 persistence=persistence,
             )
-            _finish_run(event_path, payload, progress, persistence=persistence)
-            return finish_run_locked(1, payload)
+            return terminalize(1)
 
     if args.dry_run:
         with persistence.lock:
@@ -11823,8 +11997,7 @@ def _run_locked(
                 reply_origin=reply_origin,
                 verification_context=verification_context,
             )
-        _finish_run(event_path, payload, progress, persistence=persistence)
-        return finish_run_locked(0, payload)
+        return terminalize(0)
 
     if (
         verification_context.workspace is not None
@@ -11846,8 +12019,7 @@ def _run_locked(
             },
             persistence=persistence,
         )
-        _finish_run(event_path, payload, progress, persistence=persistence)
-        return finish_run_locked(1, payload)
+        return terminalize(1)
 
     if (
         review_resume is not None
@@ -11968,8 +12140,7 @@ def _run_locked(
             details=details,
             persistence=persistence,
         )
-        _finish_run(event_path, payload, progress, persistence=persistence)
-        return finish_run_locked(1, payload)
+        return terminalize(1)
 
     non_bypassable = _non_bypassable_blockers(preflight_report)
     if non_bypassable:
@@ -11983,8 +12154,7 @@ def _run_locked(
             details={**gate_payload, "blocker": list(non_bypassable)},
             persistence=persistence,
         )
-        _finish_run(event_path, payload, progress, persistence=persistence)
-        return finish_run_locked(1, payload)
+        return terminalize(1)
 
     if (
         not gate_passed
@@ -12032,8 +12202,7 @@ def _run_locked(
                 details=gate_payload,
                 persistence=persistence,
             )
-            _finish_run(event_path, payload, progress, persistence=persistence)
-            return finish_run_locked(1, payload)
+            return terminalize(1)
 
     try:
         if commit_mode == COMMIT_MODE_END:
@@ -12063,8 +12232,7 @@ def _run_locked(
             },
             persistence=persistence,
         )
-        _finish_run(event_path, payload, progress, persistence=persistence)
-        return finish_run_locked(1, payload)
+        return terminalize(1)
 
     should_transition = gate_passed or (
         allow_not_loop_ready and preflight_report.readiness is not None
@@ -14511,15 +14679,14 @@ def _run_locked(
                 payload["review_skipped_reason"] = payload["reason"]
 
     run_controls.stop()
-    try:
-        _finish_run(event_path, payload, progress, persistence=persistence)
-    finally:
-        inline_tail.stop()
     with persistence.lock:
         exit_code = 0 if payload["ok"] else 1
         if payload.get("pause_reason") == "interrupted":
             exit_code = INTERRUPTED_EXIT
-    return finish_run_locked(exit_code, payload)
+    try:
+        return terminalize(exit_code)
+    finally:
+        inline_tail.stop()
 
 
 def _state_error_reason(error: state.StateError) -> tuple[str, bool]:
@@ -14736,6 +14903,8 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
     audit_line = supervisor_audit.status_line(payload.get("assurance"))
     if audit_line:
         print(audit_line)
+    for line in assurance_report.report_lines(payload.get("assurance_report")):
+        print(line)
 
     for session_number in payload["completed_sessions"]:
         print(f"Completed session {session_number}")

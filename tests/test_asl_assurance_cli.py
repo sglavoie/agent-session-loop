@@ -1,8 +1,9 @@
-"""Assurance CLI tests: browsing, dispositions, merges, and human closeouts."""
+"""Assurance CLI tests: browsing, dispositions, merges, closeouts, drafting."""
 
 from __future__ import annotations
 
-from contextlib import redirect_stderr, redirect_stdout
+import ast
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import hashlib
 import io
 import json
@@ -12,10 +13,12 @@ import unittest
 from unittest import mock
 
 from agent_session_loop import assurance_cli
+from agent_session_loop import assurance_draft as draft
 from agent_session_loop import assurance_ledger as ledger
 from agent_session_loop import assurance_models as models
 from agent_session_loop import assurance_projection as projection
 from agent_session_loop import cli
+from agent_session_loop import harnesses
 from agent_session_loop import state
 from agent_session_loop.assurance_projection import AuditPublication
 
@@ -864,6 +867,655 @@ class AssuranceCloseoutTests(AssuranceCliTestCase):
 
         self.assertEqual(0, code)
         self.assertIn("Supersedes the closeout on ledger line", out)
+
+
+class AssuranceProcessPendingTests(AssuranceCliTestCase):
+    """The one command here that runs a harness, and what it refuses to run."""
+
+    def seed_pending_run(
+        self,
+        plan_name: str,
+        run_id: str,
+        *,
+        skip: str | None = state.ASSURANCE_SKIP_PREDATES,
+    ) -> Path:
+        """Record that one run of ``plan_name`` died still owing an audit."""
+        plan_dir = self.seed_run_directory(plan_name, run_id)
+        run_dir = (
+            state.plan_state_dir(plan_dir, self.state_dir)
+            / state.RUNS_DIR_NAME
+            / run_id
+        )
+        (run_dir / state.ASSURANCE_PENDING_FILE_NAME).write_text(
+            json.dumps(
+                {
+                    "schema_version": state.ASSURANCE_PENDING_SCHEMA_VERSION,
+                    "run_id": run_id,
+                    "recorded_at": TIMESTAMP,
+                    "trigger": "test",
+                    "skip": skip,
+                    "plan_dir": str(plan_dir),
+                    "workspace_root": str(plan_dir),
+                    "run_config": {"harness": "codex", "audit_harness": "claude"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return plan_dir
+
+    def test_process_pending_is_wired_with_documented_defaults(self) -> None:
+        args = self.parser.parse_args(["assurance", "process-pending"])
+
+        self.assertEqual(
+            "assurance_cli:assurance_process_pending_from_args", args.handler_ref
+        )
+        self.assertIs(
+            cli.resolve_handler(args),
+            assurance_cli.assurance_process_pending_from_args,
+        )
+        self.assertIsNone(args.limit)
+        self.assertIsNone(args.run_id)
+        self.assertIsNone(args.plan)
+        self.assertIsNone(args.audit_harness)
+        self.assertIsNone(args.audit_timeout)
+        self.assertFalse(args.json)
+
+    def test_an_empty_corpus_has_no_backlog_rather_than_an_error(self) -> None:
+        code, out, err = self.run_cli(["assurance", "process-pending"])
+
+        self.assertEqual(0, code, err)
+        self.assertIn("No run is recorded as owing an audit.", out)
+        self.assertFalse(self.ledger_path.exists())
+
+    def test_history_that_predates_auditing_is_reported_never_audited(self) -> None:
+        self.seed_pending_run("alpha", RUN_ID)
+
+        code, payload, err = self.run_json(["assurance", "process-pending"])
+
+        self.assertEqual(0, code, err)
+        self.assertEqual(1, payload["candidate_count"])
+        self.assertEqual(0, payload["audited_count"])
+        self.assertEqual(20, payload["limit"])
+        self.assertEqual(
+            [
+                {
+                    "run_id": RUN_ID,
+                    "outcome": "skipped",
+                    "plan_id": "alpha",
+                    "state": None,
+                    "reason": state.ASSURANCE_SKIP_PREDATES,
+                    "issue_ids": [],
+                }
+            ],
+            payload["results"],
+        )
+        self.assertFalse(self.ledger_path.exists())
+
+    def test_the_text_form_names_the_run_and_what_became_of_it(self) -> None:
+        self.seed_pending_run("alpha", RUN_ID)
+
+        code, out, err = self.run_cli(["assurance", "process-pending"])
+
+        self.assertEqual(0, code, err)
+        self.assertIn("1 recorded, 0 audited (limit 20)", out)
+        self.assertIn(RUN_ID, out)
+        self.assertIn(state.ASSURANCE_SKIP_PREDATES, out)
+
+    def test_a_non_positive_limit_is_refused_before_anything_runs(self) -> None:
+        self.seed_pending_run("alpha", RUN_ID)
+
+        code, out, err = self.run_cli(["assurance", "process-pending", "--limit", "0"])
+
+        self.assertEqual(1, code)
+        self.assertEqual("", out)
+        self.assertIn("--limit must be a positive integer; got 0", err)
+
+    def test_a_non_positive_audit_timeout_is_refused(self) -> None:
+        code, payload, _ = self.run_json(
+            ["assurance", "process-pending", "--audit-timeout", "0"]
+        )
+
+        self.assertEqual(1, code)
+        self.assertEqual("input-error", payload["reason"])
+
+    def test_a_run_with_no_recorded_debt_is_refused(self) -> None:
+        code, payload, _ = self.run_json(
+            ["assurance", "process-pending", "--run-id", RUN_ID]
+        )
+
+        self.assertEqual(1, code)
+        self.assertEqual("unknown-run", payload["reason"])
+        self.assertIn("has no recorded pending audit", payload["error"])
+
+    def test_one_run_id_under_two_plans_is_refused_rather_than_guessed(self) -> None:
+        self.seed_pending_run("alpha", RUN_ID)
+        self.seed_pending_run("beta", RUN_ID)
+
+        code, out, err = self.run_cli(
+            ["assurance", "process-pending", "--run-id", RUN_ID]
+        )
+
+        self.assertEqual(1, code)
+        self.assertEqual("", out)
+        self.assertIn("names a pending audit under 2 plans", err)
+        self.assertIn("pass --plan PLAN_DIR_OR_ID", err)
+
+    def test_a_plan_narrows_the_pass_to_its_own_runs(self) -> None:
+        plan_dir = self.seed_pending_run("alpha", RUN_ID)
+        self.seed_pending_run("beta", OTHER_RUN_ID)
+
+        code, payload, err = self.run_json(
+            ["assurance", "process-pending", "--plan", str(plan_dir)]
+        )
+
+        self.assertEqual(0, code, err)
+        self.assertEqual([RUN_ID], [row["run_id"] for row in payload["results"]])
+
+
+DRAFT_SECTIONS: dict[str, str] = {
+    "Summary": "Clamp the retry counter before the relaunch decision is made.",
+    "Problem and Evidence": (
+        "supervisor-audit.md records a fourth attempt under a budget of three."
+    ),
+    "Proposed Changes": (
+        "Move the budget check above the relaunch branch in runner.py."
+    ),
+    "Test Plan": "Assert the fourth attempt never starts once the budget is spent.",
+    "Assumptions": "The recorded budget is the one the run actually started with.",
+}
+
+
+def _draft_document(sections: dict[str, str] | None = None) -> str:
+    body = "\n\n".join(
+        f"## {name}\n\n{text}"
+        for name, text in (DRAFT_SECTIONS if sections is None else sections).items()
+    )
+    return f"# Proposal for ASI-1\n\n{body}\n"
+
+
+class AssurancePlanTests(AssuranceCliTestCase):
+    """Drafting a proposal, and everything drafting refuses to do."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.output = Path(self._tmp.name) / "proposal.md"
+
+    # -- fixtures ---------------------------------------------------------
+
+    @contextmanager
+    def drafting(
+        self,
+        *,
+        unavailable: str | None = None,
+        last_message: str | None = None,
+        returncode: int = 0,
+        timed_out: bool = False,
+        during: object = None,
+    ):
+        """Run drafting against a harness that answers without being installed."""
+        calls: list[dict] = []
+        text = _draft_document() if last_message is None else last_message
+
+        def fake_run_harness(name, **kwargs):
+            calls.append({"name": name, **kwargs})
+            if during is not None:
+                during()
+            return harnesses.HarnessResult(
+                argv=[name],
+                returncode=returncode,
+                stdout="",
+                stderr="",
+                last_message=text,
+                name=name,
+                timed_out=timed_out,
+            )
+
+        with mock.patch.object(harnesses, "run_harness", fake_run_harness), (
+            mock.patch.object(
+                harnesses,
+                "audit_read_only_unavailable_reason",
+                return_value=unavailable,
+            )
+        ):
+            yield calls
+
+    def plan_argv(self, issue: str = "ASI-1", **flags: str) -> list[str]:
+        argv = [
+            "assurance",
+            "plan",
+            issue,
+            "--harness",
+            "claude",
+            "--output",
+            str(self.output),
+        ]
+        for name, value in flags.items():
+            argv.extend([f"--{name.replace('_', '-')}", value])
+        return argv
+
+    def drafted_plans(self, issue_id: str) -> tuple[models.ImprovementPlanDraft, ...]:
+        issue = self.inbox().issue(issue_id)
+        assert issue is not None
+        return issue.plans
+
+    # -- wiring -----------------------------------------------------------
+
+    def test_plan_subcommand_is_wired_with_documented_defaults(self) -> None:
+        args = self.parser.parse_args(
+            ["assurance", "plan", "ASI-1", "--harness", "claude", "--output", "p.md"]
+        )
+
+        self.assertEqual("assurance_cli:assurance_plan_from_args", args.handler_ref)
+        self.assertIs(
+            cli.resolve_handler(args), assurance_cli.assurance_plan_from_args
+        )
+        self.assertEqual("ASI-1", args.issue)
+        self.assertEqual("claude", args.harness)
+        self.assertEqual("p.md", args.output)
+        self.assertIsNone(args.harness_model)
+        self.assertIsNone(args.effort)
+        self.assertIsNone(args.timeout)
+        self.assertFalse(args.json)
+
+    def test_a_proposal_needs_a_harness_and_somewhere_to_put_it(self) -> None:
+        for argv in (
+            ["assurance", "plan", "ASI-1", "--output", "p.md"],
+            ["assurance", "plan", "ASI-1", "--harness", "claude"],
+            ["assurance", "plan", "--harness", "claude", "--output", "p.md"],
+        ):
+            with self.subTest(argv=argv):
+                with redirect_stderr(io.StringIO()), self.assertRaises(
+                    SystemExit
+                ) as raised:
+                    self.parser.parse_args(argv)
+                self.assertEqual(2, raised.exception.code)
+
+    # -- the drafted proposal ---------------------------------------------
+
+    def test_a_valid_reply_becomes_the_proposal_and_then_a_record(self) -> None:
+        self.open_three_issues()
+
+        with self.drafting():
+            code, payload, err = self.run_json(self.plan_argv())
+
+        self.assertEqual(0, code, err)
+        document = self.output.read_bytes()
+        self.assertEqual(_draft_document(), document.decode("utf-8"))
+        self.assertEqual(hashlib.sha256(document).hexdigest(), payload["output_sha256"])
+        self.assertEqual(len(document), payload["byte_count"])
+        self.assertEqual("ASI-1", payload["issue_id"])
+        self.assertFalse(payload["merged"])
+
+        plans = self.drafted_plans("ASI-1")
+        self.assertEqual(1, len(plans))
+        self.assertEqual(str(self.output), plans[0].output_path)
+        self.assertEqual(payload["output_sha256"], plans[0].output_sha256)
+        self.assertEqual("claude", plans[0].harness)
+
+    def test_the_record_is_appended_only_after_the_file_is_durable(self) -> None:
+        self.open_three_issues()
+        observed: dict[str, object] = {}
+        real = projection.record_improvement_plan_draft
+
+        def spy(plan, **kwargs):
+            path = Path(plan.output_path)
+            observed["exists"] = path.exists()
+            observed["digest"] = hashlib.sha256(path.read_bytes()).hexdigest()
+            return real(plan, **kwargs)
+
+        with self.drafting(), mock.patch.object(
+            projection, "record_improvement_plan_draft", spy
+        ):
+            code, payload, err = self.run_json(self.plan_argv())
+
+        self.assertEqual(0, code, err)
+        self.assertTrue(observed["exists"])
+        self.assertEqual(payload["output_sha256"], observed["digest"])
+
+    def test_a_failed_append_keeps_the_proposal_and_names_where_it_landed(
+        self,
+    ) -> None:
+        self.open_three_issues()
+        failure = ledger.LedgerError(
+            ledger.ERROR_LEDGER_WRITE, "the ledger is read-only"
+        )
+
+        with self.drafting(), mock.patch.object(
+            projection, "record_improvement_plan_draft", side_effect=failure
+        ):
+            code, payload, _ = self.run_json(self.plan_argv())
+
+        self.assertEqual(1, code)
+        self.assertEqual("ledger-write-failed", payload["reason"])
+        self.assertIn(str(self.output), payload["error"])
+        self.assertTrue(self.output.exists())
+        self.assertEqual((), self.drafted_plans("ASI-1"))
+
+    def test_a_proposal_for_a_merged_id_is_recorded_against_its_owner(self) -> None:
+        self.open_three_issues()
+        self.run_cli(["assurance", "merge", "ASI-1", "ASI-2"])
+
+        with self.drafting():
+            code, payload, err = self.run_json(self.plan_argv("ASI-1"))
+
+        self.assertEqual(0, code, err)
+        self.assertEqual("ASI-1", payload["requested_issue_id"])
+        self.assertEqual("ASI-2", payload["issue_id"])
+        self.assertTrue(payload["merged"])
+        self.assertEqual(1, len(self.drafted_plans("ASI-2")))
+
+    def test_show_reports_the_proposal_that_was_drafted(self) -> None:
+        self.open_three_issues()
+
+        with self.drafting():
+            self.run_cli(self.plan_argv())
+        code, out, err = self.run_cli(["assurance", "show", "ASI-1"])
+
+        self.assertEqual(0, code, err)
+        self.assertIn("Improvement plans", out)
+        self.assertIn(str(self.output), out)
+
+    def test_text_and_json_agree_about_the_proposal(self) -> None:
+        self.open_three_issues()
+
+        with self.drafting():
+            code, out, err = self.run_cli(self.plan_argv())
+        self.assertEqual(0, code, err)
+
+        plan = self.drafted_plans("ASI-1")[0]
+        self.assertIn("Issue: ASI-1", out)
+        self.assertIn(str(self.output), out)
+        self.assertIn(plan.output_sha256, out)
+        self.assertIn("claude", out)
+        self.assertIn("Nothing was implemented", out)
+
+    # -- what drafting refuses --------------------------------------------
+
+    def test_an_unknown_issue_is_refused_before_a_harness_runs(self) -> None:
+        self.open_three_issues()
+
+        with self.drafting() as calls:
+            code, payload, _ = self.run_json(self.plan_argv("ASI-99"))
+
+        self.assertEqual(1, code)
+        self.assertEqual("unknown-issue", payload["reason"])
+        self.assertEqual([], calls)
+        self.assertFalse(self.output.exists())
+
+    def test_an_unusable_issue_id_is_refused_before_the_ledger_is_read(self) -> None:
+        with self.drafting() as calls:
+            code, payload, _ = self.run_json(self.plan_argv("not-an-id"))
+
+        self.assertEqual(1, code)
+        self.assertEqual("invalid-issue-id", payload["reason"])
+        self.assertEqual([], calls)
+
+    def test_an_existing_output_path_is_never_overwritten(self) -> None:
+        self.open_three_issues()
+        self.output.write_text("a proposal a human is reading\n", encoding="utf-8")
+
+        with self.drafting() as calls:
+            code, payload, _ = self.run_json(self.plan_argv())
+
+        self.assertEqual(1, code)
+        self.assertEqual("output-exists", payload["reason"])
+        self.assertEqual(
+            "a proposal a human is reading\n",
+            self.output.read_text(encoding="utf-8"),
+        )
+        self.assertEqual([], calls)
+        self.assertEqual((), self.drafted_plans("ASI-1"))
+
+    def test_an_output_path_with_no_directory_is_refused(self) -> None:
+        self.open_three_issues()
+        self.output = Path(self._tmp.name) / "nowhere" / "proposal.md"
+
+        with self.drafting() as calls:
+            code, payload, _ = self.run_json(self.plan_argv())
+
+        self.assertEqual(1, code)
+        self.assertEqual("output-unwritable", payload["reason"])
+        self.assertEqual([], calls)
+
+    def test_an_unknown_harness_is_refused(self) -> None:
+        self.open_three_issues()
+
+        with self.drafting() as calls:
+            code, payload, _ = self.run_json(
+                [
+                    "assurance",
+                    "plan",
+                    "ASI-1",
+                    "--harness",
+                    "nope",
+                    "--output",
+                    str(self.output),
+                ]
+            )
+
+        self.assertEqual(1, code)
+        self.assertEqual("input-error", payload["reason"])
+        self.assertEqual([], calls)
+
+    def test_a_harness_that_cannot_run_read_only_is_refused(self) -> None:
+        self.open_three_issues()
+
+        with self.drafting(unavailable="harness-not-installed") as calls:
+            code, payload, _ = self.run_json(self.plan_argv())
+
+        self.assertEqual(1, code)
+        self.assertEqual("harness-unavailable", payload["reason"])
+        self.assertIn("harness-not-installed", payload["error"])
+        self.assertEqual([], calls)
+        self.assertFalse(self.output.exists())
+
+    def test_a_non_positive_timeout_is_refused_before_anything_runs(self) -> None:
+        self.open_three_issues()
+
+        with self.drafting() as calls:
+            code, payload, _ = self.run_json(self.plan_argv(timeout="0"))
+
+        self.assertEqual(1, code)
+        self.assertEqual("input-error", payload["reason"])
+        self.assertEqual([], calls)
+
+    def test_a_timed_out_turn_writes_nothing(self) -> None:
+        self.open_three_issues()
+
+        with self.drafting(timed_out=True, returncode=124):
+            code, payload, _ = self.run_json(self.plan_argv(timeout="45"))
+
+        self.assertEqual(1, code)
+        self.assertEqual("timeout", payload["reason"])
+        self.assertIn("45 seconds", payload["error"])
+        self.assertFalse(self.output.exists())
+        self.assertEqual((), self.drafted_plans("ASI-1"))
+
+    def test_a_failed_turn_writes_nothing(self) -> None:
+        self.open_three_issues()
+
+        with self.drafting(returncode=3):
+            code, payload, _ = self.run_json(self.plan_argv())
+
+        self.assertEqual(1, code)
+        self.assertEqual("harness-failed", payload["reason"])
+        self.assertFalse(self.output.exists())
+
+    def test_a_reply_missing_a_required_section_is_not_a_proposal(self) -> None:
+        self.open_three_issues()
+        sections = dict(DRAFT_SECTIONS)
+        del sections["Test Plan"]
+
+        with self.drafting(last_message=_draft_document(sections)):
+            code, payload, _ = self.run_json(self.plan_argv())
+
+        self.assertEqual(1, code)
+        self.assertEqual("malformed-output", payload["reason"])
+        self.assertIn("Test Plan", payload["error"])
+        self.assertFalse(self.output.exists())
+        self.assertEqual((), self.drafted_plans("ASI-1"))
+
+    def test_an_empty_reply_is_not_a_proposal(self) -> None:
+        self.open_three_issues()
+
+        with self.drafting(last_message="   \n"):
+            code, payload, _ = self.run_json(self.plan_argv())
+
+        self.assertEqual(1, code)
+        self.assertEqual("malformed-output", payload["reason"])
+        self.assertFalse(self.output.exists())
+
+    def test_a_section_named_only_inside_a_code_fence_does_not_count(self) -> None:
+        self.open_three_issues()
+        sections = dict(DRAFT_SECTIONS)
+        sections["Proposed Changes"] = (
+            "```markdown\n## Test Plan\nnot a real section\n```"
+        )
+        del sections["Test Plan"]
+
+        with self.drafting(last_message=_draft_document(sections)):
+            code, payload, _ = self.run_json(self.plan_argv())
+
+        self.assertEqual(1, code)
+        self.assertEqual("malformed-output", payload["reason"])
+        self.assertIn("Test Plan", payload["error"])
+
+    def test_a_proposal_wrapped_in_one_fence_is_still_a_proposal(self) -> None:
+        self.open_three_issues()
+        fenced = f"```markdown\n{_draft_document()}```\n"
+
+        with self.drafting(last_message=fenced):
+            code, payload, err = self.run_json(self.plan_argv())
+
+        self.assertEqual(0, code, err)
+        self.assertEqual(
+            _draft_document(), self.output.read_text(encoding="utf-8")
+        )
+
+    # -- the boundary the draft rests on ----------------------------------
+
+    def test_the_turn_runs_read_only_from_a_throwaway_directory(self) -> None:
+        self.open_three_issues()
+
+        with self.drafting() as calls:
+            code, _, err = self.run_json(self.plan_argv())
+
+        self.assertEqual(0, code, err)
+        self.assertEqual(1, len(calls))
+        call = calls[0]
+        self.assertEqual("claude", call["name"])
+        self.assertIsNone(call["plan_dir"])
+        self.assertFalse(call["unsafe_bypass"])
+        self.assertEqual("audit-read-only", call["access"].name)
+        self.assertEqual(draft.DEFAULT_DRAFT_TIMEOUT_SECONDS, call["timeout"])
+        self.assertNotIn(self.state_dir, call["cwd"].parents)
+        self.assertEqual(
+            tuple(draft.draft_read_roots([])), call["access"].read_roots[-2:]
+        )
+
+    def test_the_prompt_carries_the_issue_and_forbids_running_anything(self) -> None:
+        self.open_three_issues()
+
+        with self.drafting() as calls:
+            self.run_json(self.plan_argv())
+
+        prompt = calls[0]["prompt"]
+        self.assertIn("ASI-1", prompt)
+        self.assertIn("retry.budget-respected", prompt)
+        self.assertIn(RUN_ID, prompt)
+        self.assertIn("asl run", prompt)
+        self.assertIn("any change refuses the draft outright", prompt)
+        for section in draft.REQUIRED_SECTIONS:
+            self.assertIn(f"- ## {section}", prompt)
+
+    def test_the_drafter_reads_the_run_directories_holding_its_evidence(self) -> None:
+        self.open_three_issues()
+        self.seed_run_directory("alpha", RUN_ID)
+
+        with self.drafting() as calls:
+            code, payload, err = self.run_json(self.plan_argv())
+
+        self.assertEqual(0, code, err)
+        self.assertEqual([RUN_ID], payload["evidence_run_ids"])
+        self.assertIn(RUN_ID, {Path(root).name for root in payload["read_roots"]})
+        self.assertEqual(
+            [Path(root) for root in payload["read_roots"]],
+            list(calls[0]["access"].read_roots),
+        )
+
+    def test_a_drafter_that_changed_a_read_only_root_is_disbelieved(self) -> None:
+        self.open_three_issues()
+        plan_dir = self.seed_run_directory("alpha", RUN_ID)
+        run_dir = (
+            state.plan_state_dir(plan_dir, self.state_dir)
+            / state.RUNS_DIR_NAME
+            / RUN_ID
+        )
+
+        def write_under_evidence() -> None:
+            (run_dir / "edited.txt").write_text("changed\n", encoding="utf-8")
+
+        with self.drafting(during=write_under_evidence):
+            code, payload, _ = self.run_json(self.plan_argv())
+
+        self.assertEqual(1, code)
+        self.assertEqual("mutation-detected", payload["reason"])
+        self.assertIn(str(run_dir), payload["error"])
+        self.assertFalse(self.output.exists())
+        self.assertEqual((), self.drafted_plans("ASI-1"))
+
+    def test_a_drafter_that_wrote_the_output_itself_is_disbelieved(self) -> None:
+        self.open_three_issues()
+
+        def write_the_output() -> None:
+            self.output.write_text("written by the agent\n", encoding="utf-8")
+
+        with self.drafting(during=write_the_output):
+            code, payload, _ = self.run_json(self.plan_argv())
+
+        self.assertEqual(1, code)
+        self.assertEqual("mutation-detected", payload["reason"])
+        self.assertIn(str(self.output), payload["error"])
+        self.assertEqual(
+            "written by the agent\n", self.output.read_text(encoding="utf-8")
+        )
+        self.assertEqual((), self.drafted_plans("ASI-1"))
+
+    def test_a_mutation_is_reported_ahead_of_the_exit_code(self) -> None:
+        self.open_three_issues()
+
+        with self.drafting(
+            returncode=1, during=lambda: self.output.write_text("x", encoding="utf-8")
+        ):
+            code, payload, _ = self.run_json(self.plan_argv())
+
+        self.assertEqual(1, code)
+        self.assertEqual("mutation-detected", payload["reason"])
+
+    def test_drafting_cannot_reach_the_commands_that_change_a_repository(self) -> None:
+        """The refusal to self-modify is enforced by the import graph, not a rule."""
+        tree = ast.parse(Path(draft.__file__).read_text(encoding="utf-8"))
+        siblings: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level:
+                if node.module is None:
+                    siblings.update(alias.name for alias in node.names)
+                else:
+                    siblings.add(node.module.split(".")[0])
+
+        self.assertEqual(
+            {
+                "assurance_ledger",
+                "assurance_models",
+                "assurance_projection",
+                "harnesses",
+                "state",
+            },
+            siblings,
+        )
+        source = Path(draft.__file__).read_text(encoding="utf-8")
+        for forbidden in ("subprocess", "git_ops", "runner", "plans", "authoring"):
+            self.assertNotIn(f"import {forbidden}", source)
 
 
 if __name__ == "__main__":

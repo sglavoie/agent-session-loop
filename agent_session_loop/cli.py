@@ -1524,6 +1524,113 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         handler_ref="assurance_cli:assurance_closeout_from_args",
     )
 
+    assurance_pending_parser = assurance_sub.add_parser(
+        "process-pending",
+        help="Audit runs whose own process died before it could audit them.",
+    )
+    assurance_pending_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="RUNS",
+        help="Maximum runs to audit in this pass (default: 20)",
+    )
+    assurance_pending_parser.add_argument(
+        "--run-id",
+        metavar="RUN_ID",
+        help="Audit only this run, even if its record says to skip it",
+    )
+    assurance_pending_parser.add_argument(
+        "--plan",
+        metavar="PLAN_DIR_OR_ID",
+        help="Restrict the pass to one plan's runs",
+    )
+    assurance_pending_parser.add_argument(
+        "--audit-harness",
+        metavar="NAME",
+        help="Audit harness to use instead of the one the dead run recorded",
+    )
+    assurance_pending_parser.add_argument(
+        "--audit-harness-model",
+        metavar="MODEL",
+        help="Audit harness model to use instead of the recorded one",
+    )
+    assurance_pending_parser.add_argument(
+        "--audit-effort",
+        metavar="LEVEL",
+        help="Audit reasoning effort to use instead of the recorded one",
+    )
+    assurance_pending_parser.add_argument(
+        "--audit-timeout",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="Audit turn timeout to use instead of the recorded one",
+    )
+    assurance_pending_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    assurance_pending_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    assurance_pending_parser.set_defaults(
+        handler_ref="assurance_cli:assurance_process_pending_from_args",
+    )
+
+    assurance_plan_parser = assurance_sub.add_parser(
+        "plan",
+        help="Draft an improvement proposal for one issue, for a human to review.",
+    )
+    assurance_plan_parser.add_argument(
+        "issue",
+        metavar="ISSUE",
+        help="Issue to draft a proposal for (ASI-42 or 42)",
+    )
+    assurance_plan_parser.add_argument(
+        "--harness",
+        required=True,
+        metavar="NAME",
+        help="Harness that drafts the proposal, run read-only",
+    )
+    assurance_plan_parser.add_argument(
+        "--output",
+        required=True,
+        metavar="PATH",
+        help="Where to write the proposal; an existing path is refused",
+    )
+    assurance_plan_parser.add_argument(
+        "--harness-model",
+        metavar="MODEL",
+        help="Model the drafting harness should use",
+    )
+    assurance_plan_parser.add_argument(
+        "--effort",
+        metavar="LEVEL",
+        help="Reasoning effort for the drafting turn",
+    )
+    assurance_plan_parser.add_argument(
+        "--timeout",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="Drafting turn timeout (default: 600)",
+    )
+    assurance_plan_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    assurance_plan_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    assurance_plan_parser.set_defaults(
+        handler_ref="assurance_cli:assurance_plan_from_args",
+    )
+
     return parser
 
 

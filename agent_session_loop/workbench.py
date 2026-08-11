@@ -32,6 +32,7 @@ import tempfile
 from typing import Any, Literal
 
 from . import (
+    assurance_report,
     config,
     events,
     harnesses,
@@ -2194,6 +2195,10 @@ class WorkbenchSummary:
     searchable_text: str = ""
     recovery: dict[str, Any] = field(default_factory=dict)
     review_resume: dict[str, Any] = field(default_factory=dict)
+    #: Bounded, display-only projection of the last run's supervisor audit. The
+    #: Workbench reports what the audit found and where the inbox is; it has no
+    #: field with which to configure, launch, retry, or dispose of an audit.
+    assurance: dict[str, Any] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
 
     def to_payload(self) -> dict[str, Any]:
@@ -2218,6 +2223,7 @@ class WorkbenchSummary:
             "searchable_text": self.searchable_text,
             "recovery": dict(self.recovery),
             "review_resume": dict(self.review_resume),
+            "assurance": dict(self.assurance),
             "detail": self.detail,
             "next_pending_session_id": self.next_pending_session_id,
             "next_pending_session_path": (
@@ -4928,6 +4934,9 @@ def build_workbench_summary(
             searchable_text=searchable_text,
             recovery=recovery,
             review_resume=review_resume,
+            assurance=assurance_report.bounded_summary(
+                runner_state.get("assurance")
+            ),
             warnings=warnings,
         )
 

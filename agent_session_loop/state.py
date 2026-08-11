@@ -61,6 +61,22 @@ ABANDONED_NO_LOCK_GRACE_SECONDS = 120.0
 ABANDONED_REASON = "abandoned"
 ABANDONED_TRIGGER_LOCK_TAKEOVER = "lock-takeover"
 ABANDONED_TRIGGER_STATUS = "status"
+
+# Run-relative record naming a run whose own process died owing an audit. It
+# lives in the run directory rather than in `state.json` because the next run
+# of the same plan overwrites `state.json`, and it carries its own copy of the
+# run configuration so the audit role can still be resolved afterwards.
+ASSURANCE_PENDING_FILE_NAME = "assurance-pending.json"
+ASSURANCE_PENDING_SCHEMA_VERSION = 1
+# The run wrote no assurance object at all, so it comes from an ASL that had no
+# audit. Catch-up reports it rather than inventing a verdict for history.
+ASSURANCE_SKIP_PREDATES = "predates-assurance"
+# The run already reached a settled assurance state (a verdict, or an opt-out).
+ASSURANCE_SKIP_SETTLED = "audit-already-settled"
+# Assurance states that still owe an audit. Mirrors
+# ``runner._AUDITABLE_ASSURANCE_STATES``; kept as a literal here because state
+# must not import the runner.
+_ASSURANCE_OWED_STATES = frozenset({"pending", "unavailable"})
 WAITING_FOR_REPLY_STATUS_LIVE = "live"
 WAITING_FOR_REPLY_STATUS_EXPIRED = "expired"
 WAITING_FOR_REPLY_STATUS_INVALID = "invalid"
@@ -296,7 +312,7 @@ def _collect_plan_dir_strings(state_dir: Path) -> list[str]:
     return results
 
 
-def _iter_plan_state_dirs(state_root: Path) -> Iterator[Path]:
+def iter_plan_state_dirs(state_root: Path) -> Iterator[Path]:
     """Yield per-plan state directories under ``state_root``.
 
     A missing root scans as an empty corpus. A root that exists but is not a
@@ -342,7 +358,7 @@ def resolve_plan_reference(raw_value: str, state_root: Path) -> Path:
         return original
 
     matches: dict[str, Path] = {}
-    for state_dir in _iter_plan_state_dirs(state_root):
+    for state_dir in iter_plan_state_dirs(state_root):
         for raw_plan_dir in _collect_plan_dir_strings(state_dir):
             try:
                 candidate = plans.canonicalize_path(raw_plan_dir)
@@ -411,7 +427,7 @@ def find_run_locations(
     if plan_dir is not None:
         candidates = [plan_state_dir(plan_dir, state_dir)]
     else:
-        candidates = list(_iter_plan_state_dirs(root))
+        candidates = list(iter_plan_state_dirs(root))
     located: list[RunLocation] = []
     for candidate in candidates:
         try:
@@ -1323,9 +1339,110 @@ def _abandoned_event_payload(
         "state_path": str(state_path),
         "events_path": str(events_path),
         "abandoned": payload.get("abandoned"),
+        "assurance_pending": payload.get("assurance_pending"),
         "synthetic": True,
         "outcome": events.RUN_OUTCOME_ABANDONED,
     }
+
+
+def _assurance_skip_reason(state_obj: dict[str, Any]) -> str | None:
+    """Say why catch-up must not audit this run, or ``None`` when it should.
+
+    A run that recorded no assurance object at all predates auditing entirely,
+    and silently auditing it would flood the shared inbox with history nobody
+    asked about. A run that already reached a verdict, or opted out, has
+    already been decided. Only a run that was eligible and still owed an audit
+    is catch-up's to run.
+    """
+    assurance = state_obj.get("assurance")
+    if not isinstance(assurance, dict):
+        return ASSURANCE_SKIP_PREDATES
+    if not assurance.get("eligible"):
+        return ASSURANCE_SKIP_SETTLED
+    if assurance.get("state") not in _ASSURANCE_OWED_STATES:
+        return ASSURANCE_SKIP_SETTLED
+    return None
+
+
+def _assurance_pending_record(
+    state_obj: dict[str, Any],
+    *,
+    plan_state_dir_path: Path,
+    run_id: str,
+    trigger: str,
+    detected_at: str,
+) -> dict[str, Any]:
+    """Describe the audit an abandoned run still owes, self-contained.
+
+    Everything an audit needs is copied in rather than referenced, because the
+    next run of this plan rewrites ``state.json`` and would otherwise take the
+    dead run's harness selection and workspace binding with it.
+    """
+    raw_config = state_obj.get("run_config")
+    run_config = raw_config if isinstance(raw_config, dict) else {}
+    # A workspace run binds its root explicitly; a legacy single-repository run
+    # only ever recorded the working directory it audited from.
+    workspace_root = next(
+        (
+            value
+            for value in (
+                _nonempty_str(state_obj.get("workspace_root")),
+                _nonempty_str(run_config.get("workspace_root")),
+                _nonempty_str(state_obj.get("cwd")),
+                _nonempty_str(run_config.get("cwd")),
+            )
+            if value is not None
+        ),
+        None,
+    )
+    return {
+        "schema_version": ASSURANCE_PENDING_SCHEMA_VERSION,
+        "run_id": run_id,
+        "recorded_at": detected_at,
+        "trigger": trigger,
+        "outcome": events.RUN_OUTCOME_ABANDONED,
+        "skip": _assurance_skip_reason(state_obj),
+        "plan_dir": _nonempty_str(state_obj.get("plan_dir")),
+        "state_dir": str(plan_state_dir_path),
+        "run_dir": str(plan_state_dir_path / RUNS_DIR_NAME / run_id),
+        "workspace_root": workspace_root,
+        "run_config": run_config or None,
+    }
+
+
+def _write_assurance_pending_record(
+    plan_state_dir_path: Path,
+    payload: dict[str, Any],
+    *,
+    run_id: str,
+    trigger: str,
+    detected_at: str,
+) -> dict[str, Any] | None:
+    """Write the pending-audit record beside the abandoned run's artifacts.
+
+    Best effort like everything else on this path: an unwritable run directory
+    costs the catch-up audit, not the terminal record that proves the run
+    ended. Returns the record so the same facts ride the terminal state and
+    event rather than being derived twice.
+    """
+    record = _assurance_pending_record(
+        payload,
+        plan_state_dir_path=plan_state_dir_path,
+        run_id=run_id,
+        trigger=trigger,
+        detected_at=detected_at,
+    )
+    try:
+        run_dir = Path(record["run_dir"])
+        run_dir.mkdir(parents=True, exist_ok=True)
+        artifacts.atomic_write_bytes(
+            run_dir / ASSURANCE_PENDING_FILE_NAME,
+            json.dumps(record, sort_keys=True).encode("utf-8") + b"\n",
+            durable=True,
+        )
+    except OSError:
+        return None
+    return record
 
 
 @contextmanager
@@ -1434,6 +1551,25 @@ def mark_run_abandoned(
                     },
                 }
             )
+            # The audit this run never ran is recorded, never launched: this
+            # code path runs inside `asl status` and inside lock acquisition,
+            # and neither may block on a harness.
+            record = _write_assurance_pending_record(
+                plan_state_dir_path,
+                payload,
+                run_id=run_id,
+                trigger=trigger,
+                detected_at=detected_at,
+            )
+            if record is not None:
+                payload["assurance_pending"] = {
+                    "run_id": run_id,
+                    "recorded_at": detected_at,
+                    "skip": record["skip"],
+                    "path": str(
+                        Path(record["run_dir"]) / ASSURANCE_PENDING_FILE_NAME
+                    ),
+                }
             events_path = plan_state_dir_path / events.EVENTS_FILE_NAME
             artifacts.atomic_write_bytes(
                 state_path, _dump_state_bytes(payload), durable=True
@@ -1516,7 +1652,7 @@ def orphaned_state_candidates(
     if (plan_state / events.STATE_FILE_NAME).exists():
         return []
     try:
-        state_dirs = list(_iter_plan_state_dirs(root))
+        state_dirs = list(iter_plan_state_dirs(root))
     except StateError:
         return []
     candidates: list[dict[str, Any]] = []
@@ -1584,10 +1720,11 @@ def status_payload(
     snapshot: plans.PlanSnapshot,
     state_dir: str | Path | None = None,
 ) -> dict[str, Any]:
-    # Local import avoids a module cycle: repair planning depends on state for
-    # its mutating materializer, while this status path only uses its read-only
-    # continuation evaluator after state has finished importing.
-    from . import review_continuation
+    # Local imports avoid module cycles: repair planning depends on state for
+    # its mutating materializer, and the assurance ledger depends on state for
+    # its root, while this status path only uses their read-only projections
+    # after state has finished importing. Neither can launch an audit.
+    from . import assurance_report, review_continuation
 
     plan_state = plan_state_dir(snapshot.plan_dir, state_dir)
     state_path = plan_state / events.STATE_FILE_NAME
@@ -1620,6 +1757,16 @@ def status_payload(
     review_resume = review_continuation.evaluate_review_continuation(
         snapshot, event_path
     ).to_payload()
+    run_id = runner_state.get("run_id")
+    assurance_projection_payload = assurance_report.build_run_report(
+        runner_state.get("assurance"),
+        run_dir=(
+            plan_state / RUNS_DIR_NAME / str(run_id)
+            if isinstance(run_id, str) and run_id
+            else None
+        ),
+        state_dir=state_dir,
+    )
     workspace_fields = {
         key: runner_state.get(key)
         for key in (
@@ -1704,6 +1851,8 @@ def status_payload(
         lock=_lock_payload(lock_info, lock_path),
         progress_journal=progress_journal,
         review_resume=review_resume,
+        assurance=runner_state.get("assurance"),
+        assurance_report=assurance_projection_payload,
         orphaned_state_candidates=orphaned_state_candidates(snapshot, state_dir),
         next_command=_next_command(snapshot),
         **cwd_fields,
@@ -1761,6 +1910,18 @@ def _print_text_status(payload: dict[str, Any]) -> None:
                 f"Run state: abandoned (detected {detected_at} "
                 f"by {trigger}: {lock_reason})"
             )
+
+    # Reported, never produced: this prints what the last run's audit already
+    # recorded and what the shared inbox already holds.
+    from . import assurance_report
+
+    audit_line = assurance_report.status_line(
+        payload.get("runner_state", {}).get("assurance")
+    )
+    if audit_line:
+        print(audit_line)
+    for line in assurance_report.report_lines(payload.get("assurance_report")):
+        print(line)
 
     mailbox_status = payload.get("mailbox")
     if isinstance(mailbox_status, dict):

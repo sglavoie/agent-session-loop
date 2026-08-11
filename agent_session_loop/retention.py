@@ -10,8 +10,12 @@ anything; :func:`run_gc` is the sole caller that deletes, and only when its
 ``apply`` argument is set. A run is reclaimable solely when its finish time can
 be read from its own turn artifacts and is at least ``max_age_days`` old, its
 plan directory carries no lock at all, it is not reported running by the scan
-``asl sessions`` uses, and it is not the newest run of its plan. Every run that
-cannot be dated is retained: a run whose age is unknown is never old enough.
+``asl sessions`` uses, it is not the newest run of its plan, and the assurance
+ledger could be read well enough to say whether an open issue pins it. Every run
+that cannot be dated is retained: a run whose age is unknown is never old
+enough. An unreadable ledger retains every run for the same reason — an empty
+pin set read off a ledger nobody could parse is an absence of knowledge, not an
+absence of pins, and deleting against it is unrecoverable.
 
 Every lock here is inspected through :func:`state.inspect_lock_info` and the
 running scan is asked not to reclaim, because the ordinary read path removes a
@@ -25,7 +29,7 @@ a deliberate ``asl unlock``.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -34,13 +38,15 @@ import shutil
 import sys
 from typing import Any
 
-from . import plans, session_overview, state
+from . import assurance_ledger, assurance_report, plans, session_overview, state
 
 
 __all__ = [
     "DEFAULT_MAX_AGE_DAYS",
     "RETAIN_PLAN_LOCKED",
     "RETAIN_LIVE_RUN",
+    "RETAIN_PIN_UNKNOWN",
+    "RETAIN_OPEN_ISSUE",
     "RETAIN_UNFINISHED",
     "RETAIN_UNDATED",
     "RETAIN_NEWEST_RUN",
@@ -51,6 +57,7 @@ __all__ = [
     "PlanGC",
     "GCReport",
     "live_run_keys",
+    "pinned_run_ids",
     "plan_retention",
     "corpus_retention",
     "run_gc",
@@ -64,6 +71,8 @@ DEFAULT_MAX_AGE_DAYS = 30.0
 # the one reported.
 RETAIN_PLAN_LOCKED = "plan-locked"
 RETAIN_LIVE_RUN = "live-run"
+RETAIN_PIN_UNKNOWN = "pin-unknown"
+RETAIN_OPEN_ISSUE = "open-issue"
 RETAIN_UNFINISHED = "unfinished"
 RETAIN_UNDATED = "undated"
 RETAIN_NEWEST_RUN = "newest-run"
@@ -268,6 +277,19 @@ def live_run_keys(state_dir: str | Path | None = None) -> frozenset[tuple[str, s
     )
 
 
+def pinned_run_ids(
+    state_dir: str | Path | None = None,
+) -> assurance_report.OpenIssueRuns:
+    """Return the run IDs an open assurance issue still needs the artifacts of.
+
+    An open issue points a human at the audit report that opened it, so
+    reclaiming that run's directory would leave the inbox naming evidence that
+    no longer exists. Closing the issue releases the pin; the ledger entry
+    survives either way, because the ledger is not a run artifact.
+    """
+    return assurance_report.open_issue_run_ids(state_dir)
+
+
 def _plan_report(
     *,
     plan_dir: Path,
@@ -276,6 +298,7 @@ def _plan_report(
     max_age_days: float,
     now: datetime,
     live_runs: frozenset[tuple[str, str]],
+    pinned: assurance_report.OpenIssueRuns,
 ) -> PlanRetention:
     cutoff = now - timedelta(days=max_age_days)
     locked = _lock_blocker(lock_info)
@@ -290,6 +313,15 @@ def _plan_report(
             reason, detail = RETAIN_PLAN_LOCKED, locked
         elif (str(plan_state), run_dir.name) in live_runs:
             reason, detail = RETAIN_LIVE_RUN, "run is currently executing"
+        elif not pinned.available:
+            reason = RETAIN_PIN_UNKNOWN
+            detail = (
+                "assurance ledger is unreadable, so no run can be shown free of "
+                f"an open issue: {pinned.error}"
+            )
+        elif run_dir.name in pinned.run_ids:
+            reason = RETAIN_OPEN_ISSUE
+            detail = "audit artifacts are referenced by an open assurance issue"
         elif problem[0]:
             reason, detail = problem
         elif run_dir.name == newest_name:
@@ -330,13 +362,18 @@ def plan_retention(
     max_age_days: float = DEFAULT_MAX_AGE_DAYS,
     now: datetime | None = None,
     live_runs: frozenset[tuple[str, str]] | None = None,
+    pinned: assurance_report.OpenIssueRuns | None = None,
 ) -> PlanRetention:
     """Project which of one plan's run directories the age cutoff would reclaim.
 
     ``now`` must be timezone-aware and defaults to the current UTC instant; a
     run is old enough when it finished at or before ``now - max_age_days``.
-    ``live_runs`` is computed from :func:`live_run_keys` when omitted; callers
-    scanning many plans pass one shared set so the running scan runs once.
+    ``live_runs`` and ``pinned`` are computed from :func:`live_run_keys` and
+    :func:`pinned_run_ids` when omitted; callers scanning many plans pass one
+    shared value of each so the running scan and the ledger read happen once.
+    ``pinned`` is the whole :class:`~assurance_report.OpenIssueRuns` rather than
+    its run IDs, so a caller cannot hand over the pins without the fact that
+    reading them succeeded.
     """
     if max_age_days < 0:
         raise ValueError("max_age_days must be non-negative")
@@ -348,6 +385,7 @@ def plan_retention(
         max_age_days=max_age_days,
         now=now if now is not None else datetime.now(timezone.utc),
         live_runs=live_runs if live_runs is not None else live_run_keys(state_dir),
+        pinned=pinned if pinned is not None else pinned_run_ids(state_dir),
     )
 
 
@@ -373,6 +411,7 @@ def corpus_retention(
     *,
     max_age_days: float = DEFAULT_MAX_AGE_DAYS,
     now: datetime | None = None,
+    pinned: assurance_report.OpenIssueRuns | None = None,
 ) -> CorpusRetention:
     """Project the age cutoff across every plan state directory in a state root.
 
@@ -386,6 +425,7 @@ def corpus_retention(
     root = state.state_root(state_dir)
     moment = now if now is not None else datetime.now(timezone.utc)
     live = live_run_keys(root)
+    pins = pinned if pinned is not None else pinned_run_ids(root)
     reports: list[PlanRetention] = []
     unresolved: list[str] = []
     for plan_state in session_overview._iter_state_plan_dirs(root):
@@ -401,6 +441,7 @@ def corpus_retention(
                 max_age_days=max_age_days,
                 now=moment,
                 live_runs=live,
+                pinned=pins,
             )
         )
     reports.sort(key=lambda report: report.plan_dir)
@@ -449,6 +490,7 @@ class GCReport:
     cutoff_at: str
     plans: tuple[PlanGC, ...]
     unresolved_state_dirs: tuple[str, ...]
+    assurance: dict[str, Any] = field(default_factory=dict)
 
     @property
     def run_count(self) -> int:
@@ -519,6 +561,7 @@ class GCReport:
             "failed_removal_count": self.failure_count,
             "retained_by_reason": self.retained_by_reason(),
             "unresolved_state_dirs": list(self.unresolved_state_dirs),
+            "assurance": dict(self.assurance),
             "plans": [entry.to_dict() for entry in self.plans],
         }
 
@@ -564,6 +607,49 @@ def _sweep_plan(report: PlanRetention, *, apply: bool) -> PlanGC:
     )
 
 
+def _present_run_ids(root: Path) -> set[str]:
+    """Return the run IDs that still have a directory somewhere under ``root``."""
+    present: set[str] = set()
+    for plan_state in session_overview._iter_state_plan_dirs(root):
+        for run_dir in session_overview._iter_run_dirs(plan_state):
+            present.add(run_dir.name)
+    return present
+
+
+def _assurance_payload(
+    pinned: assurance_report.OpenIssueRuns, *, root: Path
+) -> dict[str, Any]:
+    """Report what the inbox pinned and which of its references are already gone.
+
+    Missing references are always resolved against the whole state root, so a
+    plan-scoped sweep does not report another plan's runs as lost. A reference
+    that no longer resolves is stated rather than hidden: the ledger keeps the
+    issue's history whether or not the artifacts survive, and an operator
+    following the trail deserves to learn that up front.
+
+    ``collection_blocked`` states the fail-closed consequence of an unreadable
+    ledger up front, so a JSON consumer never has to infer it from an
+    ``available: false`` beside a pin count of zero.
+    """
+    payload: dict[str, Any] = {
+        # Structural, not a policy: the ledger sits directly under the state
+        # root and the sweep only ever removes ``runs/<run-id>/`` directories.
+        "ledger_path": str(assurance_ledger.ledger_path(root)),
+        "ledger_excluded": True,
+        "available": pinned.available,
+        "collection_blocked": not pinned.available,
+        "error": pinned.error,
+        "open_issue_count": pinned.open_issue_count,
+        "pinned_run_count": len(pinned.run_ids),
+        "missing_run_references": [],
+    }
+    if pinned.run_ids:
+        payload["missing_run_references"] = sorted(
+            pinned.run_ids - _present_run_ids(root)
+        )
+    return payload
+
+
 def run_gc(
     plan_dir: str | Path | None = None,
     *,
@@ -578,8 +664,15 @@ def run_gc(
     state directory under the resolved state root, which is the aggregate the
     corpus-wide dry run reports.
     """
+    root_path = state.state_root(state_dir)
+    pinned = pinned_run_ids(root_path)
     if plan_dir is None:
-        corpus = corpus_retention(state_dir, max_age_days=max_age_days, now=now)
+        corpus = corpus_retention(
+            state_dir,
+            max_age_days=max_age_days,
+            now=now,
+            pinned=pinned,
+        )
         scope = "corpus"
         root = corpus.state_root
         cutoff_at = corpus.cutoff_at
@@ -591,9 +684,10 @@ def run_gc(
             state_dir=state_dir,
             max_age_days=max_age_days,
             now=now,
+            pinned=pinned,
         )
         scope = "plan"
-        root = str(state.state_root(state_dir))
+        root = str(root_path)
         cutoff_at = report.cutoff_at
         reports = (report,)
         unresolved = ()
@@ -605,6 +699,7 @@ def run_gc(
         cutoff_at=cutoff_at,
         plans=tuple(_sweep_plan(report, apply=apply) for report in reports),
         unresolved_state_dirs=unresolved,
+        assurance=_assurance_payload(pinned, root=root_path),
     )
 
 
@@ -675,6 +770,28 @@ def _print_report(report: GCReport) -> None:
         print("Plans refused for a lock:")
         for plan_path, detail in locked:
             print(f"  {plan_path}: {detail}")
+
+    assurance = report.assurance
+    if assurance:
+        if not assurance["available"]:
+            print(
+                f"Assurance inbox: unreadable ({assurance['error']}); "
+                "collection is blocked and every run is retained under "
+                f"`{RETAIN_PIN_UNKNOWN}`"
+            )
+        else:
+            print(
+                f"Assurance inbox: {assurance['open_issue_count']} open issue(s) "
+                f"pinning {assurance['pinned_run_count']} run(s); ledger kept at "
+                f"{assurance['ledger_path']}"
+            )
+        missing = assurance["missing_run_references"]
+        if missing:
+            print(
+                f"Assurance inbox: {len(missing)} pinned run(s) no longer on disk: "
+                f"{', '.join(missing[:5])}"
+                f"{' …' if len(missing) > 5 else ''}"
+            )
 
     if report.applied:
         print(

@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import shutil
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
 import unittest
@@ -15,12 +17,14 @@ from agent_session_loop import cli
 from agent_session_loop import events
 from agent_session_loop import harnesses
 from agent_session_loop import plans
+from agent_session_loop import repository_evidence
 from agent_session_loop import run_flags
 from agent_session_loop import runner
 from agent_session_loop import state
 from agent_session_loop import supervisor_audit
 from agent_session_loop.assurance_models import (
     MAX_AUDIT_ATTEMPTS,
+    RUBRIC_LANES,
     AssuranceError,
     AuditRole,
 )
@@ -711,6 +715,87 @@ class AuditStateProjectionTests(unittest.TestCase):
             self.assertIsNone(payload["assurance"])
             self.assertIsNone(payload["supervisor_audit"])
 
+    def _audited_status(self, tmp: str) -> tuple[dict, Path]:
+        plan_dir = Path(tmp) / "plan"
+        state_dir = Path(tmp) / "state"
+        write_plan(plan_dir, ("pending",))
+        plan_state = state.plan_state_dir(plan_dir, state_dir)
+        plan_state.mkdir(parents=True, exist_ok=True)
+        (plan_state / events.STATE_FILE_NAME).write_text(
+            json.dumps(
+                {
+                    "run_id": RUN_ID,
+                    "harness": "codex",
+                    "assurance": {
+                        "run_id": RUN_ID,
+                        "state": "findings",
+                        "eligible": True,
+                        "issue_ids": ["ASI-1", "ASI-2"],
+                        "new_issue_count": 1,
+                        "recurring_issue_count": 1,
+                        "artifacts": [
+                            {"kind": "artifact", "locator": "run/supervisor-audit.json"}
+                        ],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return (
+            state.status_payload(plans.inspect_plan(plan_dir), state_dir),
+            plan_state,
+        )
+
+    def test_status_projects_the_audit_without_launching_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload, plan_state = self._audited_status(tmp)
+
+            report = payload["assurance_report"]
+            self.assertEqual("findings", payload["assurance"]["state"])
+            self.assertEqual(["ASI-1", "ASI-2"], report["issue_ids"])
+            self.assertEqual(1, report["new_issue_count"])
+            self.assertEqual(1, report["recurring_issue_count"])
+            self.assertFalse(report["partial"])
+            self.assertEqual(0, report["open_issue_count"])
+            self.assertEqual("asl assurance list", report["list_command"])
+            self.assertEqual(
+                str(plan_state / "runs" / RUN_ID / "supervisor-audit.json"),
+                report["report_path"],
+            )
+            json.dumps(payload)
+
+    def test_status_text_prints_the_audit_and_the_inbox(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload, _ = self._audited_status(tmp)
+
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                state._print_text_status(payload)
+            output = buffer.getvalue()
+
+            self.assertIn("Supervisor audit: findings", output)
+            self.assertIn(
+                "Assurance issues: 1 new, 1 recurring; ASI-1, ASI-2", output
+            )
+            self.assertIn("Assurance inbox: 0 open; `asl assurance list`", output)
+            self.assertIn("Assurance report: ", output)
+
+    def test_status_without_an_audit_prints_no_assurance_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+
+            payload = state.status_payload(
+                plans.inspect_plan(plan_dir), Path(tmp) / "state"
+            )
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                state._print_text_status(payload)
+
+            self.assertIsNone(payload["assurance"])
+            self.assertIsNone(payload["assurance_report"])
+            self.assertNotIn("Assurance", buffer.getvalue())
+
 
 #: Every flag that widens a harness beyond its default sandbox. None of them may
 #: appear in an audit invocation, whatever else the argv contains.
@@ -931,6 +1016,1293 @@ class RestrictedAuditTests(unittest.TestCase):
             self.assertEqual("unavailable", result.outcome)
             self.assertEqual("profile-unenforceable", result.reason)
             self.assertEqual([], fake.calls)
+
+
+class EvidenceBundleTests(unittest.TestCase):
+    """The audit input bundle is bounded, deterministic, and control-plane only."""
+
+    SECRET_ARGV = "ghp_AAAAAAAAAAAAAAAAAAAA"
+    SECRET_ENV = "ghp_BBBBBBBBBBBBBBBBBBBB"
+    SECRET_PASSWORD = "correct-horse-battery"
+    APPLICATION_SOURCE = "def transfer_funds(amount):\n    return amount * 2\n"
+
+    def _history(
+        self,
+        tmp: Path,
+        *,
+        stdout_bytes: int = 64,
+        event_count: int = 3,
+    ) -> tuple[Path, Path, Path, Path]:
+        workspace = tmp / "workspace"
+        init_git_repo(workspace / "app")
+        plan_dir = tmp / "plan"
+        plan_dir.mkdir()
+        state_dir = tmp / "state"
+        run_dir = state_dir / "runs" / RUN_ID
+        run_dir.mkdir(parents=True)
+
+        (plan_dir / "context.md").write_text("Plan context.\n", encoding="utf-8")
+        (plan_dir / "session-01.md").write_text(
+            "# Session 1\n\n"
+            f"{plans.READS_REPOSITORIES_PREFIX} app\n"
+            f"{plans.WRITES_REPOSITORIES_PREFIX} app\n",
+            encoding="utf-8",
+        )
+        (plan_dir / plans.PLAN_METADATA_FILE_NAME).write_text(
+            json.dumps({"version": 1, "workspace_root": str(workspace)}),
+            encoding="utf-8",
+        )
+
+        turn_dir = run_dir / "turn-0001-01"
+        turn_dir.mkdir()
+        (turn_dir / state.RESULT_FILE_NAME).write_text(
+            json.dumps(
+                {
+                    "ok": True,
+                    "returncode": 0,
+                    "invocation": {
+                        "name": "codex",
+                        "argv": ["codex", "--token", self.SECRET_ARGV, "-p", "go"],
+                        "cwd": str(workspace / "app"),
+                    },
+                    "stdout": self.APPLICATION_SOURCE,
+                    "diff": self.APPLICATION_SOURCE,
+                    "verification": {
+                        "checks": [{"name": "tests", "passed": True, "returncode": 0}]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (turn_dir / "stdout.log").write_text("o" * stdout_bytes, encoding="utf-8")
+        (turn_dir / "stderr.log").write_text("e\n", encoding="utf-8")
+        (turn_dir / "last-message.txt").write_text("Session done.\n", encoding="utf-8")
+
+        (state_dir / events.STATE_FILE_NAME).write_text(
+            json.dumps(
+                {
+                    "harness": "codex",
+                    "model": "gpt-5",
+                    "ok": True,
+                    "review_verdict": "approved",
+                    "repositories": [
+                        {
+                            "alias": "app",
+                            "path": str(workspace / "app"),
+                            "origin": "https://user:pw@github.com/owner/repo.git",
+                        }
+                    ],
+                    "run_config": {
+                        "env": {"GITHUB_TOKEN": self.SECRET_ENV},
+                        "password": self.SECRET_PASSWORD,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        with (state_dir / events.EVENTS_FILE_NAME).open("w", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "name": "run_started",
+                        "version": events.EVENT_SCHEMA_VERSION,
+                        "created_at": "2026-08-10T10:11:12Z",
+                        "payload": {"run_id": RUN_ID},
+                    }
+                )
+                + "\n"
+            )
+            for index in range(event_count):
+                handle.write(
+                    json.dumps(
+                        {
+                            "name": events.TURN_HEARTBEAT_EVENT,
+                            "version": events.EVENT_SCHEMA_VERSION,
+                            "created_at": "2026-08-10T10:11:13Z",
+                            "payload": {"run_id": RUN_ID, "index": index},
+                        }
+                    )
+                    + "\n"
+                )
+            handle.write(
+                json.dumps(
+                    {
+                        "name": events.RUN_FINISHED_EVENT,
+                        "version": events.EVENT_SCHEMA_VERSION,
+                        "created_at": "2026-08-10T10:11:14Z",
+                        "payload": {"run_id": RUN_ID, "ok": True},
+                    }
+                )
+                + "\n"
+            )
+        return workspace, plan_dir, state_dir, run_dir
+
+    def _collect(
+        self,
+        workspace: Path,
+        plan_dir: Path,
+        state_dir: Path,
+        run_dir: Path,
+        **overrides: object,
+    ) -> supervisor_audit.AuditInput:
+        return supervisor_audit.collect_audit_input(
+            run_id=RUN_ID,
+            run_dir=run_dir,
+            state_dir=state_dir,
+            plan_dir=plan_dir,
+            workspace_root=workspace,
+            **overrides,
+        )
+
+    def test_equivalent_histories_serialize_to_identical_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "history"
+            root.mkdir()
+            one = self._collect(*self._history(root))
+            shutil.rmtree(root)
+            root.mkdir()
+            two = self._collect(*self._history(root))
+
+            self.assertEqual(one.to_bytes(), two.to_bytes())
+            self.assertEqual(one.sha256, two.sha256)
+
+    def test_relocating_a_history_preserves_its_control_plane_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            one = self._collect(*self._history(Path(first))).payload
+            two = self._collect(*self._history(Path(second))).payload
+
+            for section in ("turns", "events", "scopes", "review", "status", "registry"):
+                self.assertEqual(one[section], two[section], section)
+
+    def test_collection_is_stable_across_repeated_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+
+            self.assertEqual(
+                self._collect(*history).to_bytes(), self._collect(*history).to_bytes()
+            )
+
+    def test_huge_logs_stay_under_the_serialized_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(
+                Path(tmp), stdout_bytes=4 * 1024 * 1024, event_count=20000
+            )
+
+            bundle = self._collect(*history)
+            payload = bundle.payload
+
+            self.assertLessEqual(
+                len(bundle.to_bytes()), supervisor_audit.AUDIT_INPUT_MAX_BYTES
+            )
+            self.assertTrue(
+                any(
+                    entry["section"] == "events"
+                    and entry["reason"] == supervisor_audit.REASON_SIZE_CAP
+                    for entry in payload["omissions"]
+                )
+            )
+            terminal = [
+                record
+                for record in payload["events"]["records"]
+                if record["name"] == events.RUN_FINISHED_EVENT
+            ]
+            self.assertEqual(1, len(terminal))
+
+    def test_shedding_keeps_the_terminal_record_before_heartbeats(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp), event_count=20000)
+
+            records = self._collect(*history).payload["events"]["records"]
+            names = {record["name"] for record in records}
+
+            self.assertIn(events.RUN_FINISHED_EVENT, names)
+            self.assertIn("run_started", names)
+
+    def test_application_source_and_diffs_are_excluded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = self._collect(*self._history(Path(tmp)))
+            text = bundle.to_bytes().decode("utf-8")
+
+            self.assertNotIn("transfer_funds", text)
+            self.assertIn(supervisor_audit.REASON_APPLICATION_CONTENT, text)
+
+    def test_credentials_never_reach_the_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = self._collect(*self._history(Path(tmp)))
+            text = bundle.to_bytes().decode("utf-8")
+
+            self.assertNotIn(self.SECRET_ARGV, text)
+            self.assertNotIn(self.SECRET_ENV, text)
+            self.assertNotIn(self.SECRET_PASSWORD, text)
+            self.assertNotIn("user:pw@", text)
+            self.assertIn("github.com/owner/repo", text)
+
+    def test_missing_artifacts_are_explicit_rather_than_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            (run_dir / "turn-0001-01" / "last-message.txt").unlink()
+
+            payload = self._collect(workspace, plan_dir, state_dir, run_dir).payload
+            last_message = payload["turns"][0]["last_message"]
+
+            self.assertFalse(last_message["available"])
+            self.assertEqual(supervisor_audit.REASON_MISSING, last_message["reason"])
+            self.assertTrue(
+                any(
+                    entry["reason"] == supervisor_audit.REASON_MISSING
+                    and entry["count"] >= 1
+                    and len(entry["sha256"]) == 64
+                    for entry in payload["omissions"]
+                )
+            )
+
+    def test_a_damaged_event_log_is_counted_and_digested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            with (state_dir / events.EVENTS_FILE_NAME).open(
+                "a", encoding="utf-8"
+            ) as handle:
+                handle.write("{not json\n")
+
+            payload = self._collect(workspace, plan_dir, state_dir, run_dir).payload
+
+            self.assertEqual(1, payload["events"]["summary"]["rejected_count"])
+            self.assertTrue(
+                any(
+                    entry["section"] == "events"
+                    and entry["reason"] == supervisor_audit.REASON_MALFORMED
+                    for entry in payload["omissions"]
+                )
+            )
+
+    def test_every_reference_resolves_inside_an_approved_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = self._collect(*self._history(Path(tmp)))
+            roots = set(bundle.payload["roots"])
+
+            self.assertTrue(bundle.evidence)
+            for reference in bundle.evidence:
+                self.assertIn(reference.locator.split("/", 1)[0], roots)
+
+    def test_paths_outside_the_approved_roots_are_withheld(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            result_path = run_dir / "turn-0001-01" / state.RESULT_FILE_NAME
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            result["invocation"]["cwd"] = "/etc/ssh/secret_config"
+            result_path.write_text(json.dumps(result), encoding="utf-8")
+
+            bundle = self._collect(workspace, plan_dir, state_dir, run_dir)
+            text = bundle.to_bytes().decode("utf-8")
+
+            self.assertNotIn("/etc/ssh/secret_config", text)
+            self.assertIn(supervisor_audit.REASON_OUTSIDE_APPROVED_ROOTS, text)
+
+    def test_repository_fingerprints_are_reported_as_not_recorded_when_absent(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._collect(*self._history(Path(tmp))).payload
+
+            self.assertFalse(payload["repository"]["available"])
+            self.assertEqual(
+                supervisor_audit.REASON_NOT_RECORDED, payload["repository"]["reason"]
+            )
+
+    def test_repository_fingerprints_are_copied_when_supplied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            snapshot = repository_evidence.capture_workspace_snapshot(
+                workspace, plan_dir
+            )
+
+            payload = self._collect(
+                workspace,
+                plan_dir,
+                state_dir,
+                run_dir,
+                workspace_snapshot=snapshot,
+            ).payload
+
+            self.assertTrue(payload["repository"]["available"])
+            self.assertIn("app", payload["repository"]["repositories"])
+
+    def test_the_bundle_writes_the_canonical_audit_input_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            bundle = self._collect(workspace, plan_dir, state_dir, run_dir)
+
+            written = bundle.write(run_dir, durable=False)
+
+            self.assertEqual(bundle.to_bytes(), written.read_bytes())
+            with self.assertRaises(AssuranceError):
+                bundle.write(run_dir, durable=False)
+
+    def test_scopes_and_versions_describe_the_control_plane(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._collect(*self._history(Path(tmp))).payload
+
+            self.assertEqual(
+                [{"session": "session-01", "available": True, "reads": ["app"], "writes": ["app"]}],
+                payload["scopes"]["sessions"],
+            )
+            self.assertTrue(payload["versions"]["package"]["available"])
+            self.assertEqual(
+                events.EVENT_SCHEMA_VERSION, payload["versions"]["event_schema_version"]
+            )
+
+
+class _RunHistoryFixture:
+    """One recorded run, shared by the deterministic and agent audit tests."""
+
+    MANIFEST = (
+        "# Manifest\n\n## Repositories\n\n"
+        "| Alias | Path | Origin |\n"
+        "| --- | --- | --- |\n"
+        "| app | app | https://example.invalid/app.git |\n"
+    )
+
+    def _history(self, tmp: Path) -> tuple[Path, Path, Path, Path]:
+        """Write one run whose every recorded artifact agrees with the others."""
+        workspace = tmp / "workspace"
+        init_git_repo(workspace / "app")
+        plan_dir = tmp / "plan"
+        plan_dir.mkdir()
+        state_dir = tmp / "state"
+        run_dir = state_dir / "runs" / RUN_ID
+        run_dir.mkdir(parents=True)
+
+        (plan_dir / "context.md").write_text("Plan context.\n", encoding="utf-8")
+        (plan_dir / "manifest.md").write_text(self.MANIFEST, encoding="utf-8")
+        (plan_dir / "session-01.md").write_text(
+            "# Session 1\n\n"
+            f"{plans.READS_REPOSITORIES_PREFIX} app\n"
+            f"{plans.WRITES_REPOSITORIES_PREFIX} app\n",
+            encoding="utf-8",
+        )
+        (plan_dir / plans.PLAN_METADATA_FILE_NAME).write_text(
+            json.dumps({"version": 1, "workspace_root": str(workspace)}),
+            encoding="utf-8",
+        )
+
+        turn_dir = run_dir / "turn-0001-01"
+        turn_dir.mkdir()
+        self._write_result(turn_dir, self._clean_result(workspace, turn_dir))
+        (turn_dir / "stdout.log").write_text("session complete\n", encoding="utf-8")
+        (turn_dir / "stderr.log").write_text("no warnings\n", encoding="utf-8")
+        (turn_dir / "last-message.txt").write_text("Session done.\n", encoding="utf-8")
+
+        self._write_state(state_dir, self._clean_state(workspace))
+        self._write_events(
+            state_dir,
+            [
+                ("run_started", {"run_id": RUN_ID}),
+                (events.TURN_HEARTBEAT_EVENT, {"run_id": RUN_ID, "index": 0}),
+                (events.RUN_FINISHED_EVENT, {"run_id": RUN_ID, "ok": True}),
+            ],
+        )
+        return workspace, plan_dir, state_dir, run_dir
+
+    def _clean_result(self, workspace: Path, turn_dir: Path) -> dict[str, object]:
+        return {
+            "ok": True,
+            "returncode": 0,
+            "timed_out": False,
+            "interrupted": False,
+            "session_kind": "implementation",
+            "artifact_dir": str(turn_dir),
+            "stdout_path": str(turn_dir / "stdout.log"),
+            "stderr_path": str(turn_dir / "stderr.log"),
+            "last_message_path": str(turn_dir / "last-message.txt"),
+            "result_path": str(turn_dir / state.RESULT_FILE_NAME),
+            "invocation": {"name": "codex", "cwd": str(workspace / "app")},
+            "workspace_write_guard": {
+                "passed": True,
+                "write_aliases": ["app"],
+                "authorized_aliases": ["app"],
+                "violations": [],
+                "unavailable": {},
+            },
+            "verification": {
+                "passed": True,
+                "checks": [{"name": "tests", "passed": True, "returncode": 0}],
+                "skipped_checks": [],
+            },
+        }
+
+    def _clean_state(self, workspace: Path) -> dict[str, object]:
+        return {
+            "harness": "codex",
+            "model": "gpt-5",
+            "ok": True,
+            "workspace_root": str(workspace),
+            "commit_mode": "session",
+            "review_completed": True,
+            "review_harness": "claude",
+            "review_verdict": "approved",
+            "repositories": [
+                {
+                    "alias": "app",
+                    "path": str(workspace / "app"),
+                    "origin": "https://example.invalid/app.git",
+                }
+            ],
+            "run_config": {"cwd": str(workspace)},
+        }
+
+    def _read_state(self, state_dir: Path) -> dict[str, object]:
+        return json.loads(
+            (state_dir / events.STATE_FILE_NAME).read_text(encoding="utf-8")
+        )
+
+    def _write_state(self, state_dir: Path, payload: dict[str, object]) -> None:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / events.STATE_FILE_NAME).write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+
+    def _read_result(self, run_dir: Path) -> dict[str, object]:
+        return json.loads(
+            (run_dir / "turn-0001-01" / state.RESULT_FILE_NAME).read_text(
+                encoding="utf-8"
+            )
+        )
+
+    def _write_result(self, turn_dir: Path, payload: dict[str, object]) -> None:
+        (turn_dir / state.RESULT_FILE_NAME).write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+
+    def _write_events(
+        self, state_dir: Path, records: list[tuple[str, dict[str, object]]]
+    ) -> None:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        lines = [
+            json.dumps(
+                {
+                    "name": name,
+                    "version": events.EVENT_SCHEMA_VERSION,
+                    "created_at": f"2026-08-10T10:11:{12 + index:02d}Z",
+                    "payload": payload,
+                }
+            )
+            for index, (name, payload) in enumerate(records)
+        ]
+        (state_dir / events.EVENTS_FILE_NAME).write_text(
+            "\n".join(lines) + "\n", encoding="utf-8"
+        )
+
+    def _bundle(
+        self, history: tuple[Path, Path, Path, Path]
+    ) -> supervisor_audit.AuditInput:
+        workspace, plan_dir, state_dir, run_dir = history
+        return supervisor_audit.collect_audit_input(
+            run_id=RUN_ID,
+            run_dir=run_dir,
+            state_dir=state_dir,
+            plan_dir=plan_dir,
+            workspace_root=workspace,
+        )
+
+
+class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
+    """Known failure modes reproduce as findings; a clean run passes every lane."""
+
+    def _audit(
+        self, history: tuple[Path, Path, Path, Path], *, workspace_root: object = ...
+    ) -> tuple[supervisor_audit.AuditInput, dict[str, object]]:
+        workspace, plan_dir, state_dir, run_dir = history
+        bundle = supervisor_audit.collect_audit_input(
+            run_id=RUN_ID,
+            run_dir=run_dir,
+            state_dir=state_dir,
+            plan_dir=plan_dir,
+            workspace_root=workspace if workspace_root is ... else workspace_root,
+        )
+        results = supervisor_audit.run_deterministic_checks(bundle)
+        return bundle, {result.check: result for result in results}
+
+    def _statuses(self, results: dict[str, object]) -> dict[str, str]:
+        return {check: result.status for check, result in results.items()}
+
+    def test_a_clean_run_passes_every_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle, results = self._audit(self._history(Path(tmp)))
+
+            self.assertEqual(
+                {check: "pass" for check in results}, self._statuses(results)
+            )
+            self.assertEqual(
+                {lane: "pass" for lane in RUBRIC_LANES},
+                supervisor_audit.lane_rollup(results.values()),
+            )
+            self.assertEqual((), supervisor_audit.findings_from_results(results.values()))
+            self.assertTrue(bundle.evidence)
+
+    def test_a_registry_reaching_outside_the_workspace_is_a_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            history = self._history(root)
+            init_git_repo(root / "kiln")
+            payload = self._read_state(history[2])
+            payload["repositories"].append(
+                {
+                    "alias": "kiln",
+                    "path": str(root / "kiln"),
+                    "origin": "https://example.invalid/kiln.git",
+                }
+            )
+            self._write_state(history[2], payload)
+
+            _, results = self._audit(history)
+            finding = supervisor_audit.findings_from_results(results.values())
+
+            self.assertEqual("fail", results["root-registry-agreement"].status)
+            self.assertIn("kiln", results["root-registry-agreement"].detail)
+            self.assertEqual(
+                ["identity.root-registry-agreement"],
+                [item.invariant_key for item in finding],
+            )
+            self.assertEqual("critical", finding[0].severity)
+            self.assertEqual(
+                "fail",
+                supervisor_audit.lane_rollup(results.values())["identity-authority"],
+            )
+
+    def test_state_and_events_that_disagree_are_a_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._write_events(
+                history[2],
+                [
+                    ("run_started", {"run_id": RUN_ID}),
+                    (
+                        events.RUN_PAUSED_EVENT,
+                        {"run_id": RUN_ID, "reason": "verify-failed"},
+                    ),
+                ],
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["state-event-agreement"].status)
+            self.assertIn("pause", results["state-event-agreement"].detail)
+            self.assertIn(
+                "observability.state-event-agreement",
+                [
+                    item.invariant_key
+                    for item in supervisor_audit.findings_from_results(results.values())
+                ],
+            )
+            # The pause was never classified, so the lifecycle lane reports what
+            # it could not see rather than reading the silence as a clean run.
+            self.assertEqual("unavailable", results["retry-resume"].status)
+
+    def test_a_turn_without_a_result_is_never_a_silent_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            (history[3] / "turn-0001-01" / state.RESULT_FILE_NAME).unlink()
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["terminal-artifacts"].status)
+            self.assertIn(state.RESULT_FILE_NAME, results["terminal-artifacts"].detail)
+            self.assertEqual("unavailable", results["mutation-commit-guards"].status)
+            self.assertEqual("unavailable", results["scope-escape"].status)
+            self.assertNotIn(
+                "pass",
+                {
+                    results["terminal-artifacts"].status,
+                    results["mutation-commit-guards"].status,
+                    results["scope-escape"].status,
+                },
+            )
+
+    def test_a_harness_reviewing_its_own_work_is_a_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            payload = self._read_state(history[2])
+            payload["review_harness"] = payload["harness"]
+            self._write_state(history[2], payload)
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["review-independence"].status)
+            self.assertIn("its own work", results["review-independence"].detail)
+            self.assertEqual(
+                "fail",
+                supervisor_audit.lane_rollup(results.values())[
+                    "verification-review-independence"
+                ],
+            )
+
+    def test_an_unnamed_implementation_harness_is_not_a_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            payload = self._read_state(history[2])
+            payload.pop("harness")
+            self._write_state(history[2], payload)
+
+            _, results = self._audit(history)
+
+            self.assertEqual("unavailable", results["review-independence"].status)
+            self.assertIn("did the work", results["review-independence"].detail)
+
+    def test_a_registered_turn_without_a_write_guard_is_a_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            payload = self._read_result(history[3])
+            del payload["workspace_write_guard"]
+            self._write_result(history[3] / "turn-0001-01", payload)
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["mutation-commit-guards"].status)
+            self.assertIn("write-guard", results["mutation-commit-guards"].detail)
+            self.assertEqual("unavailable", results["scope-escape"].status)
+
+    def test_success_claimed_over_failed_verification_is_a_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            payload = self._read_result(history[3])
+            payload["verification"] = {
+                "passed": False,
+                "checks": [{"name": "tests", "passed": False, "returncode": 1}],
+                "skipped_checks": ["lint"],
+            }
+            self._write_result(history[3] / "turn-0001-01", payload)
+
+            _, results = self._audit(history)
+            findings = supervisor_audit.findings_from_results(results.values())
+
+            self.assertEqual("fail", results["misleading-success"].status)
+            self.assertIn("verification failed", results["misleading-success"].detail)
+            self.assertIn("skipped", results["misleading-success"].detail)
+            self.assertEqual(
+                ["observability.success-is-earned"],
+                [item.invariant_key for item in findings],
+            )
+
+    def test_a_damaged_event_log_lands_in_the_unknown_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            with (history[2] / events.EVENTS_FILE_NAME).open(
+                "a", encoding="utf-8"
+            ) as handle:
+                handle.write("{not json\n")
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["unclassified-anomalies"].status)
+            self.assertIn("would not parse", results["unclassified-anomalies"].detail)
+            self.assertEqual(
+                "fail",
+                supervisor_audit.lane_rollup(results.values())["unknown-anomalies"],
+            )
+
+    def test_checks_report_unavailable_when_the_workspace_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, results = self._audit(self._history(Path(tmp)), workspace_root=None)
+
+            self.assertEqual("unavailable", results["root-registry-agreement"].status)
+            self.assertEqual("unavailable", results["repository-intent"].status)
+            self.assertEqual(
+                "unavailable",
+                supervisor_audit.lane_rollup(results.values())["identity-authority"],
+            )
+
+    def test_findings_keep_one_fingerprint_across_relocated_runs(self) -> None:
+        fingerprints = []
+        for _ in range(2):
+            with tempfile.TemporaryDirectory() as tmp:
+                history = self._history(Path(tmp))
+                payload = self._read_state(history[2])
+                payload["review_harness"] = payload["harness"]
+                self._write_state(history[2], payload)
+
+                _, results = self._audit(history)
+                fingerprints.append(
+                    [
+                        item.fingerprint
+                        for item in supervisor_audit.findings_from_results(
+                            results.values()
+                        )
+                    ]
+                )
+
+        self.assertEqual(1, len(fingerprints[0]))
+        self.assertEqual(fingerprints[0], fingerprints[1])
+
+    def test_every_cited_locator_is_declared_in_the_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            (history[3] / "turn-0001-01" / state.RESULT_FILE_NAME).unlink()
+
+            bundle, results = self._audit(history)
+            declared = {reference.locator for reference in bundle.evidence}
+
+            self.assertEqual(
+                len(supervisor_audit.DETERMINISTIC_CHECK_SPECS), len(results)
+            )
+            for result in results.values():
+                self.assertTrue(result.evidence, result.check)
+                self.assertLessEqual(set(result.evidence), declared, result.check)
+
+
+#: Injected so an audit's timestamp is an input rather than a wall-clock read,
+#: which is what lets two identical runs produce byte-identical artifacts.
+FIXED_CLOCK = datetime(2026, 8, 10, 10, 11, 12, tzinfo=timezone.utc)
+
+
+class _ScriptedAuditor:
+    """Stand-in auditor with scripted answers that records every prompt it saw.
+
+    Replies are consumed in order and the last one repeats, so a test that wants
+    the same failure on both attempts scripts it once.
+    """
+
+    def __init__(self, *replies: object) -> None:
+        self.replies = list(replies)
+        self.prompts: list[str] = []
+
+    def __call__(self, name: str, **kwargs: object) -> harnesses.HarnessResult:
+        prompt = str(kwargs["prompt"])
+        self.prompts.append(prompt)
+        access = kwargs["access"]
+        assert isinstance(access, harnesses.AccessProfile)
+        argv = harnesses.get_adapter(name).build_argv(
+            cwd=Path(str(kwargs["cwd"])),
+            plan_dir=None,
+            prompt=prompt,
+            last_message_path=Path(str(kwargs["last_message_path"])),
+            access=access,
+        )
+        index = min(len(self.prompts), len(self.replies)) - 1
+        reply = self.replies[index]
+        spec = reply if isinstance(reply, dict) else {"message": reply}
+        return harnesses.HarnessResult(
+            argv=argv,
+            returncode=int(spec.get("returncode", 0)),
+            stdout="",
+            stderr="",
+            last_message=str(spec.get("message", "")),
+            name=name,
+            timed_out=bool(spec.get("timed_out", False)),
+            interrupted=bool(spec.get("interrupted", False)),
+        )
+
+
+class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
+    """The semantic auditor is validated strictly and never trusted as output."""
+
+    def _role(self) -> AuditRole:
+        return AuditRole(
+            harness="claude",
+            implementation_harness="codex",
+            source="explicit",
+            timeout_seconds=30.0,
+        )
+
+    def _run(
+        self,
+        history: tuple[Path, Path, Path, Path],
+        auditor: _ScriptedAuditor,
+        *,
+        bundle: supervisor_audit.AuditInput | None = None,
+    ) -> supervisor_audit.AgentAuditOutcome:
+        workspace, plan_dir, state_dir, run_dir = history
+        return supervisor_audit.run_agent_audit(
+            self._role(),
+            bundle=self._bundle(history) if bundle is None else bundle,
+            run_id=RUN_ID,
+            run_dir=run_dir,
+            workspace_root=workspace,
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            durable=False,
+            now=lambda: FIXED_CLOCK,
+            _run_harness_fn=auditor,
+        )
+
+    def _self_reviewed(self, history: tuple[Path, Path, Path, Path]) -> None:
+        """Make one deterministic check fail, so the run has findings of its own."""
+        payload = self._read_state(history[2])
+        payload["review_harness"] = payload["harness"]
+        self._write_state(history[2], payload)
+
+    def _lanes(
+        self, locator: str, statuses: dict[str, str] | None = None
+    ) -> list[dict[str, object]]:
+        claimed = statuses or {}
+        return [
+            {
+                "lane": lane,
+                "status": claimed.get(lane, "pass"),
+                "summary": f"{lane} judged from the recorded control-plane evidence",
+                "evidence": [locator],
+            }
+            for lane in RUBRIC_LANES
+        ]
+
+    def _finding(self, locator: str, **overrides: object) -> dict[str, object]:
+        finding: dict[str, object] = {
+            "lane": "identity-authority",
+            "severity": "medium",
+            "category": "identity",
+            "component": "workspace-registry",
+            "invariant_key": "identity.agent-observed-drift",
+            "summary": "The registry named a repository the manifest never declared.",
+            "recommendation": "Re-derive the registry from the manifest before a run.",
+            "evidence": [locator],
+        }
+        finding.update(overrides)
+        return finding
+
+    def _reply(
+        self,
+        lanes: list[dict[str, object]],
+        findings: list[dict[str, object]] | None = None,
+        *,
+        prose: str = "",
+    ) -> str:
+        body = json.dumps(
+            {
+                "schema_version": supervisor_audit.AGENT_OUTPUT_SCHEMA_VERSION,
+                "lanes": lanes,
+                "findings": findings or [],
+            }
+        )
+        return f"{prose}```json\n{body}\n```\n"
+
+    def _reports(
+        self, run_dir: Path, audit: object
+    ) -> tuple[dict[str, object], str]:
+        report, markdown = supervisor_audit.write_audit_reports(
+            run_dir, audit, durable=False
+        )
+        return (
+            json.loads(report.read_text(encoding="utf-8")),
+            markdown.read_text(encoding="utf-8"),
+        )
+
+    def test_a_clean_run_with_every_lane_proven_is_all_clear(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            bundle = self._bundle(history)
+            auditor = _ScriptedAuditor(
+                self._reply(self._lanes(bundle.evidence[0].locator))
+            )
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            self.assertTrue(outcome.agent_covered)
+            self.assertEqual("all-clear", outcome.audit.state)
+            self.assertIsNone(outcome.audit.reason)
+            self.assertEqual((), outcome.audit.findings)
+            self.assertEqual(["ok"], [item.outcome for item in outcome.attempts])
+            self.assertEqual(
+                list(RUBRIC_LANES), [lane.lane for lane in outcome.audit.lanes]
+            )
+            self.assertIsNone(outcome.mutation_issue_id)
+
+    def test_an_agent_finding_is_reported_with_an_asl_assigned_fingerprint(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            bundle = self._bundle(history)
+            locator = bundle.evidence[0].locator
+            auditor = _ScriptedAuditor(
+                self._reply(
+                    self._lanes(locator, {"identity-authority": "fail"}),
+                    [self._finding(locator)],
+                )
+            )
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            self.assertEqual("findings", outcome.audit.state)
+            self.assertIsNone(outcome.audit.reason)
+            finding = outcome.audit.findings[0]
+            self.assertEqual("identity.agent-observed-drift", finding.invariant_key)
+            self.assertEqual(64, len(finding.fingerprint))
+            self.assertEqual((locator,), finding.evidence)
+            self.assertEqual(
+                "fail", outcome.audit.lanes[0].status
+            )
+
+    def test_an_agent_that_assigns_its_own_identity_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            bundle = self._bundle(history)
+            locator = bundle.evidence[0].locator
+            auditor = _ScriptedAuditor(
+                self._reply(
+                    self._lanes(locator),
+                    [self._finding(locator, issue_id="ISSUE-0001")],
+                )
+            )
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            self.assertFalse(outcome.agent_covered)
+            self.assertEqual("malformed-output", outcome.attempts[0].outcome)
+            self.assertIn("never", outcome.attempts[0].detail)
+            self.assertIn("issue IDs", outcome.attempts[0].detail)
+
+    def test_a_malformed_answer_is_retried_in_a_fresh_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            bundle = self._bundle(history)
+            auditor = _ScriptedAuditor(
+                "I could not be bothered to answer in JSON.",
+                self._reply(self._lanes(bundle.evidence[0].locator)),
+            )
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            self.assertTrue(outcome.agent_covered)
+            self.assertEqual("all-clear", outcome.audit.state)
+            self.assertEqual(
+                ["malformed-output", "ok"], [item.outcome for item in outcome.attempts]
+            )
+            retry = auditor.prompts[1]
+            self.assertIn("Your previous answer was rejected", retry)
+            self.assertIn("not parseable JSON", retry)
+            self.assertIn("Operational evidence for run", retry)
+            self.assertNotIn("could not be bothered", retry)
+
+    def test_two_malformed_answers_keep_the_deterministic_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._self_reviewed(history)
+            auditor = _ScriptedAuditor("{not json")
+
+            outcome = self._run(history, auditor)
+
+            self.assertFalse(outcome.agent_covered)
+            self.assertEqual("unavailable", outcome.audit.state)
+            self.assertEqual("malformed-output", outcome.audit.reason)
+            self.assertEqual(MAX_AUDIT_ATTEMPTS, len(outcome.attempts))
+            self.assertEqual(
+                len(supervisor_audit.DETERMINISTIC_CHECK_SPECS),
+                len(outcome.audit.deterministic),
+            )
+            self.assertTrue(outcome.audit.findings)
+            statuses = {lane.lane: lane.status for lane in outcome.audit.lanes}
+            self.assertEqual("fail", statuses["verification-review-independence"])
+
+    def test_a_timeout_is_retried_once_and_then_reported_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            auditor = _ScriptedAuditor({"message": "", "timed_out": True})
+
+            outcome = self._run(history, auditor)
+
+            self.assertFalse(outcome.agent_covered)
+            self.assertEqual("unavailable", outcome.audit.state)
+            self.assertEqual(supervisor_audit.REASON_TIMEOUT, outcome.audit.reason)
+            self.assertEqual(
+                ["timeout", "timeout"], [item.outcome for item in outcome.attempts]
+            )
+            self.assertEqual(MAX_AUDIT_ATTEMPTS, len(auditor.prompts))
+
+    def test_a_transport_failure_is_retried_once_and_then_reported_unavailable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            auditor = _ScriptedAuditor({"message": "", "returncode": 1})
+
+            outcome = self._run(history, auditor)
+
+            self.assertFalse(outcome.agent_covered)
+            self.assertEqual("unavailable", outcome.audit.state)
+            self.assertEqual(
+                supervisor_audit.REASON_HARNESS_FAILED, outcome.audit.reason
+            )
+            self.assertEqual(
+                ["transport-error", "transport-error"],
+                [item.outcome for item in outcome.attempts],
+            )
+
+    def test_an_interrupted_attempt_is_never_retried(self) -> None:
+        """The reply a harness returns after Ctrl+C, not a raised exception."""
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            auditor = _ScriptedAuditor(
+                {"message": "", "returncode": 130, "interrupted": True}
+            )
+
+            outcome = self._run(history, auditor)
+
+            self.assertFalse(outcome.agent_covered)
+            self.assertEqual("unavailable", outcome.audit.state)
+            self.assertEqual(supervisor_audit.REASON_INTERRUPTED, outcome.audit.reason)
+            self.assertEqual(
+                ["interrupted"], [item.outcome for item in outcome.attempts]
+            )
+            self.assertEqual(1, len(auditor.prompts))
+
+    def test_an_interrupt_outranks_the_nonzero_exit_it_arrives_with(self) -> None:
+        """130 is the harness reporting the interrupt, not a transport failure."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            auditor = _ScriptedAuditor(
+                {"message": "", "returncode": 130, "interrupted": True}
+            )
+
+            attempt = supervisor_audit.run_restricted_audit(
+                self._role(),
+                run_dir=run_dir,
+                run_id=RUN_ID,
+                workspace_root=workspace,
+                plan_dir=plan_dir,
+                prompt="grade this run",
+                state_dir=state_dir,
+                _run_harness_fn=auditor,
+            )
+
+            self.assertEqual("interrupted", attempt.outcome)
+            self.assertEqual("unavailable", attempt.state)
+            self.assertEqual(supervisor_audit.REASON_INTERRUPTED, attempt.reason)
+            self.assertNotIn(
+                "interrupted", supervisor_audit.RETRYABLE_ATTEMPT_OUTCOMES
+            )
+
+    def test_a_localized_finding_names_its_source_in_both_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            bundle = self._bundle(history)
+            locator = bundle.evidence[0].locator
+            auditor = _ScriptedAuditor(
+                self._reply(
+                    self._lanes(locator, {"identity-authority": "fail"}),
+                    [
+                        self._finding(
+                            locator,
+                            localization=["package/runner.py:8129", "skills/asl/SKILL.md"],
+                        )
+                    ],
+                )
+            )
+
+            outcome = self._run(history, auditor, bundle=bundle)
+            report, markdown = self._reports(history[3], outcome.audit)
+
+            self.assertEqual(
+                ("package/runner.py:8129", "skills/asl/SKILL.md"),
+                outcome.audit.findings[0].localization,
+            )
+            self.assertEqual(
+                ["package/runner.py:8129", "skills/asl/SKILL.md"],
+                report["findings"][0]["localization"],
+            )
+            self.assertIn("`package/runner.py:8129`", markdown)
+
+    def test_a_localization_outside_the_source_roots_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            bundle = self._bundle(history)
+            locator = bundle.evidence[0].locator
+            auditor = _ScriptedAuditor(
+                self._reply(
+                    self._lanes(locator, {"identity-authority": "fail"}),
+                    [self._finding(locator, localization=["workspace/app/main.py:12"])],
+                )
+            )
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            self.assertFalse(outcome.agent_covered)
+            self.assertEqual("invalid-reference", outcome.audit.reason)
+            self.assertIn("outside the read-only source roots", auditor.prompts[1])
+
+    def test_evidence_the_bundle_never_declared_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            auditor = _ScriptedAuditor(
+                self._reply(self._lanes("run/invented-by-the-agent.json"))
+            )
+
+            outcome = self._run(history, auditor)
+
+            self.assertFalse(outcome.agent_covered)
+            self.assertEqual("invalid-reference", outcome.audit.reason)
+            self.assertEqual(
+                ["invalid-reference", "invalid-reference"],
+                [item.outcome for item in outcome.attempts],
+            )
+
+    def test_an_answer_missing_a_rubric_lane_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            bundle = self._bundle(history)
+            auditor = _ScriptedAuditor(
+                self._reply(self._lanes(bundle.evidence[0].locator)[:3])
+            )
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            self.assertFalse(outcome.agent_covered)
+            self.assertEqual("missing-lanes", outcome.audit.reason)
+            self.assertEqual("missing-lanes", outcome.attempts[0].outcome)
+
+    def test_a_lane_the_agent_could_not_judge_is_never_all_clear(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            bundle = self._bundle(history)
+            auditor = _ScriptedAuditor(
+                self._reply(
+                    self._lanes(
+                        bundle.evidence[0].locator, {"resources-stalls": "unavailable"}
+                    )
+                )
+            )
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            self.assertTrue(outcome.agent_covered)
+            self.assertEqual("unavailable", outcome.audit.state)
+            self.assertEqual(
+                supervisor_audit.REASON_LANE_COVERAGE, outcome.audit.reason
+            )
+
+    def test_an_agent_pass_never_overrules_a_deterministic_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._self_reviewed(history)
+            bundle = self._bundle(history)
+            auditor = _ScriptedAuditor(
+                self._reply(self._lanes(bundle.evidence[0].locator))
+            )
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            statuses = {lane.lane: lane.status for lane in outcome.audit.lanes}
+            self.assertEqual("fail", statuses["verification-review-independence"])
+            self.assertEqual("findings", outcome.audit.state)
+
+    def test_no_agent_markdown_reaches_the_operator_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            bundle = self._bundle(history)
+            lanes = self._lanes(bundle.evidence[0].locator)
+            lanes[0]["summary"] = "table | breaker\nwith a newline"
+            auditor = _ScriptedAuditor(
+                self._reply(lanes, prose="## Trust me instead\n\nI rewrote the run.\n\n")
+            )
+
+            outcome = self._run(history, auditor, bundle=bundle)
+            _, markdown = self._reports(history[3], outcome.audit)
+
+            self.assertNotIn("Trust me instead", markdown)
+            self.assertNotIn("I rewrote the run.", markdown)
+            self.assertIn("table \\| breaker with a newline", markdown)
+
+    def test_the_prompt_orders_evidence_before_any_source_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = self._bundle(self._history(Path(tmp)))
+
+            prompt = supervisor_audit.build_audit_prompt(bundle)
+
+            self.assertLess(
+                prompt.index("Analyze the operational evidence below first"),
+                prompt.index("read ASL source to localize it"),
+            )
+            self.assertIn("You are not reviewing the application", prompt)
+            self.assertIn("Reviewing, grading, or commenting on the application", prompt)
+            self.assertIn("Assigning issue IDs, fingerprints", prompt)
+            self.assertIn("Editing, creating, or deleting any file", prompt)
+            for lane in RUBRIC_LANES:
+                self.assertIn(f"- {lane}", prompt)
+            for root in supervisor_audit.LOCALIZATION_ROOTS:
+                self.assertIn(f"`{root}`", prompt)
+
+    def test_identical_inputs_produce_identical_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            bundle = self._bundle(history)
+            declared = [entry.locator for entry in bundle.evidence]
+            results = supervisor_audit.run_deterministic_checks(bundle)
+            reply = self._reply(
+                self._lanes(declared[0], {"identity-authority": "fail"}),
+                [self._finding(declared[0])],
+            )
+            rendered = []
+            for index in range(2):
+                directory = Path(tmp) / f"render-{index}"
+                directory.mkdir()
+                audit = supervisor_audit.render_supervisor_audit(
+                    run_id=RUN_ID,
+                    bundle=bundle,
+                    results=results,
+                    generated_at=FIXED_CLOCK.isoformat(),
+                    agent=supervisor_audit.parse_agent_audit(reply, declared=declared),
+                )
+                report, markdown = supervisor_audit.write_audit_reports(
+                    directory, audit, durable=False
+                )
+                rendered.append((report.read_bytes(), markdown.read_bytes()))
+
+            self.assertEqual(rendered[0], rendered[1])
+
+    def test_the_audit_leaves_the_workspace_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            workspace, plan_dir, _, run_dir = history
+            before = repository_evidence.capture_workspace_snapshot(
+                workspace, plan_dir
+            )
+            auditor = _ScriptedAuditor("not an audit")
+
+            outcome = self._run(history, auditor)
+            comparison = repository_evidence.compare_workspace_snapshots(
+                before,
+                repository_evidence.capture_workspace_snapshot(workspace, plan_dir),
+            )
+
+            self.assertEqual({}, dict(comparison["changed"]))
+            self.assertEqual([], comparison["added"])
+            self.assertEqual([], comparison["removed"])
+            self.assertIsNone(outcome.mutation_issue_id)
+            self.assertFalse(
+                (run_dir / supervisor_audit.MUTATION_ARTIFACT_NAME).exists()
+            )
+
+    def test_every_attempt_is_archived_without_inlining_the_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            run_dir = history[3]
+            bundle = self._bundle(history)
+            auditor = _ScriptedAuditor(
+                "not json", self._reply(self._lanes(bundle.evidence[0].locator))
+            )
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            for attempt in outcome.attempts:
+                directory = run_dir / str(attempt.artifact_dir)
+                self.assertTrue(
+                    (directory / supervisor_audit.ATTEMPT_PROMPT_FILE).is_file()
+                )
+                self.assertTrue(
+                    (directory / supervisor_audit.ATTEMPT_MESSAGE_FILE).is_file()
+                )
+                recorded = json.loads(
+                    (directory / supervisor_audit.ATTEMPT_OUTCOME_FILE).read_text(
+                        encoding="utf-8"
+                    )
+                )
+                self.assertEqual(attempt.outcome, recorded["outcome"])
+                self.assertFalse(
+                    any("Operational evidence" in item for item in recorded["argv"])
+                )
+
+    def test_every_rubric_lane_owns_at_least_one_check(self) -> None:
+        covered = {spec.lane for spec in supervisor_audit.DETERMINISTIC_CHECK_SPECS}
+
+        self.assertEqual(set(RUBRIC_LANES), covered)
 
 
 if __name__ == "__main__":

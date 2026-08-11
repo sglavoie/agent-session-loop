@@ -24,6 +24,13 @@ and guard results, never application source or semantic diffs. It is a pure
 function of the run's persisted history, so two equivalent histories serialize
 to the same bytes, and anything the size cap forces out is reported as a count,
 a digest, and a reason rather than silently dropped.
+
+Reading that bundle is a separate job from collecting it. The deterministic
+checks turn known failure modes into reproducible verdicts: each answers
+``pass``, ``fail``, or ``unavailable`` under a stable invariant key and names
+the evidence it read. Evidence a check needed but could not see is
+``unavailable``, never ``pass``, so a shed log or an unwritten result file
+reads as a gap in the audit rather than as a clean run.
 """
 
 from __future__ import annotations
@@ -32,20 +39,26 @@ import argparse
 import hashlib
 import json
 import re
-from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from . import (
     artifacts,
     assurance_ledger,
     assurance_models,
+    assurance_projection,
+    assurance_report,
     events,
     harnesses,
+    pause_policy,
+    plans,
+    preflight,
     repository_evidence,
+    state,
     workspaces,
 )
 from .assurance_models import (
@@ -73,6 +86,10 @@ REASON_WORKSPACE_EVIDENCE_UNAVAILABLE = "workspace-evidence-unavailable"
 REASON_HARNESS_FAILED = "harness-failed"
 REASON_TIMEOUT = "timeout"
 
+#: Why an audit produced no verdict before any auditor could be launched.
+REASON_EVIDENCE_UNAVAILABLE = "evidence-unavailable"
+REASON_INTERRUPTED = "interrupted"
+
 #: The auditor's working directory, under the run directory so it is captured
 #: with the rest of the run's evidence and never sits inside the workspace.
 AUDIT_WORKDIR_NAME = "audit-workdir"
@@ -80,6 +97,11 @@ AUDIT_WORKDIR_NAME = "audit-workdir"
 #: Run-relative artifact naming the mutation a read-only audit was not supposed
 #: to be able to cause. It is the finding's only evidence reference.
 MUTATION_ARTIFACT_NAME = "supervisor-audit-mutation.json"
+
+#: Run-relative artifact naming an audit that never reached an evidence bundle.
+#: An unavailable audit has to point a reader at something it can open, and a
+#: collection failure has no bundle and no attempt directory to offer.
+UNAVAILABLE_ARTIFACT_NAME = "supervisor-audit-unavailable.json"
 
 
 @dataclass(frozen=True)
@@ -232,6 +254,21 @@ def initial_summary(
         state=plan.state,
         eligible=True,
         reason=plan.reason,
+        role=plan.role,
+    )
+
+
+def cancelled_summary(plan: AuditPlan, *, run_id: str) -> AssuranceSummary:
+    """Return the assurance a cancelled audit records.
+
+    Cancelling an audit cancels only the audit. The run's outcome is already
+    decided, so what is left to say is that its audit could not be judged.
+    """
+    return AssuranceSummary(
+        run_id=run_id,
+        state="unavailable",
+        eligible=True,
+        reason=REASON_INTERRUPTED,
         role=plan.role,
     )
 
@@ -486,6 +523,18 @@ def run_restricted_audit(
             ),
         )
 
+    if result.interrupted:
+        # Ahead of the exit code, because the harness reports an interrupt as a
+        # nonzero return: reading it as a transport failure would answer the
+        # operator's first Ctrl+C with a second full audit turn.
+        return AuditAttemptResult(
+            outcome="interrupted",
+            state="unavailable",
+            reason=REASON_INTERRUPTED,
+            argv=argv,
+            returncode=result.returncode,
+            last_message=result.last_message,
+        )
     if result.timed_out:
         return AuditAttemptResult(
             outcome="timeout",
@@ -513,27 +562,3446 @@ def run_restricted_audit(
     )
 
 
-def _format_timeout(value: Any) -> str:
-    if isinstance(value, (int, float)) and float(value).is_integer():
-        return f"{int(value)}s"
-    return f"{value}s"
+# ---------------------------------------------------------------------------
+# Bounded operational evidence
+# ---------------------------------------------------------------------------
+
+#: Version of the ``supervisor-audit-input.json`` payload.
+AUDIT_INPUT_SCHEMA_VERSION = 1
+
+#: Serialized cap on one audit input bundle, well under the
+#: ``assurance_models.MAX_ARTIFACT_BYTES`` ceiling the writer enforces.
+AUDIT_INPUT_MAX_BYTES = 512 * 1024
+
+#: Per-side preview budget for a captured log or last message.
+PREVIEW_HEAD_BYTES = 2 * 1024
+PREVIEW_TAIL_BYTES = 2 * 1024
+
+#: Smallest preview the size cap shrinks to before dropping the text entirely.
+MIN_PREVIEW_BYTES = 128
+
+#: Longest string kept verbatim inside a copied control-plane payload.
+MAX_INLINE_STRING_BYTES = 512
+
+#: Entries kept from any one copied list before the remainder is counted.
+MAX_SEQUENCE_ITEMS = 100
+
+#: Files hashed when fingerprinting the ASL package or the skill tree.
+MAX_TREE_FILES = 2000
+
+#: Turns kept regardless of age, on top of every anomalous one.
+RECENT_TURN_COUNT = 3
+
+#: Stand-in for a value withheld because it looked like a credential.
+REDACTED = "[redacted]"
+
+#: Why something is absent from the bundle. Token-shaped so they can be read
+#: back as reasons without further parsing.
+REASON_SIZE_CAP = "size-cap"
+REASON_MISSING = "missing"
+REASON_UNREADABLE = "unreadable"
+REASON_MALFORMED = "malformed"
+REASON_OUTSIDE_APPROVED_ROOTS = "outside-approved-roots"
+REASON_NOT_RECORDED = "not-recorded"
+REASON_APPLICATION_CONTENT = "application-content-excluded"
+
+#: Symbolic names for the roots every reference in the bundle resolves under.
+EVIDENCE_ROOT_RUN = "run"
+EVIDENCE_ROOT_STATE = "state"
+EVIDENCE_ROOT_PLAN = "plan"
+EVIDENCE_ROOT_WORKSPACE = "workspace"
+EVIDENCE_ROOT_PACKAGE = "package"
+EVIDENCE_ROOT_SKILLS = "skills"
+
+#: Keys whose value is application output or a semantic diff rather than
+#: control-plane evidence. Their digest and size are kept; their bytes are not.
+_CONTENT_KEYS = frozenset(
+    {
+        "body",
+        "content",
+        "diff",
+        "output",
+        "patch",
+        "source",
+        "stderr",
+        "stdout",
+        "text",
+    }
+)
+
+#: Keys naming a Git origin, which is canonicalized rather than copied so a
+#: credential embedded in a remote URL cannot reach the bundle.
+_ORIGIN_KEYS = frozenset({"origin", "origins", "remote", "remote_url", "url"})
+
+#: Keys holding a process environment, whose values are withheld wholesale.
+_ENVIRONMENT_KEYS = frozenset({"env", "environ", "environment"})
+
+_SECRET_KEY_RE = re.compile(
+    r"(?i)(?:^|[-_.])(?:api[-_]?key|access[-_]?key|auth|authorization|bearer|"
+    r"cookie|credential|credentials|passphrase|passwd|password|private[-_]?key|"
+    r"pwd|secret|session[-_]?key|signature|token)"
+)
+_SECRET_VALUE_RE = re.compile(
+    r"gh[pousr]_[A-Za-z0-9]{16,}"
+    r"|github_pat_[A-Za-z0-9_]{20,}"
+    r"|sk-[A-Za-z0-9]{20,}"
+    r"|xox[abposr]-[A-Za-z0-9-]{10,}"
+    r"|(?:AKIA|ASIA)[0-9A-Z]{16}"
+    r"|ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
+)
+_CREDENTIAL_URL_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*://)[^/\s@]+@")
+
+#: Keys whose value is a command line. Argv is redacted positionally as well as
+#: by shape, because a secret usually arrives as the argument after its flag.
+_ARGV_KEYS = frozenset({"argv", "args", "command", "cmd"})
+_SECRET_FLAG_RE = re.compile(
+    r"(?i)^--?(?:api[-_]?key|auth|authorization|bearer|credential|credentials|"
+    r"key|passphrase|passwd|password|pwd|secret|token)$"
+)
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)^(--?(?:api[-_]?key|auth|authorization|bearer|credential|credentials|"
+    r"key|passphrase|passwd|password|pwd|secret|token)=)(.+)$"
+)
+
+#: Events emitted per heartbeat or per delivery. They dominate a long run's log
+#: and say the least about it, so they are the first thing the cap sheds.
+_BULK_EVENT_NAMES = frozenset(
+    {
+        events.AGENT_MUX_DELIVERY_EVENT,
+        events.PROCESS_SWEEP_EVENT,
+        events.TURN_HEARTBEAT_EVENT,
+        events.VERIFICATION_CHECK_STARTED_EVENT,
+        events.VERIFICATION_HEARTBEAT_EVENT,
+    }
+)
+
+#: Events that are themselves the anomaly, a guard result, or the run's
+#: terminal record. They are shed last and only when nothing else is left.
+_ANOMALY_EVENT_NAMES = frozenset(
+    {
+        events.ACTION_REQUIRED_EVENT,
+        events.PREFLIGHT_AUTO_REPAIRED_EVENT,
+        events.RESOLUTION_CONSUMED_EVENT,
+        events.REVIEW_REPAIR_REOPENED_EVENT,
+        events.REVIEW_VERDICT_RETRY_EVENT,
+        events.RUN_CONTROL_EVENT,
+        events.RUN_FINISHED_EVENT,
+        events.RUN_PAUSED_EVENT,
+        events.TURN_HANG_CLEARED_EVENT,
+        events.TURN_HANG_SUSPECTED_EVENT,
+        events.VERIFICATION_CHECK_SKIPPED_EVENT,
+        events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT,
+    }
+)
+
+_RUN_STARTED_EVENT = "run_started"
+_TERMINAL_EVENT_NAMES = frozenset(
+    {events.RUN_FINISHED_EVENT, events.RUN_PAUSED_EVENT}
+)
+
+#: State keys copied verbatim (after redaction) into each projection.
+_REVIEW_STATE_KEYS = (
+    "review_completed",
+    "review_cycles",
+    "review_harness",
+    "review_output_path",
+    "review_requested",
+    "review_session_id",
+    "review_skipped_reason",
+    "review_verdict",
+)
+_REPAIR_STATE_KEYS = (
+    "review_fix_disposition",
+    "review_reopen",
+    "review_resume",
+)
+_COMMIT_STATE_KEYS = ("commit_mode", "commit_groups", "commits")
+_COMMIT_DIR_PREFIX = "commit-"
+_STATUS_STATE_KEYS = (
+    "action_required",
+    "assurance",
+    "command",
+    "completed_session_ids",
+    "completed_sessions",
+    "control",
+    "details",
+    "dry_run",
+    "duration_seconds",
+    "ok",
+    "pause_details",
+    "pause_message",
+    "pause_reason",
+    "pause_policy",
+    "paused",
+    "readiness_gate",
+    "readiness_state_active",
+    "readiness_state_current",
+    "readiness_state_final",
+    "readiness_state_initial",
+    "reason",
+    "run_finished_at",
+    "run_started_at",
+    "version",
+)
+_SNAPSHOT_IDENTITY_KEYS = (
+    "content_sha256",
+    "counts",
+    "next_pending",
+    "next_pending_id",
+    "path_hash",
+    "plan_hash",
+)
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _truncate_utf8(text: str, max_bytes: int) -> str:
+    """Truncate ``text`` to at most ``max_bytes`` UTF-8 bytes without splitting."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+@dataclass(frozen=True)
+class EvidenceRoots:
+    """The approved roots every reference in the bundle must resolve inside.
+
+    References are rendered as ``<root>/<relative>`` rather than as absolute
+    paths, which is what makes containment decidable: a locator that cannot be
+    expressed this way names something outside the audit's reach and is
+    withheld instead of copied.
+    """
+
+    roots: tuple[tuple[str, Path], ...]
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        run_dir: Path | str,
+        state_dir: Path | str,
+        plan_dir: Path | str,
+        workspace_root: Path | str | None = None,
+    ) -> "EvidenceRoots":
+        package_root = Path(__file__).resolve().parent
+        declared: list[tuple[str, Path | str]] = [
+            (EVIDENCE_ROOT_RUN, run_dir),
+            (EVIDENCE_ROOT_STATE, state_dir),
+            (EVIDENCE_ROOT_PLAN, plan_dir),
+            (EVIDENCE_ROOT_PACKAGE, package_root),
+            (EVIDENCE_ROOT_SKILLS, package_root.parent / "skills"),
+        ]
+        if workspace_root is not None:
+            declared.append((EVIDENCE_ROOT_WORKSPACE, workspace_root))
+        return cls(
+            roots=tuple(
+                (name, workspaces.canonicalize_filesystem_path(value))
+                for name, value in declared
+            )
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        return {name: str(path) for name, path in self.roots}
+
+    def locate(self, path: Path | str) -> str | None:
+        """Return the symbolic locator for ``path``, or ``None`` when unsafe.
+
+        The deepest matching root wins, so an artifact inside the run directory
+        is named ``run/...`` rather than ``state/runs/<id>/...`` even though
+        both containments hold.
+        """
+        candidate = workspaces.canonicalize_filesystem_path(path)
+        best: tuple[int, str] | None = None
+        for name, root in self.roots:
+            if candidate == root:
+                locator = name
+            elif workspaces.is_descendant(candidate, root):
+                locator = f"{name}/{candidate.relative_to(root).as_posix()}"
+            else:
+                continue
+            depth = len(root.parts)
+            if best is None or depth > best[0]:
+                best = (depth, locator)
+        return None if best is None else best[1]
+
+
+@dataclass(frozen=True)
+class AuditInput:
+    """The bounded, control-plane-only evidence bundle an auditor reads."""
+
+    payload: dict[str, Any]
+
+    def to_bytes(self) -> bytes:
+        return assurance_models.canonical_json_bytes(self.payload)
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.to_bytes()).hexdigest()
+
+    @property
+    def evidence(self) -> tuple[assurance_models.EvidenceRef, ...]:
+        return tuple(
+            assurance_models.parse_evidence_ref(entry)
+            for entry in self.payload.get("evidence", ())
+        )
+
+    @property
+    def omissions(self) -> tuple[dict[str, Any], ...]:
+        return tuple(self.payload.get("omissions", ()))
+
+    def write(self, run_dir: Path | str, *, durable: bool = True) -> Path:
+        """Write the bundle as the run's canonical audit input, exactly once."""
+        return assurance_models.write_audit_artifact(
+            run_dir,
+            assurance_models.AUDIT_INPUT_FILENAME,
+            self.to_bytes(),
+            durable=durable,
+        )
+
+
+class _Omissions:
+    """Counts, digests, and reasons for everything the bundle left out."""
+
+    def __init__(self) -> None:
+        self._entries: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def record(self, section: str, reason: str, payload: Any) -> None:
+        entry = self._entries.setdefault(
+            (section, reason),
+            {"section": section, "reason": reason, "count": 0, "digest": hashlib.sha256()},
+        )
+        entry["count"] += 1
+        entry["digest"].update(assurance_models.canonical_json_bytes(payload))
+
+    def to_list(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "section": entry["section"],
+                "reason": entry["reason"],
+                "count": entry["count"],
+                "sha256": entry["digest"].hexdigest(),
+            }
+            for entry in sorted(
+                self._entries.values(), key=lambda item: (item["section"], item["reason"])
+            )
+        ]
+
+
+class _Collector:
+    """Redacts, bounds, and validates every value on its way into the bundle."""
+
+    def __init__(self, roots: EvidenceRoots) -> None:
+        self._roots = roots
+        self._evidence: dict[str, assurance_models.EvidenceRef] = {}
+        self._previews: list[dict[str, Any]] = []
+        self.omissions = _Omissions()
+
+    # -- references ------------------------------------------------------
+
+    def locator(self, path: Path | str | None) -> str | None:
+        if path is None:
+            return None
+        locator = self._roots.locate(path)
+        if locator is None:
+            self.omissions.record(
+                "references", REASON_OUTSIDE_APPROVED_ROOTS, str(path)
+            )
+        return locator
+
+    def reference(
+        self,
+        path: Path | str | None,
+        *,
+        kind: str,
+        digest: str | None = None,
+        detail: str | None = None,
+    ) -> str | None:
+        """Register ``path`` in the evidence index and return its locator."""
+        locator = self.locator(path)
+        if locator is None:
+            return None
+        if (
+            locator not in self._evidence
+            and len(self._evidence) < assurance_models.MAX_EVIDENCE_ENTRIES
+        ):
+            self._evidence[locator] = assurance_models.EvidenceRef(
+                kind=kind, locator=locator, digest=digest, detail=detail
+            )
+        return locator
+
+    def evidence(self) -> list[dict[str, Any]]:
+        return [
+            self._evidence[locator].to_dict() for locator in sorted(self._evidence)
+        ]
+
+    # -- redaction -------------------------------------------------------
+
+    def redact(self, value: Any, *, key: str | None = None) -> Any:
+        """Return ``value`` with credentials, content, and unsafe paths removed."""
+        if isinstance(value, Mapping):
+            return {
+                str(name): self.redact(item, key=str(name))
+                for name, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            items = list(value)
+            if key in _ARGV_KEYS:
+                items = _redact_argv(items)
+            kept = [self.redact(item, key=key) for item in items[:MAX_SEQUENCE_ITEMS]]
+            for dropped in items[MAX_SEQUENCE_ITEMS:]:
+                self.omissions.record(key or "payload", REASON_SIZE_CAP, dropped)
+            return kept
+        if isinstance(value, str):
+            return self._redact_string(value, key=key)
+        if isinstance(value, (bool, int, float)) or value is None:
+            return value
+        return self._redact_string(str(value), key=key)
+
+    def _redact_string(self, text: str, *, key: str | None) -> str:
+        if key is not None:
+            if _SECRET_KEY_RE.search(key):
+                return REDACTED
+            if key in _ENVIRONMENT_KEYS:
+                return REDACTED
+            if key in _CONTENT_KEYS:
+                return self._content_stub(text)
+            if key in _ORIGIN_KEYS:
+                return _redact_origin(text)
+        if text.startswith("/") and "\n" not in text:
+            located = self._roots.locate(text)
+            if located is not None:
+                return located
+            self.omissions.record(
+                "references", REASON_OUTSIDE_APPROVED_ROOTS, text
+            )
+            return f"[{REASON_OUTSIDE_APPROVED_ROOTS}:{_sha256_text(text)[:16]}]"
+        cleaned = _redact_secrets(text)
+        if len(cleaned.encode("utf-8")) <= MAX_INLINE_STRING_BYTES:
+            return cleaned
+        self.omissions.record(key or "payload", REASON_SIZE_CAP, text)
+        return (
+            f"{_truncate_utf8(cleaned, MAX_INLINE_STRING_BYTES)}"
+            f"…[truncated sha256:{_sha256_text(text)[:16]}]"
+        )
+
+    def _content_stub(self, text: str) -> str:
+        self.omissions.record("payload", REASON_APPLICATION_CONTENT, len(text))
+        return (
+            f"[{REASON_APPLICATION_CONTENT} bytes:{len(text.encode('utf-8'))} "
+            f"sha256:{_sha256_text(text)[:16]}]"
+        )
+
+    # -- files -----------------------------------------------------------
+
+    def file_digest(self, path: Path, *, kind: str) -> dict[str, Any]:
+        """Describe a file by identity alone: locator, size, and digest."""
+        record: dict[str, Any] = {"reference": None, "available": False}
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            record["reason"] = REASON_MISSING
+        except OSError:
+            record["reason"] = REASON_UNREADABLE
+        else:
+            digest = artifacts.sha256_hex(data)
+            record.update(
+                available=True,
+                byte_count=len(data),
+                sha256=digest,
+                reference=self.reference(path, kind=kind, digest=digest),
+            )
+            return record
+        record["reference"] = self.locator(path)
+        self.omissions.record(kind, record["reason"], str(path))
+        return record
+
+    def file_preview(self, path: Path, *, kind: str) -> dict[str, Any]:
+        """Describe a stream by identity plus a bounded, shrinkable preview."""
+        capture = artifacts.StreamCapture(
+            head_bytes=PREVIEW_HEAD_BYTES, tail_bytes=PREVIEW_TAIL_BYTES
+        )
+        try:
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(65536), b""):
+                    capture.feed(chunk)
+        except FileNotFoundError:
+            capture.discard()
+            return self._unavailable_preview(path, kind, REASON_MISSING)
+        except OSError:
+            capture.discard()
+            return self._unavailable_preview(path, kind, REASON_UNREADABLE)
+        metadata = capture.finalize(failed=False)
+        record = {
+            "available": True,
+            "reference": self.reference(
+                path, kind=kind, digest=metadata.sha256
+            ),
+            "byte_count": metadata.byte_count,
+            "sha256": metadata.sha256,
+            "truncated": metadata.truncated,
+            "preview": _redact_secrets(metadata.preview),
+        }
+        self._previews.append(record)
+        return record
+
+    def _unavailable_preview(
+        self, path: Path, kind: str, reason: str
+    ) -> dict[str, Any]:
+        self.omissions.record(kind, reason, str(path))
+        return {
+            "available": False,
+            "reason": reason,
+            "reference": self.locator(path),
+        }
+
+    def text_preview(self, text: str, *, label: str) -> dict[str, Any]:
+        """Bound a string that is already in memory, keeping its full digest."""
+        encoded = text.encode("utf-8")
+        preview, truncated = artifacts.bounded_preview(
+            encoded, head_bytes=PREVIEW_HEAD_BYTES, tail_bytes=PREVIEW_TAIL_BYTES
+        )
+        record = {
+            "available": True,
+            "label": label,
+            "byte_count": len(encoded),
+            "sha256": artifacts.sha256_hex(encoded),
+            "truncated": truncated,
+            "preview": _redact_secrets(preview),
+        }
+        self._previews.append(record)
+        return record
+
+    # -- size cap --------------------------------------------------------
+
+    def shrink_previews(
+        self, budget: int, *, only: Iterable[dict[str, Any]] | None = None
+    ) -> bool:
+        """Trim preview text to ``budget`` bytes, reporting whether anything moved."""
+        targets = self._previews if only is None else list(only)
+        changed = False
+        for record in targets:
+            preview = record.get("preview")
+            if not isinstance(preview, str) or not preview:
+                continue
+            if len(preview.encode("utf-8")) <= budget:
+                continue
+            record["preview"] = _truncate_utf8(preview, budget)
+            record["truncated"] = True
+            self.omissions.record("previews", REASON_SIZE_CAP, record.get("sha256"))
+            changed = True
+        return changed
+
+    @property
+    def previews(self) -> list[dict[str, Any]]:
+        return self._previews
+
+
+def _redact_argv(items: Sequence[Any]) -> list[Any]:
+    """Blank out argv values that a secret-bearing flag introduces or embeds."""
+    redacted: list[Any] = []
+    expect_secret = False
+    for item in items:
+        if not isinstance(item, str):
+            redacted.append(item)
+            expect_secret = False
+            continue
+        if expect_secret:
+            redacted.append(REDACTED)
+            expect_secret = False
+            continue
+        assignment = _SECRET_ASSIGNMENT_RE.match(item)
+        if assignment is not None:
+            redacted.append(f"{assignment.group(1)}{REDACTED}")
+            continue
+        redacted.append(item)
+        expect_secret = _SECRET_FLAG_RE.match(item) is not None
+    return redacted
+
+
+def _redact_origin(value: str) -> str:
+    """Return a credential-free origin identity, or a stable stand-in."""
+    try:
+        return workspaces.canonicalize_origin(value)
+    except workspaces.WorkspaceError:
+        return f"[unparsable-origin:{_sha256_text(value)[:16]}]"
+
+
+def _redact_secrets(text: str) -> str:
+    """Strip URL userinfo and recognizable credential literals from ``text``."""
+    cleaned = _CREDENTIAL_URL_RE.sub(rf"\1{REDACTED}@", text)
+    return _SECRET_VALUE_RE.sub(REDACTED, cleaned)
+
+
+def _read_json_file(path: Path) -> tuple[Any, str | None]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, REASON_MISSING
+    except OSError:
+        return None, REASON_UNREADABLE
+    try:
+        return json.loads(text), None
+    except (json.JSONDecodeError, ValueError):
+        return None, REASON_MALFORMED
+
+
+def _tree_digest(root: Path, *, patterns: Sequence[str]) -> dict[str, Any]:
+    """Hash a source tree by relative path and content, never by mtime."""
+    if not root.is_dir():
+        return {"available": False, "reason": REASON_MISSING}
+    paths: list[Path] = []
+    for pattern in patterns:
+        paths.extend(candidate for candidate in root.rglob(pattern) if candidate.is_file())
+    ordered = sorted(set(paths), key=lambda item: item.relative_to(root).as_posix())
+    omitted = max(0, len(ordered) - MAX_TREE_FILES)
+    digest = hashlib.sha256()
+    for path in ordered[:MAX_TREE_FILES]:
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        try:
+            digest.update(hashlib.sha256(path.read_bytes()).digest())
+        except OSError:
+            digest.update(b"\x00unreadable")
+    return {
+        "available": True,
+        "file_count": min(len(ordered), MAX_TREE_FILES),
+        "omitted_file_count": omitted,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def _event_priority(name: str, payload: Mapping[str, Any]) -> int:
+    """Return 0 for evidence the cap protects, 2 for what it sheds first."""
+    if name in _ANOMALY_EVENT_NAMES or name == _RUN_STARTED_EVENT:
+        return 0
+    if _payload_shows_failure(payload):
+        return 0
+    if name in _BULK_EVENT_NAMES:
+        return 2
+    return 1
+
+
+def _payload_shows_failure(payload: Mapping[str, Any]) -> bool:
+    """Whether a record is evidence of an anomaly rather than of progress."""
+    returncode = payload.get("returncode")
+    if isinstance(returncode, int) and returncode != 0:
+        return True
+    if payload.get("passed") is False:
+        return True
+    if payload.get("status") in {"fail", "unavailable"}:
+        return True
+    for key in ("timed_out", "interrupted", "hang_suspected", "paused"):
+        if payload.get(key) is True:
+            return True
+    for key in ("failure_reason", "failure_classification", "pause_reason"):
+        if payload.get(key):
+            return True
+    return payload.get("ok") is False
+
+
+def _turn_directories(run_dir: Path) -> list[Path]:
+    try:
+        entries = [
+            entry
+            for entry in run_dir.iterdir()
+            if entry.is_dir() and entry.name.startswith(state.TURN_DIR_PREFIX)
+        ]
+    except OSError:
+        return []
+    return sorted(entries, key=lambda entry: entry.name)
+
+
+def _commit_section(
+    collector: _Collector, *, run_dir: Path, state_payload: Mapping[str, Any]
+) -> dict[str, Any]:
+    """What the run committed, from state projection plus per-commit results."""
+    section = _projection(collector, state_payload, _COMMIT_STATE_KEYS)
+    attempts: list[dict[str, Any]] = []
+    try:
+        directories = sorted(
+            entry
+            for entry in run_dir.iterdir()
+            if entry.is_dir() and entry.name.startswith(_COMMIT_DIR_PREFIX)
+        )
+    except OSError:
+        directories = []
+    for directory in directories:
+        result, reason = _read_json_file(directory / state.RESULT_FILE_NAME)
+        entry: dict[str, Any] = {
+            "name": directory.name,
+            "reference": collector.reference(directory, kind="commit"),
+        }
+        if isinstance(result, Mapping):
+            entry["result"] = collector.redact(result)
+        else:
+            collector.omissions.record(
+                "commits", reason or REASON_MALFORMED, str(directory)
+            )
+            entry["result"] = {"available": False, "reason": reason or REASON_MALFORMED}
+        attempts.append(entry)
+    section["attempts"] = attempts
+    return section
+
+
+def _read_events(
+    path: Path, run_id: str, collector: _Collector
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Read the run's slice of the shared event log, failing loudly on damage.
+
+    The log is per-plan and append-only, so a run is the span from its own
+    ``run_started`` to its terminal record, plus any record that names the run
+    ID outright. Lines that will not parse are counted and digested rather than
+    dropped: a damaged log is itself evidence about the run that wrote it.
+    """
+    summary: dict[str, Any] = {"available": False, "rejected_count": 0}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        summary["reason"] = REASON_MISSING
+        collector.omissions.record("events", REASON_MISSING, str(path))
+        return [], summary
+    except OSError:
+        summary["reason"] = REASON_UNREADABLE
+        collector.omissions.record("events", REASON_UNREADABLE, str(path))
+        return [], summary
+
+    summary["available"] = True
+    records: list[dict[str, Any]] = []
+    inside = False
+    terminated = False
+    rejected = 0
+    for index, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            parsed = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            rejected += 1
+            collector.omissions.record("events", REASON_MALFORMED, line[:2000])
+            continue
+        if not isinstance(parsed, Mapping):
+            rejected += 1
+            collector.omissions.record("events", REASON_MALFORMED, line[:2000])
+            continue
+        payload = parsed.get("payload")
+        payload = payload if isinstance(payload, Mapping) else {}
+        name = str(parsed.get("name") or "")
+        named_run = payload.get("run_id")
+        names_this_run = named_run == run_id
+        if names_this_run and name == _RUN_STARTED_EVENT:
+            inside = True
+            terminated = False
+        if not names_this_run:
+            if not inside or terminated or named_run is not None:
+                continue
+        records.append(
+            {
+                "sequence": index,
+                "name": name,
+                "created_at": parsed.get("created_at"),
+                "version": parsed.get("version"),
+                "priority": _event_priority(name, payload),
+                "payload": collector.redact(payload),
+            }
+        )
+        if names_this_run and name in _TERMINAL_EVENT_NAMES:
+            terminated = True
+    summary["rejected_count"] = rejected
+    summary["reference"] = collector.reference(path, kind="event")
+    return records, summary
+
+
+def _plan_section(
+    collector: _Collector,
+    *,
+    plan_dir: Path,
+    state_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Identity of the source plan directory and of the split it produced."""
+    section: dict[str, Any] = {
+        "reference": collector.reference(plan_dir, kind="plan"),
+        "context": collector.file_digest(plan_dir / "context.md", kind="plan"),
+        "manifest": collector.file_digest(plan_dir / "manifest.md", kind="plan"),
+        "metadata": _plan_metadata(collector, plan_dir),
+    }
+    for label, key in (("initial", "initial_snapshot"), ("final", "final_snapshot")):
+        snapshot = state_payload.get(key)
+        if isinstance(snapshot, Mapping):
+            section[label] = {
+                name: collector.redact(snapshot.get(name), key=name)
+                for name in _SNAPSHOT_IDENTITY_KEYS
+                if name in snapshot
+            }
+        else:
+            section[label] = {"available": False, "reason": REASON_NOT_RECORDED}
+    sessions = []
+    for path in sorted(plan_dir.glob("session-*.md")):
+        entry = collector.file_digest(path, kind="plan")
+        entry["name"] = path.name
+        sessions.append(entry)
+    section["sessions"] = sessions
+    return section
+
+
+def _plan_metadata(collector: _Collector, plan_dir: Path) -> dict[str, Any]:
+    """Read the durable workspace binding without recovering a transaction.
+
+    ``plans.load_plan_metadata`` repairs a pending plan transaction as a side
+    effect. An evidence collector must observe the run rather than change it,
+    so the file is parsed directly.
+    """
+    path = plan_dir / plans.PLAN_METADATA_FILE_NAME
+    payload, reason = _read_json_file(path)
+    if payload is None:
+        collector.omissions.record("plan.metadata", reason, str(path))
+        return {"available": False, "reason": reason}
+    return {
+        "available": True,
+        "reference": collector.reference(
+            path, kind="plan", digest=_sha256_text(json.dumps(payload, sort_keys=True))
+        ),
+        "content": collector.redact(payload),
+    }
+
+
+def _registry_section(
+    collector: _Collector, state_payload: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The workspace binding and repository registry the run executed under."""
+    repositories = state_payload.get("repositories")
+    if not isinstance(repositories, (list, tuple)):
+        run_config = state_payload.get("run_config")
+        if isinstance(run_config, Mapping):
+            repositories = run_config.get("repositories")
+    if not isinstance(repositories, (list, tuple)):
+        return {"registered": False, "reason": REASON_NOT_RECORDED}
+    return {
+        "registered": True,
+        "workspace_root": collector.locator(
+            state_payload.get("workspace_root") or state_payload.get("cwd") or "."
+        ),
+        "digest": state_payload.get("registry_digest"),
+        "repositories": collector.redact(list(repositories)),
+        "inventory_excludes": collector.redact(
+            list(state_payload.get("workspace_inventory_excludes") or ())
+        ),
+    }
+
+
+def _scopes_section(
+    collector: _Collector, *, plan_dir: Path, aliases: Sequence[str]
+) -> dict[str, Any]:
+    """Per-session read and write scopes as the split plan declares them."""
+    if not aliases:
+        return {"available": False, "reason": REASON_NOT_RECORDED}
+    sessions: list[dict[str, Any]] = []
+    for path in sorted(plan_dir.glob("session-*.md")):
+        entry: dict[str, Any] = {"session": path.stem}
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            entry["available"] = False
+            entry["reason"] = REASON_UNREADABLE
+            sessions.append(entry)
+            continue
+        try:
+            scope = plans.parse_session_scope(text, tuple(aliases))
+        except (plans.PlanError, ValueError):
+            entry["available"] = False
+            entry["reason"] = REASON_MALFORMED
+        else:
+            entry.update(
+                available=True, reads=list(scope.reads), writes=list(scope.writes)
+            )
+        sessions.append(entry)
+    return {"available": True, "sessions": sessions}
+
+
+def _turn_section(collector: _Collector, directory: Path) -> dict[str, Any]:
+    """One turn's packet, prompt, harness metadata, and bounded streams."""
+    result, reason = _read_json_file(directory / state.RESULT_FILE_NAME)
+    turn: dict[str, Any] = {
+        "directory": collector.reference(directory, kind="artifact"),
+        "name": directory.name,
+    }
+    if isinstance(result, Mapping):
+        turn["result"] = collector.redact(result)
+        turn["anomalous"] = _payload_shows_failure(result)
+    else:
+        collector.omissions.record(
+            "turns", reason or REASON_MALFORMED, str(directory)
+        )
+        turn["result"] = {"available": False, "reason": reason or REASON_MALFORMED}
+        turn["anomalous"] = True
+    turn["logs"] = {
+        "stdout": collector.file_preview(directory / "stdout.log", kind="harness"),
+        "stderr": collector.file_preview(directory / "stderr.log", kind="harness"),
+    }
+    turn["last_message"] = collector.file_preview(
+        directory / "last-message.txt", kind="harness"
+    )
+    return turn
+
+
+def _verification_section(turns: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Check-level outcomes across the run, without any command output."""
+    sessions = []
+    for turn in turns:
+        result = turn.get("result")
+        if not isinstance(result, Mapping):
+            continue
+        verification = result.get("verification")
+        if not isinstance(verification, Mapping):
+            continue
+        sessions.append({"turn": turn.get("name"), "verification": verification})
+    return {"sessions": sessions, "session_count": len(sessions)}
+
+
+def _projection(
+    collector: _Collector, state_payload: Mapping[str, Any], keys: Sequence[str]
+) -> dict[str, Any]:
+    return {
+        key: collector.redact(state_payload.get(key), key=key)
+        for key in keys
+        if key in state_payload
+    }
+
+
+def _repository_section(
+    collector: _Collector,
+    snapshot: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Per-repository mutation fingerprints: paths and hashes, never content."""
+    if not isinstance(snapshot, Mapping):
+        return {"available": False, "reason": REASON_NOT_RECORDED}
+    return {
+        "available": True,
+        "repositories": {
+            str(name): collector.redact(fingerprint)
+            for name, fingerprint in snapshot.items()
+        },
+    }
+
+
+def _versions_section() -> dict[str, Any]:
+    """What ASL and its skills were, by version and by content digest."""
+    package_root = Path(__file__).resolve().parent
+    return {
+        "asl": __version__,
+        "package": _tree_digest(package_root, patterns=("*.py",)),
+        "skills": _tree_digest(package_root.parent / "skills", patterns=("*",)),
+        "assurance_schema_version": assurance_models.ASSURANCE_SCHEMA_VERSION,
+        "event_schema_version": events.EVENT_SCHEMA_VERSION,
+    }
+
+
+def _shed(
+    payload: dict[str, Any],
+    collector: _Collector,
+    *,
+    max_bytes: int,
+) -> None:
+    """Shrink the bundle to ``max_bytes``, giving up the least useful evidence first.
+
+    Ordering is the whole point: heartbeat chatter goes before ordinary
+    records, ordinary records before old healthy turns, and the terminal,
+    failing, and guard evidence goes last, so a bundle that had to shed
+    something still explains how the run ended.
+    """
+    records: list[dict[str, Any]] = payload["events"]["records"]
+    turns: list[dict[str, Any]] = payload["turns"]
+    protected = {
+        id(turn)
+        for turn in turns[-RECENT_TURN_COUNT:] + [t for t in turns if t.get("anomalous")]
+    }
+
+    def size() -> int:
+        payload["omissions"] = collector.omissions.to_list()
+        return len(assurance_models.canonical_json_bytes(payload))
+
+    def drop_events(priority: int, batch: int) -> bool:
+        doomed = [
+            index
+            for index, record in enumerate(records)
+            if record.get("priority") == priority
+        ][:batch]
+        for index in reversed(doomed):
+            collector.omissions.record("events", REASON_SIZE_CAP, records[index])
+            del records[index]
+        return bool(doomed)
+
+    def drop_turn(only_unprotected: bool, batch: int) -> bool:
+        doomed = [
+            index
+            for index, turn in enumerate(turns)
+            if not (only_unprotected and id(turn) in protected)
+        ][:batch]
+        for index in reversed(doomed):
+            collector.omissions.record("turns", REASON_SIZE_CAP, turns[index].get("name"))
+            del turns[index]
+        return bool(doomed)
+
+    steps: list[Callable[[int], bool]] = [
+        lambda batch: collector.shrink_previews(
+            MIN_PREVIEW_BYTES,
+            only=[
+                preview
+                for turn in turns
+                if id(turn) not in protected
+                for preview in _turn_previews(turn)
+            ],
+        ),
+        lambda batch: drop_events(2, batch),
+        lambda batch: drop_events(1, batch),
+        lambda batch: drop_turn(True, batch),
+        lambda batch: collector.shrink_previews(MIN_PREVIEW_BYTES),
+        lambda batch: collector.shrink_previews(0),
+        lambda batch: drop_events(0, batch),
+        lambda batch: drop_turn(False, batch),
+    ]
+    # Batches grow geometrically so a log with thousands of records is bounded
+    # in a logarithmic number of serializations rather than one per record.
+    for step in steps:
+        batch = 1
+        while size() > max_bytes:
+            if not step(batch):
+                break
+            batch = min(batch * 2, 4096)
+        if size() <= max_bytes:
+            return
+
+
+def _turn_previews(turn: Mapping[str, Any]) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    logs = turn.get("logs")
+    if isinstance(logs, Mapping):
+        found.extend(item for item in logs.values() if isinstance(item, dict))
+    last_message = turn.get("last_message")
+    if isinstance(last_message, dict):
+        found.append(last_message)
+    return found
+
+
+def collect_audit_input(
+    *,
+    run_id: str,
+    run_dir: Path | str,
+    state_dir: Path | str,
+    plan_dir: Path | str,
+    workspace_root: Path | str | None = None,
+    state_payload: Mapping[str, Any] | None = None,
+    workspace_snapshot: Mapping[str, Any] | None = None,
+    terminal_pending: bool = False,
+    max_bytes: int = AUDIT_INPUT_MAX_BYTES,
+) -> AuditInput:
+    """Collect the bounded operational evidence bundle for one finished run.
+
+    The bundle is a pure function of the run's persisted history and of the
+    trees ASL itself ships, so two equivalent histories serialize to identical
+    bytes — which is what lets the artifact's digest key the idempotent
+    publication in :mod:`agent_session_loop.assurance_projection`. Nothing is
+    collected by wall clock, and nothing is collected from the application
+    under test: paths, digests, exit codes, timings, and guard results carry
+    the control-plane story, while file contents and semantic diffs stay out.
+
+    Set ``terminal_pending`` when the caller audits a run whose terminal record
+    has not been written yet, so the checks that read for a missing terminal
+    record do not report the caller's own ordering as a defect.
+    """
+    run_dir = Path(run_dir)
+    state_dir = Path(state_dir)
+    plan_dir = Path(plan_dir)
+    roots = EvidenceRoots.build(
+        run_dir=run_dir,
+        state_dir=state_dir,
+        plan_dir=plan_dir,
+        workspace_root=workspace_root,
+    )
+    collector = _Collector(roots)
+    # Registered first so it survives the evidence-index cap. A deterministic
+    # check may not cite nothing, so this is the locator every check falls back
+    # to when the artifact it read was shed or was never written.
+    collector.reference(run_dir, kind="artifact", detail="run directory")
+
+    state_path = state_dir / events.STATE_FILE_NAME
+    if state_payload is None:
+        loaded, reason = _read_json_file(state_path)
+        if isinstance(loaded, Mapping):
+            state_payload = loaded
+        else:
+            collector.omissions.record(
+                "state", reason or REASON_MALFORMED, str(state_path)
+            )
+            state_payload = {}
+    state_reference = collector.reference(state_path, kind="state")
+
+    registry = _registry_section(collector, state_payload)
+    aliases = [
+        str(entry.get("alias"))
+        for entry in (registry.get("repositories") or ())
+        if isinstance(entry, Mapping) and entry.get("alias")
+    ]
+    event_records, event_summary = _read_events(
+        state_dir / events.EVENTS_FILE_NAME, run_id, collector
+    )
+    turns = [
+        _turn_section(collector, directory) for directory in _turn_directories(run_dir)
+    ]
+
+    payload: dict[str, Any] = {
+        "schema_version": AUDIT_INPUT_SCHEMA_VERSION,
+        "run_id": run_id,
+        "roots": roots.to_dict(),
+        "plan": _plan_section(
+            collector, plan_dir=plan_dir, state_payload=state_payload
+        ),
+        "registry": registry,
+        "scopes": _scopes_section(collector, plan_dir=plan_dir, aliases=aliases),
+        "configuration": collector.redact(state_payload.get("run_config") or {}),
+        "state": {
+            "reference": state_reference,
+            "harness": state_payload.get("harness"),
+            "model": collector.redact(state_payload.get("model"), key="model"),
+            "effort": state_payload.get("effort"),
+            "turn_count": len(turns),
+        },
+        "turns": turns,
+        "events": {
+            "records": event_records,
+            "summary": event_summary,
+            "counts": _event_counts(event_records),
+            "terminal_pending": bool(terminal_pending),
+        },
+        "verification": _verification_section(turns),
+        "review": _projection(collector, state_payload, _REVIEW_STATE_KEYS),
+        "repair": _projection(collector, state_payload, _REPAIR_STATE_KEYS),
+        "commits": _commit_section(
+            collector, run_dir=run_dir, state_payload=state_payload
+        ),
+        "status": _projection(collector, state_payload, _STATUS_STATE_KEYS),
+        "repository": _repository_section(collector, workspace_snapshot),
+        "versions": _versions_section(),
+    }
+    for name in assurance_models.CANONICAL_AUDIT_ARTIFACTS:
+        candidate = run_dir / name
+        if candidate.exists():
+            collector.reference(candidate, kind="artifact")
+
+    payload["evidence"] = collector.evidence()
+    payload["omissions"] = collector.omissions.to_list()
+    _shed(payload, collector, max_bytes=max_bytes)
+    payload["evidence"] = collector.evidence()
+    payload["omissions"] = collector.omissions.to_list()
+    return AuditInput(payload=payload)
+
+
+def _event_counts(records: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in records:
+        name = str(record.get("name") or "")
+        counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+# ---------------------------------------------------------------------------
+# Deterministic checks
+# ---------------------------------------------------------------------------
+
+#: The locator every check falls back to. ``collect_audit_input`` registers the
+#: run directory first, so this is always in the evidence index, and a result
+#: that read nothing else still says where it looked.
+RUN_ANCHOR = EVIDENCE_ROOT_RUN
+
+#: Event names a deterministic check reads. A record that reports a failure
+#: under any other name lands in the unknown-anomalies lane rather than going
+#: unread, which is what keeps the rubric's last lane honest.
+_CLASSIFIED_EVENT_NAMES = frozenset(
+    {
+        _RUN_STARTED_EVENT,
+        events.PROCESS_SWEEP_EVENT,
+        events.REVIEW_VERDICT_RETRY_EVENT,
+        events.RUN_FINISHED_EVENT,
+        events.RUN_PAUSED_EVENT,
+        events.TURN_HANG_CLEARED_EVENT,
+        events.TURN_HANG_SUSPECTED_EVENT,
+        events.VERIFICATION_CHECK_SKIPPED_EVENT,
+        events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT,
+    }
+)
+
+#: Records that describe work in progress. One of these after a run's terminal
+#: record means the run kept working after it declared itself over.
+_POST_TERMINAL_WORK_EVENTS = frozenset(
+    {
+        events.COMMIT_FINISHED_EVENT,
+        events.COMMIT_STARTED_EVENT,
+        events.TURN_HEARTBEAT_EVENT,
+        events.VERIFICATION_CHECK_FINISHED_EVENT,
+        events.VERIFICATION_CHECK_STARTED_EVENT,
+        events.VERIFICATION_FINISHED_EVENT,
+        events.VERIFICATION_STARTED_EVENT,
+    }
+)
+
+#: Turn-result keys naming an artifact, paired with the basename that artifact
+#: must carry inside the turn directory. ``None`` names the directory itself.
+_TURN_PATH_KEYS: tuple[tuple[str, str | None], ...] = (
+    ("artifact_dir", None),
+    ("stdout_path", "stdout.log"),
+    ("stderr_path", "stderr.log"),
+    ("last_message_path", "last-message.txt"),
+    ("result_path", state.RESULT_FILE_NAME),
+)
+
+#: Lane rollup keeps the least reassuring status any of its checks returned.
+_STATUS_PRECEDENCE = {"pass": 0, "unavailable": 1, "fail": 2}
+
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+@dataclass(frozen=True)
+class CheckSpec:
+    """The stable identity one deterministic check reports under.
+
+    The invariant key is the check's contract with the issue inbox: it feeds
+    the finding fingerprint, so the same defect in two runs deduplicates into
+    one issue with two occurrences. Renaming one splits an issue's history.
+    """
+
+    check: str
+    lane: assurance_models.RubricLane
+    category: str
+    component: str
+    invariant_key: str
+    severity: assurance_models.Severity
+    recommendation: str
+
+
+@dataclass(frozen=True)
+class _Verdict:
+    """What one check concluded, before it is stamped with its spec."""
+
+    status: assurance_models.CheckStatus
+    detail: str
+    evidence: tuple[str, ...]
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _sequence(value: Any) -> list[Any]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return list(value)
+    return []
+
+
+def _detail(text: str) -> str:
+    """Bound and flatten a detail so it survives ``DeterministicResult``."""
+    collapsed = " ".join(_CONTROL_CHAR_RE.sub(" ", str(text)).split())
+    return collapsed[: assurance_models.MAX_TEXT_CHARS] or "no detail recorded"
+
+
+def _names(values: Iterable[Any], *, limit: int = 8) -> str:
+    items = sorted({str(value) for value in values if value})
+    if not items:
+        return "none"
+    shown = ", ".join(items[:limit])
+    if len(items) > limit:
+        return f"{shown}, and {len(items) - limit} more"
+    return shown
+
+
+def _inside(locator: Any, root: str) -> bool:
+    return isinstance(locator, str) and (
+        locator == root or locator.startswith(f"{root}/")
+    )
+
+
+def _joined(claims: Iterable[str]) -> str:
+    return "; ".join(sorted(set(claims)))
+
+
+class _CheckContext:
+    """A read-only view of one evidence bundle, shared by every check.
+
+    Every path in the bundle has already been rewritten into a symbolic
+    locator, so containment and agreement are decided by string comparison
+    against an approved root rather than by touching the filesystem.
+    """
+
+    def __init__(self, payload: Mapping[str, Any]) -> None:
+        self.payload = payload
+        self.roots = {
+            str(name): str(value)
+            for name, value in _mapping(payload.get("roots")).items()
+        }
+        self.declared = {
+            str(entry.get("locator"))
+            for entry in _sequence(payload.get("evidence"))
+            if isinstance(entry, Mapping) and entry.get("locator")
+        }
+        self.turns = [
+            turn for turn in _sequence(payload.get("turns")) if isinstance(turn, Mapping)
+        ]
+        self.records = [
+            record
+            for record in _sequence(self.section("events").get("records"))
+            if isinstance(record, Mapping)
+        ]
+        self.omissions = [
+            entry
+            for entry in _sequence(payload.get("omissions"))
+            if isinstance(entry, Mapping)
+        ]
+
+    def section(self, name: str) -> dict[str, Any]:
+        return _mapping(self.payload.get(name))
+
+    @property
+    def events_shed(self) -> bool:
+        """Whether the size cap dropped event records the checks would read."""
+        return any(
+            entry.get("section") == "events" and entry.get("reason") == REASON_SIZE_CAP
+            for entry in self.omissions
+        )
+
+    @property
+    def terminal_pending(self) -> bool:
+        """Whether the run's terminal record is still owed at collection time.
+
+        An audit that runs inside its own run reads the history before the
+        terminal record exists. Absence then proves nothing, so the checks that
+        read for a missing terminal record stay silent instead of reporting the
+        ordering the audit itself requires.
+        """
+        return bool(self.section("events").get("terminal_pending"))
+
+    @property
+    def event_summary(self) -> dict[str, Any]:
+        return _mapping(self.section("events").get("summary"))
+
+    def turn_directories(self) -> list[str]:
+        return [
+            turn["directory"]
+            for turn in self.turns
+            if isinstance(turn.get("directory"), str)
+        ]
+
+    def evidence(self, *candidates: Any) -> tuple[str, ...]:
+        """Keep the declared locators among ``candidates``, else the anchor."""
+        chosen = [
+            locator
+            for locator in dict.fromkeys(candidates)
+            if isinstance(locator, str) and locator in self.declared
+        ]
+        return (
+            tuple(chosen[: assurance_models.MAX_REFERENCES_PER_ITEM])
+            or (RUN_ANCHOR,)
+        )
+
+
+def _check_root_registry_agreement(context: _CheckContext) -> _Verdict:
+    plan = context.section("plan")
+    metadata = _mapping(plan.get("metadata"))
+    registry = context.section("registry")
+    evidence = context.evidence(
+        metadata.get("reference"),
+        context.section("state").get("reference"),
+        plan.get("reference"),
+    )
+    if EVIDENCE_ROOT_WORKSPACE not in context.roots:
+        return _Verdict(
+            "unavailable",
+            "the run declared no workspace root, so no binding can be compared "
+            "against one",
+            evidence,
+        )
+
+    bindings: list[tuple[str, Any]] = []
+    content = _mapping(metadata.get("content"))
+    if metadata.get("available") and content.get("workspace_root") is not None:
+        bindings.append(("the plan metadata", content.get("workspace_root")))
+    if registry.get("registered"):
+        if registry.get("workspace_root") is not None:
+            bindings.append(("the run registry", registry.get("workspace_root")))
+        for entry in _sequence(registry.get("repositories")):
+            entry = _mapping(entry)
+            if entry.get("path") is not None:
+                alias = entry.get("alias") or "an unnamed repository"
+                bindings.append((f"registered repository {alias}", entry.get("path")))
+    if not bindings:
+        return _Verdict(
+            "unavailable",
+            "neither the plan metadata nor the run registry recorded a workspace "
+            "binding to compare against the run's root",
+            evidence,
+        )
+
+    disagreeing = [
+        f"{source} resolves to {value}"
+        for source, value in bindings
+        if not _inside(value, EVIDENCE_ROOT_WORKSPACE)
+    ]
+    if disagreeing:
+        return _Verdict(
+            "fail",
+            "the run's workspace root disagrees with what its own records bind "
+            f"it to: {_joined(disagreeing)}",
+            evidence,
+        )
+    return _Verdict(
+        "pass",
+        f"all {len(bindings)} recorded workspace bindings resolve inside the "
+        "run's workspace root",
+        evidence,
+    )
+
+
+def _check_repository_intent(context: _CheckContext) -> _Verdict:
+    plan = context.section("plan")
+    evidence = context.evidence(
+        plan.get("reference"), context.section("state").get("reference")
+    )
+    plan_root = context.roots.get(EVIDENCE_ROOT_PLAN)
+    workspace_root = context.roots.get(EVIDENCE_ROOT_WORKSPACE)
+    if not plan_root or not workspace_root or not Path(plan_root).is_dir():
+        return _Verdict(
+            "unavailable",
+            "the run recorded no plan directory and workspace root to replay the "
+            "repository-intent gate against",
+            evidence,
+        )
+    # Replaying the gate reads the plan through ``plans``, which rolls a pending
+    # publication forward as a side effect. An audit observes a run; it does not
+    # finish one, so an interrupted plan is reported rather than repaired.
+    if (Path(plan_root) / plans.PLAN_TRANSACTION_DIR_NAME).exists():
+        return _Verdict(
+            "unavailable",
+            "the plan directory holds a pending publication transaction, and "
+            "replaying the repository-intent gate would complete it rather than "
+            "observe it",
+            evidence,
+        )
+    exempt = [
+        context.roots[name]
+        for name in (EVIDENCE_ROOT_STATE, EVIDENCE_ROOT_RUN)
+        if context.roots.get(name)
+    ]
+    try:
+        _, report = preflight.plan_repository_intent(
+            plan_root, workspace_root, extra_exempt_roots=exempt
+        )
+    except (OSError, ValueError, plans.PlanError) as error:
+        return _Verdict(
+            "unavailable",
+            f"the repository-intent gate could not be replayed after the run: {error}",
+            evidence,
+        )
+    if report is None:
+        return _Verdict(
+            "pass",
+            "the plan declares a repository registry naming every repository it "
+            "may reach",
+            evidence,
+        )
+    reachable = _names(
+        Path(str(root)).name for root in _sequence(report.get("git_roots"))
+    )
+    return _Verdict(
+        "fail",
+        f"the plan reaches {report.get('git_root_count')} git repositories but "
+        f"declares no repository registry: {reachable}",
+        evidence,
+    )
+
+
+def _check_task_packet_paths(context: _CheckContext) -> _Verdict:
+    contradictions: list[str] = []
+    references: list[str] = []
+    observed = 0
+    workspace_declared = EVIDENCE_ROOT_WORKSPACE in context.roots
+    for turn in context.turns:
+        directory = turn.get("directory")
+        result = _mapping(turn.get("result"))
+        if not isinstance(directory, str) or result.get("available") is False:
+            continue
+        references.append(directory)
+        for key, basename in _TURN_PATH_KEYS:
+            value = result.get(key)
+            if value is None:
+                continue
+            observed += 1
+            expected = directory if basename is None else f"{directory}/{basename}"
+            if value != expected:
+                contradictions.append(
+                    f"{turn.get('name')} names {value} as its {key} rather than "
+                    f"{expected}"
+                )
+        cwd = _mapping(result.get("invocation")).get("cwd")
+        if isinstance(cwd, str) and workspace_declared:
+            observed += 1
+            if not _inside(cwd, EVIDENCE_ROOT_WORKSPACE):
+                contradictions.append(
+                    f"{turn.get('name')} ran in {cwd}, outside the run's workspace"
+                )
+    configured_cwd = context.section("configuration").get("cwd")
+    if isinstance(configured_cwd, str) and workspace_declared:
+        observed += 1
+        if not _inside(configured_cwd, EVIDENCE_ROOT_WORKSPACE):
+            contradictions.append(
+                f"the run configuration names {configured_cwd} as its working "
+                "directory, outside the run's workspace"
+            )
+    evidence = context.evidence(
+        *references, context.section("state").get("reference")
+    )
+    if contradictions:
+        return _Verdict(
+            "fail",
+            f"a task packet names paths its own run contradicts: {_joined(contradictions)}",
+            evidence,
+        )
+    if not observed:
+        return _Verdict(
+            "unavailable",
+            "no turn recorded the artifact paths its packet was written from",
+            evidence,
+        )
+    return _Verdict(
+        "pass",
+        f"all {observed} recorded packet paths agree with the artifacts they name",
+        evidence,
+    )
+
+
+def _check_scope_escape(context: _CheckContext) -> _Verdict:
+    escapes: list[str] = []
+    blind: list[str] = []
+    references: list[str] = []
+    observed = 0
+    for turn in context.turns:
+        guard = _mapping(_mapping(turn.get("result")).get("workspace_write_guard"))
+        if not guard:
+            continue
+        observed += 1
+        if isinstance(turn.get("directory"), str):
+            references.append(turn["directory"])
+        violations = [_mapping(item) for item in _sequence(guard.get("violations"))]
+        if violations:
+            named = _names(
+                item.get("alias") or item.get("repository") for item in violations
+            )
+            escapes.append(
+                f"{turn.get('name')} wrote outside its declared scope ({named})"
+            )
+        if _mapping(guard.get("unavailable")):
+            blind.append(f"{turn.get('name')} could not be inventoried")
+    for record in context.records:
+        name = record.get("name")
+        reason = _mapping(record.get("payload")).get("reason")
+        if name == events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT:
+            observed += 1
+            escapes.append(
+                "the run repaired a write scope that had already been exceeded"
+            )
+        elif name != events.RUN_PAUSED_EVENT:
+            continue
+        elif reason == events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION:
+            observed += 1
+            escapes.append("the run paused on a workspace write scope violation")
+        elif reason == events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE:
+            observed += 1
+            blind.append("the write guard reported itself unavailable")
+    evidence = context.evidence(
+        *references, context.section("state").get("reference")
+    )
+    if escapes:
+        return _Verdict("fail", _joined(escapes), evidence)
+    if blind:
+        return _Verdict(
+            "unavailable",
+            f"the workspace write guard could not judge containment: {_joined(blind)}",
+            evidence,
+        )
+    if not observed:
+        return _Verdict(
+            "unavailable",
+            "no turn recorded a workspace write guard result, so scope "
+            "containment cannot be judged",
+            evidence,
+        )
+    return _Verdict(
+        "pass",
+        f"all {observed} recorded write-guard results kept every write inside "
+        "the session's declared scope",
+        evidence,
+    )
+
+
+def _check_state_event_agreement(context: _CheckContext) -> _Verdict:
+    status = context.section("status")
+    evidence = context.evidence(
+        context.section("state").get("reference"),
+        context.event_summary.get("reference"),
+    )
+    terminal = [
+        record for record in context.records if record.get("name") in _TERMINAL_EVENT_NAMES
+    ]
+    if "ok" not in status and "paused" not in status and not terminal:
+        return _Verdict(
+            "unavailable",
+            "the run recorded neither a terminal outcome in its state nor a "
+            "terminal event record",
+            evidence,
+        )
+    paused_records = [
+        record for record in terminal if record.get("name") == events.RUN_PAUSED_EVENT
+    ]
+    finished_records = [
+        record for record in terminal if record.get("name") == events.RUN_FINISHED_EVENT
+    ]
+
+    contradictions: list[str] = []
+    blind: list[str] = []
+
+    def absent(claim: str) -> None:
+        (blind if context.events_shed else contradictions).append(claim)
+
+    if not context.terminal_pending:
+        if status.get("paused") is True and not paused_records:
+            absent("state records the run as paused but no run_paused record survives")
+        if status.get("ok") is True and not finished_records:
+            absent("state records the run as ok but no run_finished record survives")
+    if paused_records and status.get("paused") is False:
+        contradictions.append(
+            "the event log records a pause the state projection denies"
+        )
+    if paused_records and status.get("ok") is True:
+        contradictions.append(
+            "the event log records a pause the state projection reports as success"
+        )
+    if any(
+        _mapping(record.get("payload")).get("ok") is False
+        for record in finished_records
+    ) and status.get("ok") is True:
+        contradictions.append(
+            "the run_finished record reports failure while the state projection "
+            "reports success"
+        )
+    reason = status.get("pause_reason")
+    for record in paused_records:
+        recorded = _mapping(record.get("payload")).get("reason")
+        if reason and recorded and recorded != reason:
+            contradictions.append(
+                f"state names {reason} as the pause reason while the run_paused "
+                f"record names {recorded}"
+            )
+
+    if contradictions:
+        return _Verdict(
+            "fail",
+            f"the persisted state and the event log tell different stories: "
+            f"{_joined(contradictions)}",
+            evidence,
+        )
+    if blind:
+        return _Verdict(
+            "unavailable",
+            f"the event log was shed under the size cap, so {_joined(blind)}",
+            evidence,
+        )
+    return _Verdict(
+        "pass",
+        "the persisted status agrees with the run's terminal event records",
+        evidence,
+    )
+
+
+def _check_terminal_artifacts(context: _CheckContext) -> _Verdict:
+    problems: list[str] = []
+    blind: list[str] = []
+    references: list[str] = []
+    for turn in context.turns:
+        result = _mapping(turn.get("result"))
+        if isinstance(turn.get("directory"), str):
+            references.append(turn["directory"])
+        if result.get("available") is False:
+            problems.append(
+                f"{turn.get('name')} wrote no readable {state.RESULT_FILE_NAME} "
+                f"({result.get('reason')})"
+            )
+    evidence = context.evidence(
+        context.event_summary.get("reference"), *references
+    )
+    names = [str(record.get("name") or "") for record in context.records]
+    if not names:
+        if problems:
+            return _Verdict("fail", _joined(problems), evidence)
+        return _Verdict(
+            "unavailable",
+            "the run's slice of the event log holds no records to order",
+            evidence,
+        )
+
+    if _RUN_STARTED_EVENT not in names:
+        (blind if context.events_shed else problems).append(
+            "the run recorded no run_started event"
+        )
+    elif names[0] != _RUN_STARTED_EVENT:
+        problems.append(
+            f"the run's first record is {names[0]} rather than {_RUN_STARTED_EVENT}"
+        )
+    terminal_at = [
+        index for index, name in enumerate(names) if name in _TERMINAL_EVENT_NAMES
+    ]
+    if not terminal_at:
+        if not context.terminal_pending:
+            (blind if context.events_shed else problems).append(
+                "the run recorded no terminal event"
+            )
+    elif len(terminal_at) > 1:
+        problems.append(f"the run recorded {len(terminal_at)} terminal events")
+    if terminal_at:
+        trailing = [
+            name
+            for name in names[terminal_at[-1] + 1 :]
+            if name in _POST_TERMINAL_WORK_EVENTS
+        ]
+        if trailing:
+            problems.append(
+                f"{len(trailing)} record(s) of work follow the run's terminal "
+                f"record: {_names(trailing)}"
+            )
+
+    if problems:
+        return _Verdict(
+            "fail",
+            f"the run's terminal artifacts are missing or out of order: "
+            f"{_joined(problems)}",
+            evidence,
+        )
+    if blind:
+        return _Verdict(
+            "unavailable",
+            f"the event log was shed under the size cap, so {_joined(blind)} "
+            "cannot be distinguished from one the cap removed",
+            evidence,
+        )
+    closing = (
+        "has not yet written the terminal record it is being audited ahead of"
+        if not terminal_at
+        else "closes on exactly one terminal record"
+    )
+    return _Verdict(
+        "pass",
+        f"the run opens on {_RUN_STARTED_EVENT}, {closing}, and every turn wrote "
+        f"a readable {state.RESULT_FILE_NAME}",
+        evidence,
+    )
+
+
+def _check_misleading_success(context: _CheckContext) -> _Verdict:
+    status = context.section("status")
+    finished = [
+        record
+        for record in context.records
+        if record.get("name") == events.RUN_FINISHED_EVENT
+    ]
+    claimed = status.get("ok") is True or any(
+        _mapping(record.get("payload")).get("ok") is True for record in finished
+    )
+
+    counter: list[str] = []
+    references: list[str] = []
+    for turn in context.turns:
+        result = _mapping(turn.get("result"))
+        guard = _mapping(result.get("workspace_write_guard"))
+        contradicts = turn.get("anomalous") is True or bool(
+            _sequence(guard.get("violations"))
+        )
+        if turn.get("anomalous") is True:
+            counter.append(f"{turn.get('name')} recorded an anomalous result")
+        if _sequence(guard.get("violations")):
+            counter.append(f"{turn.get('name')} exceeded its declared write scope")
+        if contradicts and isinstance(turn.get("directory"), str):
+            references.append(turn["directory"])
+    for session in _sequence(context.section("verification").get("sessions")):
+        verification = _mapping(_mapping(session).get("verification"))
+        if verification.get("passed") is False:
+            counter.append(f"verification failed for {_mapping(session).get('turn')}")
+        skipped = _sequence(verification.get("skipped_checks"))
+        if skipped:
+            counter.append(
+                f"{len(skipped)} verification check(s) were skipped for "
+                f"{_mapping(session).get('turn')}"
+            )
+    skipped_records = [
+        record
+        for record in context.records
+        if record.get("name") == events.VERIFICATION_CHECK_SKIPPED_EVENT
+    ]
+    if skipped_records:
+        counter.append(
+            f"{len(skipped_records)} verification check(s) recorded themselves as "
+            "skipped"
+        )
+    if status.get("paused") is True:
+        counter.append("the state projection records the run as paused")
+    if any(
+        record.get("name") == events.RUN_PAUSED_EVENT for record in context.records
+    ):
+        counter.append("the event log records the run as paused")
+
+    evidence = context.evidence(
+        context.section("state").get("reference"), *references
+    )
+    if claimed and counter:
+        return _Verdict(
+            "fail",
+            f"the run reports success its own evidence contradicts: {_joined(counter)}",
+            evidence,
+        )
+    if claimed:
+        return _Verdict(
+            "pass",
+            "nothing the run recorded contradicts the success it claims",
+            evidence,
+        )
+    if "ok" not in status and not finished:
+        return _Verdict(
+            "unavailable",
+            "the run recorded no outcome to weigh against its own evidence",
+            evidence,
+        )
+    return _Verdict(
+        "pass", "the run claimed no success, so no success is unearned", evidence
+    )
+
+
+def _check_retry_resume(context: _CheckContext) -> _Verdict:
+    status = context.section("status")
+    evidence = context.evidence(
+        context.section("state").get("reference"),
+        context.event_summary.get("reference"),
+    )
+    reason = status.get("pause_reason")
+    paused = status.get("paused") is True or any(
+        record.get("name") == events.RUN_PAUSED_EVENT for record in context.records
+    )
+    recorded = _mapping(status.get("pause_policy"))
+    if paused and reason and not recorded:
+        return _Verdict(
+            "unavailable",
+            f"the run paused for {reason} but recorded no retry classification to "
+            "check against the pause policy",
+            evidence,
+        )
+
+    contradictions: list[str] = []
+    if recorded:
+        expected = pause_policy.classify_pause(
+            reason if isinstance(reason, str) else None
+        )
+        for key in ("reason", "recoverable", "requires_user", "max_retries"):
+            if recorded.get(key) != expected[key]:
+                contradictions.append(
+                    f"the recorded retry policy gives {key}={recorded.get(key)!r} "
+                    f"where the pause classifier gives {expected[key]!r}"
+                )
+    retries: dict[str, list[dict[str, Any]]] = {}
+    for record in context.records:
+        if record.get("name") != events.REVIEW_VERDICT_RETRY_EVENT:
+            continue
+        payload = _mapping(record.get("payload"))
+        retries.setdefault(str(payload.get("session")), []).append(payload)
+    for session, attempts in sorted(retries.items()):
+        budgets = [
+            payload["max_attempts"]
+            for payload in attempts
+            if isinstance(payload.get("max_attempts"), int)
+        ]
+        if not budgets:
+            contradictions.append(
+                f"session {session} recorded {len(attempts)} retry attempt(s) "
+                "without naming the budget they were spent against"
+            )
+            continue
+        budget = min(budgets)
+        if len(attempts) > budget:
+            contradictions.append(
+                f"session {session} was relaunched {len(attempts)} times against a "
+                f"budget of {budget}"
+            )
+        beyond = [
+            payload["attempt"]
+            for payload in attempts
+            if isinstance(payload.get("attempt"), int) and payload["attempt"] > budget
+        ]
+        if beyond:
+            contradictions.append(
+                f"session {session} recorded retry attempt {max(beyond)} beyond its "
+                f"budget of {budget}"
+            )
+
+    if contradictions:
+        return _Verdict(
+            "fail",
+            f"the run's retry and resume records are inconsistent: "
+            f"{_joined(contradictions)}",
+            evidence,
+        )
+    if not recorded and not retries:
+        if not paused:
+            return _Verdict(
+                "pass",
+                "the run neither paused nor retried, so no retry budget was spent",
+                evidence,
+            )
+        return _Verdict(
+            "unavailable",
+            "the run paused without recording either a reason or a retry "
+            "classification",
+            evidence,
+        )
+    return _Verdict(
+        "pass",
+        f"the recorded retry classification matches the pause policy and "
+        f"{len(retries)} session(s) stayed inside their retry budget",
+        evidence,
+    )
+
+
+def _check_review_independence(context: _CheckContext) -> _Verdict:
+    review = context.section("review")
+    run_state = context.section("state")
+    evidence = context.evidence(run_state.get("reference"))
+    if not review and not _sequence(context.section("verification").get("sessions")):
+        return _Verdict(
+            "unavailable",
+            "the run recorded neither a review verdict nor a verification result "
+            "to judge independence by",
+            evidence,
+        )
+
+    verdict = review.get("review_verdict")
+    harness = run_state.get("harness")
+    review_harness = review.get("review_harness")
+    contradictions: list[str] = []
+    if verdict and harness and review_harness == harness:
+        contradictions.append(f"the {harness} harness reviewed its own work")
+    if verdict == "approved" and review.get("review_completed") is False:
+        contradictions.append("a verdict was approved without the review completing")
+    if contradictions:
+        return _Verdict(
+            "fail",
+            f"the run's review did not stand apart from the work it graded: "
+            f"{_joined(contradictions)}",
+            evidence,
+        )
+    if not verdict:
+        return _Verdict(
+            "unavailable",
+            "the run recorded no review verdict, so review independence cannot be "
+            "judged",
+            evidence,
+        )
+    if not review_harness:
+        return _Verdict(
+            "unavailable",
+            "the run recorded a review verdict without naming the harness that "
+            "produced it",
+            evidence,
+        )
+    if not harness:
+        return _Verdict(
+            "unavailable",
+            "the run recorded a review verdict without naming the harness that "
+            "did the work the review graded",
+            evidence,
+        )
+    return _Verdict(
+        "pass",
+        f"the {review_harness} review harness is independent of the {harness} "
+        "implementation harness",
+        evidence,
+    )
+
+
+def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
+    commits = context.section("commits")
+    registry = context.section("registry")
+    scopes = context.section("scopes")
+    contradictions: list[str] = []
+    references: list[str] = []
+
+    mutation = f"{EVIDENCE_ROOT_RUN}/{MUTATION_ARTIFACT_NAME}"
+    if mutation in context.declared:
+        references.append(mutation)
+        contradictions.append(
+            "the audit recorded a workspace mutation under its own read-only profile"
+        )
+
+    writable = {
+        str(alias)
+        for session in _sequence(scopes.get("sessions"))
+        for alias in _sequence(_mapping(session).get("writes"))
+    }
+    attempts = [_mapping(item) for item in _sequence(commits.get("attempts"))]
+    if attempts and not commits.get("commit_mode"):
+        contradictions.append(
+            f"the run made {len(attempts)} commit attempt(s) without recording the "
+            "commit mode they ran under"
+        )
+    for attempt in attempts:
+        if isinstance(attempt.get("reference"), str):
+            references.append(attempt["reference"])
+        result = _mapping(attempt.get("result"))
+        if result.get("available") is False:
+            contradictions.append(
+                f"{attempt.get('name')} wrote no readable commit result"
+            )
+            continue
+        alias = result.get("repository_alias")
+        if scopes.get("available") and alias and str(alias) not in writable:
+            contradictions.append(
+                f"{attempt.get('name')} committed to {alias}, which no session "
+                "declares as writable"
+            )
+
+    guarded = 0
+    unguarded: list[str] = []
+    if registry.get("registered"):
+        for turn in context.turns:
+            result = _mapping(turn.get("result"))
+            if result.get("available") is False or turn.get("anomalous") is True:
+                continue
+            if isinstance(turn.get("directory"), str):
+                references.append(turn["directory"])
+            if _mapping(result.get("workspace_write_guard")):
+                guarded += 1
+            else:
+                unguarded.append(str(turn.get("name")))
+    if unguarded:
+        contradictions.append(
+            f"{_names(unguarded)} completed on a registered workspace without a "
+            "write-guard result"
+        )
+
+    evidence = context.evidence(
+        *references, context.section("state").get("reference")
+    )
+    if contradictions:
+        return _Verdict(
+            "fail",
+            f"the run's mutation and commit guards left a gap: {_joined(contradictions)}",
+            evidence,
+        )
+    if not attempts and not guarded:
+        return _Verdict(
+            "unavailable",
+            "the run recorded neither a commit attempt nor a write-guard result to "
+            "judge its mutation guards by",
+            evidence,
+        )
+    return _Verdict(
+        "pass",
+        f"{guarded} guarded turn(s) and {len(attempts)} commit attempt(s) stayed "
+        "inside the run's declared write scope",
+        evidence,
+    )
+
+
+def _check_resource_anomalies(context: _CheckContext) -> _Verdict:
+    anomalies: list[str] = []
+    references: list[str] = []
+    suspected = 0
+    cleared = 0
+    for record in context.records:
+        name = record.get("name")
+        payload = _mapping(record.get("payload"))
+        if name == events.TURN_HANG_SUSPECTED_EVENT:
+            suspected += 1
+        elif name == events.TURN_HANG_CLEARED_EVENT:
+            cleared += 1
+        elif name == events.PROCESS_SWEEP_EVENT:
+            if _sequence(payload.get("kill_failed")):
+                anomalies.append(
+                    "a post-turn process sweep failed to kill a process it owned"
+                )
+            if _sequence(payload.get("survivors_after")):
+                anomalies.append("processes survived a post-turn sweep")
+    if suspected > cleared:
+        anomalies.append(f"{suspected - cleared} suspected hang(s) were never cleared")
+    for turn in context.turns:
+        result = _mapping(turn.get("result"))
+        stalled = [
+            label
+            for key, label in (("timed_out", "timed out"), ("interrupted", "was interrupted"))
+            if result.get(key) is True
+        ]
+        for label in stalled:
+            anomalies.append(f"{turn.get('name')} {label}")
+        if stalled and isinstance(turn.get("directory"), str):
+            references.append(turn["directory"])
+
+    evidence = context.evidence(
+        *references,
+        context.event_summary.get("reference"),
+        context.section("state").get("reference"),
+    )
+    if anomalies:
+        return _Verdict(
+            "fail",
+            f"the run stalled or leaked processes: {_joined(anomalies)}",
+            evidence,
+        )
+    if context.events_shed:
+        return _Verdict(
+            "unavailable",
+            "the event log was shed under the size cap, so the run's process "
+            "sweeps cannot be read in full",
+            evidence,
+        )
+    if not context.records and not context.turns:
+        return _Verdict(
+            "unavailable",
+            "the run recorded neither events nor turns to judge stalls and "
+            "timeouts by",
+            evidence,
+        )
+    return _Verdict(
+        "pass",
+        f"{len(context.turns)} turn(s) ran without a timeout, an interrupt, an "
+        "uncleared hang, or a surviving process",
+        evidence,
+    )
+
+
+def _check_unclassified_anomalies(context: _CheckContext) -> _Verdict:
+    summary = context.event_summary
+    evidence = context.evidence(
+        summary.get("reference"), context.section("state").get("reference")
+    )
+    unread: list[str] = []
+    rejected = summary.get("rejected_count")
+    if isinstance(rejected, int) and rejected > 0:
+        unread.append(f"{rejected} event log line(s) would not parse")
+    for omission in context.omissions:
+        if omission.get("reason") in (REASON_UNREADABLE, REASON_MALFORMED):
+            unread.append(
+                f"{omission.get('count')} {omission.get('section')} artifact(s) were "
+                f"{omission.get('reason')}"
+            )
+    unclassified: dict[str, int] = {}
+    for record in context.records:
+        name = str(record.get("name") or "")
+        if name in _CLASSIFIED_EVENT_NAMES:
+            continue
+        if _payload_shows_failure(_mapping(record.get("payload"))):
+            unclassified[name] = unclassified.get(name, 0) + 1
+    for name in sorted(unclassified):
+        unread.append(
+            f"{unclassified[name]} {name} record(s) report a failure no "
+            "deterministic check classifies"
+        )
+
+    if unread:
+        return _Verdict(
+            "fail",
+            f"the run holds evidence no deterministic check accounts for: "
+            f"{_joined(unread)}",
+            evidence,
+        )
+    if not context.records and not context.omissions:
+        return _Verdict(
+            "unavailable",
+            "the run recorded no events and no omissions, so there is nothing to "
+            "classify",
+            evidence,
+        )
+    return _Verdict(
+        "pass",
+        "every recorded failure is accounted for by a named deterministic check",
+        evidence,
+    )
+
+
+_CHECKS: tuple[tuple[CheckSpec, Callable[[_CheckContext], _Verdict]], ...] = (
+    (
+        CheckSpec(
+            check="root-registry-agreement",
+            lane="identity-authority",
+            category="identity",
+            component="workspace-registry",
+            invariant_key="identity.root-registry-agreement",
+            severity="critical",
+            recommendation=(
+                "Re-bind the plan to the workspace it actually ran against, or "
+                "re-register the repositories under the recorded root, before "
+                "trusting any scope decision this run made."
+            ),
+        ),
+        _check_root_registry_agreement,
+    ),
+    (
+        CheckSpec(
+            check="repository-intent",
+            lane="identity-authority",
+            category="identity",
+            component="repository-intent",
+            invariant_key="identity.repository-intent",
+            severity="critical",
+            recommendation=(
+                "Declare a `## Repositories` table in manifest.md naming every "
+                "repository the plan reaches, then re-run preflight."
+            ),
+        ),
+        _check_repository_intent,
+    ),
+    (
+        CheckSpec(
+            check="task-packet-paths",
+            lane="task-packet-coherence",
+            category="packet",
+            component="turn-artifacts",
+            invariant_key="packet.artifact-path-agreement",
+            severity="high",
+            recommendation=(
+                "Reconcile the paths written into the turn result with the "
+                "directory the turn actually ran from."
+            ),
+        ),
+        _check_task_packet_paths,
+    ),
+    (
+        CheckSpec(
+            check="scope-escape",
+            lane="task-packet-coherence",
+            category="packet",
+            component="workspace-write-guard",
+            invariant_key="packet.write-scope-containment",
+            severity="critical",
+            recommendation=(
+                "Widen the session's declared writes or revert the out-of-scope "
+                "change; do not resume until the guard passes on its own."
+            ),
+        ),
+        _check_scope_escape,
+    ),
+    (
+        CheckSpec(
+            check="retry-resume",
+            lane="lifecycle-retry-resume",
+            category="lifecycle",
+            component="pause-policy",
+            invariant_key="lifecycle.retry-and-resume-consistency",
+            severity="medium",
+            recommendation=(
+                "Persist the classification `pause_policy.classify_pause` returns "
+                "for the recorded reason, and keep relaunches inside the budget "
+                "the retry records name."
+            ),
+        ),
+        _check_retry_resume,
+    ),
+    (
+        CheckSpec(
+            check="review-independence",
+            lane="verification-review-independence",
+            category="review",
+            component="review-harness",
+            invariant_key="review.independent-verification",
+            severity="high",
+            recommendation=(
+                "Run the review under a harness other than the one that did the "
+                "work, and record a verdict only once the review completes."
+            ),
+        ),
+        _check_review_independence,
+    ),
+    (
+        CheckSpec(
+            check="mutation-commit-guards",
+            lane="mutation-commit-guards",
+            category="guards",
+            component="mutation-and-commit",
+            invariant_key="guards.mutation-and-commit",
+            severity="critical",
+            recommendation=(
+                "Record a write-guard result for every completed turn on a "
+                "registered workspace, and commit only to repositories a session "
+                "declares as writable."
+            ),
+        ),
+        _check_mutation_commit_guards,
+    ),
+    (
+        CheckSpec(
+            check="state-event-agreement",
+            lane="truthfulness-observability",
+            category="observability",
+            component="state-and-events",
+            invariant_key="observability.state-event-agreement",
+            severity="high",
+            recommendation=(
+                "Write the terminal event and the state projection under one lock "
+                "so an operator reading either sees the same outcome."
+            ),
+        ),
+        _check_state_event_agreement,
+    ),
+    (
+        CheckSpec(
+            check="terminal-artifacts",
+            lane="truthfulness-observability",
+            category="observability",
+            component="terminal-artifacts",
+            invariant_key="observability.terminal-artifacts",
+            severity="medium",
+            recommendation=(
+                "Ensure every turn writes its result file and that the run opens "
+                "on run_started and closes on exactly one terminal record."
+            ),
+        ),
+        _check_terminal_artifacts,
+    ),
+    (
+        CheckSpec(
+            check="misleading-success",
+            lane="truthfulness-observability",
+            category="observability",
+            component="success-claim",
+            invariant_key="observability.success-is-earned",
+            severity="high",
+            recommendation=(
+                "Withhold the success claim until the anomalies, failed checks, "
+                "and skipped checks it contradicts are resolved or explained."
+            ),
+        ),
+        _check_misleading_success,
+    ),
+    (
+        CheckSpec(
+            check="resource-anomalies",
+            lane="resources-stalls",
+            category="resources",
+            component="process-lifecycle",
+            invariant_key="resources.stall-and-timeout",
+            severity="medium",
+            recommendation=(
+                "Trace the stalled turn or surviving process to the descendant "
+                "that outlived its turn, and close the handle that kept it alive."
+            ),
+        ),
+        _check_resource_anomalies,
+    ),
+    (
+        CheckSpec(
+            check="unclassified-anomalies",
+            lane="unknown-anomalies",
+            category="anomalies",
+            component="unclassified-evidence",
+            invariant_key="anomalies.unclassified-evidence",
+            severity="low",
+            recommendation=(
+                "Read the unclassified records directly, then either repair the "
+                "damaged evidence or add a deterministic check that owns them."
+            ),
+        ),
+        _check_unclassified_anomalies,
+    ),
+)
+
+#: Every deterministic check, in the order results are reported.
+DETERMINISTIC_CHECK_SPECS: tuple[CheckSpec, ...] = tuple(spec for spec, _ in _CHECKS)
+
+
+def run_deterministic_checks(
+    bundle: AuditInput | Mapping[str, Any],
+) -> tuple[assurance_models.DeterministicResult, ...]:
+    """Judge one evidence bundle against every reproducible check.
+
+    Each check answers ``pass``, ``fail``, or ``unavailable`` under a stable
+    invariant key and names the evidence it read. Evidence a check needed but
+    could not see yields ``unavailable``: an audit that cannot look is never
+    the same thing as an audit that looked and found nothing.
+    """
+    payload = bundle.payload if isinstance(bundle, AuditInput) else bundle
+    context = _CheckContext(payload)
+    return tuple(
+        assurance_models.DeterministicResult(
+            check=spec.check,
+            lane=spec.lane,
+            status=verdict.status,
+            invariant_key=spec.invariant_key,
+            evidence=verdict.evidence,
+            detail=_detail(verdict.detail),
+        )
+        for spec, verdict in ((spec, run(context)) for spec, run in _CHECKS)
+    )
+
+
+def findings_from_results(
+    results: Iterable[assurance_models.DeterministicResult],
+) -> tuple[Finding, ...]:
+    """Raise each failing check into a finding under the check's fingerprint."""
+    specs = {spec.check: spec for spec in DETERMINISTIC_CHECK_SPECS}
+    findings = []
+    for result in results:
+        spec = specs.get(result.check)
+        if result.status != "fail" or spec is None:
+            continue
+        findings.append(
+            Finding(
+                category=spec.category,
+                component=spec.component,
+                invariant_key=spec.invariant_key,
+                lane=spec.lane,
+                severity=spec.severity,
+                summary=result.detail or f"the {spec.check} check failed",
+                recommendation=spec.recommendation,
+                evidence=result.evidence,
+            )
+        )
+    return tuple(findings)
+
+
+def lane_rollup(
+    results: Iterable[assurance_models.DeterministicResult],
+) -> dict[str, str]:
+    """Reduce results to one status per rubric lane, keeping the worst.
+
+    A lane no check reported on rolls up as ``unavailable`` rather than as
+    ``pass``, so a gap in coverage reads as a gap.
+    """
+    worst: dict[str, str] = {}
+    for result in results:
+        current = worst.get(result.lane)
+        if (
+            current is None
+            or _STATUS_PRECEDENCE[result.status] > _STATUS_PRECEDENCE[current]
+        ):
+            worst[result.lane] = result.status
+    return {
+        lane: worst.get(lane, "unavailable")
+        for lane in assurance_models.RUBRIC_LANES
+    }
+
+
+# ---------------------------------------------------------------------------
+# Independent agent audit
+# ---------------------------------------------------------------------------
+
+#: Version of the JSON contract the auditor answers in.
+AGENT_OUTPUT_SCHEMA_VERSION = 1
+
+#: Largest agent message parsed. An auditor that answers with more than this is
+#: not answering the contract, and parsing an unbounded reply is how untrusted
+#: output starts costing memory instead of being rejected.
+MAX_AGENT_OUTPUT_BYTES = 256 * 1024
+
+#: The only roots a localization may name. They are exactly the read-only
+#: source trees the audit profile grants, so a localization pointing anywhere
+#: else describes something the auditor could not have read.
+LOCALIZATION_ROOTS: tuple[str, ...] = (EVIDENCE_ROOT_PACKAGE, EVIDENCE_ROOT_SKILLS)
+
+#: Attempt outcomes that earn the single retry. A detected mutation, an
+#: unenforceable profile, and an interrupt are absent on purpose: none is a
+#: transient failure of the agent, and retrying would either run a second turn
+#: under a boundary already known to be broken or answer the operator's Ctrl+C
+#: with more of what they interrupted.
+RETRYABLE_ATTEMPT_OUTCOMES: frozenset[str] = frozenset(
+    {
+        "timeout",
+        "transport-error",
+        "malformed-output",
+        "missing-lanes",
+        "invalid-reference",
+    }
+)
+
+#: Why a launched audit reports no agent coverage.
+REASON_AGENT_UNAVAILABLE = "agent-coverage-unavailable"
+
+#: Why an audit with agent coverage and no findings is still not all-clear.
+REASON_LANE_COVERAGE = "incomplete-lane-coverage"
+
+#: Files written under each ``supervisor-audit-attempt-N/`` directory.
+ATTEMPT_PROMPT_FILE = "prompt.txt"
+ATTEMPT_MESSAGE_FILE = "last-message.txt"
+ATTEMPT_OUTCOME_FILE = "outcome.json"
+
+_JSON_FENCE_RE = re.compile(r"```(?:json)?[ \t]*\n(.*?)```", re.DOTALL)
+
+#: Keys the agent may set on a finding. ``fingerprint``, ``issue_id``, and
+#: ``schema_version`` are absent because ASL computes them; an agent that sends
+#: one is claiming an authority it does not have.
+_AGENT_FINDING_KEYS: frozenset[str] = frozenset(
+    {
+        "category",
+        "component",
+        "invariant_key",
+        "lane",
+        "severity",
+        "summary",
+        "recommendation",
+        "evidence",
+        "localization",
+    }
+)
+
+_AGENT_IDENTITY_KEYS: frozenset[str] = frozenset(
+    {"fingerprint", "id", "issue", "issue_id", "issue_ids"}
+)
+
+AUDIT_PROMPT_TEMPLATE = """\
+You are auditing the control plane of one finished agent-session-loop (ASL) run.
+You are not reviewing the application the run worked on.
+
+Order of work, which is not optional:
+
+1. Analyze the operational evidence below first, on its own terms. Every claim
+   you make must rest on a record in that bundle: identities, paths, digests,
+   exit codes, timings, guard results, events, and status projections.
+2. Only after you have identified a specific anomaly in that evidence may you
+   read ASL source to localize it. That reading is read-only and is limited to
+   the `{package_root}` and `{skills_root}` locator roots.
+
+Prohibited, without exception:
+
+- Reviewing, grading, or commenting on the application implementation the run
+  produced: its code quality, design, tests, or diffs are out of scope.
+- Editing, creating, or deleting any file. You have read access only.
+- Assigning issue IDs, fingerprints, or any identifier. ASL computes those.
+
+Judge these eight rubric lanes, all of them, every time:
+
+{lane_list}
+
+Answer with exactly one JSON object, in a single fenced ```json block, and
+nothing that must be parsed outside it:
+
+{schema}
+
+Rules the answer must satisfy:
+
+- `lanes` holds exactly one record per rubric lane named above. A lane you
+  could not judge is `unavailable` and still names the evidence that proves it
+  could not be judged; it is never `pass`.
+- Every `evidence` entry is a locator copied verbatim from the `evidence` index
+  of the bundle below. Invented, absolute, or `..`-bearing locators are
+  rejected.
+- `category`, `component`, and `invariant_key` are lowercase tokens of
+  alphanumerics separated by `.`, `_`, `-`, or `/`. Reuse an existing
+  `invariant_key` when you are reporting the same invariant a deterministic
+  check already names.
+- `severity` is one of low, medium, high, critical.
+- `localization` is optional, appears only on a finding, and holds source
+  pointers under `{package_root}/` or `{skills_root}/` such as
+  `{package_root}/runner.py:8129`. Omit it when you did not localize anything.
+- Report a finding only for a control-plane defect. An audit with no defects
+  returns an empty `findings` list and passing lanes.
+
+Operational evidence for run {run_id}:
+
+```json
+{bundle}
+```
+"""
+
+AUDIT_CORRECTION_TEMPLATE = """\
+Your previous answer was rejected by ASL's validator:
+
+{detail}
+
+This is a fresh invocation and your previous answer is gone. Redo the audit
+from the evidence above and return only a corrected JSON object in a single
+fenced ```json block.
+"""
+
+
+class AgentOutputError(Exception):
+    """Raised when agent output fails validation, carrying the retry outcome.
+
+    The outcome is the vocabulary the attempt record and the retry decision both
+    read, so ``malformed-output``, ``missing-lanes``, and ``invalid-reference``
+    stay distinguishable instead of collapsing into one opaque parse failure.
+    """
+
+    def __init__(self, outcome: AttemptOutcome, detail: str) -> None:
+        super().__init__(detail)
+        self.outcome = outcome
+        self.detail = detail
+
+
+@dataclass(frozen=True)
+class AgentAudit:
+    """One validated agent answer: lane coverage and the findings it claims."""
+
+    lanes: tuple[assurance_models.LaneEvidence, ...]
+    findings: tuple[Finding, ...]
+
+
+@dataclass(frozen=True)
+class AgentAuditOutcome:
+    """The audit an engine run produced, with the attempts that produced it."""
+
+    audit: assurance_models.SupervisorAudit
+    attempts: tuple[assurance_models.AuditAttempt, ...]
+    agent_covered: bool
+    mutation_issue_id: str | None = None
+
+    @property
+    def linked_issue_ids(self) -> tuple[str, ...]:
+        """Issues the audit's own guards already appended, for the summary.
+
+        The mutation guard opens its issue while the attempt is still running,
+        so the publication names that ID instead of observing the mutation a
+        second time; without this the run's most severe issue would exist only
+        in the inbox and be missing from every run-facing surface.
+        """
+        return () if self.mutation_issue_id is None else (self.mutation_issue_id,)
+
+
+def _inline(text: str, *, limit: int = assurance_models.MAX_TEXT_CHARS) -> str:
+    """Collapse validated text to one line so it can be rendered into a cell."""
+    collapsed = " ".join(_CONTROL_CHAR_RE.sub(" ", str(text)).split())
+    return collapsed[:limit]
+
+
+def _agent_schema_block() -> str:
+    return json.dumps(
+        {
+            "schema_version": AGENT_OUTPUT_SCHEMA_VERSION,
+            "lanes": [
+                {
+                    "lane": assurance_models.RUBRIC_LANES[0],
+                    "status": "pass|fail|unavailable",
+                    "summary": "what the evidence showed for this lane",
+                    "evidence": ["<locator from the evidence index>"],
+                }
+            ],
+            "findings": [
+                {
+                    "lane": assurance_models.RUBRIC_LANES[0],
+                    "severity": "low|medium|high|critical",
+                    "category": "identity",
+                    "component": "workspace-registry",
+                    "invariant_key": "identity.root-registry-agreement",
+                    "summary": "the defect, stated as what the evidence shows",
+                    "recommendation": "what a maintainer should change",
+                    "evidence": ["<locator from the evidence index>"],
+                    "localization": ["<source pointer>"],
+                }
+            ],
+        },
+        indent=2,
+        sort_keys=True,
+    )
+
+
+def build_audit_prompt(
+    bundle: AuditInput | Mapping[str, Any], *, correction: str | None = None
+) -> str:
+    """Render the prompt for one audit attempt.
+
+    ``correction`` carries the validation failure of the previous attempt and
+    nothing else: the rejected answer itself is deliberately withheld, so the
+    retry re-derives its verdict from the evidence rather than being handed its
+    own earlier output to launder into a better-formed version of the same
+    mistake.
+    """
+    payload = bundle.payload if isinstance(bundle, AuditInput) else dict(bundle)
+    prompt = AUDIT_PROMPT_TEMPLATE.format(
+        package_root=EVIDENCE_ROOT_PACKAGE,
+        skills_root=EVIDENCE_ROOT_SKILLS,
+        lane_list="\n".join(f"- {lane}" for lane in assurance_models.RUBRIC_LANES),
+        schema=_agent_schema_block(),
+        run_id=payload.get("run_id", "unknown"),
+        bundle=assurance_models.canonical_json_bytes(payload).decode("utf-8"),
+    )
+    if correction is None:
+        return prompt
+    return f"{prompt}\n{AUDIT_CORRECTION_TEMPLATE.format(detail=_inline(correction))}"
+
+
+def _agent_payload(text: str) -> dict[str, Any]:
+    if not isinstance(text, str) or not text.strip():
+        raise AgentOutputError("malformed-output", "the agent returned no output")
+    if len(text.encode("utf-8")) > MAX_AGENT_OUTPUT_BYTES:
+        raise AgentOutputError(
+            "malformed-output",
+            f"the agent answered with more than the {MAX_AGENT_OUTPUT_BYTES}-byte "
+            "cap on audit output",
+        )
+    fenced = _JSON_FENCE_RE.findall(text)
+    candidate = fenced[-1] if fenced else text
+    try:
+        payload = json.loads(candidate)
+    except (ValueError, RecursionError) as error:
+        raise AgentOutputError(
+            "malformed-output",
+            f"the agent answer is not parseable JSON: {error}",
+        ) from error
+    if not isinstance(payload, Mapping):
+        raise AgentOutputError(
+            "malformed-output", "the agent answer must be a single JSON object"
+        )
+    unknown = sorted(
+        str(key) for key in payload if key not in {"schema_version", "lanes", "findings"}
+    )
+    if unknown:
+        raise AgentOutputError(
+            "malformed-output",
+            f"the agent answer has unknown key(s) {', '.join(unknown)}; only "
+            "'schema_version', 'lanes', and 'findings' are read",
+        )
+    if payload.get("schema_version") != AGENT_OUTPUT_SCHEMA_VERSION:
+        raise AgentOutputError(
+            "malformed-output",
+            f"the agent answer must declare schema_version "
+            f"{AGENT_OUTPUT_SCHEMA_VERSION}; got "
+            f"{payload.get('schema_version')!r}",
+        )
+    return dict(payload)
+
+
+def _agent_lanes(payload: Mapping[str, Any]) -> tuple[assurance_models.LaneEvidence, ...]:
+    entries = payload.get("lanes")
+    if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+        raise AgentOutputError(
+            "malformed-output", "the agent answer must carry a 'lanes' list"
+        )
+    lanes = []
+    for index, entry in enumerate(entries):
+        try:
+            lanes.append(
+                assurance_models.parse_lane_evidence(entry, label=f"lane #{index + 1}")
+            )
+        except assurance_models.AssuranceError as error:
+            raise AgentOutputError("malformed-output", str(error)) from error
+    try:
+        assurance_models.validate_lane_coverage(lanes, require_complete=True)
+    except assurance_models.AssuranceError as error:
+        raise AgentOutputError("missing-lanes", str(error)) from error
+    return tuple(lanes)
+
+
+def _agent_findings(payload: Mapping[str, Any]) -> tuple[Finding, ...]:
+    entries = payload.get("findings", [])
+    if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+        raise AgentOutputError(
+            "malformed-output", "the agent answer must carry a 'findings' list"
+        )
+    if len(entries) > assurance_models.MAX_FINDINGS:
+        raise AgentOutputError(
+            "malformed-output",
+            f"the agent answer must hold at most {assurance_models.MAX_FINDINGS} "
+            f"findings; got {len(entries)}",
+        )
+    findings = []
+    for index, entry in enumerate(entries):
+        label = f"finding #{index + 1}"
+        if not isinstance(entry, Mapping):
+            raise AgentOutputError("malformed-output", f"{label} must be a JSON object")
+        claimed = _AGENT_IDENTITY_KEYS.intersection(str(key) for key in entry)
+        if claimed:
+            raise AgentOutputError(
+                "malformed-output",
+                f"{label} sets {', '.join(sorted(claimed))}; the audit agent never "
+                "assigns issue IDs or fingerprints, ASL computes them",
+            )
+        unknown = sorted(str(key) for key in entry if key not in _AGENT_FINDING_KEYS)
+        if unknown:
+            raise AgentOutputError(
+                "malformed-output",
+                f"{label} has unknown key(s) {', '.join(unknown)}",
+            )
+        try:
+            findings.append(
+                assurance_models.parse_finding(
+                    {
+                        **{str(key): value for key, value in entry.items()},
+                        "schema_version": assurance_models.ASSURANCE_SCHEMA_VERSION,
+                    },
+                    label=label,
+                )
+            )
+        except assurance_models.AssuranceError as error:
+            raise AgentOutputError("malformed-output", str(error)) from error
+    return tuple(findings)
+
+
+def _validate_agent_references(
+    lanes: Sequence[assurance_models.LaneEvidence],
+    findings: Sequence[Finding],
+    *,
+    declared: Iterable[str],
+) -> None:
+    known = set(declared)
+    referenced = {ref for lane in lanes for ref in lane.evidence}
+    referenced.update(ref for finding in findings for ref in finding.evidence)
+    unknown = sorted(referenced - known)
+    if unknown:
+        raise AgentOutputError(
+            "invalid-reference",
+            f"the agent cited evidence the bundle never declared: "
+            f"{_names(unknown)}",
+        )
+    outside = sorted(
+        {
+            ref
+            for finding in findings
+            for ref in finding.localization
+            if not any(_inside(ref, root) for root in LOCALIZATION_ROOTS)
+        }
+    )
+    if outside:
+        raise AgentOutputError(
+            "invalid-reference",
+            f"the agent localized outside the read-only source roots "
+            f"{', '.join(LOCALIZATION_ROOTS)}: {_names(outside)}",
+        )
+
+
+def parse_agent_audit(text: str, *, declared: Iterable[str]) -> AgentAudit:
+    """Validate one agent answer strictly, or raise :class:`AgentOutputError`.
+
+    Nothing the agent writes is trusted as output: the Markdown it may have
+    produced is never rendered, its findings carry no identity it assigned, and
+    every locator it names must already appear in the evidence index ASL built.
+    """
+    payload = _agent_payload(text)
+    lanes = _agent_lanes(payload)
+    findings = _agent_findings(payload)
+    _validate_agent_references(lanes, findings, declared=declared)
+    return AgentAudit(lanes=lanes, findings=findings)
+
+
+def _worst(*statuses: str) -> str:
+    return max(statuses, key=lambda status: _STATUS_PRECEDENCE[status])
+
+
+def _status_counts(results: Sequence[assurance_models.DeterministicResult]) -> str:
+    if not results:
+        return "no deterministic check reported"
+    counts = {status: 0 for status in assurance_models.CHECK_STATUSES}
+    for result in results:
+        counts[result.status] += 1
+    return ", ".join(
+        f"{count} {status}" for status, count in counts.items() if count
+    )
+
+
+def _anchor(declared: Sequence[str]) -> tuple[str, ...]:
+    if RUN_ANCHOR in declared:
+        return (RUN_ANCHOR,)
+    return (declared[0],) if declared else ()
+
+
+def _merged_lanes(
+    results: Sequence[assurance_models.DeterministicResult],
+    agent: AgentAudit | None,
+    *,
+    declared: Sequence[str],
+) -> tuple[assurance_models.LaneEvidence, ...]:
+    """Reduce deterministic results and agent lanes to one record per lane.
+
+    The worse of the two statuses wins. An agent that reports ``pass`` on a lane
+    a deterministic check disproved does not get to overrule the check, and a
+    lane the agent never covered is ``unavailable`` rather than absent.
+    """
+    rollup = lane_rollup(results)
+    reported = {lane.lane: lane for lane in (agent.lanes if agent else ())}
+    lanes = []
+    for name in assurance_models.RUBRIC_LANES:
+        lane_results = [result for result in results if result.lane == name]
+        claim = reported.get(name)
+        status = _worst(rollup[name], claim.status if claim else "unavailable")
+        evidence = list(
+            dict.fromkeys(
+                [*(claim.evidence if claim else ()),
+                 *(ref for result in lane_results for ref in result.evidence)]
+            )
+        )[: assurance_models.MAX_REFERENCES_PER_ITEM]
+        deterministic_note = (
+            f"Deterministic checks: {_status_counts(lane_results)}."
+        )
+        summary = (
+            f"{_inline(claim.summary)} {deterministic_note}"
+            if claim
+            else f"Agent coverage was unavailable for this lane. {deterministic_note}"
+        )
+        lanes.append(
+            assurance_models.LaneEvidence(
+                lane=name,
+                status=status,
+                summary=_inline(summary),
+                evidence=tuple(evidence) or _anchor(declared),
+            )
+        )
+    return tuple(lanes)
+
+
+def _merged_findings(
+    deterministic: Sequence[Finding], agent: Sequence[Finding]
+) -> tuple[Finding, ...]:
+    """Combine both sources, letting the reproducible finding own a fingerprint."""
+    merged: dict[str, Finding] = {}
+    for finding in (*deterministic, *agent):
+        merged.setdefault(finding.fingerprint, finding)
+    return tuple(merged.values())[: assurance_models.MAX_FINDINGS]
+
+
+def render_supervisor_audit(
+    *,
+    run_id: str,
+    bundle: AuditInput,
+    results: Sequence[assurance_models.DeterministicResult],
+    generated_at: str,
+    agent: AgentAudit | None = None,
+    reason: str | None = None,
+) -> assurance_models.SupervisorAudit:
+    """Build the canonical audit from validated internal data only.
+
+    Both reports are rendered from this object, so no byte of agent Markdown
+    ever reaches an operator: the agent contributes validated lane statuses,
+    summaries, findings, and locators, and ASL decides everything else.
+    """
+    evidence = bundle.evidence
+    declared = [entry.locator for entry in evidence]
+    lanes = _merged_lanes(results, agent, declared=declared)
+    findings = _merged_findings(findings_from_results(results), agent.findings if agent else ())
+    if agent is None:
+        state: assurance_models.AuditState = "unavailable"
+        state_reason = reason or REASON_AGENT_UNAVAILABLE
+    elif findings:
+        state, state_reason = "findings", None
+    elif all(lane.status == "pass" for lane in lanes):
+        state, state_reason = "all-clear", None
+    else:
+        state, state_reason = "unavailable", REASON_LANE_COVERAGE
+    return assurance_models.SupervisorAudit(
+        run_id=run_id,
+        state=state,
+        input_digest=bundle.sha256,
+        generated_at=generated_at,
+        reason=state_reason,
+        evidence=evidence,
+        lanes=lanes,
+        findings=findings,
+        deterministic=tuple(results)[: assurance_models.MAX_DETERMINISTIC_RESULTS],
+    )
+
+
+def _markdown_row(*cells: str) -> str:
+    return "| " + " | ".join(cell.replace("|", "\\|") for cell in cells) + " |"
+
+
+def render_audit_markdown(audit: assurance_models.SupervisorAudit) -> str:
+    """Render the operator-facing report from the validated audit object."""
+    lines = [
+        f"# Supervisor audit — {audit.run_id}",
+        "",
+        f"- State: `{audit.state}`",
+        f"- Reason: {audit.reason if audit.reason else '(none)'}",
+        f"- Generated: {audit.generated_at}",
+        f"- Evidence digest: `{audit.input_digest}`",
+        "",
+        "## Rubric lanes",
+        "",
+        _markdown_row("Lane", "Status", "Summary", "Evidence"),
+        _markdown_row("---", "---", "---", "---"),
+    ]
+    for lane in audit.lanes:
+        lines.append(
+            _markdown_row(
+                lane.lane,
+                lane.status,
+                _inline(lane.summary),
+                ", ".join(f"`{ref}`" for ref in lane.evidence),
+            )
+        )
+    lines.extend(["", "## Findings", ""])
+    if not audit.findings:
+        lines.append("No findings.")
+    for finding in audit.findings:
+        lines.extend(
+            [
+                f"### {finding.invariant_key} ({finding.severity})",
+                "",
+                f"- Lane: {finding.lane}",
+                f"- Component: {finding.component}",
+                f"- Category: {finding.category}",
+                f"- Fingerprint: `{finding.fingerprint}`",
+                f"- Evidence: {', '.join(f'`{ref}`' for ref in finding.evidence)}",
+            ]
+        )
+        if finding.localization:
+            lines.append(
+                "- Localization: "
+                + ", ".join(f"`{ref}`" for ref in finding.localization)
+            )
+        lines.extend(
+            [
+                "",
+                _inline(finding.summary),
+                "",
+                f"**Recommendation:** {_inline(finding.recommendation)}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "## Deterministic checks",
+            "",
+            _markdown_row("Check", "Status", "Invariant", "Detail"),
+            _markdown_row("---", "---", "---", "---"),
+        ]
+    )
+    for result in audit.deterministic:
+        lines.append(
+            _markdown_row(
+                result.check,
+                result.status,
+                result.invariant_key,
+                _inline(result.detail or ""),
+            )
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_audit_reports(
+    run_dir: Path | str,
+    audit: assurance_models.SupervisorAudit,
+    *,
+    durable: bool = True,
+) -> tuple[Path, Path]:
+    """Write both canonical reports, each exactly once."""
+    report = assurance_models.write_audit_json(
+        run_dir,
+        assurance_models.AUDIT_REPORT_FILENAME,
+        audit.to_dict(),
+        durable=durable,
+    )
+    markdown = assurance_models.write_audit_artifact(
+        run_dir,
+        assurance_models.AUDIT_MARKDOWN_FILENAME,
+        render_audit_markdown(audit).encode("utf-8"),
+        durable=durable,
+    )
+    return report, markdown
+
+
+def _reason_token(value: Any, fallback: str) -> str:
+    """Keep a reason only when it groups; a raw exception string never does.
+
+    ``run_restricted_audit`` reports launch failures with the harness error's
+    own text, which differs on every machine. Falling back to the attempt
+    outcome keeps one recurring failure deduplicating into one inbox issue.
+    """
+    try:
+        return assurance_models.parse_reason_token(value)
+    except assurance_models.AssuranceError:
+        return fallback
+
+
+def _bounded_argv(argv: Sequence[str], *, prompt: str) -> list[str]:
+    """Replace the inlined prompt with its digest so an attempt record stays small."""
+    return [
+        f"[prompt sha256:{_sha256_text(prompt)}]" if item == prompt else item
+        for item in argv
+    ]
+
+
+def _write_attempt_artifacts(
+    run_dir: Path,
+    number: int,
+    *,
+    prompt: str,
+    attempt: AuditAttemptResult,
+    outcome: AttemptOutcome,
+    detail: str | None,
+    durable: bool,
+) -> str | None:
+    """Archive one attempt, returning its locator, or ``None`` when it cannot.
+
+    Best effort by design, exactly like the mutation artifact: losing the
+    archive of an attempt must not lose the verdict the attempt produced.
+    """
+    try:
+        directory = assurance_models.create_attempt_dir(run_dir, number)
+        assurance_models.write_new_bytes(
+            directory / ATTEMPT_PROMPT_FILE, prompt.encode("utf-8"), durable=durable
+        )
+        assurance_models.write_new_bytes(
+            directory / ATTEMPT_MESSAGE_FILE,
+            _truncate_utf8(attempt.last_message, MAX_AGENT_OUTPUT_BYTES).encode("utf-8"),
+            durable=durable,
+        )
+        assurance_models.write_new_bytes(
+            directory / ATTEMPT_OUTCOME_FILE,
+            assurance_models.canonical_json_bytes(
+                {
+                    "number": number,
+                    "outcome": outcome,
+                    "detail": detail,
+                    "reason": attempt.reason,
+                    "returncode": attempt.returncode,
+                    "argv": _bounded_argv(attempt.argv, prompt=prompt),
+                }
+            ),
+            durable=durable,
+        )
+    except (OSError, assurance_models.AssuranceError):
+        return None
+    return assurance_models.attempt_dir_name(number)
+
+
+def run_agent_audit(
+    role: AuditRole,
+    *,
+    bundle: AuditInput,
+    run_id: str,
+    run_dir: Path | str,
+    workspace_root: Path | str,
+    plan_dir: Path | str,
+    state_dir: Path | str | None = None,
+    results: Sequence[assurance_models.DeterministicResult] | None = None,
+    inventory_excludes: Sequence[str] = (),
+    stream_callback: harnesses.StreamCallback | None = None,
+    durable: bool = True,
+    now: Callable[[], datetime] | None = None,
+    _run_harness_fn: Callable[..., harnesses.HarnessResult] | None = None,
+) -> AgentAuditOutcome:
+    """Run the semantic audit and return the audit its attempts earned.
+
+    The agent gets at most :data:`assurance_models.MAX_AUDIT_ATTEMPTS` attempts,
+    each a fresh invocation with its own archived directory, and the second one
+    is told only which validation rule the first one broke. When neither attempt
+    produces a valid answer the audit is ``unavailable`` — but it still carries
+    the deterministic lanes, results, and findings, because losing reproducible
+    evidence because an agent misbehaved would be a second failure, not a
+    consequence of the first.
+    """
+    run_dir = Path(run_dir)
+    clock = datetime.now(timezone.utc) if now is None else now()
+    verdicts = tuple(results) if results is not None else run_deterministic_checks(bundle)
+    declared = [entry.locator for entry in bundle.evidence]
+    attempts: list[assurance_models.AuditAttempt] = []
+    mutation_issue_id: str | None = None
+    correction: str | None = None
+    unavailable_reason = REASON_AGENT_UNAVAILABLE
+
+    for number in range(1, assurance_models.MAX_AUDIT_ATTEMPTS + 1):
+        prompt = build_audit_prompt(bundle, correction=correction)
+        attempt = run_restricted_audit(
+            role,
+            run_dir=run_dir,
+            run_id=run_id,
+            workspace_root=workspace_root,
+            plan_dir=plan_dir,
+            prompt=prompt,
+            state_dir=state_dir,
+            inventory_excludes=inventory_excludes,
+            stream_callback=stream_callback,
+            now=now,
+            _run_harness_fn=_run_harness_fn,
+        )
+        mutation_issue_id = attempt.issue_id or mutation_issue_id
+        agent: AgentAudit | None = None
+        if attempt.outcome == "ok":
+            try:
+                agent = parse_agent_audit(attempt.last_message, declared=declared)
+                outcome: AttemptOutcome = "ok"
+                detail = None
+            except AgentOutputError as error:
+                outcome, detail = error.outcome, error.detail
+                unavailable_reason = error.outcome
+        else:
+            outcome, detail = attempt.outcome, attempt.reason
+            unavailable_reason = _reason_token(attempt.reason, attempt.outcome)
+        attempts.append(
+            assurance_models.AuditAttempt(
+                number=number,
+                outcome=outcome,
+                artifact_dir=_write_attempt_artifacts(
+                    run_dir,
+                    number,
+                    prompt=prompt,
+                    attempt=attempt,
+                    outcome=outcome,
+                    detail=detail,
+                    durable=durable,
+                ),
+                detail=None if detail is None else _inline(detail),
+            )
+        )
+        if agent is not None:
+            return AgentAuditOutcome(
+                audit=render_supervisor_audit(
+                    run_id=run_id,
+                    bundle=bundle,
+                    results=verdicts,
+                    generated_at=clock.isoformat(),
+                    agent=agent,
+                ),
+                attempts=tuple(attempts),
+                agent_covered=True,
+                mutation_issue_id=mutation_issue_id,
+            )
+        if outcome not in RETRYABLE_ATTEMPT_OUTCOMES:
+            break
+        correction = detail
+
+    return AgentAuditOutcome(
+        audit=render_supervisor_audit(
+            run_id=run_id,
+            bundle=bundle,
+            results=verdicts,
+            generated_at=clock.isoformat(),
+            reason=unavailable_reason,
+        ),
+        attempts=tuple(attempts),
+        agent_covered=False,
+        mutation_issue_id=mutation_issue_id,
+    )
+
+
+def _deterministic_only_audit(
+    bundle: AuditInput, *, run_id: str, generated_at: str
+) -> AgentAuditOutcome:
+    """Grade a run with no independent auditor available.
+
+    The reproducible checks are worth running on their own, so what is missing
+    is the semantic half rather than the audit. The verdict therefore stays
+    ``unavailable`` under the missing role while carrying every lane, result,
+    and finding the checks reached.
+    """
+    return AgentAuditOutcome(
+        audit=render_supervisor_audit(
+            run_id=run_id,
+            bundle=bundle,
+            results=run_deterministic_checks(bundle),
+            generated_at=generated_at,
+            reason=REASON_NO_INDEPENDENT_ROLE,
+        ),
+        attempts=(),
+        agent_covered=False,
+    )
+
+
+def _artifact_reference(path: Path, run_dir: Path, digest: str) -> assurance_models.EvidenceRef:
+    return assurance_models.EvidenceRef(
+        kind="artifact",
+        locator=f"{EVIDENCE_ROOT_RUN}/{path.relative_to(run_dir).as_posix()}",
+        digest=digest,
+    )
+
+
+def _publish_evidence_failure(
+    *,
+    run_id: str,
+    run_dir: Path,
+    role: AuditRole | None,
+    detail: str,
+    started: datetime,
+    completed: datetime,
+    ledger_state_dir: Path | str | None,
+    durable: bool,
+) -> AssuranceSummary | None:
+    """Record an audit that never reached an evidence bundle, or ``None``.
+
+    The failure itself becomes the artifact, because an unavailable audit that
+    names nothing opens an issue nobody can investigate. When even that write
+    or the ledger append fails there is no durable record to point at, and the
+    caller degrades to ``pending`` rather than claiming one exists.
+    """
+    path = run_dir / UNAVAILABLE_ARTIFACT_NAME
+    try:
+        recorded = assurance_models.canonical_json_bytes(
+            {
+                "run_id": run_id,
+                "reason": REASON_EVIDENCE_UNAVAILABLE,
+                "detail": _inline(detail),
+                "recorded_at": completed.isoformat(),
+            }
+        )
+        assurance_models.write_new_bytes(path, recorded, durable=durable)
+        result = assurance_projection.publish_audit(
+            assurance_projection.AuditPublication(
+                run_id=run_id,
+                state="unavailable",
+                eligible=True,
+                reason=REASON_EVIDENCE_UNAVAILABLE,
+                role=role,
+                artifacts=(
+                    _artifact_reference(path, run_dir, artifacts.sha256_hex(recorded)),
+                ),
+                started_at=started.isoformat(),
+                completed_at=completed.isoformat(),
+                duration_seconds=max(0.0, (completed - started).total_seconds()),
+            ),
+            state_dir=ledger_state_dir,
+        )
+    except (OSError, assurance_models.AssuranceError):
+        return None
+    return result.summary
+
+
+def audit_terminal_run(
+    plan: AuditPlan,
+    *,
+    run_id: str,
+    run_dir: Path | str,
+    state_dir: Path | str,
+    plan_dir: Path | str,
+    workspace_root: Path | str,
+    ledger_state_dir: Path | str | None = None,
+    state_payload: Mapping[str, Any] | None = None,
+    workspace_snapshot: Mapping[str, Any] | None = None,
+    inventory_excludes: Sequence[str] = (),
+    stream_callback: harnesses.StreamCallback | None = None,
+    durable: bool = True,
+    now: Callable[[], datetime] | None = None,
+    _run_harness_fn: Callable[..., harnesses.HarnessResult] | None = None,
+) -> AssuranceSummary:
+    """Audit one terminating run and publish the verdict, returning its summary.
+
+    This never raises: an audit is advisory, so a failure to produce or record
+    one degrades the run's assurance rather than its outcome. A run whose
+    artifacts exist but whose ledger publication failed comes back ``pending``,
+    because the artifacts alone are not the durable record an operator reads —
+    claiming otherwise would report an all-clear nobody can look up.
+
+    Opting out is the only way to run no checks at all. A run that stayed
+    enabled but resolved no independent role still gets the reproducible half:
+    the deterministic checks need no agent, so the audit lands ``unavailable``
+    for the missing role while publishing whatever they proved.
+
+    The bundle is collected with ``terminal_pending`` set: the caller runs this
+    before writing the run's terminal record, which is what lets the audit's own
+    artifacts and ledger records precede it.
+
+    ``state_dir`` is the run's own plan state directory, where the evidence
+    lives; ``ledger_state_dir`` is the state root the one shared assurance
+    ledger sits in. They are different directories and conflating them would
+    scatter the inbox one file per plan.
+    """
+    clock = (lambda: datetime.now(timezone.utc)) if now is None else now
+    if not plan.config.enabled:
+        return initial_summary(plan, run_id=run_id, eligible=True)
+
+    role = plan.role
+    run_dir = Path(run_dir)
+    started = clock()
+
+    def pending(artifacts: Sequence[assurance_models.EvidenceRef] = ()) -> AssuranceSummary:
+        return AssuranceSummary(
+            run_id=run_id,
+            state="pending",
+            eligible=True,
+            role=role,
+            artifacts=tuple(artifacts),
+            started_at=started.isoformat(),
+        )
+
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        bundle = collect_audit_input(
+            run_id=run_id,
+            run_dir=run_dir,
+            state_dir=state_dir,
+            plan_dir=plan_dir,
+            workspace_root=workspace_root,
+            state_payload=state_payload,
+            workspace_snapshot=workspace_snapshot,
+            terminal_pending=True,
+        )
+    except (OSError, assurance_models.AssuranceError) as error:
+        recorded = _publish_evidence_failure(
+            run_id=run_id,
+            run_dir=run_dir,
+            role=role,
+            detail=str(error),
+            started=started,
+            completed=clock(),
+            ledger_state_dir=ledger_state_dir,
+            durable=durable,
+        )
+        return pending() if recorded is None else recorded
+
+    try:
+        input_path = bundle.write(run_dir, durable=durable)
+        outcome = (
+            _deterministic_only_audit(
+                bundle, run_id=run_id, generated_at=clock().isoformat()
+            )
+            if role is None
+            else run_agent_audit(
+                role,
+                bundle=bundle,
+                run_id=run_id,
+                run_dir=run_dir,
+                workspace_root=workspace_root,
+                plan_dir=plan_dir,
+                state_dir=ledger_state_dir,
+                inventory_excludes=inventory_excludes,
+                stream_callback=stream_callback,
+                durable=durable,
+                now=now,
+                _run_harness_fn=_run_harness_fn,
+            )
+        )
+        report_path, markdown_path = write_audit_reports(
+            run_dir, outcome.audit, durable=durable
+        )
+        report_bytes = report_path.read_bytes()
+        markdown_bytes = markdown_path.read_bytes()
+        audit_artifacts = (
+            _artifact_reference(input_path, run_dir, bundle.sha256),
+            _artifact_reference(report_path, run_dir, artifacts.sha256_hex(report_bytes)),
+            _artifact_reference(
+                markdown_path, run_dir, artifacts.sha256_hex(markdown_bytes)
+            ),
+        )
+    except (OSError, assurance_models.AssuranceError):
+        return pending()
+
+    completed = clock()
+    try:
+        result = assurance_projection.publish_audit(
+            assurance_projection.AuditPublication(
+                run_id=run_id,
+                state=outcome.audit.state,
+                eligible=True,
+                findings=outcome.audit.findings,
+                reason=outcome.audit.reason,
+                role=role,
+                attempts=outcome.attempts,
+                artifacts=audit_artifacts,
+                linked_issue_ids=outcome.linked_issue_ids,
+                started_at=started.isoformat(),
+                completed_at=completed.isoformat(),
+                duration_seconds=max(
+                    0.0, (completed - started).total_seconds()
+                ),
+            ),
+            state_dir=ledger_state_dir,
+        )
+    except (OSError, assurance_models.AssuranceError):
+        return pending(audit_artifacts)
+    return result.summary
 
 
 def status_line(assurance: Mapping[str, Any] | None) -> str | None:
-    """Render the one-line operator summary of a run's assurance object."""
-    if not isinstance(assurance, Mapping):
-        return None
-    state = assurance.get("state")
-    if not state:
-        return None
-    role = assurance.get("role")
-    if isinstance(role, Mapping) and role.get("harness"):
-        detail = (
-            f" ({role.get('harness')} via {role.get('source')} role, "
-            f"{_format_timeout(role.get('timeout_seconds'))} per attempt)"
-        )
-    elif assurance.get("reason"):
-        detail = f" ({assurance.get('reason')})"
-    else:
-        detail = ""
-    return f"Supervisor audit: {state}{detail}"
+    """Render the one-line operator summary of a run's assurance object.
+
+    Delegated so that ``asl status`` — which must never be able to launch an
+    audit — renders the identical line without importing this module.
+    """
+    return assurance_report.status_line(assurance)

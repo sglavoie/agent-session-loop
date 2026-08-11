@@ -20,7 +20,12 @@ from agent_session_loop import (
     review_continuation,
     review_repair,
 )
+from agent_session_loop import assurance_models as assurance
+from agent_session_loop import assurance_projection as assurance_projection
 from tests.support import write_plan_with_ids
+
+
+AUDIT_RUN_ID = "20260810T101112123456Z-4242"
 
 
 def _iso(now: datetime, *, hours_ago: float) -> str:
@@ -87,6 +92,30 @@ def _append_event(
     }
     with (state_dir / "events.jsonl").open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _publish_audit(state_root: Path, *, recorded_at: str, run_id: str = AUDIT_RUN_ID):
+    finding = assurance.Finding(
+        category="lifecycle",
+        component="agent_session_loop/runner.py",
+        invariant_key="retry.budget-respected",
+        lane="lifecycle-retry-resume",
+        severity="high",
+        summary="A retry ran after the budget was exhausted.",
+        recommendation="Clamp the retry counter before relaunching.",
+        evidence=("events.jsonl",),
+    )
+    return assurance_projection.publish_audit(
+        assurance_projection.AuditPublication(
+            run_id=run_id,
+            state="findings",
+            eligible=True,
+            findings=(finding,),
+            completed_at=recorded_at,
+        ),
+        state_dir=state_root,
+        recorded_at=recorded_at,
+    )
 
 
 def _write_generated_review_repair_plan(
@@ -781,6 +810,60 @@ class MetricsCollectionTests(unittest.TestCase):
         self.assertEqual(0, report.pauses["total"])
 
 
+class AssuranceMetricsSectionTests(unittest.TestCase):
+    """The assurance section is aggregated once from the corpus-wide ledger."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.state_root = self.tmp_path / "state"
+        self.state_root.mkdir()
+        self.now = datetime.now(timezone.utc)
+
+    def _collect(self) -> metrics.MetricsReport:
+        return metrics.collect_metrics(
+            state_dir=self.state_root, since_days=7, now=self.now
+        )
+
+    def test_absent_ledger_reports_an_empty_but_available_section(self) -> None:
+        report = self._collect()
+        self.assertTrue(report.assurance["available"])
+        self.assertEqual(report.assurance["runs_recorded"], 0)
+        self.assertEqual(report.assurance["issues"]["open_total"], 0)
+        self.assertIn("assurance", report.to_dict())
+
+    def test_section_reports_coverage_findings_and_dispositions(self) -> None:
+        _publish_audit(self.state_root, recorded_at=_iso(self.now, hours_ago=3))
+        assurance_projection.record_disposition(
+            "ASI-1",
+            "dismiss",
+            state_dir=self.state_root,
+            recorded_at=_iso(self.now, hours_ago=1),
+        )
+
+        section = self._collect().assurance
+
+        self.assertEqual(section["runs_recorded"], 1)
+        self.assertEqual(section["coverage"]["coverage_rate"], 1.0)
+        self.assertEqual(section["audit_states"]["findings"], 1)
+        self.assertEqual(section["issues"]["new"], 1)
+        self.assertEqual(section["issues"]["by_severity"], {"high": 1})
+        self.assertEqual(section["issues"]["by_category"], {"lifecycle": 1})
+        self.assertEqual(section["issues"]["open_total"], 0)
+        self.assertEqual(section["dispositions"]["dismissal_rate"], 1.0)
+        self.assertEqual(section["dispositions"]["time_to_disposition"]["count"], 1)
+
+    def test_records_outside_the_window_are_not_counted(self) -> None:
+        _publish_audit(self.state_root, recorded_at=_iso(self.now, hours_ago=24 * 30))
+
+        section = self._collect().assurance
+
+        self.assertEqual(section["runs_recorded"], 0)
+        self.assertEqual(section["issues"]["observations"], 0)
+        self.assertEqual(section["issues"]["open_total"], 1)
+
+
 class MetricsCliTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -814,6 +897,7 @@ class MetricsCliTests(unittest.TestCase):
             "review_cycles",
             "artifacts",
             "compaction",
+            "assurance",
         ):
             self.assertIn(section, payload)
 
@@ -838,6 +922,20 @@ class MetricsCliTests(unittest.TestCase):
         self.assertIn("unique materializations", stdout)
         self.assertIn("reopen attempts", stdout)
         self.assertIn("Compaction", stdout)
+        self.assertIn("Supervisor audit:", stdout)
+        self.assertIn("recurrence after resolution", stdout)
+
+    def test_metrics_text_reports_what_the_audit_found(self) -> None:
+        now = datetime.now(timezone.utc)
+        _publish_audit(self.state_root, recorded_at=_iso(now, hours_ago=2))
+
+        exit_code, stdout, _ = self._run_cli(
+            ["metrics", "--state-dir", str(self.state_root)]
+        )
+
+        self.assertEqual(0, exit_code)
+        self.assertIn("states all-clear 0, findings 1", stdout)
+        self.assertIn("1 sighting(s), 1 new, 0 recurring, 1 open now", stdout)
 
     def test_metrics_rejects_invalid_since_days(self) -> None:
         exit_code, stdout, _ = self._run_cli(

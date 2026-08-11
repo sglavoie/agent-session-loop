@@ -259,6 +259,12 @@ class AuditPublication:
     role: AuditRole | None = None
     attempts: tuple[AuditAttempt, ...] = ()
     artifacts: tuple[EvidenceRef, ...] = ()
+    #: Issues this run's own guards already appended to the ledger before the
+    #: publication ran. They are named by the summary and observed again by
+    #: nobody: the observation that minted them is already history. Syntax is
+    #: checked here; that the ledger really allocated them is checked under the
+    #: lock, because only the view taken there can answer it.
+    linked_issue_ids: tuple[str, ...] = ()
     started_at: str | None = None
     completed_at: str | None = None
     duration_seconds: float | None = None
@@ -267,6 +273,13 @@ class AuditPublication:
         object.__setattr__(self, "findings", tuple(self.findings))
         object.__setattr__(self, "attempts", tuple(self.attempts))
         object.__setattr__(self, "artifacts", tuple(self.artifacts))
+        object.__setattr__(
+            self,
+            "linked_issue_ids",
+            tuple(
+                dict.fromkeys(parse_issue_id(item) for item in self.linked_issue_ids)
+            ),
+        )
         for index, finding in enumerate(self.findings):
             if not isinstance(finding, Finding):
                 raise AssuranceError(
@@ -381,6 +394,25 @@ class PublicationResult:
         )
 
 
+def _issue_opening_runs(view: LedgerView) -> dict[str, str]:
+    """Map each issue to the run whose observation opened it.
+
+    This is what lets a linked issue be counted the same way an allocated one
+    is: new when this run opened it, recurring when an earlier run did, so the
+    counts stay one vocabulary whether the observation was written by the
+    publication or by a guard that ran before it.
+    """
+    edges = view.merge_edges
+    opened: dict[str, str] = {}
+    for record in view.records_of_kind(KIND_ISSUE_OBSERVED):
+        if record.issue_id is None:
+            continue
+        opened.setdefault(
+            follow_merge_chain(edges, record.issue_id), record.payload.run_id
+        )
+    return opened
+
+
 class _Allocator:
     """Issue-ID allocation for one transaction, merges already applied.
 
@@ -436,14 +468,14 @@ def publish_audit(
             return ()
         allocator = _Allocator(view)
         issue_ids: list[str] = []
-        minted: set[str] = set()
+        new_ids: set[str] = set()
         observations: list[PendingRecord] = []
         for finding in publication.issue_findings():
             issue_id, is_new = allocator.allocate(finding.fingerprint)
             if issue_id not in issue_ids:
                 issue_ids.append(issue_id)
                 if is_new:
-                    minted.add(issue_id)
+                    new_ids.add(issue_id)
             observations.append(
                 PendingRecord(
                     kind=KIND_ISSUE_OBSERVED,
@@ -457,10 +489,23 @@ def publish_audit(
                     recorded_at=stamp,
                 )
             )
+        if publication.linked_issue_ids:
+            opened_by = _issue_opening_runs(view)
+            for linked in publication.linked_issue_ids:
+                canonical = view.canonical_issue_id(linked)
+                if canonical not in view.allocated_issue_ids:
+                    raise ProjectionError(
+                        UNKNOWN_ISSUE, f"{linked} names no issue in the inbox"
+                    )
+                if canonical in issue_ids:
+                    continue
+                issue_ids.append(canonical)
+                if opened_by.get(canonical) == publication.run_id:
+                    new_ids.add(canonical)
         summary = publication.to_summary(
             issue_ids=tuple(issue_ids),
-            new_issue_count=len(minted),
-            recurring_issue_count=len(issue_ids) - len(minted),
+            new_issue_count=len(new_ids),
+            recurring_issue_count=len(issue_ids) - len(new_ids),
         )
         written.append(summary)
         return (
@@ -571,6 +616,38 @@ def record_merge(
                     recorded_at=stamp,
                     note=note,
                 ),
+            ),
+        )
+
+    return ledger.append_transaction(build, state_dir=state_dir, recorded_at=stamp)[0]
+
+
+def record_improvement_plan_draft(
+    draft: ImprovementPlanDraft,
+    *,
+    state_dir: str | Path | None = None,
+    recorded_at: str | None = None,
+) -> LedgerRecord:
+    """Append the record that a proposal was drafted for an issue.
+
+    The draft carries the digest of a file that already exists on disk, so this
+    append is the last step of drafting rather than a promise about one: the
+    canonical issue is resolved inside the transaction, and a request naming an
+    unknown issue is refused with nothing written.
+    """
+    requested = parse_issue_id(draft.issue_id)
+    stamp = recorded_at or _utc_now()
+
+    def build(view: LedgerView) -> tuple[PendingRecord, ...]:
+        canonical = view.canonical_issue_id(requested)
+        if canonical not in view.allocated_issue_ids:
+            raise ProjectionError(
+                UNKNOWN_ISSUE, f"{requested} names no issue in the inbox"
+            )
+        return (
+            PendingRecord(
+                kind=KIND_IMPROVEMENT_PLAN_DRAFTED,
+                payload=replace_dataclass(draft, issue_id=canonical),
             ),
         )
 

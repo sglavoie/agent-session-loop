@@ -436,6 +436,8 @@ asl assurance dismiss ISSUE [--note TEXT] [--state-dir DIR] [--json]
 asl assurance accept-risk ISSUE [--note TEXT] [--state-dir DIR] [--json]
 asl assurance merge ISSUE TARGET [--note TEXT] [--yes] [--state-dir DIR] [--json]
 asl assurance closeout RUN_ID --outcome accepted|reworked|escaped [--rework-minutes N] [--issue ISSUE ...] [--note TEXT] [--plan PLAN_DIR_OR_ID] [--replace] [--state-dir DIR] [--json]
+asl assurance process-pending [--limit RUNS] [--run-id RUN_ID] [--plan PLAN_DIR_OR_ID] [--audit-harness NAME] [--audit-harness-model MODEL] [--audit-effort LEVEL] [--audit-timeout SECONDS] [--state-dir DIR] [--json]
+asl assurance plan ISSUE --harness NAME --output PATH [--harness-model MODEL] [--effort LEVEL] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl control stop-after-current PLAN_DIR_OR_ID [--state-dir DIR] [--json]
 asl control select-harness PLAN_DIR_OR_ID --harness codex|claude|copilot [--state-dir DIR] [--json]
 asl control set-model PLAN_DIR_OR_ID [--harness codex|claude|copilot] [--harness-model MODEL|--clear-harness-model] [--effort EFFORT|--clear-effort] [--state-dir DIR] [--json]
@@ -1282,6 +1284,62 @@ immediately, and `--dry-run` persists `skipped` with reason `dry-run` while
 still reporting the role, timeout, and attempt budget a real run would have used
 under `planned.audit`. Text runs print a `Supervisor audit: STATE` summary line.
 
+Opting out is the only way to run no checks at all. A run that stays enabled but
+resolves no independent role, loses both agent attempts, draws a harness that
+cannot enforce the read-only profile, or catches its auditor mutating the
+workspace still publishes whatever the deterministic checks proved, under an
+`unavailable` verdict for the semantic half that went missing.
+
+A caught mutation opens its critical issue while the attempt is still running,
+so the terminal publication names that issue ID in the run summary rather than
+recording the same mutation a second time. It counts as new when this run opened
+it and as recurring when an earlier run did, which is the rule an allocated
+finding already follows, and it makes the run's most severe issue copyable from
+`asl run`, `asl status`, the Workbench, and the Autopilot instead of only from
+the inbox. A named ID must be one the ledger actually allocated: publication
+resolves it through the merge chain under the lock and refuses the whole append
+when it owns no issue, so a summary never claims an issue the inbox cannot
+show.
+
+Interrupting an audit turn cancels the audit rather than retrying it. The first
+Ctrl+C ends the attempt, the verdict is `unavailable` with reason `interrupted`,
+terminalization still completes, and the run keeps the exit code it had already
+earned.
+
+Ordering inside one run is fixed. Every ending reaches the terminalization
+coordinator exactly once, the audit runs there first, and its artifacts and
+ledger records are on disk before `run_finished` is appended — so the terminal
+event and the state projection carry the same verdict rather than two. The
+outcome and the exit code are decided before a run reaches the coordinator and
+auditing changes neither: a finding, a failed audit, or a failed publication
+never turns a successful run into a failed one, never rewrites a pause reason,
+and never touches the artifacts the run recorded.
+
+A terminated run also carries an additive `assurance_report` block beside its
+`assurance` object, in `state.json`, in the `run_finished` event, in
+`asl run --json`, and in `asl status --json`. It repeats the audit state and
+eligibility and adds the copyable issue IDs, the new and recurring counts, the
+absolute path of `supervisor-audit.json` in the run directory, the corpus-wide
+open issue count, and `list_command` (`asl assurance list`). Findings carried by
+an `unavailable` verdict are flagged `partial: true`, because those are the
+problems the audit managed to see rather than all of them. Text output renders
+the same three lines:
+
+```text
+Assurance issues: 1 new, 1 recurring; ASI-1, ASI-2
+Assurance inbox: 4 open; `asl assurance list`
+Assurance report: /path/to/runs/<run-id>/supervisor-audit.json
+```
+
+When the ledger cannot be read, the open count is reported as unavailable with
+the reason rather than guessed, and the command still succeeds. The block is a
+sibling key rather than a field inside `assurance`, because the persisted
+assurance object is parsed with unknown keys refused. `asl status` renders all
+of this without being able to produce any of it: the projection module imports
+only the assurance ledger, models, and projection, so nothing reachable from a
+status read can launch a harness. Status keeps its existing abandonment
+reconstruction, which records the audit debt and still launches nothing.
+
 After a review session completes with structured findings, the runner drives
 bounded same-plan repair/rereview cycles: it materializes one pending repair
 child per `repair_group` beneath the review session (`N.1`, `N.2`, ... via
@@ -1702,9 +1760,10 @@ aggregate. A run is reclaimable only when its finish time can be read from its
 own `turn-*/result.json` artifacts and is at least `--max-age-days` (default 30)
 old, its plan directory carries no lock, it is not reported running by the same
 scan `asl sessions` uses, and it is not the newest run of its plan. Every other
-run is retained with a stated reason — `plan-locked`, `live-run`, `unfinished`,
-`undated`, `newest-run`, or `within-cutoff`, evaluated in that order — so a
-sweep that reclaims little still explains what held the rest. A stale lock is
+run is retained with a stated reason — `plan-locked`, `live-run`, `pin-unknown`,
+`open-issue`, `unfinished`, `undated`, `newest-run`, or `within-cutoff`,
+evaluated in that order — so a sweep that reclaims little still explains what
+held the rest. A stale lock is
 refused exactly like an active one: clearing it stays a deliberate `asl unlock`,
 never a side effect of reclaiming disk. State directories whose plan directory
 cannot be recovered are counted as unresolved and are not judged at all. The
@@ -2189,6 +2248,17 @@ lock; neither appends a record, mints an issue id, rebuilds the index cache, or
 repairs a malformed line, so browsing a damaged inbox reports the damage instead
 of quietly rewriting it. A missing ledger is an empty inbox, not an error.
 
+The assurance ledger and the live per-plan mailbox are separate systems, and
+nothing connects them. `assurance-inbox.jsonl` sits directly under the state
+root, is shared by every plan in the corpus, records what audits found after
+runs ended, is permanent, and is written under its own `assurance-inbox.lock`.
+`mailbox.jsonl` sits inside one plan's state directory, carries guidance,
+questions, replies, and notices for a run that is still going, is enabled per
+run, and is written under its own mailbox locking with a separate
+`mailbox-lease.json` supervisor lease. They share no file, no lock, no id
+space, and no lifetime; `asl inbox ...` never reads or writes the assurance
+ledger, and `asl assurance ...` never reads or writes a mailbox.
+
 `list` answers the default triage question — what is still open — by printing
 the 50 most recently observed open issues, newest sighting first, with the
 issue id, severity, state, occurrence count, last-seen timestamp, component, and
@@ -2259,6 +2329,140 @@ ledger is opened; a run with no audit record exits `1` with
 append like everything else: the new record names the ledger line holding the
 closeout it supersedes as `seq-N`, both verdicts stay readable, and the later
 one is the one in force.
+
+`asl assurance process-pending` audits the runs whose own process died before it
+could audit itself. When abandonment is proven, the terminal reconstruction
+writes `assurance-pending.json` into the dead run's directory and nothing more:
+that reconstruction happens inside `asl status` and inside lock acquisition, and
+neither may launch a harness or wait on one, so the debt is recorded there and
+paid here. The record is self-contained — it copies the plan directory,
+workspace root, and the run's own harness and audit settings — because the next
+run of the same plan overwrites `state.json` and would otherwise take them with
+it. The terminal `run_finished` event and the persisted state carry a bounded
+`assurance_pending` object naming the run, when the debt was recorded, and where
+the record lives. The abandoned run's own outcome is never rewritten: it died
+abandoned and stays abandoned, whatever the later audit says.
+
+Only records this feature wrote are ever candidates, so a state root full of
+history that predates auditing enumerates as empty rather than as a backlog
+nobody asked for. A record whose run wrote no assurance object at all carries
+`skip: predates-assurance`, and one whose run already reached a verdict or opted
+out carries `skip: audit-already-settled`; both are reported and neither is
+processed in bulk. Naming `--run-id RUN_ID` processes that run anyway, which is
+the only way an audit is ever run for old state, and it is one run at a time by
+a person who asked for it.
+
+Processing is serial and single-winner. Each run is claimed with a nonblocking
+`flock` on `assurance-catchup.lock` in its own run directory, so two catch-up
+passes divide the backlog instead of racing on it and a run another pass holds
+is reported as `claimed` rather than waited on. The ledger is consulted inside
+that claim, so a run already published is reported as `already-audited` and is
+never published twice; repeating the command is therefore idempotent. A run
+whose plan has moved on to a later run is left alone as `unusable` with
+`reason: evidence-superseded`, because the evidence an audit would read no
+longer describes the run it is owed for. `--limit RUNS` bounds the audits one
+pass launches, defaulting to 20; it counts audits rather than records, so skips
+and already-published runs cannot crowd out real work, and a non-positive value
+exits `1` with `reason: input-error`. `--plan PLAN_DIR_OR_ID` narrows the pass to
+one plan, and `--audit-harness`, `--audit-harness-model`, `--audit-effort`, and
+`--audit-timeout` override what the dead run recorded, for the case where the
+harness that would have audited it is the reason nobody can.
+
+`asl assurance plan ISSUE --harness NAME --output PATH` turns an accepted issue
+into a proposal a human reads and decides on. It writes exactly one artifact —
+a Markdown document at `--output` — and produces no plan, no session, no
+readiness, no commit, and no change to any repository. That boundary is
+structural: the drafting module imports the ledger, the models, the projection,
+the harness layer, and the state layer, and nothing else, so `asl split`,
+`asl prepare`, `asl preflight`, `asl expand-ingest`, and `asl run` are not
+reachable from it at all.
+
+The drafter is given the canonical merged issue, its whole observation and
+disposition history, any proposal already drafted for it, and the run
+directories holding the evidence its findings cite. It runs a single turn under
+the same restricted read-only access profile the supervisor audit uses, from a
+throwaway working directory, with no `plan_dir`, no bypass, and read access to
+the evidence run directories plus the read-only ASL package and skill trees. A
+harness that cannot enforce that profile exits `1` with
+`reason: harness-unavailable` rather than running under a weaker one. Those read
+roots are fingerprinted by content on both sides of the turn: any change to them,
+or an output file the agent created itself, exits `1` with
+`reason: mutation-detected` and discards the reply, ahead of the exit code and
+the timeout, because a read-only turn that wrote something has already disproved
+the boundary the whole draft rests on.
+
+The reply must be a non-empty Markdown document carrying the ATX headings
+`Summary`, `Problem and Evidence`, `Proposed Changes`, `Test Plan`, and
+`Assumptions`, once each. Heading detection ignores anything inside a code
+fence, so a section named only in an example does not count; one outer fence
+wrapping the whole answer is unwrapped rather than rejected. Anything else exits
+`1` with `reason: malformed-output` and writes nothing.
+
+ASL writes the validated document itself, never the agent. The file is created
+exclusively and fullsynced along with its parent directory, so a path that
+already exists is refused with `reason: output-exists` before a harness is
+launched at all and drafting twice never overwrites the proposal a human is
+reading. Only once the file is durable is `improvement_plan_drafted` appended to
+the ledger, naming the issue, the harness and model, the output path, and the
+document's SHA-256; `asl assurance show` then lists it. If that append fails the
+document is kept rather than deleted and the error names where it landed, since
+a validated proposal a human can read outranks a history that never mentions it.
+`--timeout SECONDS` bounds the single turn and defaults to 600; drafting is
+never retried, because a rejected reply is a refusal an operator sees rather
+than a budget to spend twice.
+
+### Assurance in metrics, retention, and consumers
+
+`asl metrics` adds an `assurance` section, aggregated once from the shared
+ledger rather than per plan, since the inbox spans every plan. Coverage and
+correctness are reported separately: `coverage` counts eligible runs, ineligible
+runs, runs that reached a terminal verdict, and the resulting rate, while
+`audit_states` counts all five states so a window with no audits and a window
+with no findings never render the same. `issues` reports sightings, new versus
+recurring, findings by severity and by category, the open backlog now, and
+recurrence after resolution — replayed over the window, because a reopen from a
+year ago says nothing about the last seven days. `dispositions` reports the
+counts by kind, the dismissal and accepted-risk rates, and the time from an
+issue's first sighting to its disposition. `closeouts` reports the outcomes,
+escaped issues, and rework minutes, counted per run through the projection so a
+superseding verdict replaces the one it corrects instead of being counted twice.
+Every count is windowed by `--since-days` except the open backlog, which is a
+fact about now. An unreadable ledger yields `available: false` with the reason
+and zeroed counters rather than a failed command.
+
+`asl gc` never collects the ledger: `assurance-inbox.jsonl` sits directly under
+the state root and the sweep only ever removes `runs/<run-id>/` directories, and
+the report states that as `ledger_excluded: true` beside the ledger path. Run
+directories referenced by an open issue are retained with reason `open-issue`,
+ahead of the age cutoff and the newest-run rule but behind the plan lock and the
+live-run check. Pinning is by run ID alone, because that is all an occurrence
+records. Once every issue naming a run is resolved, dismissed, or accepted, the
+pin is released and the run becomes reclaimable on the ordinary schedule while
+the ledger keeps its whole history. References that no longer resolve to a
+directory anywhere under the state root are reported as
+`missing_run_references` rather than hidden, so an operator following an issue's
+evidence trail learns up front that the artifacts are gone.
+
+A ledger that cannot be read at all fails closed instead of reading as an empty
+inbox. The report carries `available: false` with the reason and
+`collection_blocked: true`, and every run in scope — plan scope and corpus scope
+alike — is retained under `pin-unknown`, ahead of every rule but the plan lock
+and the live-run check. The dry-run text says so in words, and `--apply` removes
+nothing until the ledger is readable again: an empty pin set read off a ledger
+nobody could parse states an absence of knowledge rather than an absence of
+pins, and the deletion it would otherwise license is unrecoverable. A ledger
+file that does not exist yet is not this case — that is a readable empty inbox,
+and it pins nothing.
+
+The Workbench summary and the Autopilot supervision result carry the same
+verdict in bounded form: state, eligibility, reason, up to eight issue IDs with
+`issue_ids_truncated` when there are more, the new and recurring counts, the
+partial flag, the one-line status text, and the inbox command. Neither carries a
+field with which to configure, launch, retry, or dispose of an audit, and the
+Autopilot's human summary names what the audit found rather than deciding
+anything about it. All existing state, event, status, metrics, retention,
+Workbench, and Autopilot fields keep their meaning; every field described here
+is additive.
 
 ## Harness Commands
 
@@ -2459,8 +2663,25 @@ Runtime files include:
 - `runs/<run_id>/commit-0001-session-<id>/result.json`: diagnostic commit
   result, including argv, cwd, return code, HEAD before/after, status result,
   commit SHA when one was created, and artifact paths.
+- `runs/<run_id>/supervisor-audit-input.json`: the bounded operational evidence
+  bundle the audit read.
+- `runs/<run_id>/supervisor-audit.json`: the validated audit record.
+- `runs/<run_id>/supervisor-audit.md`: the operator-readable audit report.
+- `runs/<run_id>/supervisor-audit-attempt-N/`: per-attempt prompt, returned
+  message, and outcome.
+- `runs/<run_id>/assurance-pending.json`: the audit debt an abandoned run left
+  for `asl assurance process-pending`.
 - `runs/<run_id>/commit-0001-end/...`: equivalent artifacts for
   `--commit-at-end`.
+
+Three assurance files sit one level up, directly under the state root rather
+than inside any plan's directory, because the inbox spans the whole corpus:
+
+- `assurance-inbox.jsonl`: the append-only assurance ledger.
+- `assurance-inbox.lock`: the exclusive-append lock; writers never lock the
+  data file itself.
+- `assurance-index.json`: a disposable cache, rebuilt whenever it is missing,
+  stale, malformed, or of an unknown version.
 
 Durable mailbox, event, and state-ledger writes issue `fcntl(F_FULLFSYNC)` on
 Darwin so completed records cross the device cache. Filesystems that reject

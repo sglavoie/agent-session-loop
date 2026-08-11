@@ -2581,6 +2581,9 @@ class ReviewGuardUnavailableRunTests(unittest.TestCase):
                 "--state-dir",
                 str(self.state_dir),
                 "--allow-not-loop-ready",
+                # A completing run would otherwise inherit `claude` as its audit
+                # role and add a harness call these assertions do not describe.
+                "--no-supervisor-audit",
             ]
         )
         with (

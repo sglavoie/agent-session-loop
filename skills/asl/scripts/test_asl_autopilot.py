@@ -7848,6 +7848,95 @@ class RunAutopilotReviewTest(unittest.TestCase):
         self.assertIn("completed 1", summary)
         self.assertIn("30 still pending", summary)
 
+    def test_run_result_carries_the_bounded_audit_verdict(self) -> None:
+        result = autopilot._run_result(
+            True,
+            "complete",
+            run={
+                "assurance": {
+                    "run_id": "20260619T120000Z-9",
+                    "state": "findings",
+                    "eligible": True,
+                    "issue_ids": ["ASI-1", "ASI-2"],
+                    "new_issue_count": 2,
+                }
+            },
+        )
+
+        self.assertEqual("findings", result["assurance"]["state"])
+        self.assertEqual(["ASI-1", "ASI-2"], result["assurance"]["issue_ids"])
+        self.assertEqual("asl assurance list", result["assurance"]["list_command"])
+        # Display only: nothing here can configure, launch, or retry an audit.
+        self.assertNotIn("role", result["assurance"])
+        self.assertNotIn("attempts", result["assurance"])
+
+    def test_run_result_falls_back_to_status_runner_state(self) -> None:
+        result = autopilot._run_result(
+            True,
+            "complete",
+            status={
+                "runner_state": {
+                    "assurance": {
+                        "run_id": "20260619T120000Z-9",
+                        "state": "all-clear",
+                        "eligible": True,
+                    }
+                }
+            },
+        )
+
+        self.assertEqual("all-clear", result["assurance"]["state"])
+        self.assertEqual([], result["assurance"]["issue_ids"])
+
+    def test_run_result_omits_assurance_when_no_audit_ran(self) -> None:
+        result = autopilot._run_result(True, "complete", run={"ok": True})
+
+        self.assertNotIn("assurance", result)
+
+    def test_human_summary_names_the_issues_the_audit_found(self) -> None:
+        result = {
+            "ok": True,
+            "reason": "complete",
+            "assurance": {
+                "state": "findings",
+                "issue_ids": ["ASI-1", "ASI-2"],
+                "issue_count": 2,
+                "issue_ids_truncated": False,
+                "partial": False,
+                "list_command": "asl assurance list",
+            },
+        }
+
+        summary = autopilot._human_summary(result)
+
+        self.assertIn("supervisor audit found 2 issue(s)", summary)
+        self.assertIn("ASI-1, ASI-2", summary)
+        self.assertIn("asl assurance list", summary)
+
+    def test_human_summary_flags_a_partial_audit_verdict(self) -> None:
+        result = {
+            "ok": True,
+            "reason": "complete",
+            "assurance": {
+                "state": "unavailable",
+                "issue_ids": ["ASI-1"],
+                "issue_count": 9,
+                "issue_ids_truncated": True,
+                "partial": True,
+                "list_command": "asl assurance list",
+            },
+        }
+
+        summary = autopilot._human_summary(result)
+
+        self.assertIn("partial: the audit could not complete", summary)
+        self.assertIn("ASI-1, …", summary)
+
+    def test_human_summary_stays_unchanged_without_findings(self) -> None:
+        result = {"ok": True, "reason": "complete", "completed": 3, "pending": 0}
+
+        self.assertNotIn("supervisor audit", autopilot._human_summary(result))
+
     def test_human_summary_reports_stopped_progress(self) -> None:
         result = {
             "ok": True,

@@ -5395,24 +5395,32 @@ class MarkRunAbandonedTests(unittest.TestCase):
         *,
         run_id: str = "20260728T123131255926Z-77262",
         run_started_at: str = "2026-06-19T12:00:00+00:00",
+        assurance: dict[str, object] | None = None,
+        run_config: dict[str, object] | None = None,
     ) -> None:
-        self.state_path.write_text(
-            json.dumps(
-                {
-                    "ok": True,
-                    "paused": False,
-                    "run_id": run_id,
-                    "harness": "claude",
-                    "reason": "",
-                    "run_started_at": run_started_at,
-                    "run_finished_at": None,
-                    "duration_seconds": None,
-                    "active_turn": {"session": 1, "turn_index": 1},
-                    "active_verification": {"session": 1, "turn_index": 1},
-                }
-            ),
-            encoding="utf-8",
-        )
+        payload: dict[str, object] = {
+            "ok": True,
+            "paused": False,
+            "run_id": run_id,
+            "harness": "claude",
+            "reason": "",
+            "run_started_at": run_started_at,
+            "run_finished_at": None,
+            "duration_seconds": None,
+            "active_turn": {"session": 1, "turn_index": 1},
+            "active_verification": {"session": 1, "turn_index": 1},
+        }
+        if assurance is not None:
+            payload["assurance"] = assurance
+        if run_config is not None:
+            # Shaped like `runner._initial_payload`: the plan directory is a
+            # top-level field and the workspace binding lives in `run_config`.
+            payload["plan_dir"] = str(plans.canonicalize_path(self.plan_dir))
+            payload["run_config"] = {
+                "workspace_root": str(plans.canonicalize_path(self.plan_dir)),
+                **run_config,
+            }
+        self.state_path.write_text(json.dumps(payload), encoding="utf-8")
 
     def write_lock(self, *, pid: int, hostname: str | None) -> None:
         payload: dict[str, object] = {
@@ -5769,6 +5777,127 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.addCleanup(state.release_lock, self.plan_dir, self.state_dir)
 
         self.assertUntouched()
+
+    def pending_record(self, run_id: str) -> dict[str, object]:
+        path = (
+            self.plan_state
+            / state.RUNS_DIR_NAME
+            / run_id
+            / state.ASSURANCE_PENDING_FILE_NAME
+        )
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_abandonment_records_the_audit_the_dead_run_still_owed(self) -> None:
+        self.write_unfinished_state(
+            run_id="run-owing",
+            assurance={"run_id": "run-owing", "state": "pending", "eligible": True},
+            run_config={"harness": "claude", "audit_harness": "codex"},
+        )
+
+        self.assertTrue(
+            state.mark_run_abandoned(
+                self.plan_state, lock_info=None, trigger="test"
+            )
+        )
+
+        record = self.pending_record("run-owing")
+        self.assertEqual(
+            state.ASSURANCE_PENDING_SCHEMA_VERSION, record["schema_version"]
+        )
+        self.assertEqual("run-owing", record["run_id"])
+        self.assertIsNone(record["skip"])
+        self.assertEqual(events.RUN_OUTCOME_ABANDONED, record["outcome"])
+        # The record carries its own copy of what the audit needs, because the
+        # next run of this plan overwrites the `state.json` it came from.
+        self.assertEqual("codex", record["run_config"]["audit_harness"])
+        self.assertEqual(
+            str(plans.canonicalize_path(self.plan_dir)), record["plan_dir"]
+        )
+        self.assertEqual(
+            str(plans.canonicalize_path(self.plan_dir)), record["workspace_root"]
+        )
+
+        persisted = self.persisted_state()
+        self.assertEqual("run-owing", persisted["assurance_pending"]["run_id"])
+        self.assertEqual(
+            persisted["run_finished_at"],
+            persisted["assurance_pending"]["recorded_at"],
+        )
+        records = read_jsonl(self.events_path)
+        self.assertEqual(
+            persisted["assurance_pending"],
+            records[0]["payload"]["assurance_pending"],
+        )
+
+    def test_run_that_predates_auditing_is_recorded_as_such(self) -> None:
+        self.write_unfinished_state(run_id="run-old")
+
+        self.assertTrue(
+            state.mark_run_abandoned(
+                self.plan_state, lock_info=None, trigger="test"
+            )
+        )
+
+        self.assertEqual(
+            state.ASSURANCE_SKIP_PREDATES, self.pending_record("run-old")["skip"]
+        )
+
+    def test_settled_assurance_is_recorded_as_owing_nothing(self) -> None:
+        for label, assurance in (
+            ("verdict-reached", {"state": "all-clear", "eligible": True}),
+            ("opted-out", {"state": "pending", "eligible": False}),
+        ):
+            with self.subTest(label):
+                self.write_unfinished_state(run_id=label, assurance=assurance)
+
+                self.assertTrue(
+                    state.mark_run_abandoned(
+                        self.plan_state, lock_info=None, trigger="test"
+                    )
+                )
+
+                self.assertEqual(
+                    state.ASSURANCE_SKIP_SETTLED, self.pending_record(label)["skip"]
+                )
+
+    def test_abandonment_records_the_debt_without_launching_a_harness(self) -> None:
+        # `asl status` and lock acquisition both reach this code, and neither
+        # may block on a harness turn.
+        self.write_unfinished_state(
+            run_id="run-quiet",
+            assurance={"state": "pending", "eligible": True},
+            run_config={"harness": "claude", "audit_harness": "codex"},
+        )
+
+        with mock.patch.object(
+            harnesses,
+            "run_harness",
+            side_effect=AssertionError("abandonment launched a harness"),
+        ):
+            self.assertTrue(
+                state.mark_run_abandoned(
+                    self.plan_state, lock_info=None, trigger="test"
+                )
+            )
+
+        self.assertIsNone(self.pending_record("run-quiet")["skip"])
+
+    def test_unwritable_pending_record_never_blocks_terminalization(self) -> None:
+        self.write_unfinished_state(run_id="run-blocked")
+        runs_dir = self.plan_state / state.RUNS_DIR_NAME
+        runs_dir.mkdir(parents=True)
+        (runs_dir / "run-blocked").write_text("not a directory", encoding="utf-8")
+
+        self.assertTrue(
+            state.mark_run_abandoned(
+                self.plan_state, lock_info=None, trigger="test"
+            )
+        )
+
+        persisted = self.persisted_state()
+        self.assertEqual(state.ABANDONED_REASON, persisted["reason"])
+        self.assertNotIn("assurance_pending", persisted)
+        self.assertEqual(1, len(read_jsonl(self.events_path)))
 
 
 def _plan_state_dir(state_root: Path, plan_dir: Path) -> Path:

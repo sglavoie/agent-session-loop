@@ -151,6 +151,7 @@ AttemptOutcome = Literal[
     "malformed-output",
     "missing-lanes",
     "invalid-reference",
+    "interrupted",
     "mutation-detected",
     "unavailable",
 ]
@@ -164,6 +165,7 @@ ATTEMPT_OUTCOMES: tuple[AttemptOutcome, ...] = (
     "malformed-output",
     "missing-lanes",
     "invalid-reference",
+    "interrupted",
     "mutation-detected",
     "unavailable",
 )
@@ -479,6 +481,16 @@ def issue_id_number(value: object) -> int:
     return int(parse_issue_id(value)[len(ISSUE_ID_PREFIX) :])
 
 
+def parse_reason_token(value: object) -> str:
+    """Validate a reason class in the token form every artifact stores it as.
+
+    Reasons are classes, not messages: an audit and a summary both store one so
+    a recurring failure groups under a stable key, which raw exception text
+    never does.
+    """
+    return _require_token(value, label="reason")
+
+
 def _require_issue_ids(value: object, *, label: str) -> tuple[str, ...]:
     items = _require_sequence(value, label=label, maximum=MAX_ISSUE_REFERENCES)
     issue_ids = tuple(parse_issue_id(item) for item in items)
@@ -612,7 +624,14 @@ def finding_fingerprint(
 
 @dataclass(frozen=True)
 class Finding:
-    """One control-plane defect the audit is willing to put a human's name on."""
+    """One control-plane defect the audit is willing to put a human's name on.
+
+    ``localization`` points at the ASL or skill source the defect was traced to.
+    It is deliberately not evidence: evidence is what the run recorded, while a
+    localization is where the behavior comes from, so it is never required to
+    appear in the audit's evidence index and never participates in the
+    fingerprint.
+    """
 
     category: str
     component: str
@@ -622,10 +641,12 @@ class Finding:
     summary: str
     recommendation: str
     evidence: tuple[str, ...]
+    localization: tuple[str, ...] = ()
     schema_version: int = ASSURANCE_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "evidence", tuple(self.evidence))
+        object.__setattr__(self, "localization", tuple(self.localization))
         _require_schema_version(self.schema_version, label="finding 'schema_version'")
         _require_token(self.category, label="finding 'category'")
         _require_token(self.component, label="finding 'component'")
@@ -635,6 +656,8 @@ class Finding:
         _require_text(self.summary, label="finding 'summary'")
         _require_text(self.recommendation, label="finding 'recommendation'")
         _require_references(self.evidence, label="finding 'evidence'")
+        if self.localization:
+            _require_references(self.localization, label="finding 'localization'")
 
     @property
     def fingerprint(self) -> str:
@@ -657,6 +680,7 @@ class Finding:
             "summary": self.summary,
             "recommendation": self.recommendation,
             "evidence": list(self.evidence),
+            "localization": list(self.localization),
             "fingerprint": self.fingerprint,
         }
 
@@ -676,9 +700,11 @@ def parse_finding(payload: object, *, label: str = "finding") -> Finding:
             "summary",
             "recommendation",
             "evidence",
+            "localization",
             "fingerprint",
         ),
     )
+    localization = data.get("localization") or ()
     finding = Finding(
         schema_version=_require_schema_version(
             data.get("schema_version"), label=f"{label} 'schema_version'"
@@ -697,6 +723,11 @@ def parse_finding(payload: object, *, label: str = "finding") -> Finding:
             data.get("recommendation"), label=f"{label} 'recommendation'"
         ),
         evidence=_require_references(data.get("evidence"), label=f"{label} 'evidence'"),
+        localization=(
+            ()
+            if not localization
+            else _require_references(localization, label=f"{label} 'localization'")
+        ),
     )
     declared = data.get("fingerprint")
     if declared is not None and declared != finding.fingerprint:

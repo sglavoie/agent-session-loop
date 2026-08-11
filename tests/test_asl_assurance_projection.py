@@ -25,6 +25,7 @@ LATER_TIMESTAMP = "2026-08-10T11:11:12+00:00"
 LAST_TIMESTAMP = "2026-08-10T12:11:12+00:00"
 INPUT_DIGEST = "a" * 64
 OTHER_INPUT_DIGEST = "b" * 64
+THIRD_INPUT_DIGEST = "c" * 64
 
 
 _PUBLISH_WORKER_SOURCE = """
@@ -294,6 +295,77 @@ class PublicationTests(ProjectionTestCase):
                 findings=(_finding(), _finding(severity="low")),
             )
         self.assertIn("repeats the finding identity", str(caught.exception))
+
+    def test_a_linked_issue_the_inbox_never_opened_is_refused(self) -> None:
+        self.publish(_publication())
+
+        with self.assertRaises(projection.ProjectionError) as caught:
+            self.publish(
+                _publication(
+                    run_id=OTHER_RUN_ID,
+                    artifacts=_artifacts(OTHER_INPUT_DIGEST),
+                    linked_issue_ids=("ASI-999",),
+                    completed_at=LATER_TIMESTAMP,
+                ),
+                recorded_at=LATER_TIMESTAMP,
+            )
+
+        self.assertEqual(projection.UNKNOWN_ISSUE, caught.exception.reason)
+        # The refusal is the whole transaction: no summary, no observation, and
+        # no run that names a phantom issue.
+        self.assertEqual(2, len(ledger.read_ledger(state_dir=self.state_dir).records))
+        projected = self.read()
+        self.assertEqual((RUN_ID,), tuple(run.run_id for run in projected.runs))
+        self.assertEqual(("ASI-1",), tuple(issue.issue_id for issue in projected.issues))
+
+    def test_a_linked_issue_the_ledger_opened_is_named_once(self) -> None:
+        self.publish(_publication())
+
+        result = self.publish(
+            _publication(
+                run_id=OTHER_RUN_ID,
+                findings=(_finding(invariant_key="scope.no-escape"),),
+                artifacts=_artifacts(OTHER_INPUT_DIGEST),
+                linked_issue_ids=("ASI-1",),
+                completed_at=LATER_TIMESTAMP,
+            ),
+            recorded_at=LATER_TIMESTAMP,
+        )
+
+        self.assertEqual(("ASI-2", "ASI-1"), result.issue_ids)
+        self.assertEqual(1, result.summary.new_issue_count)
+        self.assertEqual(1, result.summary.recurring_issue_count)
+        self.assertEqual(1, len(result.observations))
+        self.assertEqual(1, self.read().issue("ASI-1").occurrence_count)
+
+    def test_a_linked_issue_merged_away_is_accepted_as_its_owner(self) -> None:
+        self.open_two_issues()
+        projection.record_merge(
+            "ASI-2", "ASI-1", state_dir=self.state_dir, recorded_at=LATER_TIMESTAMP
+        )
+
+        result = self.publish(
+            _publication(
+                run_id=THIRD_RUN_ID,
+                state="unavailable",
+                findings=(),
+                reason="timeout",
+                attempts=(
+                    models.AuditAttempt(
+                        number=1,
+                        outcome="timeout",
+                        artifact_dir="supervisor-audit-attempt-1",
+                    ),
+                ),
+                artifacts=_artifacts(THIRD_INPUT_DIGEST),
+                linked_issue_ids=("ASI-2",),
+                completed_at=LAST_TIMESTAMP,
+            ),
+            recorded_at=LAST_TIMESTAMP,
+        )
+
+        self.assertIn("ASI-1", result.issue_ids)
+        self.assertNotIn("ASI-2", result.issue_ids)
 
     def test_publication_key_separates_kinds_runs_and_inputs(self) -> None:
         self.assertNotEqual(

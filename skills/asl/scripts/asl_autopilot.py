@@ -46,6 +46,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from agent_session_loop import assurance_report as _assurance_report  # noqa: E402
 from agent_session_loop import events as _events  # noqa: E402
 from agent_session_loop import harnesses as _harnesses  # noqa: E402
 from agent_session_loop import mailbox as _mailbox  # noqa: E402
@@ -2447,6 +2448,27 @@ def _review_resume_payload(payload: Optional[dict]) -> Optional[dict]:
     return review_resume if isinstance(review_resume, dict) else None
 
 
+def _assurance_payload(payload: Optional[dict]) -> Optional[dict]:
+    """Return a bounded, display-only projection of a payload's assurance object.
+
+    Built through ``agent_session_loop.assurance_report`` so the supervision
+    result, ``asl run``, ``asl status``, and the Workbench all describe one
+    audit the same way. The projection carries a verdict and the inbox command;
+    it carries nothing with which this helper could configure, launch, retry, or
+    dispose of an audit, and this helper never writes to the ledger.
+    """
+    if not isinstance(payload, dict):
+        return None
+    assurance = payload.get("assurance")
+    if not isinstance(assurance, dict):
+        runner_state = payload.get("runner_state")
+        assurance = (
+            runner_state.get("assurance") if isinstance(runner_state, dict) else None
+        )
+    bounded = _assurance_report.bounded_summary(assurance)
+    return bounded or None
+
+
 def _resume_run_config(parsed: dict, status: dict) -> Optional[dict]:
     """Load the persisted ``run_config`` for a ``--resume`` supervised command.
 
@@ -2762,6 +2784,9 @@ def _run_result(
     review_resume = _review_resume_payload(run) or _review_resume_payload(status)
     if review_resume is not None:
         result["review_resume"] = review_resume
+    assurance = _assurance_payload(run) or _assurance_payload(status)
+    if assurance is not None:
+        result["assurance"] = assurance
     return result
 
 
@@ -3976,8 +4001,37 @@ def _hung_leaf_command(hang: dict) -> Optional[str]:
     return None
 
 
+def _assurance_guidance(result: dict) -> Optional[str]:
+    """Name what the supervisor audit found, or ``None`` when it found nothing.
+
+    Silent on ``all-clear``, ``skipped``, and ``pending``: a one-line summary
+    that announces a clean audit every time trains an operator to stop reading
+    it, which is exactly when the one line that matters would be missed.
+    """
+    assurance = result.get("assurance")
+    if not isinstance(assurance, dict) or not assurance.get("issue_ids"):
+        return None
+    listed = ", ".join(str(item) for item in assurance["issue_ids"])
+    if assurance.get("issue_ids_truncated"):
+        listed = f"{listed}, …"
+    qualifier = " (partial: the audit could not complete)" if assurance.get(
+        "partial"
+    ) else ""
+    return (
+        f"supervisor audit found {assurance.get('issue_count', 0)} issue(s)"
+        f"{qualifier}: {listed}; run `{assurance.get('list_command')}`"
+    )
+
+
 def _human_summary(result: dict) -> str:
-    """One-line human summary for non-JSON output."""
+    """One-line human summary for non-JSON output, plus any audit verdict."""
+    summary = _run_human_summary(result)
+    audit = _assurance_guidance(result)
+    return f"{summary}; {audit}" if audit else summary
+
+
+def _run_human_summary(result: dict) -> str:
+    """One-line human summary of how the supervised run itself ended."""
     reason = result.get("reason", "unknown")
     if reason == "worker_hung":
         hang = result.get("hang")

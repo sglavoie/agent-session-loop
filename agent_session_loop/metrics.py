@@ -34,6 +34,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
+from . import assurance_report
 from . import compact_state
 from . import events
 from . import plans
@@ -76,6 +77,7 @@ class MetricsReport:
     agent_mux_delivery: dict[str, Any]
     artifacts: dict[str, Any]
     compaction: dict[str, Any]
+    assurance: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -95,6 +97,7 @@ class MetricsReport:
             "agent_mux_delivery": self.agent_mux_delivery,
             "artifacts": self.artifacts,
             "compaction": self.compaction,
+            "assurance": self.assurance,
         }
 
 
@@ -532,6 +535,11 @@ def collect_metrics(
             "artifact_bytes_added": compaction_artifact_bytes,
             "projected_bytes_reclaimed": compaction_projected,
         },
+        # The inbox spans every plan, so it is aggregated once from the shared
+        # ledger rather than per state directory.
+        assurance=assurance_report.collect_assurance_metrics(
+            state_dir=state_root, since=cutoff
+        ),
     )
 
 
@@ -546,6 +554,81 @@ def _format_bytes(count: int) -> str:
 
 def _format_rate(rate: float | None) -> str:
     return "n/a" if rate is None else f"{rate * 100:.1f}%"
+
+
+def _print_assurance_section(assurance: dict[str, Any]) -> None:
+    """Print the supervisor-audit section, separating coverage from correctness."""
+    print("\nSupervisor audit:")
+    if not assurance:
+        print("  not collected")
+        return
+    if not assurance.get("available"):
+        print(f"  ledger unreadable: {assurance.get('error')}")
+        return
+    coverage = assurance["coverage"]
+    print(
+        f"  runs recorded {assurance['runs_recorded']} "
+        f"(eligible {coverage['eligible_runs']}, "
+        f"ineligible {coverage['ineligible_runs']}), "
+        f"audited {coverage['audited_runs']} "
+        f"({_format_rate(coverage['coverage_rate'])})"
+    )
+    states = assurance["audit_states"]
+    print(
+        "  states "
+        + ", ".join(f"{name} {states.get(name, 0)}" for name in states)
+    )
+    issues = assurance["issues"]
+    print(
+        f"  issues: {issues['observations']} sighting(s), "
+        f"{issues['new']} new, {issues['recurring']} recurring, "
+        f"{issues['open_total']} open now"
+    )
+    if issues["by_severity"]:
+        print(
+            "  by severity: "
+            + ", ".join(
+                f"{name} {count}" for name, count in issues["by_severity"].items()
+            )
+        )
+    if issues["by_category"]:
+        print(
+            "  by category: "
+            + ", ".join(
+                f"{name} {count}" for name, count in issues["by_category"].items()
+            )
+        )
+    print(
+        f"  recurrence after resolution: "
+        f"{issues['recurrence_after_resolution']} sighting(s) across "
+        f"{issues['issues_recurring_after_resolution']} issue(s)"
+    )
+    dispositions = assurance["dispositions"]
+    latency = dispositions["time_to_disposition"]
+    median = latency["median_hours"]
+    print(
+        f"  dispositions {dispositions['total']} "
+        f"(dismissed {_format_rate(dispositions['dismissal_rate'])}, "
+        f"accepted risk {_format_rate(dispositions['accepted_risk_rate'])}), "
+        f"median time to disposition "
+        f"{'n/a' if median is None else f'{median:.1f} h'}"
+    )
+    closeouts = assurance["closeouts"]
+    outcomes = ", ".join(
+        f"{name} {count}" for name, count in closeouts["by_outcome"].items()
+    )
+    print(
+        f"  closeouts {closeouts['total']}"
+        f"{f' ({outcomes})' if outcomes else ''}, "
+        f"escaped issues {closeouts['escaped_issues']}, "
+        f"rework {closeouts['rework_minutes']:.0f} min"
+    )
+    integrity = assurance["integrity"]
+    if integrity["anomalies"] or integrity["rejected_records"]:
+        print(
+            f"  ledger integrity: {integrity['anomalies']} anomaly(ies), "
+            f"{integrity['rejected_records']} rejected record(s)"
+        )
 
 
 def _print_report(report: MetricsReport) -> None:
@@ -635,6 +718,7 @@ def _print_report(report: MetricsReport) -> None:
         f"grown in window {_format_bytes(artifacts_section['grown_bytes'])} "
         f"({artifacts_section['grown_files']} files)"
     )
+    _print_assurance_section(report.assurance)
     compaction_section = report.compaction
     print("\nCompaction (dry-run over active dirs):")
     print(
