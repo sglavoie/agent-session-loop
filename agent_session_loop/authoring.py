@@ -167,6 +167,18 @@ class SourceScopeError(SourceHeadingError):
     """A line-specific malformed multi-repository session-scope diagnostic."""
 
 
+class DuplicateSplitError(PlanError):
+    """Raised when a split plan id already has durable output directories."""
+
+    def __init__(self, plan_id: str, existing_outputs: Sequence[str]) -> None:
+        self.plan_id = plan_id
+        self.existing_outputs = tuple(existing_outputs)
+        outputs = "; ".join(self.existing_outputs)
+        super().__init__(
+            f"split output already exists for plan {plan_id}: {outputs}"
+        )
+
+
 CONTEXT_REFERENCE_LINE = (
     "> **Before starting**: Read `context.md` in this directory for shared "
     "project context."
@@ -348,8 +360,47 @@ def capture_inline_plan(
     }
 
 
-def _create_output_dir(base_dir: str, plan_id: str) -> tuple[str, int]:
+def _describe_existing_split_output(path: Path) -> str:
+    canonical = path.resolve()
+    if not canonical.is_dir():
+        return f"{canonical} [not-a-directory]"
+    try:
+        plans.inspect_plan(canonical)
+        metadata = plans.read_readiness_metadata(canonical)
+    except PlanError as error:
+        return f"{canonical} [invalid: {error}]"
+    readiness = metadata.state if metadata is not None else "unknown"
+    return f"{canonical} [{readiness}]"
+
+
+def _existing_split_outputs(base_dir: str, plan_id: str) -> tuple[str, ...]:
+    pattern = re.compile(rf"^{re.escape(plan_id)}(?:-(?P<suffix>[1-9][0-9]*))?$")
+    matches: list[tuple[int, str]] = []
+    try:
+        for entry in Path(base_dir).iterdir():
+            matched = pattern.fullmatch(entry.name)
+            if matched is None:
+                continue
+            sort_key = (
+                1 if matched.group("suffix") is None else int(matched.group("suffix"))
+            )
+            matches.append((sort_key, _describe_existing_split_output(entry)))
+    except OSError as error:
+        raise PlanError(
+            f"cannot scan existing split outputs under {base_dir}: {error}"
+        ) from error
+    matches.sort(key=lambda item: item[0])
+    return tuple(description for _sort_key, description in matches)
+
+
+def _create_output_dir(
+    base_dir: str, plan_id: str, *, force_new: bool = False
+) -> tuple[str, int]:
     os.makedirs(base_dir, exist_ok=True)
+    if not force_new:
+        existing_outputs = _existing_split_outputs(base_dir, plan_id)
+        if existing_outputs:
+            raise DuplicateSplitError(plan_id, existing_outputs)
 
     collision_index = 1
     while True:
@@ -366,11 +417,14 @@ def _create_output_dir(base_dir: str, plan_id: str) -> tuple[str, int]:
 def resolve_plan_output(
     plan_file: str | os.PathLike[str],
     base_dir: str | os.PathLike[str] | None = None,
+    *,
+    force_new: bool = False,
 ) -> dict[str, object]:
-    """Create a fresh collision-safe output directory for a split plan.
+    """Create a fresh split output directory for a plan.
 
     Canonical implementation behind ``asl split`` output resolution (formerly
-    the retired ``resolve-plan-output.py`` script); returns JSON-serializable keys.
+    the retired ``resolve-plan-output.py`` script); returns JSON-serializable
+    keys. Duplicate plan ids are refused unless ``force_new=True``.
     """
     canonical_source = os.path.realpath(
         os.path.abspath(os.path.expanduser(os.fspath(plan_file)))
@@ -382,7 +436,9 @@ def resolve_plan_output(
     content_hash_prefix = content_hash[:HASH_PREFIX_LENGTH]
     fingerprint_prefix = fingerprint[:HASH_PREFIX_LENGTH]
     plan_id = f"{content_hash_prefix}-{fingerprint_prefix}"
-    output_dir, collision_index = _create_output_dir(selected_base_dir, plan_id)
+    output_dir, collision_index = _create_output_dir(
+        selected_base_dir, plan_id, force_new=force_new
+    )
 
     return {
         "output_dir": output_dir,
@@ -2101,6 +2157,7 @@ def split_plan(
     skill_prefix: str = "/",
     analysis_note: str | None = None,
     now: datetime | None = None,
+    force_new: bool = False,
 ) -> SplitResult:
     """Author a split plan directory from a source plan and Step 7 contracts.
 
@@ -2159,7 +2216,9 @@ def split_plan(
             repository_registry=parsed.registry,
         )
 
-    resolver = resolve_plan_output(canonical_source, base_dir)
+    resolver = resolve_plan_output(
+        canonical_source, base_dir, force_new=force_new
+    )
     output_dir = Path(str(resolver["output_dir"]))
 
     transaction = PlanTransaction(output_dir)
@@ -2556,6 +2615,7 @@ def split_from_args(args: Any) -> int:
             base_dir=base_dir,
             skill_prefix=prefix,
             analysis_note=analysis_note,
+            force_new=bool(getattr(args, "force_new", False)),
         )
     except SingleSessionError as error:
         return _emit_error(SPLIT_REASON_SINGLE_SESSION, str(error))

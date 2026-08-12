@@ -8,7 +8,7 @@ allowed-tools: Bash, Read, Write
 
 ## Purpose
 
-Parse a multi-session plan and split it into a collision-safe persistent directory of smaller, self-contained files: shared context, individual session files with handoff templates, and a manifest with a ready-to-paste serial execution command. The generated plan is serial-only by design — `session-run` auto-advances through sessions in dotted numeric order.
+Parse a multi-session plan and split it into a persistent directory of smaller, self-contained files: shared context, individual session files with handoff templates, and a manifest with a ready-to-paste serial execution command. The generated plan is serial-only by design — `session-run` auto-advances through sessions in dotted numeric order. By default `asl split` refuses a duplicate plan id before creating any directory; intentional duplicates opt in with `--force-new`, which preserves the numbered sibling suffix behavior.
 
 All file generation is owned by the `asl split` subcommand, which chains the deterministic authoring API (`agent_session_loop.authoring`) end to end. This skill authors only the per-session completion contracts and (optionally) an analysis note; it never hand-writes `context.md`, `session-N.md`, `manifest.md`, or `progress.md`.
 
@@ -171,7 +171,7 @@ Optionally, also write an analysis markdown file and pass it as `--analysis-file
 
 ### Step 6: Generate the Plan Directory via `asl split`
 
-Run `asl split` with the source resolved in Step 1 and the contracts authored in Step 5, using `--json` and reading its output as the source of truth. `asl split` resolves a fresh collision-safe `output_dir` itself and never overwrites an existing one, so do not pre-create it or ask overwrite prompts; use the reported `output_dir` for every path you print (collision suffixes may have been applied, so never rebuild the path from `plan_id` or the source filename).
+Run `asl split` with the source resolved in Step 1 and the contracts authored in Step 5, using `--json` and reading its output as the source of truth. By default `asl split` refuses a duplicate plan id before creating any directory, so do not pre-create output or ask overwrite prompts. Use `--force-new` only when the user explicitly wants an intentional duplicate split; then `asl split` creates the next numbered sibling directory. On success, use the reported `output_dir` for every path you print and never rebuild the path from `plan_id` or the source filename.
 
 **Path input** (an unrepaired plan file):
 

@@ -517,6 +517,14 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         ),
     )
     split_parser.add_argument(
+        "--force-new",
+        action="store_true",
+        help=(
+            "Allow an intentional duplicate split by creating the next "
+            "numbered sibling directory instead of refusing the existing plan id"
+        ),
+    )
+    split_parser.add_argument(
         "--check",
         dest="check",
         action="store_true",
@@ -646,6 +654,14 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help=(
             "Base directory for the split plan output "
             "(default: the persistent agent-plans directory)"
+        ),
+    )
+    prepare_parser.add_argument(
+        "--force-new",
+        action="store_true",
+        help=(
+            "When preparing from a source plan, allow an intentional duplicate "
+            "split by creating the next numbered sibling directory"
         ),
     )
     prepare_parser.add_argument(
@@ -1004,6 +1020,48 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Print parsed entries as machine-readable JSON",
     )
     progress_parser.set_defaults(handler_ref="progress_cli:progress_from_args")
+
+    plans_parser = subparsers.add_parser(
+        "plans",
+        help=(
+            "List discovered plan directories, with filters for stale, "
+            "never-run, or specific readiness states."
+        ),
+    )
+    plans_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    plans_parser.add_argument(
+        "--stale-days",
+        type=float,
+        metavar="DAYS",
+        help=(
+            "Only show plans whose latest activity, or readiness check when "
+            "never launched, is at least this many days old"
+        ),
+    )
+    plans_parser.add_argument(
+        "--never-run",
+        action="store_true",
+        help=(
+            "Only show plans whose state_path file is absent "
+            "(no run state on disk yet)"
+        ),
+    )
+    plans_parser.add_argument(
+        "--readiness",
+        help=(
+            "Only show plans whose manifest readiness state matches this value "
+            "(for example: draft, reviewed, loop-ready)"
+        ),
+    )
+    plans_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    plans_parser.set_defaults(handler_ref="workbench:plans_from_args")
 
     workbench_parser = subparsers.add_parser(
         "workbench",

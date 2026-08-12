@@ -2392,6 +2392,135 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
         self.assertIsNone(rereview.artifact_valid)
         self.assertIsNone(rereview.artifact_error)
 
+    def test_continuation_projects_group_exhausted_from_run_config(
+        self,
+    ) -> None:
+        first = self._finding("F1", "runner")
+        second = self._finding(
+            "F2",
+            "runner",
+            title="Fix the rerouted runner failure",
+            evidence=[{"path": "pkg/F2.py", "symbol": "retry_loop"}],
+            explanation="F2 is still broken in a different way.",
+            done_criteria=["F2 is fixed and tested."],
+        )
+        self._write_plan([first])
+        materialized = self._materialize()
+        self.assertTrue(materialized.ok, materialized.error)
+        child_path = materialized.children[0].path
+        child_path.write_text(
+            child_path.read_text(encoding="utf-8").replace(
+                "- **Status**: pending", "- **Status**: complete"
+            ),
+            encoding="utf-8",
+        )
+
+        review_body = runner.build_generated_review_session_body(
+            plans.parse_session_id("3"),
+            review_harness="codex",
+            plan_dir=self.plan_dir,
+        ).replace("- **Status**: pending", "- **Status**: complete")
+        (self.plan_dir / "session-3.md").write_text(
+            review_body, encoding="utf-8"
+        )
+        (self.plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
+            "# Review\n\n## Findings\n\n"
+            "See pkg/F2.py and README.md.\n\n"
+            f"{self._status_line([second])}\n",
+            encoding="utf-8",
+        )
+        (self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+            json.dumps(
+                {"version": 2, "outcome": "findings", "findings": [second]}
+            ),
+            encoding="utf-8",
+        )
+        event_path = self._write_review_events(
+            {
+                "cycle": 1,
+                "review_session_id": "2",
+                "disposition": runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+                "fingerprints": [review.finding_fingerprint(first)],
+                "repair_session_ids": ["2.1"],
+                "repair_groups": [
+                    {
+                        "repair_group": "runner",
+                        "repair_session_id": "2.1",
+                        "finding_ids": ["F1"],
+                    }
+                ],
+                "max_review_fix_cycles": 4,
+            }
+        )
+        event_path.with_name(events.STATE_FILE_NAME).write_text(
+            json.dumps({"run_config": {"max_repair_group_attempts": 1}}),
+            encoding="utf-8",
+        )
+
+        projected = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir), event_path
+        )
+
+        self.assertEqual("terminal", projected.action)
+        self.assertFalse(projected.eligible)
+        self.assertEqual(
+            runner.REVIEW_CYCLE_DISPOSITION_GROUP_EXHAUSTED,
+            projected.blocker,
+        )
+        self.assertEqual(1, projected.max_repair_group_attempts)
+        self.assertEqual({"runner": 1}, projected.repair_group_attempts)
+        self.assertEqual(
+            (review.finding_fingerprint(second),),
+            projected.current_fingerprints,
+        )
+        self.assertEqual((), projected.repair_session_ids)
+        payload = projected.to_payload()
+        self.assertEqual(1, payload["max_repair_group_attempts"])
+        self.assertEqual({"runner": 1}, payload["repair_group_attempts"])
+        self.assertEqual(
+            (
+                'the recurring repair group "runner" already hit 1 attempt; '
+                "fix it manually or re-split instead of raising "
+                "--max-review-fix-cycles"
+            ),
+            review_continuation.review_resume_guidance(
+                payload, review_harness_active=False
+            ),
+        )
+
+    def test_review_resume_guidance_avoids_higher_cap_for_exhausted_group(
+        self,
+    ) -> None:
+        resume = review_continuation.ReviewResume(
+            source_cycle=2,
+            review_session_id="2",
+            source_disposition=runner.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
+            action="materialize-repairs",
+            eligible=False,
+            blocker="higher-cap-required",
+            historical_materializations=2,
+            minimum_required_cap=3,
+            selected_cap=2,
+            max_repair_group_attempts=2,
+            repair_group_attempts={"runner": 2},
+            repair_groups=(
+                {
+                    "repair_group": "runner",
+                    "repair_session_id": "2.1",
+                    "finding_ids": ["F1"],
+                },
+            ),
+        )
+
+        guidance = review_continuation.review_resume_guidance(
+            resume.to_payload(), review_harness_active=False
+        )
+
+        self.assertIn('repair group "runner"', guidance or "")
+        self.assertIn("2 attempts", guidance or "")
+        self.assertIn("fix it manually or re-split", guidance or "")
+        self.assertNotIn("or higher", guidance or "")
+
     def test_continuation_skips_repair_planning_for_terminal_states(self) -> None:
         self._write_plan([self._finding("F1", "runner")])
         for disposition, repair_ids, blocker, materializations in (

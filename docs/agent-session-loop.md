@@ -407,16 +407,17 @@ before any `--review-harness` work.
 ## Commands
 
 ```text
-asl run PLAN_DIR [--cwd ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--review-harness codex|claude|copilot] [--review-harness-model MODEL] [--effort EFFORT] [--timeout SEC] [--audit-harness codex|claude|copilot] [--audit-harness-model MODEL] [--audit-effort EFFORT] [--audit-timeout SEC] [--supervisor-audit|--no-supervisor-audit] [--max-sessions N] [--max-pending-sessions N] [--max-review-fix-cycles N] [--review-guard-exclude PATH] [--review-guard-include-ignored] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--no-mailbox] [--allow-not-loop-ready] [--reply TEXT|--reply-stdin] [--json] [--dry-run]
+asl run PLAN_DIR [--cwd ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--review-harness codex|claude|copilot] [--review-harness-model MODEL] [--effort EFFORT] [--timeout SEC] [--audit-harness codex|claude|copilot] [--audit-harness-model MODEL] [--audit-effort EFFORT] [--audit-timeout SEC] [--supervisor-audit|--no-supervisor-audit] [--max-sessions N] [--max-pending-sessions N] [--max-review-fix-cycles N] [--max-repair-group-attempts N] [--max-review-fix-cycles-ceiling N] [--review-guard-exclude PATH] [--review-guard-include-ignored] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--no-mailbox] [--allow-not-loop-ready] [--reply TEXT|--reply-stdin] [--json] [--dry-run]
 asl preflight PLAN_DIR [--cwd ROOT] [--harness codex|claude|copilot] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--max-pending-sessions N] [--mark-loop-ready] [--json]
 asl verify PLAN_DIR --session ID [--cwd ROOT] [--artifact-dir DIR] [--json]
 asl contract-check PLAN_DIR [--session ID] [--cwd ROOT] [--json]
 asl baseline PLAN_DIR [--cwd ROOT] [--per-check-timeout SECONDS] [--total-timeout SECONDS] [--json]
-asl split (--plan-file PATH | --inline-stdin) --contracts-file PATH [--cwd ROOT] [--base-dir DIR] [--skill-prefix auto|codex|claude|copilot] [--analysis-file PATH] [--json]
-asl prepare PLAN.md [--cwd ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--validator-harness H] [--review-harness H] [--review-harness-model MODEL] [--base-dir DIR] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--json]
+asl split (--plan-file PATH | --inline-stdin) --contracts-file PATH [--cwd ROOT] [--base-dir DIR] [--force-new] [--skill-prefix auto|codex|claude|copilot] [--analysis-file PATH] [--json]
+asl prepare PLAN.md [--cwd ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--validator-harness H] [--review-harness H] [--review-harness-model MODEL] [--base-dir DIR] [--force-new] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--json]
 asl prepare --resume PLAN_DIR [--rebind-workspace ...]
 asl expand-ingest PLAN_DIR --batch-file PATH [--json]
 asl register-repositories (PLAN_DIR | --plan-file PATH | --inline-stdin) [--cwd ROOT] [--output PATH] [--state-dir DIR] [--json]
+asl plans [--stale-days N] [--never-run] [--readiness STATE] [--json]
 asl status PLAN_DIR_OR_ID [--state-dir DIR] [--json]
 asl questions PLAN_DIR [--state-dir DIR] [--json]
 asl review-verdict PLAN_DIR [--state-dir DIR] [--json]
@@ -1353,8 +1354,11 @@ with the same pause and retained-change behavior as authored sessions.
 `--max-review-fix-cycles N` is an **absolute cross-run cap** on
 unique source-review materializations (default 4; `0` still runs the review but
 never creates repair sessions; `--max-review-fix-plans` is a deprecated
-compatibility alias — passing both flags is an input error). A source review
-counts once when it produced repair children, including legacy
+compatibility alias — passing both flags is an input error). `--max-repair-group-attempts N`
+sets the default per-group reopen budget (default 2), and
+`--max-review-fix-cycles-ceiling N` sets the absolute ceiling a resumed run may
+raise `--max-review-fix-cycles` to without an explicit new override (default 8).
+A source review counts once when it produced repair children, including legacy
 `not-loop-ready` histories and crash-recovered reopen records; ordinary cycle
 and reopen evidence never double-count it. The minimum cap needed for another
 materialization is therefore `historical_materializations + 1`, not the prior
@@ -1456,9 +1460,10 @@ authority. Existing generated repair children are authoritative after a crash:
 the runner executes pending children or appends a missing rereview, but never
 recreates them.
 
-The loop stops on an all-clear rereview, repeated finding fingerprints,
-unstructured findings, operator stop requests, or an unchanged insufficient
-cap. Repeated and unstructured findings are terminal circuit breakers. Every
+The loop stops on an all-clear rereview, an exhausted repair group, repeated
+finding fingerprints, unstructured findings, operator stop requests, or an
+unchanged insufficient cap. Repeated, exhausted-group, and unstructured
+findings are terminal circuit breakers. Every
 review completion appends a `review_cycle` event and a `review_cycles[]` state
 entry recording the cycle number, review session id, outcome,
 introduced/closed/repeated fingerprints, repair session ids, disposition, and
@@ -1470,7 +1475,8 @@ source lineage, previous/current fingerprints and digests, exact child IDs,
 repository evidence, group attribution, and before/after cap accounting. The
 run payload's `review_fix_disposition` keeps
 the compatible disposition vocabulary (`all-clear`, `repairs-materialized`,
-`cycles-disabled`, `cycle-cap-exhausted`, `findings-repeated`,
+`cycles-disabled`, `cycle-cap-exhausted`, `repair-group-exhausted`,
+`findings-repeated`,
 `unstructured-findings`, `malformed-review-repair`, or `not-loop-ready`).
 Cycle and continuation state are reconstructed from append-only events plus
 generated sessions, so caps, idempotency, and rereview scheduling survive
@@ -3048,8 +3054,8 @@ may ignore this block. `action` is one of `initial-review`,
 `materialize-repairs`, `run-repairs`, `rereview`, or `terminal`; `eligible`
 describes the persisted/effective-cap evaluation, and `blocker` is `null`,
 `review-harness-required`, `higher-cap-required`, `artifact-invalid`, a
-terminal disposition (`all-clear`, `findings-repeated`, or
-`unstructured-findings`), or a non-disposition terminal blocker
+terminal disposition (`all-clear`, `repair-group-exhausted`,
+`findings-repeated`, or `unstructured-findings`), or a non-disposition terminal blocker
 (`repair-sessions-missing`, `repair-sessions-not-runnable`, or
 `unknown-disposition`). An unrecognized recorded disposition is retained in
 `source_disposition` for diagnosis and maps to the stable
@@ -3559,11 +3565,17 @@ considering zero-pending completion, and when unlocked it relaunches only for
 command's review harness. Only `materialize-repairs` is gated by the effective
 absolute cap — 4 unique source-review materializations unless the supervised
 command passed `--max-review-fix-cycles N`; eligible `rereview` launches are
-cap-free because they consume no materialization budget. A corrected malformed artifact or a higher cap can
+cap-free because they consume no materialization budget. The runner also
+persists the per-group reopen cap (`--max-repair-group-attempts`, default 2)
+and the absolute cap ceiling (`--max-review-fix-cycles-ceiling`, default 8),
+so resumed supervision reuses the same repair-loop bounds unless the operator
+explicitly overrides them. A corrected malformed artifact or a higher cap can
 therefore resume the same command later without a second plan. Insufficient
-caps and terminal all-clear/repeated/unstructured findings do not relaunch, so
-every supervision loop has a deterministic stop. The skill never authors,
-splits, or expands a separate repair plan.
+caps and terminal all-clear/repeated/unstructured findings do not relaunch, and
+`repair-group-exhausted` or `cycle-cap-exhausted` hand control back to the
+operator instead of silently raising caps, so every supervision loop has a
+deterministic stop. The skill never authors, splits, or expands a separate
+repair plan.
 
 ### Final helper statuses
 

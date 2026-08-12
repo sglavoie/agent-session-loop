@@ -69,6 +69,7 @@ from agent_session_loop.formatting import (
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,
+    _load_script_module,
     agent_mux_notify_enabled,
     patched_env,
     write_plan,
@@ -81,6 +82,88 @@ from tests.support import (
     _command_contract,
     _contract_block,
 )
+
+
+class RunFlagValidationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.autopilot = _load_script_module(
+            "asl_autopilot_run_gates",
+            "skills",
+            "asl",
+            "scripts",
+            "asl_autopilot.py",
+        )
+
+    def test_cycle_cap_above_ceiling_is_rejected_identically_by_runner_and_helper(
+        self,
+    ) -> None:
+        message = (
+            "--max-review-fix-cycles 9 exceeds "
+            "--max-review-fix-cycles-ceiling 8"
+        )
+        args = argparse.Namespace(
+            cwd=str(REPO_ROOT),
+            max_review_fix_cycles=9,
+            max_review_fix_cycles_ceiling=8,
+        )
+
+        with self.assertRaises(runner.RunError) as caught:
+            runner._validate_run_inputs(args)
+        self.assertEqual(message, str(caught.exception))
+
+        result = self.autopilot.parse_command(
+            "asl run /tmp/plan --max-review-fix-cycles 9 "
+            "--max-review-fix-cycles-ceiling 8"
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual("invalid-argument", result["reason"])
+        self.assertEqual(message, result["error"])
+
+    def test_helper_forwards_new_review_cap_flags(self) -> None:
+        result = self.autopilot.parse_command(
+            "asl run /tmp/plan --max-repair-group-attempts 3 "
+            "--max-review-fix-cycles-ceiling 12"
+        )
+
+        self.assertTrue(result["ok"], result)
+        args = result["run_args"]
+        self.assertEqual(args[args.index("--max-repair-group-attempts") + 1], "3")
+        self.assertEqual(
+            args[args.index("--max-review-fix-cycles-ceiling") + 1], "12"
+        )
+
+    def test_resume_overlay_restores_new_review_cap_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = tmp_path / "plan"
+            plan_dir.mkdir()
+            state_root = tmp_path / "state"
+            plan_state_dir = state.plan_state_dir(plan_dir, state_root)
+            plan_state_dir.mkdir(parents=True, exist_ok=True)
+            (plan_state_dir / events.STATE_FILE_NAME).write_text(
+                json.dumps(
+                    {
+                        "run_config": {
+                            "max_repair_group_attempts": 3,
+                            "max_review_fix_cycles_ceiling": 12,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            restored = runner._apply_resume_config(
+                argparse.Namespace(
+                    plan_dir=str(plan_dir),
+                    state_dir=str(state_root),
+                    resume=True,
+                ),
+                ["run", str(plan_dir), "--state-dir", str(state_root), "--resume"],
+            )
+
+        self.assertEqual(3, restored.max_repair_group_attempts)
+        self.assertEqual(12, restored.max_review_fix_cycles_ceiling)
 
 
 class RunReadinessGateTests(unittest.TestCase):

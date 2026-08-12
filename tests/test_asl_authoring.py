@@ -120,7 +120,65 @@ class PlanAuthoringTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             authoring.extract_inline_plan("<proposed_plan>   </proposed_plan>")
 
-    def test_resolve_plan_output_is_collision_safe(self) -> None:
+    def test_split_plan_refuses_duplicate_plan_id_without_force_new(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = os.path.join(tmp, "out")
+            plan = os.path.join(tmp, "PLAN.md")
+            with open(plan, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "# Plan\n\n"
+                    "## Session 1: First\n\nDo one.\n\n"
+                    "## Session 2: Second\n\nDo two.\n"
+                )
+            contracts_by_id = {
+                "1": {
+                    "done_when": ["Session 1 lands."],
+                    "verify": {
+                        "session": "1",
+                        "checks": [
+                            {
+                                "type": "command",
+                                "argv": ["python3", "-m", "unittest", "-q"],
+                                "timeout_seconds": 60,
+                            }
+                        ],
+                    },
+                },
+                "2": {
+                    "done_when": ["Session 2 lands."],
+                    "verify": {
+                        "session": "2",
+                        "checks": [
+                            {
+                                "type": "command",
+                                "argv": ["python3", "-m", "unittest", "-q"],
+                                "timeout_seconds": 60,
+                            }
+                        ],
+                    },
+                },
+            }
+
+            first = authoring.split_plan(
+                plan_file=plan,
+                contracts_by_id=contracts_by_id,
+                base_dir=base,
+            )
+
+            with self.assertRaises(authoring.DuplicateSplitError) as raised:
+                authoring.split_plan(
+                    plan_file=plan, contracts_by_id=contracts_by_id, base_dir=base
+                )
+
+            self.assertIn(first.plan_id, str(raised.exception))
+            self.assertIn(str(first.output_dir), str(raised.exception))
+            self.assertIn("[draft]", str(raised.exception))
+            self.assertEqual(
+                [first.output_dir.name],
+                sorted(path.name for path in Path(base).iterdir()),
+            )
+
+    def test_resolve_plan_output_force_new_keeps_collision_safe_suffixing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = os.path.join(tmp, "out")
             plan = os.path.join(tmp, "PLAN.md")
@@ -128,7 +186,7 @@ class PlanAuthoringTests(unittest.TestCase):
                 handle.write("# Plan\n")
 
             first = authoring.resolve_plan_output(plan, base)
-            second = authoring.resolve_plan_output(plan, base)
+            second = authoring.resolve_plan_output(plan, base, force_new=True)
 
             self.assertEqual(1, first["collision_index"])
             self.assertEqual(2, second["collision_index"])
@@ -141,6 +199,26 @@ class PlanAuthoringTests(unittest.TestCase):
             self.assertEqual(
                 f"{first['plan_id']}-2", os.path.basename(second["output_dir"])
             )
+
+    def test_split_and_prepare_parsers_accept_force_new(self) -> None:
+        parser = cli.build_parser()
+
+        split_args = parser.parse_args(
+            [
+                "split",
+                "--plan-file",
+                "P.md",
+                "--contracts-file",
+                "c.json",
+                "--force-new",
+            ]
+        )
+        prepare_args = parser.parse_args(
+            ["prepare", "/tmp/plan.md", "--force-new"]
+        )
+
+        self.assertTrue(split_args.force_new)
+        self.assertTrue(prepare_args.force_new)
 
     def test_resolve_plan_output_fingerprints_content_and_path(self) -> None:
         # Migrated from the retired resolve-plan-output.py script tests.

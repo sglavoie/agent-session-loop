@@ -22,11 +22,14 @@ detection and the recoverable-pause retry budget (see payload `pause_policy`),
 reply resume, and final-review verdict parsing. The runner itself owns automatic
 repair/rereview cycles: after a findings review it materializes same-plan repair
 sessions, executes them, and rereviews, bounded by
-`asl run --max-review-fix-cycles` (default 4). This skill is supervision and Q&A
-only — run the helper; when a paused run needs an answer, infer a defensible
-reply or ask the user, then resume; and when it reports remaining review
-findings, surface them to the user. It never drafts, splits, or expands
-follow-up fix plans.
+`asl run --max-review-fix-cycles` (default 4), the per-group reopen cap
+`--max-repair-group-attempts` (default 2), and the absolute cycle ceiling
+`--max-review-fix-cycles-ceiling` (default 8). This skill is supervision and
+Q&A only — run the helper; when a paused run needs an answer, infer a
+defensible reply or ask the user, then resume; and when it reports remaining
+review findings, surface them to the user. It never drafts, splits, or expands
+follow-up fix plans, and it does not relaunch a capped review by quietly
+raising those limits.
 
 ## Input
 
@@ -40,12 +43,13 @@ $asl asl run ~/.local/share/agent-plans/9e3ab88dedcf-7d2caa1117db/
 The command may include leading environment assignments (such as
 `CLAUDE_CONFIG_DIR=~/.claude-personal`), quoted arguments, and normal `asl run`
 flags — including `--max-review-fix-cycles N` (deprecated alias
-`--max-review-fix-plans N`), which bounds the runner's own repair/rereview
-cycles. Shell operators, pipes, redirects, `--dry-run`, and user-supplied
-`--reply` / `--reply-stdin` are not accepted — the helper owns resume behavior.
-`--no-mailbox` is accepted and disables watcher construction, lease writes,
-live guidance, notice observation, and mailbox question closure for both launch
-and attach behavior.
+`--max-review-fix-plans N`), `--max-repair-group-attempts N`, and
+`--max-review-fix-cycles-ceiling N`, which bound the runner's own
+repair/rereview loop. Shell operators, pipes, redirects, `--dry-run`, and
+user-supplied `--reply` / `--reply-stdin` are not accepted — the helper owns
+resume behavior. `--no-mailbox` is accepted and disables watcher construction,
+lease writes, live guidance, notice observation, and mailbox question closure
+for both launch and attach behavior.
 
 `--max-sessions N` is a **global** budget: the helper stops the whole supervised
 run after `N` implementation sessions have completed, not `N` per relaunch. With
@@ -174,7 +178,10 @@ The WARN is soft: supervision keeps waiting. Above it sit two hard hang bars
 that end supervision with `reason: worker_hung` while leaving the run alive —
 see "reason: worker_hung" in Step 2. To
 override the runner's cycle cap at launch, include `--max-review-fix-cycles N`
-inside the `--command` string (`0` still reviews but creates no repair sessions).
+inside the `--command` string (`0` still reviews but creates no repair
+sessions). The same launch command may also set `--max-repair-group-attempts N`
+or `--max-review-fix-cycles-ceiling N` when the operator deliberately wants
+different review-loop limits for that run.
 
 With mailbox supervision enabled, the helper writes a fresh fixed-size lease
 before starting the child, polls questions and notices every five seconds, and
@@ -429,7 +436,10 @@ follow-up fix plan. Instead:
    recorded cycle disposition (`review_fix_disposition`). When the payload's
    `review_resume` block reports `higher-cap-required` or `artifact-invalid`,
    include its minimum cap or artifact-remediation detail so the user can resume
-   the same plan.
+   the same plan. When it reports `repair-group-exhausted` or
+   `cycle-cap-exhausted`, do **not** relaunch with a raised cap; report the
+   recurring `repair_group` (when present) and hand control back to the
+   operator for a manual fix or resplit decision.
 
 Registered review is one combined read-only review across the ordered registry.
 Every finding, evidence path, and completion check is repository-attributed;
@@ -496,8 +506,11 @@ could be configured, launched, retried, or disposed of.
   and final-review verdict parsing. Keep the skill workflow thin.
 - Automatic repair/rereview cycles are runner-owned, bounded by
   `asl run --max-review-fix-cycles` (default 4; `--max-review-fix-plans` is a
-  deprecated alias). Corrected artifacts and higher caps resume the same plan;
-  this skill never creates follow-up fix plans.
+  deprecated alias), `--max-repair-group-attempts` (default 2), and
+  `--max-review-fix-cycles-ceiling` (default 8). Corrected artifacts can resume
+  the same plan; this skill never creates follow-up fix plans, and on
+  `repair-group-exhausted` or `cycle-cap-exhausted` it reports the recurring
+  `repair_group` instead of relaunching with higher caps.
 - Preserve registered workspace semantics across launch, attach, replies,
   combined review, and recovery: use the bound workspace root, retain ordered
   repository aliases and qualified paths, never rebind automatically, and

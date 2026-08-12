@@ -243,6 +243,57 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 f"{required_cap} or higher", recovery.actions[0].description
             )
 
+    def test_ready_continuation_exhausted_group_avoids_cap_guidance(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = _make_workbench_plan(
+                tmp_path, "ready-continuation-exhausted"
+            )
+            required_cap = runner.DEFAULT_MAX_REVIEW_FIX_CYCLES + 1
+            resume = workbench.review_continuation.ReviewResume(
+                source_cycle=2,
+                review_session_id="2",
+                source_disposition="cycle-cap-exhausted",
+                action="materialize-repairs",
+                eligible=True,
+                blocker=None,
+                historical_materializations=2,
+                minimum_required_cap=required_cap,
+                selected_cap=runner.DEFAULT_MAX_REVIEW_FIX_CYCLES,
+                max_repair_group_attempts=2,
+                repair_group_attempts={"runner": 2},
+                repair_groups=(
+                    {
+                        "repair_group": "runner",
+                        "repair_session_id": "2.1",
+                        "finding_ids": ["F1"],
+                    },
+                ),
+            )
+
+            with mock.patch.object(
+                workbench.review_continuation,
+                "evaluate_review_continuation",
+                return_value=resume,
+            ):
+                recovery = workbench.build_workbench_recovery(
+                    _discovered(plan_dir), state_dir=tmp_path / "state"
+                )
+
+            self.assertEqual("Review continuation ready", recovery.title)
+            self.assertIn('repair group "runner"', recovery.summary)
+            self.assertIn("2 attempts", recovery.summary)
+            self.assertIn("fix it manually or re-split", recovery.summary)
+            self.assertNotIn(
+                f"--max-review-fix-cycles to {required_cap}", recovery.summary
+            )
+            self.assertEqual("inspect-artifacts", recovery.actions[0].id)
+            self.assertNotIn(
+                "--max-review-fix-cycles", recovery.actions[0].description
+            )
+
     def test_ready_rereview_omits_cap_above_runner_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

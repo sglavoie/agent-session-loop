@@ -2474,6 +2474,8 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
 
     def test_docs_pin_review_cycle_default_and_lock_reclamation(self) -> None:
         default_cycles = runner.DEFAULT_MAX_REVIEW_FIX_CYCLES
+        default_group_attempts = runner.DEFAULT_MAX_REPAIR_GROUP_ATTEMPTS
+        default_cycle_ceiling = runner.DEFAULT_MAX_REVIEW_FIX_CYCLES_CEILING
         self.assertIn(
             f"unique source-review materializations (default {default_cycles};",
             self.docs,
@@ -2486,11 +2488,33 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
         skill = (REPO_ROOT / "skills" / "asl" / "SKILL.md").read_text(
             encoding="utf-8"
         )
-        for skill_claim in (
-            f"`asl run --max-review-fix-cycles` (default {default_cycles}).",
-            f"`asl run --max-review-fix-cycles` (default {default_cycles};",
-        ):
-            self.assertIn(skill_claim, skill)
+        self.assertIn(
+            f"`asl run --max-review-fix-cycles` (default {default_cycles})",
+            skill,
+        )
+        self.assertIn(
+            f"`--max-repair-group-attempts` (default {default_group_attempts})",
+            skill,
+        )
+        self.assertIn(
+            f"`--max-review-fix-cycles-ceiling` (default {default_cycle_ceiling})",
+            skill,
+        )
+        self.assertIn(
+            "`repair-group-exhausted` or `cycle-cap-exhausted`",
+            skill,
+        )
+        self.assertIn("recurring `repair_group`", skill)
+
+        split_skill = (REPO_ROOT / "skills" / "session-split" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "By default `asl split` refuses a duplicate plan id before creating any directory",
+            split_skill,
+        )
+        self.assertIn("intentional duplicate split", split_skill)
+        self.assertIn("`--force-new`", split_skill)
 
         self.assertIn("Reading such a lock also removes it", self.docs)
         self.assertIn("reclaimed stale lock at <path>", self.docs)

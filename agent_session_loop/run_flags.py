@@ -184,6 +184,16 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
         ),
     ),
     RunFlag(
+        dest="max_repair_group_attempts",
+        option_strings=("--max-repair-group-attempts",),
+        type=int,
+        cli_default=None,
+        help=(
+            "Maximum attempts for one repair_group before the runner stops "
+            "reopening it (default: 2)"
+        ),
+    ),
+    RunFlag(
         dest="max_review_fix_cycles",
         option_strings=("--max-review-fix-cycles",),
         type=int,
@@ -191,6 +201,16 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
             "Maximum automatic repair/rereview cycles after a findings "
             "review (default: 4). 0 still runs the review but creates no "
             "repair sessions"
+        ),
+    ),
+    RunFlag(
+        dest="max_review_fix_cycles_ceiling",
+        option_strings=("--max-review-fix-cycles-ceiling",),
+        type=int,
+        cli_default=None,
+        help=(
+            "Absolute ceiling for --max-review-fix-cycles; values above it "
+            "are rejected unless the ceiling is raised too (default: 8)"
         ),
     ),
     RunFlag(
@@ -406,7 +426,10 @@ def add_run_arguments(
 
 
 def validate_run_namespace(
-    ns: argparse.Namespace, *, defer_resume_dependent: bool = False
+    ns: argparse.Namespace,
+    *,
+    defer_resume_dependent: bool = False,
+    default_max_review_fix_cycles_ceiling: int | None = None,
 ) -> list[FlagError]:
     """Return the shared numeric/harness cross-field errors for ``ns``.
 
@@ -445,6 +468,14 @@ def validate_run_namespace(
             FlagError("--max-pending-sessions must be a positive integer")
         )
 
+    max_repair_group_attempts = getattr(ns, "max_repair_group_attempts", None)
+    if max_repair_group_attempts is not None and max_repair_group_attempts < 0:
+        errors.append(
+            FlagError(
+                "--max-repair-group-attempts must be zero or a positive integer"
+            )
+        )
+
     cycles = getattr(ns, "max_review_fix_cycles", None)
     if cycles is not None and cycles < 0:
         errors.append(
@@ -462,6 +493,29 @@ def validate_run_namespace(
             FlagError(
                 "--max-review-fix-plans is a deprecated alias of "
                 "--max-review-fix-cycles; pass only one"
+            )
+        )
+
+    cycle_ceiling = getattr(ns, "max_review_fix_cycles_ceiling", None)
+    if cycle_ceiling is not None and cycle_ceiling < 0:
+        errors.append(
+            FlagError(
+                "--max-review-fix-cycles-ceiling must be zero or a positive integer"
+            )
+        )
+    if cycle_ceiling is None:
+        cycle_ceiling = default_max_review_fix_cycles_ceiling
+    effective_cycles = cycles if cycles is not None else legacy_cycles
+    if (
+        effective_cycles is not None
+        and cycle_ceiling is not None
+        and effective_cycles > cycle_ceiling
+    ):
+        errors.append(
+            FlagError(
+                "--max-review-fix-cycles "
+                f"{effective_cycles} exceeds "
+                f"--max-review-fix-cycles-ceiling {cycle_ceiling}"
             )
         )
 

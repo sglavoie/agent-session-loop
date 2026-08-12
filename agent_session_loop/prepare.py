@@ -2188,9 +2188,12 @@ def _author_plan_directory(
     contracts_by_id: dict[str, contracts.CompletionContract],
     *,
     base_dir: str | Path | None,
+    force_new: bool = False,
 ) -> Path:
     """Author the split plan directory deterministically, in one transaction."""
-    resolver = authoring.resolve_plan_output(source_path, base_dir)
+    resolver = authoring.resolve_plan_output(
+        source_path, base_dir, force_new=force_new
+    )
     output_dir = Path(str(resolver["output_dir"]))
 
     transaction = PlanTransaction(output_dir)
@@ -2990,6 +2993,7 @@ def prepare_plan(
     review_harness: str | None = None,
     review_harness_model: str | None = None,
     base_dir: str | Path | None = None,
+    force_new: bool = False,
     resume_plan_dir: str | Path | None = None,
     validator: ValidatorRunner | None = None,
     batch_size: int = DEFAULT_VALIDATION_BATCH_SIZE,
@@ -3107,7 +3111,12 @@ def prepare_plan(
             )
         )
         plan_dir = _author_plan_directory(
-            source_path, text, parsed, contracts_by_id, base_dir=base_dir
+            source_path,
+            text,
+            parsed,
+            contracts_by_id,
+            base_dir=base_dir,
+            force_new=force_new,
         )
         steps.append(
             PrepareStep(
@@ -3469,6 +3478,8 @@ def prepare_from_args(args: Any) -> int:
         "resume": resume,
         "base_dir": str(args.base_dir) if args.base_dir else None,
     }
+    if getattr(args, "force_new", False):
+        common_fields["force_new"] = True
     if rebind_workspace:
         common_fields["rebind_workspace"] = True
 
@@ -3547,6 +3558,7 @@ def prepare_from_args(args: Any) -> int:
             review_harness=review_harness,
             review_harness_model=review_harness_model,
             base_dir=args.base_dir,
+            force_new=bool(getattr(args, "force_new", False)),
             resume_plan_dir=plan_path if resume else None,
             unsafe_bypass=getattr(args, "unsafe_bypass", True),
             state_dir=getattr(args, "state_dir", None),

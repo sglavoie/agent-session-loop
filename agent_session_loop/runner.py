@@ -335,12 +335,16 @@ REVIEW_VERDICT_FINGERPRINT_PREFIX = "review-verdict"
 # children (``agent_session_loop.review_repair``), executes them serially, and
 # appends the next top-level review session — one *cycle*. Cycles are bounded
 # by ``--max-review-fix-cycles`` (default below; ``0`` still reviews but never
-# creates repair sessions; ``--max-review-fix-plans`` is a deprecated alias).
+# creates repair sessions; ``--max-review-fix-plans`` is a deprecated alias),
+# per-group reopen attempts default to two, and the operator-facing cycle cap
+# cannot exceed its absolute ceiling unless that ceiling is raised too.
 # Every review completion appends a ``review_cycle`` event whose fingerprints
 # (:func:`review.finding_fingerprint`) let the next cycle detect repeated
 # findings across processes; a repeated fingerprint stops the loop without
 # another cycle.
+DEFAULT_MAX_REPAIR_GROUP_ATTEMPTS = 2
 DEFAULT_MAX_REVIEW_FIX_CYCLES = 4
+DEFAULT_MAX_REVIEW_FIX_CYCLES_CEILING = 8
 REVIEW_CYCLE_DISPOSITION_ALL_CLEAR = (
     review_continuation.REVIEW_CYCLE_DISPOSITION_ALL_CLEAR
 )
@@ -352,6 +356,9 @@ REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED = (
 )
 REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED = (
     review_continuation.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED
+)
+REVIEW_CYCLE_DISPOSITION_GROUP_EXHAUSTED = (
+    review_continuation.REVIEW_CYCLE_DISPOSITION_GROUP_EXHAUSTED
 )
 REVIEW_CYCLE_DISPOSITION_REPEATED = (
     review_continuation.REVIEW_CYCLE_DISPOSITION_REPEATED
@@ -2974,7 +2981,10 @@ def _validate_run_inputs(
     # The numeric/harness cross-field checks live in ``run_flags`` so the CLI
     # runner and the supervisor helper enforce identical rules; cwd existence
     # and commit-mode resolution stay here because they are CLI-runner specific.
-    errors = run_flags.validate_run_namespace(args)
+    errors = run_flags.validate_run_namespace(
+        args,
+        default_max_review_fix_cycles_ceiling=DEFAULT_MAX_REVIEW_FIX_CYCLES_CEILING,
+    )
     if errors:
         raise RunError(errors[0].message)
 
@@ -3231,6 +3241,22 @@ def _max_review_fix_cycles(args: argparse.Namespace) -> int:
     if legacy_cycles is not None:
         return legacy_cycles
     return DEFAULT_MAX_REVIEW_FIX_CYCLES
+
+
+def _max_repair_group_attempts(args: argparse.Namespace) -> int:
+    """Resolve the per-group repair reopen cap for this run."""
+    attempts = getattr(args, "max_repair_group_attempts", None)
+    if attempts is not None:
+        return attempts
+    return DEFAULT_MAX_REPAIR_GROUP_ATTEMPTS
+
+
+def _max_review_fix_cycles_ceiling(args: argparse.Namespace) -> int:
+    """Resolve the absolute repair/rereview cycle ceiling for this run."""
+    ceiling = getattr(args, "max_review_fix_cycles_ceiling", None)
+    if ceiling is not None:
+        return ceiling
+    return DEFAULT_MAX_REVIEW_FIX_CYCLES_CEILING
 
 
 def _review_guard_excludes(args: argparse.Namespace) -> tuple[str, ...]:
@@ -9729,6 +9755,7 @@ def _set_review_resume(
     event_path: Path,
     payload: dict[str, Any],
     persistence: "_RunPersistence",
+    max_repair_group_attempts: int,
     max_review_fix_cycles: int,
     review_requested: bool,
 ) -> review_continuation.ReviewResume:
@@ -9737,6 +9764,7 @@ def _set_review_resume(
     resume = review_continuation.evaluate_review_continuation(
         snapshot,
         event_path,
+        max_repair_group_attempts=max_repair_group_attempts,
         max_review_fix_cycles=max_review_fix_cycles,
         review_harness_requested=review_requested,
     )
@@ -9832,6 +9860,7 @@ def _advance_review_cycle(
         "closed_findings": [fp for fp in previous if fp not in current],
         "repeated_findings": [fp for fp in current if fp in previous],
         "repair_session_ids": [],
+        "max_repair_group_attempts": _max_repair_group_attempts(args),
         "max_review_fix_cycles": max_review_fix_cycles,
     }
     (
@@ -9875,6 +9904,50 @@ def _advance_review_cycle(
     if cycle_state["repairs_materialized"] >= max_review_fix_cycles:
         return record_and_complete(REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED)
 
+    planning = review_repair.plan_review_repair_sessions(
+        snapshot.plan_dir,
+        review_session_id=session_id,
+    )
+    if planning.ok and planning.reason == review_repair.REVIEW_REPAIR_REASON_OK:
+        historical_attempts = review_continuation.repair_group_attempts(
+            event_path, snapshot
+        )
+        cycle_record["repair_groups"] = [
+            {
+                "repair_group": group.repair_group,
+                "repair_session_id": group.proposed_child_id.value,
+                "finding_ids": list(group.finding_ids),
+                **(
+                    {
+                        "read_repositories": list(group.read_repositories),
+                        "write_repositories": list(group.write_repositories),
+                    }
+                    if "repositories" in cycle_record
+                    else {}
+                ),
+            }
+            for group in planning.repair_groups
+        ]
+        exhausted_group = next(
+            (
+                group
+                for group in planning.repair_groups
+                if historical_attempts.get(group.repair_group, 0)
+                >= cycle_record["max_repair_group_attempts"]
+            ),
+            None,
+        )
+        if exhausted_group is not None:
+            cycle_record["exhausted_repair_group"] = (
+                exhausted_group.repair_group
+            )
+            cycle_record["exhausted_repair_group_attempts"] = (
+                historical_attempts[exhausted_group.repair_group]
+            )
+            return record_and_complete(
+                REVIEW_CYCLE_DISPOSITION_GROUP_EXHAUSTED
+            )
+
     repair_result = review_repair.materialize_review_repair_sessions(
         snapshot.plan_dir,
         review_session_id=session_id,
@@ -9885,17 +9958,22 @@ def _advance_review_cycle(
     cycle_record["repair_session_ids"] = [
         child.session_id.value for child in repair_result.children
     ]
-    if "repositories" in cycle_record:
-        cycle_record["repair_groups"] = [
-            {
-                "repair_group": child.repair_group,
-                "repair_session_id": child.session_id.value,
-                "finding_ids": list(child.finding_ids),
-                "read_repositories": list(child.read_repositories),
-                "write_repositories": list(child.write_repositories),
-            }
-            for child in repair_result.children
-        ]
+    cycle_record["repair_groups"] = [
+        {
+            "repair_group": child.repair_group,
+            "repair_session_id": child.session_id.value,
+            "finding_ids": list(child.finding_ids),
+            **(
+                {
+                    "read_repositories": list(child.read_repositories),
+                    "write_repositories": list(child.write_repositories),
+                }
+                if "repositories" in cycle_record
+                else {}
+            ),
+        }
+        for child in repair_result.children
+    ]
 
     if not repair_result.ok:
         _record_review_cycle(
@@ -11421,7 +11499,9 @@ def _run_config_payload(
         "timeout": getattr(args, "timeout", None),
         "max_sessions": getattr(args, "max_sessions", None),
         "max_pending_sessions": getattr(args, "max_pending_sessions", None),
+        "max_repair_group_attempts": _max_repair_group_attempts(args),
         "max_review_fix_cycles": _max_review_fix_cycles(args),
+        "max_review_fix_cycles_ceiling": _max_review_fix_cycles_ceiling(args),
         "review_guard_exclude": list(_review_guard_excludes(args)),
         "review_guard_include_ignored": _review_guard_include_ignored(args),
         "commit_mode": commit_mode,
@@ -12038,6 +12118,7 @@ def _run_locked(
             event_path=event_path,
             payload=payload,
             persistence=persistence,
+            max_repair_group_attempts=_max_repair_group_attempts(args),
             max_review_fix_cycles=max_review_fix_cycles,
             review_requested=True,
         )
@@ -12158,6 +12239,9 @@ def _run_locked(
             event_path=event_path,
             payload=payload,
             persistence=persistence,
+            max_repair_group_attempts=_max_repair_group_attempts(
+                args
+            ),
             max_review_fix_cycles=max_review_fix_cycles,
             review_requested=True,
         )
@@ -12548,6 +12632,7 @@ def _run_locked(
                         event_path=event_path,
                         payload=payload,
                         persistence=persistence,
+                        max_repair_group_attempts=_max_repair_group_attempts(args),
                         max_review_fix_cycles=max_review_fix_cycles,
                         review_requested=True,
                     )
@@ -12745,6 +12830,9 @@ def _run_locked(
                             event_path=event_path,
                             payload=payload,
                             persistence=persistence,
+                            max_repair_group_attempts=(
+                                _max_repair_group_attempts(args)
+                            ),
                             max_review_fix_cycles=max_review_fix_cycles,
                             review_requested=True,
                         )
@@ -14607,6 +14695,7 @@ def _run_locked(
                     event_path=event_path,
                     payload=payload,
                     persistence=persistence,
+                    max_repair_group_attempts=_max_repair_group_attempts(args),
                     max_review_fix_cycles=max_review_fix_cycles,
                     review_requested=review_requested,
                 )
@@ -14747,6 +14836,7 @@ def _run_locked(
                 event_path=event_path,
                 payload=payload,
                 persistence=persistence,
+                max_repair_group_attempts=_max_repair_group_attempts(args),
                 max_review_fix_cycles=max_review_fix_cycles,
                 review_requested=True,
             )
@@ -15086,32 +15176,39 @@ def _emit_run_payload(args: argparse.Namespace, payload: dict[str, Any]) -> None
 
 
 # Flag dests rehydrated from a persisted ``run_config`` by ``asl run --resume``.
-# Kept in lockstep with ``_run_config_payload`` (minus ``state_dir_override``,
-# which located the state file and is not itself a rehydratable flag).
-_RESUME_OVERLAY_DESTS: tuple[str, ...] = (
-    "cwd",
-    "harness",
-    "harness_model",
-    "review_harness",
-    "review_harness_model",
-    "effort",
-    "timeout",
-    "max_sessions",
-    "max_pending_sessions",
-    "max_review_fix_cycles",
-    "review_guard_exclude",
-    "review_guard_include_ignored",
-    "commit_mode",
-    "note",
-    "unsafe_bypass",
-    "no_mailbox",
-    "allow_not_loop_ready",
-    "supervisor_audit",
-    "audit_harness",
-    "audit_harness_model",
-    "audit_effort",
-    "audit_timeout",
+# Derived from ``RUN_FLAG_SPEC`` so new ordinary run flags join the overlay
+# automatically. Exclusions are flags that are positional, helper-owned, or
+# persisted under a different key (``state_dir_override``) / canonical alias.
+_RESUME_OVERLAY_EXCLUDED_DESTS = frozenset(
+    {
+        "dry_run",
+        "json",
+        "max_review_fix_plans",
+        "plan_dir",
+        "reply",
+        "reply_stdin",
+        "resume",
+        "state_dir",
+    }
 )
+
+
+def _resume_overlay_dests() -> tuple[str, ...]:
+    seen: set[str] = set()
+    dests: list[str] = []
+    for flag in run_flags.RUN_FLAG_SPEC:
+        if (
+            flag.positional
+            or flag.dest in _RESUME_OVERLAY_EXCLUDED_DESTS
+            or flag.dest in seen
+        ):
+            continue
+        seen.add(flag.dest)
+        dests.append(flag.dest)
+    return tuple(dests)
+
+
+_RESUME_OVERLAY_DESTS = _resume_overlay_dests()
 
 
 class _ResumeUnavailable(Exception):

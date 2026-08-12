@@ -75,6 +75,7 @@ from agent_session_loop.formatting import (
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,
+    _write_state_payload,
     git_stdout,
     init_multi_repo_workspace,
     patched_env,
@@ -970,6 +971,32 @@ class CommandAndConfigTests(unittest.TestCase):
             repository_registration.register_repositories_from_args,
         )
 
+    def test_plans_subcommand_registers_handler(self) -> None:
+        parser = cli.build_parser()
+
+        args = parser.parse_args(
+            [
+                "plans",
+                "--state-dir",
+                "/tmp/state",
+                "--stale-days",
+                "14",
+                "--never-run",
+                "--readiness",
+                "reviewed",
+                "--json",
+            ]
+        )
+
+        self.assertEqual("plans", args.command)
+        self.assertEqual("/tmp/state", args.state_dir)
+        self.assertEqual(14.0, args.stale_days)
+        self.assertTrue(args.never_run)
+        self.assertEqual("reviewed", args.readiness)
+        self.assertTrue(args.json)
+        self.assertEqual("workbench:plans_from_args", args.handler_ref)
+        self.assertIs(cli.resolve_handler(args), workbench.plans_from_args)
+
     def test_expand_ingest_subcommand_registers_handler(self) -> None:
         parser = cli.build_parser()
 
@@ -1713,6 +1740,28 @@ class CommandAndConfigTests(unittest.TestCase):
 
 
 class JsonCliTests(unittest.TestCase):
+    def _write_readiness(
+        self,
+        plan_dir: Path,
+        *,
+        state_value: str,
+        checked_at: str,
+    ) -> None:
+        plans.write_readiness_metadata(
+            plan_dir,
+            plans.ReadinessMetadata(
+                state=state_value,
+                readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                checked_at=checked_at,
+            ),
+        )
+
+    def _run_plans(self, *argv: str) -> tuple[int, str, str]:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = cli.main(["plans", *argv])
+        return code, stdout.getvalue(), stderr.getvalue()
+
     def test_status_and_dry_run_json_outputs_include_contract_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -1810,6 +1859,148 @@ class JsonCliTests(unittest.TestCase):
             )
             self.assertTrue(run_payload["state_path"].endswith("/state.json"))
             self.assertTrue(run_payload["events_path"].endswith("/events.jsonl"))
+
+    def test_plans_cli_text_and_json_shapes_with_readiness_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            data_home = tmp_dir / "data"
+            share_root = data_home / "agent-plans"
+            share_root.mkdir(parents=True)
+            (tmp_dir / "config").mkdir()
+            (tmp_dir / "tmp").mkdir()
+            (tmp_dir / "home").mkdir()
+
+            reviewed = share_root / "reviewed-plan"
+            draft = share_root / "draft-plan"
+            write_plan(reviewed, ("pending",))
+            write_plan(draft, ("pending",))
+            self._write_readiness(
+                reviewed,
+                state_value="reviewed",
+                checked_at="2026-07-01T00:00:00+00:00",
+            )
+            self._write_readiness(
+                draft,
+                state_value="draft",
+                checked_at="2026-07-02T00:00:00+00:00",
+            )
+
+            with patched_env(
+                HOME=str(tmp_dir / "home"),
+                XDG_CONFIG_HOME=str(tmp_dir / "config"),
+                XDG_DATA_HOME=str(data_home),
+                TMPDIR=str(tmp_dir / "tmp"),
+            ):
+                text_code, text_stdout, text_stderr = self._run_plans(
+                    "--readiness",
+                    "reviewed",
+                )
+                json_code, json_stdout, json_stderr = self._run_plans(
+                    "--readiness",
+                    "reviewed",
+                    "--json",
+                )
+
+            self.assertEqual(0, text_code, text_stderr)
+            self.assertEqual("", text_stderr)
+            self.assertIn(f"- {plans.canonicalize_path(reviewed)}", text_stdout)
+            self.assertIn("  state: ready", text_stdout)
+            self.assertIn("  run state: absent", text_stdout)
+            self.assertIn("  readiness: reviewed", text_stdout)
+            self.assertNotIn(str(plans.canonicalize_path(draft)), text_stdout)
+
+            self.assertEqual(0, json_code, json_stderr)
+            self.assertEqual("", json_stderr)
+            payload = json.loads(json_stdout)
+            self.assertTrue(payload["ok"])
+            self.assertEqual("plans", payload["command"])
+            self.assertEqual(
+                {
+                    "never_run": False,
+                    "readiness": "reviewed",
+                    "stale_days": None,
+                },
+                payload["filters"],
+            )
+            self.assertEqual(1, payload["plan_count"])
+            self.assertEqual(
+                str(plans.canonicalize_path(reviewed)),
+                payload["plans"][0]["plan_dir"],
+            )
+            self.assertEqual("ready", payload["plans"][0]["primary_state"])
+            self.assertEqual("reviewed", payload["plans"][0]["readiness"]["state"])
+
+    def test_plans_cli_stale_and_never_run_filters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            data_home = tmp_dir / "data"
+            share_root = data_home / "agent-plans"
+            share_root.mkdir(parents=True)
+            state_root = tmp_dir / "state"
+            (tmp_dir / "config").mkdir()
+            (tmp_dir / "tmp").mkdir()
+            (tmp_dir / "home").mkdir()
+
+            abandoned = share_root / "abandoned-plan"
+            recent = share_root / "recent-plan"
+            write_plan(abandoned, ("pending",))
+            write_plan(recent, ("pending",))
+            self._write_readiness(
+                abandoned,
+                state_value="reviewed",
+                checked_at="2026-07-01T00:00:00+00:00",
+            )
+            _write_state_payload(
+                plans.canonicalize_path(recent),
+                state_root,
+                {
+                    "ok": True,
+                    "paused": False,
+                    "run_id": "20260810T120000Z-9",
+                    "run_started_at": "2026-08-10T12:00:00+00:00",
+                    "run_finished_at": "2026-08-11T12:45:00+00:00",
+                    "active_turn": None,
+                    "active_verification": None,
+                },
+            )
+
+            with patched_env(
+                HOME=str(tmp_dir / "home"),
+                XDG_CONFIG_HOME=str(tmp_dir / "config"),
+                XDG_DATA_HOME=str(data_home),
+                TMPDIR=str(tmp_dir / "tmp"),
+            ):
+                stale_code, stale_stdout, stale_stderr = self._run_plans(
+                    "--state-dir",
+                    str(state_root),
+                    "--stale-days",
+                    "14",
+                    "--json",
+                )
+                never_run_code, never_run_stdout, never_run_stderr = self._run_plans(
+                    "--state-dir",
+                    str(state_root),
+                    "--never-run",
+                    "--json",
+                )
+
+            self.assertEqual(0, stale_code, stale_stderr)
+            self.assertEqual("", stale_stderr)
+            stale_payload = json.loads(stale_stdout)
+            self.assertEqual(1, stale_payload["plan_count"])
+            self.assertEqual(
+                [str(plans.canonicalize_path(abandoned))],
+                [entry["plan_dir"] for entry in stale_payload["plans"]],
+            )
+
+            self.assertEqual(0, never_run_code, never_run_stderr)
+            self.assertEqual("", never_run_stderr)
+            never_run_payload = json.loads(never_run_stdout)
+            self.assertEqual(1, never_run_payload["plan_count"])
+            self.assertEqual(
+                [str(plans.canonicalize_path(abandoned))],
+                [entry["plan_dir"] for entry in never_run_payload["plans"]],
+            )
 
     def test_dry_run_reports_mailbox_activation_and_opt_out(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3328,7 +3519,14 @@ class SplitCliTests(unittest.TestCase):
             )
 
             _, out1, _ = self._run_split(args)
-            _, out2, _ = self._run_split(args)
+            _, out2, _ = self._run_split(
+                self._split_args(
+                    plan_file=str(plan),
+                    contracts_file=str(contracts_file),
+                    base_dir=str(base),
+                    force_new=True,
+                )
+            )
 
             first = Path(json.loads(out1)["output_dir"])
             second = Path(json.loads(out2)["output_dir"])

@@ -1068,6 +1068,7 @@ def mutate_registry(
 
 
 WORKBENCH_COMMAND_NAME = "workbench"
+PLANS_COMMAND_NAME = "plans"
 
 
 def workbench_pin_from_args(args: Any) -> int:
@@ -1165,6 +1166,228 @@ def workbench_registry_from_args(args: Any) -> int:
         print(f"Warnings ({len(registry.warnings)}):")
         for warning in registry.warnings:
             print(f"  - {warning}")
+    return 0
+
+
+def _plans_error(args: Any, *, reason: str, error: str) -> int:
+    if getattr(args, "json", False):
+        responses.print_json(
+            responses.error_payload(
+                PLANS_COMMAND_NAME,
+                reason=reason,
+                error=error,
+            )
+        )
+    else:
+        print(f"agent-session-loop plans: {error}", file=sys.stderr)
+    return 1
+
+
+def _plan_readiness_payload(
+    plan_dir: Path,
+    *,
+    warnings: list[str],
+) -> dict[str, str] | None:
+    try:
+        metadata = plans.read_readiness_metadata(plan_dir)
+    except (plans.PlanError, OSError, ValueError) as error:
+        warnings.append(f"{plan_dir}: readiness unreadable ({error})")
+        return None
+    if metadata is None:
+        return None
+    return {
+        "state": metadata.state,
+        "readiness_sha256": metadata.readiness_sha256,
+        "checked_at": metadata.checked_at,
+    }
+
+
+def _plan_effective_activity_at(
+    summary: "WorkbenchSummary",
+    readiness: Mapping[str, str] | None,
+) -> str | None:
+    if summary.last_activity_at:
+        return summary.last_activity_at
+    if readiness is None:
+        return None
+    checked_at = readiness.get("checked_at")
+    return checked_at if isinstance(checked_at, str) and checked_at else None
+
+
+def _plan_has_no_run_state(summary: "WorkbenchSummary") -> bool:
+    state_path = summary.state_path
+    if state_path is None:
+        return True
+    try:
+        return not state_path.is_file()
+    except OSError:
+        return True
+
+
+def _plan_matches_stale_days(
+    summary: "WorkbenchSummary",
+    *,
+    stale_days: float,
+    now: datetime,
+    readiness: Mapping[str, str] | None,
+) -> bool:
+    activity = _plan_effective_activity_at(summary, readiness)
+    if not activity:
+        return False
+    if activity.endswith("Z"):
+        activity = activity[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(activity)
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return now - parsed >= timedelta(days=stale_days)
+
+
+def _print_plan_listing(
+    rows: Sequence[tuple["WorkbenchSummary", dict[str, str] | None]],
+    *,
+    warnings: Sequence[str],
+    show_readiness: bool,
+) -> None:
+    print(f"Plans ({len(rows)}):")
+    if not rows:
+        print("  (none)")
+    for summary, readiness in rows:
+        counts = summary.counts
+        print(f"- {summary.plan_dir}")
+        print(f"  state: {summary.primary_state}")
+        print(
+            "  sessions: "
+            f"pending={counts.get('pending', 0)} "
+            f"complete={counts.get('complete', 0)} "
+            f"unknown={counts.get('unknown', 0)}"
+        )
+        print(
+            "  run state: "
+            f"{'absent' if _plan_has_no_run_state(summary) else 'present'}"
+        )
+        print(
+            "  activity: "
+            f"{_plan_effective_activity_at(summary, readiness) or 'unknown'}"
+        )
+        next_pending = summary.next_pending_session_id or "(none)"
+        print(f"  next pending session: {next_pending}")
+        if show_readiness:
+            readiness_state = (
+                readiness.get("state")
+                if readiness is not None and readiness.get("state")
+                else "(none)"
+            )
+            print(f"  readiness: {readiness_state}")
+    if warnings:
+        print(f"Warnings ({len(warnings)}):")
+        for warning in warnings:
+            print(f"  - {warning}")
+
+
+def plans_from_args(args: Any) -> int:
+    """List discovered plans with stale, never-run, and readiness filters."""
+    stale_days = getattr(args, "stale_days", None)
+    if stale_days is not None and stale_days < 0:
+        return _plans_error(
+            args,
+            reason="invalid-argument",
+            error="--stale-days must be non-negative",
+        )
+
+    readiness_filter = getattr(args, "readiness", None)
+    if readiness_filter is not None:
+        try:
+            readiness_filter = plans.parse_readiness_state(readiness_filter)
+        except plans.PlanError as error:
+            return _plans_error(
+                args,
+                reason="invalid-readiness",
+                error=str(error),
+            )
+
+    try:
+        registry = load_registry(None)
+    except WorkbenchError as error:
+        return _plans_error(
+            args,
+            reason="invalid-registry",
+            error=str(error),
+        )
+
+    discovery = discover_plans(
+        state_root=getattr(args, "state_dir", None),
+        registry=registry,
+    )
+    summaries = build_workbench_summaries(
+        discovery.plans,
+        state_dir=getattr(args, "state_dir", None),
+    )
+    warnings = list(discovery.warnings)
+    now = datetime.now(timezone.utc)
+    rows: list[tuple[WorkbenchSummary, dict[str, str] | None]] = []
+    payloads: list[dict[str, Any]] = []
+
+    for summary in summaries:
+        readiness: dict[str, str] | None = None
+        if readiness_filter is not None or (
+            stale_days is not None and not summary.last_activity_at
+        ):
+            readiness = _plan_readiness_payload(
+                summary.plan_dir,
+                warnings=warnings,
+            )
+
+        if readiness_filter is not None:
+            readiness_state = (
+                readiness.get("state") if readiness is not None else None
+            )
+            if readiness_state != readiness_filter:
+                continue
+
+        if getattr(args, "never_run", False) and not _plan_has_no_run_state(summary):
+            continue
+
+        if stale_days is not None and not _plan_matches_stale_days(
+            summary,
+            stale_days=stale_days,
+            now=now,
+            readiness=readiness,
+        ):
+            continue
+
+        payload = summary.to_payload()
+        if readiness_filter is not None:
+            payload["readiness"] = (
+                dict(readiness) if readiness is not None else None
+            )
+        rows.append((summary, readiness))
+        payloads.append(payload)
+
+    if getattr(args, "json", False):
+        responses.print_json(
+            responses.success_payload(
+                PLANS_COMMAND_NAME,
+                reason="ok",
+                filters={
+                    "stale_days": stale_days,
+                    "never_run": bool(getattr(args, "never_run", False)),
+                    "readiness": readiness_filter,
+                },
+                plan_count=len(payloads),
+                plans=payloads,
+                warnings=warnings,
+            )
+        )
+        return 0
+
+    _print_plan_listing(
+        rows,
+        warnings=warnings,
+        show_readiness=readiness_filter is not None,
+    )
     return 0
 
 
@@ -4422,13 +4645,41 @@ def _build_review_continuation_recovery(
             and resume.minimum_required_cap
             > runner.DEFAULT_MAX_REVIEW_FIX_CYCLES
         )
-        if cap_exceeds_default:
+        exhausted_group = (
+            review_continuation.exhausted_repair_group_details(
+                resume.to_payload()
+            )
+            if cap_exceeds_default
+            else None
+        )
+        if exhausted_group is not None:
+            repair_group, attempts = exhausted_group
+            summary += (
+                f' The recurring repair group "{repair_group}" already hit '
+                f'{attempts} {"attempt" if attempts == 1 else "attempts"}; '
+                "fix it manually or re-split instead of raising "
+                "--max-review-fix-cycles."
+            )
+        elif cap_exceeds_default:
             summary += (
                 " Set --max-review-fix-cycles to "
                 f"{resume.minimum_required_cap} or higher as well."
             )
         severity = "info"
-        actions = (_profile_action(profile_guidance(include_cap=cap_exceeds_default)),)
+        actions = (
+            (
+                _inspect_action(
+                    "Inspect the recurring repair group and repair it "
+                    "manually or re-split before relaunching."
+                ),
+            )
+            if exhausted_group is not None
+            else (
+                _profile_action(
+                    profile_guidance(include_cap=cap_exceeds_default)
+                ),
+            )
+        )
 
     return _build_context_recovery_payload(
         context,

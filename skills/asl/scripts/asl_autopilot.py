@@ -304,6 +304,76 @@ def _build_run_parser() -> _RunArgumentParser:
     return parser
 
 
+_CHILD_RUN_ARG_SKIP_DESTS = frozenset(
+    {
+        "dry_run",
+        "json",
+        "max_review_fix_plans",
+        "plan_dir",
+        "reply",
+        "reply_stdin",
+    }
+)
+
+
+def _append_child_run_flag(argv: list[str], flag: _run_flags.RunFlag, value: Any) -> None:
+    """Serialize one parsed run flag back into child argv.
+
+    The helper keeps the child command in shared-spec order, so adding an
+    ordinary flag to ``RUN_FLAG_SPEC`` automatically forwards it here.
+    """
+    if value is None:
+        return
+    if flag.action == "append":
+        for entry in value:
+            argv.extend([flag.option_strings[0], str(entry)])
+        return
+    if flag.action == "store_true":
+        if value:
+            argv.append(flag.option_strings[0])
+        return
+    if flag.action == "store_false":
+        if value is False:
+            argv.append(flag.option_strings[0])
+        return
+    if flag.action == "store_const":
+        if value == flag.const:
+            argv.append(flag.option_strings[0])
+        return
+    argv.extend([flag.option_strings[0], str(value)])
+
+
+def _build_child_run_args(
+    namespace: argparse.Namespace,
+    *,
+    plan_dir: str,
+    cwd: Optional[str],
+    state_dir: Optional[str],
+) -> list[str]:
+    """Reconstruct the supervised ``asl run`` argv from the declarative spec."""
+    argv = ["run", plan_dir]
+    legacy_cycles = getattr(namespace, "max_review_fix_plans", None)
+    for flag in _run_flags.RUN_FLAG_SPEC:
+        if flag.positional or flag.dest in _CHILD_RUN_ARG_SKIP_DESTS:
+            continue
+        if flag.dest == "max_review_fix_cycles":
+            value = getattr(namespace, flag.dest, None)
+            if value is None:
+                value = legacy_cycles
+            if value is not None:
+                argv.extend(["--max-review-fix-cycles", str(value)])
+            continue
+        if flag.dest == "cwd":
+            value = cwd
+        elif flag.dest == "state_dir":
+            value = state_dir
+        else:
+            value = getattr(namespace, flag.dest, None)
+        _append_child_run_flag(argv, flag, value)
+    argv.append("--json")
+    return argv
+
+
 def _tokenize(command: str) -> list:
     """Split ``command`` into shell-like tokens, rejecting shell operators.
 
@@ -411,6 +481,9 @@ def parse_command(command: str) -> dict:
     validation_errors = _run_flags.validate_run_namespace(
         namespace,
         defer_resume_dependent=bool(getattr(namespace, "resume", False)),
+        default_max_review_fix_cycles_ceiling=(
+            _runner.DEFAULT_MAX_REVIEW_FIX_CYCLES_CEILING
+        ),
     )
     if validation_errors:
         return _parse_error("invalid-argument", validation_errors[0].message)
@@ -423,74 +496,13 @@ def parse_command(command: str) -> dict:
         else None
     )
 
-    child_args = ["run", plan_dir]
-    if cwd is not None:
-        child_args += ["--cwd", cwd]
-    if namespace.harness is not None:
-        child_args += ["--harness", namespace.harness]
-    if namespace.review_harness is not None:
-        child_args += ["--review-harness", namespace.review_harness]
-    if namespace.harness_model is not None:
-        child_args += ["--harness-model", namespace.harness_model]
-    if namespace.review_harness_model is not None:
-        child_args += ["--review-harness-model", namespace.review_harness_model]
-    if namespace.effort is not None:
-        child_args += ["--effort", namespace.effort]
-    if namespace.timeout is not None:
-        child_args += ["--timeout", str(namespace.timeout)]
-    if namespace.audit_harness is not None:
-        child_args += ["--audit-harness", namespace.audit_harness]
-    if namespace.audit_harness_model is not None:
-        child_args += ["--audit-harness-model", namespace.audit_harness_model]
-    if namespace.audit_effort is not None:
-        child_args += ["--audit-effort", namespace.audit_effort]
-    if namespace.audit_timeout is not None:
-        child_args += ["--audit-timeout", str(namespace.audit_timeout)]
-    if namespace.supervisor_audit is True:
-        child_args.append("--supervisor-audit")
-    elif namespace.supervisor_audit is False:
-        child_args.append("--no-supervisor-audit")
-    if namespace.max_sessions is not None:
-        child_args += ["--max-sessions", str(namespace.max_sessions)]
-    if namespace.max_pending_sessions is not None:
-        child_args += ["--max-pending-sessions", str(namespace.max_pending_sessions)]
-    # The runner owns repair/rereview cycles; forward the cap under the
-    # canonical flag, translating the deprecated alias.
-    if namespace.max_review_fix_cycles is not None:
-        child_args += [
-            "--max-review-fix-cycles",
-            str(namespace.max_review_fix_cycles),
-        ]
-    elif namespace.max_review_fix_plans is not None:
-        child_args += [
-            "--max-review-fix-cycles",
-            str(namespace.max_review_fix_plans),
-        ]
-    for exclude in getattr(namespace, "review_guard_exclude", None) or ():
-        child_args += ["--review-guard-exclude", exclude]
-    if namespace.review_guard_include_ignored:
-        child_args.append("--review-guard-include-ignored")
-    if namespace.commit_mode == "per-session":
-        child_args.append("--commit-per-session")
-    elif namespace.commit_mode == "end":
-        child_args.append("--commit-at-end")
-    if state_dir is not None:
-        child_args += ["--state-dir", state_dir]
-    if namespace.note is not None:
-        child_args += ["--note", namespace.note]
-    if namespace.unsafe_bypass is True:
-        child_args.append("--unsafe-bypass")
-    elif namespace.unsafe_bypass is False:
-        child_args.append("--no-unsafe-bypass")
-    if namespace.no_mailbox:
-        child_args.append("--no-mailbox")
-    if namespace.allow_not_loop_ready:
-        child_args.append("--allow-not-loop-ready")
-    if getattr(namespace, "resume", False):
-        child_args.append("--resume")
-
     json_appended = not namespace.json
-    child_args.append("--json")
+    child_args = _build_child_run_args(
+        namespace,
+        plan_dir=plan_dir,
+        cwd=cwd,
+        state_dir=state_dir,
+    )
 
     return {
         "ok": True,

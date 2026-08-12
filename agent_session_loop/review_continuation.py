@@ -23,6 +23,7 @@ REVIEW_CYCLE_DISPOSITION_ALL_CLEAR = "all-clear"
 REVIEW_CYCLE_DISPOSITION_REPAIRS = "repairs-materialized"
 REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED = "cycles-disabled"
 REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED = "cycle-cap-exhausted"
+REVIEW_CYCLE_DISPOSITION_GROUP_EXHAUSTED = "repair-group-exhausted"
 REVIEW_CYCLE_DISPOSITION_REPEATED = "findings-repeated"
 REVIEW_CYCLE_DISPOSITION_UNSTRUCTURED = "unstructured-findings"
 REVIEW_CYCLE_DISPOSITION_MALFORMED = "malformed-review-repair"
@@ -32,6 +33,7 @@ REVIEW_CYCLE_DISPOSITIONS: tuple[str, ...] = (
     REVIEW_CYCLE_DISPOSITION_REPAIRS,
     REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED,
     REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
+    REVIEW_CYCLE_DISPOSITION_GROUP_EXHAUSTED,
     REVIEW_CYCLE_DISPOSITION_REPEATED,
     REVIEW_CYCLE_DISPOSITION_UNSTRUCTURED,
     REVIEW_CYCLE_DISPOSITION_MALFORMED,
@@ -41,6 +43,7 @@ REVIEW_CYCLE_DISPOSITIONS: tuple[str, ...] = (
 TERMINAL_REVIEW_DISPOSITIONS = frozenset(
     {
         REVIEW_CYCLE_DISPOSITION_ALL_CLEAR,
+        REVIEW_CYCLE_DISPOSITION_GROUP_EXHAUSTED,
         REVIEW_CYCLE_DISPOSITION_REPEATED,
         REVIEW_CYCLE_DISPOSITION_UNSTRUCTURED,
     }
@@ -90,6 +93,8 @@ class ReviewResume:
     historical_materializations: int
     minimum_required_cap: int
     selected_cap: int | None
+    max_repair_group_attempts: int | None = None
+    repair_group_attempts: Mapping[str, int] | None = None
     repair_session_ids: tuple[str, ...] = ()
     pending_repair_session_ids: tuple[str, ...] = ()
     completed_repair_session_ids: tuple[str, ...] = ()
@@ -146,6 +151,14 @@ class ReviewResume:
             "artifact_valid": self.artifact_valid,
             "artifact_error": self.artifact_error,
         }
+        if self.max_repair_group_attempts is not None:
+            payload["max_repair_group_attempts"] = (
+                self.max_repair_group_attempts
+            )
+        if self.repair_group_attempts is not None:
+            payload["repair_group_attempts"] = dict(
+                self.repair_group_attempts
+            )
         if self.source_findings is not None:
             payload["source_findings"] = [dict(item) for item in self.source_findings]
         if self.current_findings is not None:
@@ -272,6 +285,35 @@ def _event_repair_ids(payload: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(item for item in raw if isinstance(item, str) and item.strip())
 
 
+def _repair_groups_from_payload(
+    payload: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], ...]:
+    raw = payload.get("repair_groups")
+    if not isinstance(raw, list):
+        return ()
+    groups: list[Mapping[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        repair_group = _nonempty_str(item.get("repair_group"))
+        repair_session_id = _nonempty_str(item.get("repair_session_id"))
+        if repair_group is None or repair_session_id is None:
+            continue
+        group: dict[str, Any] = {
+            "repair_group": repair_group,
+            "repair_session_id": repair_session_id,
+            "finding_ids": list(_string_tuple(item.get("finding_ids")) or ()),
+        }
+        read_repositories = _string_tuple(item.get("read_repositories"))
+        write_repositories = _string_tuple(item.get("write_repositories"))
+        if read_repositories is not None:
+            group["read_repositories"] = list(read_repositories)
+        if write_repositories is not None:
+            group["write_repositories"] = list(write_repositories)
+        groups.append(group)
+    return tuple(groups)
+
+
 def _materialization_key(
     record: ReviewEventRecord,
     *,
@@ -327,6 +369,116 @@ def review_event_materialization_key(
     return _materialization_key(
         ReviewEventRecord(name=name, payload=payload),
         ordinal=ordinal,
+    )
+
+
+def repair_group_attempts(
+    event_path: str | Path,
+    snapshot_or_plan_dir: plans.PlanSnapshot | str | Path | None = None,
+) -> dict[str, int]:
+    """Return per-group repair attempt counts from events and durable children."""
+
+    records = read_review_events(event_path)
+    snapshot = (
+        snapshot_or_plan_dir
+        if isinstance(snapshot_or_plan_dir, plans.PlanSnapshot)
+        else (
+            plans.inspect_plan(snapshot_or_plan_dir)
+            if snapshot_or_plan_dir is not None
+            else None
+        )
+    )
+    counts: dict[str, int] = {}
+    seen_repair_sessions: set[str] = set()
+
+    def record_attempt(group: Mapping[str, Any]) -> None:
+        repair_group = _nonempty_str(group.get("repair_group"))
+        repair_session_id = _nonempty_str(group.get("repair_session_id"))
+        if repair_group is None or repair_session_id is None:
+            return
+        if repair_session_id in seen_repair_sessions:
+            return
+        seen_repair_sessions.add(repair_session_id)
+        counts[repair_group] = counts.get(repair_group, 0) + 1
+
+    for record in records:
+        for group in _repair_groups_from_payload(record.payload):
+            record_attempt(group)
+
+    if snapshot is not None:
+        generated_repairs = _generated_repair_statuses(snapshot)
+        durable_children = {
+            repair_session_id: status
+            for children in generated_repairs.values()
+            for repair_session_id, status in children.items()
+        }
+        durable_groups = _repair_group_records_from_children(durable_children)
+        if durable_groups is not None:
+            for group in durable_groups:
+                record_attempt(group)
+
+    return {group: counts[group] for group in sorted(counts)}
+
+
+def _repair_group_attempts_from_payload(
+    payload: Mapping[str, Any],
+) -> dict[str, int]:
+    raw = payload.get("repair_group_attempts")
+    if not isinstance(raw, Mapping):
+        return {}
+    counts: dict[str, int] = {}
+    for repair_group, attempts in raw.items():
+        if not isinstance(repair_group, str) or not repair_group.strip():
+            continue
+        count = _nonnegative_int(attempts)
+        if count is None:
+            continue
+        counts[repair_group] = count
+    return {group: counts[group] for group in sorted(counts)}
+
+
+def exhausted_repair_group_details(
+    review_resume: Mapping[str, Any] | None,
+) -> tuple[str, int] | None:
+    """Return the recurring repair group that already exhausted its budget."""
+
+    if not isinstance(review_resume, Mapping):
+        return None
+    limit = _nonnegative_int(review_resume.get("max_repair_group_attempts"))
+    if limit is None:
+        return None
+    counts = _repair_group_attempts_from_payload(review_resume)
+    if not counts:
+        return None
+    repair_groups = _repair_groups_from_payload(review_resume)
+    if repair_groups:
+        seen_groups: set[str] = set()
+        for group in repair_groups:
+            repair_group = str(group["repair_group"])
+            if repair_group in seen_groups:
+                continue
+            seen_groups.add(repair_group)
+            attempts = counts.get(repair_group)
+            if attempts is not None and attempts >= limit:
+                return repair_group, attempts
+        return None
+    for repair_group, attempts in counts.items():
+        if attempts >= limit:
+            return repair_group, attempts
+    return None
+
+
+def exhausted_repair_group_guidance(
+    review_resume: Mapping[str, Any] | None,
+) -> str | None:
+    exhausted = exhausted_repair_group_details(review_resume)
+    if exhausted is None:
+        return None
+    repair_group, attempts = exhausted
+    return (
+        f'the recurring repair group "{repair_group}" already hit {attempts} '
+        f'{"attempt" if attempts == 1 else "attempts"}; fix it manually or '
+        "re-split instead of raising --max-review-fix-cycles"
     )
 
 
@@ -828,6 +980,28 @@ def _selected_cap_from_events(
     return None
 
 
+def _selected_group_attempt_cap_from_history(
+    records: tuple[ReviewEventRecord, ...],
+    event_path: str | Path,
+) -> int | None:
+    for record in reversed(records):
+        cap = _nonnegative_int(record.payload.get("max_repair_group_attempts"))
+        if cap is not None:
+            return cap
+
+    state_path = Path(event_path).with_name(events.STATE_FILE_NAME)
+    try:
+        raw = json.loads(state_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    run_config = raw.get("run_config")
+    if not isinstance(run_config, dict):
+        return None
+    return _nonnegative_int(run_config.get("max_repair_group_attempts"))
+
+
 def _source_digests(
     cycle: Mapping[str, Any] | None,
 ) -> tuple[str | None, str | None]:
@@ -890,15 +1064,11 @@ def _repair_ids_for_source(
     return tuple(sorted(ids, key=sort_key))
 
 
-def _repair_groups_from_children(
-    plan_dir: Path,
+def _repair_group_records_from_children(
     generated: Mapping[str, plans.SessionStatus],
 ) -> tuple[Mapping[str, Any], ...] | None:
-    """Recover repository attribution from durable generated child sessions."""
+    """Recover durable repair-group identity from generated child sessions."""
     if not generated:
-        return None
-    registry = plans.read_repository_registry(plan_dir)
-    if registry is None:
         return None
     groups: list[Mapping[str, Any]] = []
     for session_id in sorted(
@@ -915,14 +1085,6 @@ def _repair_groups_from_children(
         )
         if group_match is None or finding_match is None:
             return None
-        read_aliases: tuple[str, ...] = ()
-        write_aliases: tuple[str, ...] = ()
-        try:
-            scope = plans.parse_session_scope(text, registry.aliases)
-        except plans.PlanError:
-            return None
-        read_aliases = scope.reads
-        write_aliases = scope.writes
         groups.append(
             {
                 "repair_group": group_match.group(1),
@@ -932,11 +1094,38 @@ def _repair_groups_from_children(
                     for item in finding_match.group(1).split(",")
                     if item.strip()
                 ],
-                "read_repositories": list(read_aliases),
-                "write_repositories": list(write_aliases),
             }
         )
     return tuple(groups)
+
+
+def _repair_groups_from_children(
+    plan_dir: Path,
+    generated: Mapping[str, plans.SessionStatus],
+) -> tuple[Mapping[str, Any], ...] | None:
+    """Recover repository attribution from durable generated child sessions."""
+    groups = _repair_group_records_from_children(generated)
+    if groups is None:
+        return None
+    registry = plans.read_repository_registry(plan_dir)
+    if registry is None:
+        return groups
+    attributed: list[Mapping[str, Any]] = []
+    for group in groups:
+        repair_session_id = str(group["repair_session_id"])
+        status = generated.get(repair_session_id)
+        if status is None:
+            return None
+        try:
+            text = status.path.read_text(encoding="utf-8")
+            scope = plans.parse_session_scope(text, registry.aliases)
+        except (OSError, plans.PlanError):
+            return None
+        entry = dict(group)
+        entry["read_repositories"] = list(scope.reads)
+        entry["write_repositories"] = list(scope.writes)
+        attributed.append(entry)
+    return tuple(attributed)
 
 
 def _resume(
@@ -949,6 +1138,8 @@ def _resume(
     blocker: str | None,
     materialization_count: int,
     selected_cap: int | None,
+    max_repair_group_attempts: int | None = None,
+    repair_group_attempts: Mapping[str, int] | None = None,
     repair_ids: tuple[str, ...] = (),
     pending_ids: tuple[str, ...] = (),
     completed_ids: tuple[str, ...] = (),
@@ -989,15 +1180,23 @@ def _resume(
             current_repositories = tuple(
                 dict(repository) for repository in planning.repository_bases
             )
-        if repository_aware and planning.repair_groups:
+        if planning.repair_groups:
             repair_groups = tuple(
-                {
-                    "repair_group": group.repair_group,
-                    "finding_ids": list(group.finding_ids),
-                    "read_repositories": list(group.read_repositories),
-                    "write_repositories": list(group.write_repositories),
-                    "repair_session_id": group.proposed_child_id.value,
-                }
+                dict(
+                    {
+                        "repair_group": group.repair_group,
+                        "finding_ids": list(group.finding_ids),
+                        "repair_session_id": group.proposed_child_id.value,
+                    },
+                    **(
+                        {
+                            "read_repositories": list(group.read_repositories),
+                            "write_repositories": list(group.write_repositories),
+                        }
+                        if repository_aware
+                        else {}
+                    ),
+                )
                 for group in planning.repair_groups
             )
         if (
@@ -1020,6 +1219,12 @@ def _resume(
         historical_materializations=materialization_count,
         minimum_required_cap=materialization_count + 1,
         selected_cap=selected_cap,
+        max_repair_group_attempts=max_repair_group_attempts,
+        repair_group_attempts=(
+            {group: repair_group_attempts[group] for group in sorted(repair_group_attempts)}
+            if repair_group_attempts
+            else None
+        ),
         repair_session_ids=repair_ids,
         pending_repair_session_ids=pending_ids,
         completed_repair_session_ids=completed_ids,
@@ -1053,6 +1258,14 @@ def review_resume_guidance(
     """
     if not isinstance(review_resume, Mapping):
         return None
+    if (
+        review_resume.get("blocker")
+        in {REVIEW_CYCLE_DISPOSITION_GROUP_EXHAUSTED, "higher-cap-required"}
+        or review_resume.get("action") == "materialize-repairs"
+    ):
+        exhausted_guidance = exhausted_repair_group_guidance(review_resume)
+        if exhausted_guidance is not None:
+            return exhausted_guidance
     needs_review_harness = not review_harness_active
     blocker = review_resume.get("blocker")
     if blocker == "higher-cap-required":
@@ -1098,15 +1311,17 @@ def evaluate_review_continuation(
     snapshot_or_plan_dir: plans.PlanSnapshot | str | Path,
     event_path: str | Path,
     *,
+    max_repair_group_attempts: int | None = None,
     max_review_fix_cycles: int | None = None,
     review_harness_requested: bool = False,
 ) -> ReviewResume:
     """Reconcile history, generated lineage, budget, and current artifacts.
 
-    ``max_review_fix_cycles`` is the selected absolute cap for a prospective
-    run.  Read-only status consumers may omit it; the latest cap recorded in
-    review history is then used.  ``review_harness_requested`` only affects the
-    otherwise inert ``initial-review`` projection.
+    ``max_repair_group_attempts`` and ``max_review_fix_cycles`` are the selected
+    caps for a prospective run. Read-only status consumers may omit either; the
+    latest review history, then the persisted run_config, are used when
+    available. ``review_harness_requested`` only affects the otherwise inert
+    ``initial-review`` projection.
     """
     snapshot = (
         snapshot_or_plan_dir
@@ -1130,6 +1345,11 @@ def evaluate_review_continuation(
         max_review_fix_cycles
         if max_review_fix_cycles is not None
         else _selected_cap_from_events(records)
+    )
+    selected_group_attempt_cap = (
+        max_repair_group_attempts
+        if max_repair_group_attempts is not None
+        else _selected_group_attempt_cap_from_history(records, event_path)
     )
 
     source_id, source_cycle_record = _latest_source(cycles, review_statuses)
@@ -1207,6 +1427,7 @@ def evaluate_review_continuation(
             key=lambda item: plans.parse_session_id(item).sort_key,
         )
     )
+    repair_attempt_counts = repair_group_attempts(event_path, snapshot)
 
     def result(
         action: ReviewResumeAction,
@@ -1224,6 +1445,8 @@ def evaluate_review_continuation(
             blocker=blocker,
             materialization_count=materialization_count,
             selected_cap=selected_cap,
+            max_repair_group_attempts=selected_group_attempt_cap,
+            repair_group_attempts=repair_attempt_counts,
             repair_ids=repair_ids,
             pending_ids=pending_ids,
             completed_ids=completed_ids,
@@ -1294,6 +1517,22 @@ def evaluate_review_continuation(
         return result("run-repairs", True, None, planning=planning)
     if generated_for_source and len(completed_ids) == len(generated_for_source):
         return result("rereview", True, None, planning=planning)
+    if (
+        selected_group_attempt_cap is not None
+        and planning.ok
+        and planning.reason == review_repair.REVIEW_REPAIR_REASON_OK
+    ):
+        if any(
+            repair_attempt_counts.get(group.repair_group, 0)
+            >= selected_group_attempt_cap
+            for group in planning.repair_groups
+        ):
+            return result(
+                "terminal",
+                False,
+                REVIEW_CYCLE_DISPOSITION_GROUP_EXHAUSTED,
+                planning=planning,
+            )
 
     if (
         disposition is None
