@@ -3966,6 +3966,78 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         self.assertEqual("tracked-patch-missing", detail["reason"])
         self.assertNotIn("tracked_patches", fingerprint)
 
+    def test_a_typechanged_path_pairs_both_of_its_patches(self) -> None:
+        before = self._fingerprint()
+
+        (self.repo_root / "README.md").unlink()
+        (self.repo_root / "README.md").symlink_to("target-a")
+        after = self._fingerprint()
+
+        # Git cannot express a change of type as one patch, so it renders the
+        # old type's deletion and the new type's creation as two sections for
+        # the one name entry every other status claims exactly one of.
+        self.assertEqual(
+            2, self._git("diff", "HEAD", "--", "README.md").count("diff --git ")
+        )
+        self.assertIsNone(runner._review_guard_unavailable_detail(after))
+        self.assertEqual(["README.md"], after["tracked_changed"])
+        self.assertEqual(
+            ["README.md"], [entry[0] for entry in after["tracked_patches"]]
+        )
+        self.assertEqual(
+            ["README.md"],
+            runner._review_guard_changed_paths(before, after)["tracked"],
+        )
+
+    def test_a_staged_typechange_pairs_both_of_its_patches(self) -> None:
+        before = self._fingerprint()
+
+        (self.repo_root / "README.md").unlink()
+        (self.repo_root / "README.md").symlink_to("target-a")
+        self._stage("README.md")
+        after = self._fingerprint()
+
+        self.assertEqual(
+            2,
+            self._git("diff", "--cached", "HEAD", "--", "README.md").count(
+                "diff --git "
+            ),
+        )
+        self.assertIsNone(runner._review_guard_unavailable_detail(after))
+        self.assertEqual(["README.md"], after["index_changed"])
+        self.assertEqual(
+            ["README.md"], [entry[0] for entry in after["index_patches"]]
+        )
+        self.assertEqual(
+            ["README.md"],
+            runner._review_guard_changed_paths(before, after)["tracked"],
+        )
+
+    def test_a_typechange_does_not_misattribute_later_patches(self) -> None:
+        self._write("a.txt", "one\n")
+        self._write("b.txt", "one\n")
+        self._commit_all("add two files")
+
+        (self.repo_root / "a.txt").unlink()
+        (self.repo_root / "a.txt").symlink_to("target")
+        before = self._fingerprint()
+
+        self._write("b.txt", "two\n")
+        after = self._fingerprint()
+
+        # Consuming one section for the typechange would have paired `b.txt`
+        # with the second half of `a.txt`'s patch, so its own mutation would
+        # not have moved its hash.
+        self.assertEqual(["a.txt", "b.txt"], after["tracked_changed"])
+        self.assertEqual(
+            ["a.txt", "b.txt"],
+            [entry[0] for entry in after["tracked_patches"]],
+        )
+        self.assertEqual(
+            ["b.txt"],
+            runner._review_guard_changed_paths(before, after)["tracked"],
+        )
+
     def _flag_index_entry(self, rel: str, flag: str) -> None:
         subprocess.run(
             ["git", "update-index", flag, rel],
@@ -4055,9 +4127,9 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
     def test_failed_git_probe_yields_an_unavailable_fingerprint(self) -> None:
         failing = {
             "diff": ("diff", "HEAD"),
-            "name-only": ("diff", "HEAD", "--name-only"),
+            "name-status": ("diff", "HEAD", "--name-status"),
             "index-diff": ("diff", "--cached", "HEAD", "--no-renames"),
-            "index-name-only": ("diff", "--cached", "HEAD", "--name-only"),
+            "index-name-status": ("diff", "--cached", "HEAD", "--name-status"),
             "untracked": ("ls-files", "--others"),
         }
         real_run_git = runner._run_git

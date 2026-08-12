@@ -93,6 +93,13 @@ def _run_git_bytes(
 
 _DIFF_FILE_HEADER_RE = re.compile(r"^diff --git ", re.MULTILINE)
 
+# Git cannot express a change of type (regular file, symlink, gitlink) as one
+# patch, so it renders the old type's deletion followed by the new type's
+# creation — two `diff --git` sections for the one `--name-status` entry every
+# other status claims exactly one of.
+_TYPE_CHANGED_STATUS = "T"
+_TYPE_CHANGED_PATCH_SECTIONS = 2
+
 # `git hash-object -t tree <devnull>` yields the repository's own empty tree id
 # (sha1 and sha256 repositories disagree on its value), which is the only diff
 # base that exists before the first commit.
@@ -100,9 +107,10 @@ _EMPTY_TREE_ARGV: tuple[str, ...] = ("hash-object", "-t", "tree", os.devnull)
 
 # Carried by every guard diff probe so the evidence describes content rather
 # than presentation. `--no-renames` keeps both sides of a rename in the
-# evidence: with detection on, `--name-only` prints only the destination, so
-# the source path would vanish from the dirty-path list a later rereview scopes
-# against. `--no-relative` keeps the `:(top)` pathspec from being re-narrowed to
+# evidence as one entry each: with detection on, a single `--name-status` line
+# carries both paths, so the source would neither pair with its own patch nor
+# reach the dirty-path list a later rereview scopes against.
+# `--no-relative` keeps the `:(top)` pathspec from being re-narrowed to
 # `cwd` by a `diff.relative=true` config. `--no-textconv` and `--no-ext-diff`
 # keep the patch derived from the file's raw bytes: a repository can configure
 # a textconv or external diff driver — in `.gitattributes` and git config, both
@@ -641,23 +649,48 @@ def _pair_diff_names_with_patches(
 ) -> tuple[list[str], list[list[str]]]:
     """Attribute each patch in ``diff_text`` to its path in ``names_text``.
 
-    ``--name-only`` and the full patch walk the same diff queue in the same
-    order, so pairing them positionally attributes each patch to its path
-    without re-parsing quoted ``diff --git`` headers.
+    ``names_text`` is ``--name-status`` output, which walks the same diff queue
+    in the same order as the full patch. Its status is what says how many patch
+    sections the path claims, so consuming that many per entry attributes each
+    patch without re-parsing ``diff --git`` headers, whose two paths cannot be
+    told apart when one of them contains a space. ``--no-renames`` is what keeps
+    every entry to a single ``<status>\\t<path>`` line.
 
-    A path git named but rendered no patch for fails the capture closed rather
-    than pairing short and dropping the tail of the queue: a path with no patch
-    evidence carries no content in the fingerprint, so any two of its contents
-    would compare equal.
+    A typechange is the one status claiming two sections
+    (:data:`_TYPE_CHANGED_PATCH_SECTIONS`); both are hashed together, so the
+    pair is that path's content evidence. Pairing one section per entry instead
+    would misalign every remaining path in the queue.
+
+    A queue that does not add up fails the capture closed rather than pairing
+    short and dropping its tail: a path with no patch evidence carries no
+    content in the fingerprint, so any two of its contents would compare equal.
     """
-    changed = [rel for rel in names_text.splitlines() if rel]
+    changed: list[str] = []
+    section_counts: list[int] = []
+    for line in names_text.splitlines():
+        if not line:
+            continue
+        status, tab, rel = line.partition("\t")
+        if not tab or not status or not rel:
+            raise _ReviewGuardUnavailable(reason, argv)
+        changed.append(rel)
+        section_counts.append(
+            _TYPE_CHANGED_PATCH_SECTIONS
+            if status == _TYPE_CHANGED_STATUS
+            else 1
+        )
     patches = _DIFF_FILE_HEADER_RE.split(diff_text)[1:]
-    if len(patches) != len(changed):
+    if len(patches) != sum(section_counts):
         raise _ReviewGuardUnavailable(reason, argv)
-    return changed, [
-        [rel, hashlib.sha256(patch.encode("utf-8")).hexdigest()]
-        for rel, patch in zip(changed, patches)
-    ]
+    paired: list[list[str]] = []
+    cursor = 0
+    for rel, count in zip(changed, section_counts):
+        section = "".join(patches[cursor : cursor + count])
+        cursor += count
+        paired.append(
+            [rel, hashlib.sha256(section.encode("utf-8")).hexdigest()]
+        )
+    return changed, paired
 
 
 def _capture_review_repo_fingerprint(
@@ -788,7 +821,7 @@ def _capture_review_repo_fingerprint(
         names_argv = [
             "diff",
             diff_base,
-            "--name-only",
+            "--name-status",
             *_GUARD_DIFF_FLAGS,
             "--",
             *pathspecs,
@@ -807,7 +840,7 @@ def _capture_review_repo_fingerprint(
             "diff",
             "--cached",
             diff_base,
-            "--name-only",
+            "--name-status",
             *_GUARD_DIFF_FLAGS,
             "--",
             *pathspecs,
