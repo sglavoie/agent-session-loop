@@ -138,6 +138,11 @@ LINT_SUGGESTABLE_CATEGORIES = frozenset(
     )
 )
 
+#: A prose heading that would otherwise be mistaken for a malformed session
+#: marker. The exact ``Session plan`` phrase has one safe interpretation: it
+#: is a plan-overview section, not a session with an ID.
+_NON_SESSION_PLAN_HEADING_RE = re.compile(r"^plan[ \t]*$", re.IGNORECASE)
+
 
 class SourceHeadingError(PlanError):
     """A line-specific malformed source-heading diagnostic.
@@ -983,9 +988,6 @@ def parse_plan_document(text: str) -> ParsedPlan:
 
 def _suggest_heading_repair(error: SourceHeadingError) -> str | None:
     """Rebuild a canonical heading when exactly one rewrite is correct."""
-    if error.category not in LINT_SUGGESTABLE_CATEGORIES:
-        return None
-
     line = error.source_line
     without_closing_marker = _ATX_CLOSING_MARKER_RE.sub("", line)
     closing_marker = line[len(without_closing_marker) :]
@@ -997,6 +999,21 @@ def _suggest_heading_repair(error: SourceHeadingError) -> str | None:
     after_token = prefix.group("rest")
     payload = after_token.lstrip(" \t")
     gap = after_token[: len(after_token) - len(payload)]
+
+    # ``## Session plan`` is ordinary prose whose first word happens to be the
+    # reserved session marker. It cannot describe a valid session (IDs are
+    # numeric), and rewriting it to a stable overview heading leaves its body
+    # untouched. Keep this deliberately narrow: other non-numeric values may
+    # be an intended session whose ID was omitted.
+    if (
+        error.category == LINT_NON_NUMERIC_SESSION_ID
+        and _NON_SESSION_PLAN_HEADING_RE.fullmatch(payload) is not None
+    ):
+        return f"{head[:-len('Session')]}Plan overview{closing_marker}"
+
+    if error.category not in LINT_SUGGESTABLE_CATEGORIES:
+        return None
+
     numeric_prefix = re.match(r"[0-9.]+", payload)
     if numeric_prefix is None:
         return None

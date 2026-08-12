@@ -749,6 +749,9 @@ class PlanAuthoringTests(unittest.TestCase):
         suggestable = {
             "## Session 1 Missing punctuation": "## Session 1: Missing punctuation",
             "## Session 2 / Unsupported": "## Session 2: Unsupported",
+            # A prose heading, not a session with the ID "plan". Original
+            # spacing and any ATX closing marker are preserved.
+            "## Session plan ##": "## Plan overview ##",
             # Original spacing and any ATX closing marker are preserved.
             "##  Session   3 No colon ##": "##  Session   3: No colon ##",
         }
@@ -764,11 +767,34 @@ class PlanAuthoringTests(unittest.TestCase):
             "## Session 1.0: Zero",
             "## Session 1:",
             "## Session nope: Bad id",
+            "## Session roadmap",
             "## Session 1 /",
         ):
             with self.subTest(source=source):
                 finding = authoring.lint_plan_document(source + "\n").findings[0]
                 self.assertIsNone(finding.suggested_line)
+
+    def test_lint_suggests_a_safe_rename_for_a_stray_session_plan_heading(
+        self,
+    ) -> None:
+        text = (
+            "# Plan\n\n## Session plan\n\nOverview body stays intact.\n\n"
+            "## Session 1: First\n\nDo one.\n\n"
+            "## Session 2: Second\n\nDo two.\n"
+        )
+        finding = authoring.lint_plan_document(text).findings[0]
+        self.assertEqual(authoring.LINT_NON_NUMERIC_SESSION_ID, finding.category)
+        self.assertEqual("## Plan overview", finding.suggested_line)
+
+        lines = text.splitlines()
+        lines[finding.line - 1] = str(finding.suggested_line)
+        repaired = "\n".join(lines) + "\n"
+
+        self.assertEqual((), authoring.lint_plan_document(repaired).findings)
+        parsed = authoring.parse_plan_document(repaired)
+        self.assertEqual(("1", "2"), parsed.session_ids)
+        self.assertIn("## Plan overview", parsed.context_lines)
+        self.assertIn("Overview body stays intact.", parsed.context_lines)
 
     def test_lint_suggestions_parse_when_applied(self) -> None:
         text = "## Session 1 No colon\n\none\n\n### Session 2 | Bad sep\n\ntwo\n"

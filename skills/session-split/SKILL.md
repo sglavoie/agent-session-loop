@@ -86,7 +86,7 @@ When `--check` returns `reason: repository-registry-required` it also carries a 
 
 **Repair loop** (at most 3 rounds):
 
-1. For every finding with a non-null `suggested_line`, replace that line with the suggestion. These have exactly one correct rewrite, so apply them silently — this is canonicalization, not restructuring.
+1. For every finding with a non-null `suggested_line`, replace that line with the suggestion. These have exactly one correct rewrite, so apply them silently — this is canonicalization, not restructuring. This includes the false-positive prose heading `## Session plan`, which ASL suggests as `## Plan overview`; do not ask for confirmation.
 2. For every finding with `suggested_line: null`, the repair would change what the plan means (inventing an id, renumbering a duplicate, dropping a title). Derive a concrete proposal from the finding's `message` and the session's own body, then ask the user to approve it. Batch all such findings from the round into one question.
 3. Edit only the flagged heading lines. Never alter body content, never reorder, merge, or renumber sessions beyond an approved repair, and never write to the original plan file.
 4. Re-run `asl split --check` on the repaired text. Repairing one heading can expose a finding the fail-fast parser had masked (a duplicate id only becomes visible once both headings parse), so keep looping while findings remain and rounds are left.
