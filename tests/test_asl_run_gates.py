@@ -20,6 +20,7 @@ import select
 import shlex
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -53,6 +54,7 @@ from agent_session_loop import (
     review_repair,
     run_control,
     runner,
+    session_overview,
     state,
     tail,
     verification,
@@ -1655,6 +1657,101 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
         )
         self.assertEqual([], payload["turns"])
 
+    def test_unregistered_sibling_write_does_not_pause_the_run(self) -> None:
+        sibling = self.workspace_root / "unrelated-active-work"
+        init_git_repo(sibling)
+
+        def mutate_sibling(
+            *args: object, **kwargs: object
+        ) -> harnesses.HarnessResult:
+            (sibling / "concurrent.txt").write_text(
+                "another run is working here\n", encoding="utf-8"
+            )
+            return self._completed_harness_result(*args, **kwargs)
+
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=mutate_sibling,
+        ):
+            exit_code, payload = self._invoke("collateral-write-run")
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual([], self._pause_reasons())
+        self.assertTrue(payload["turns"][0]["workspace_write_guard"]["passed"])
+        self.assertIn(
+            "- **Status**: complete",
+            (self.plan_dir / "session-1.md").read_text(encoding="utf-8"),
+        )
+        self.assertTrue((sibling / "concurrent.txt").is_file())
+
+    def test_registered_repository_removal_still_pauses(self) -> None:
+        removed = self.repositories["OAK"]
+
+        def remove_then_complete(
+            *args: object, **kwargs: object
+        ) -> harnesses.HarnessResult:
+            shutil.rmtree(removed)
+            return self._completed_harness_result(*args, **kwargs)
+
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=remove_then_complete,
+        ):
+            exit_code, payload = self._invoke("removed-repository-run")
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual(
+            events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+            payload["pause_reason"],
+        )
+        guard = payload["turns"][0]["workspace_write_guard"]
+        self.assertEqual(["tundra_OAK"], guard["removed"])
+        self.assertEqual("repository-removed", guard["violations"][0]["kind"])
+        self.assertIn(
+            "- **Status**: pending",
+            (self.plan_dir / "session-1.md").read_text(encoding="utf-8"),
+        )
+
+    def test_registered_repository_symlink_swap_still_pauses(self) -> None:
+        registered = self.repositories["OAK"]
+        twin = self.tmp_path / "oak-twin"
+        subprocess.run(
+            ["git", "clone", str(registered), str(twin)],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+        def swap_then_complete(
+            *args: object, **kwargs: object
+        ) -> harnesses.HarnessResult:
+            shutil.rmtree(registered)
+            registered.symlink_to(twin)
+            return self._completed_harness_result(*args, **kwargs)
+
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=swap_then_complete,
+        ):
+            exit_code, payload = self._invoke("symlinked-repository-run")
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual(
+            events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+            payload["pause_reason"],
+        )
+        guard = payload["turns"][0]["workspace_write_guard"]
+        self.assertEqual(["tundra_OAK"], guard["removed"])
+        self.assertEqual("repository-removed", guard["violations"][0]["kind"])
+        self.assertTrue(registered.is_symlink())
+        self.assertIn(
+            "- **Status**: pending",
+            (self.plan_dir / "session-1.md").read_text(encoding="utf-8"),
+        )
+
     def test_post_harness_system_exit_records_scope_violation(self) -> None:
         target = self.repositories["OAK"] / "README.md"
 
@@ -1814,6 +1911,205 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
         self.assertEqual(
             events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
             second_payload["pause_reason"],
+        )
+
+
+class RunRepositoryContentionGateTests(unittest.TestCase):
+    """Startup refusal when another live run already claims a registered repo."""
+
+    DEAD_PID = 4_242_424
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.workspace_root = self.tmp_path / "workspace"
+        self.repositories = init_multi_repo_workspace(
+            self.workspace_root,
+            DEFAULT_MULTI_REPO_SPECS[:2],
+        )
+        self.unregistered = self.workspace_root / "unrelated_repo"
+        init_git_repo(self.unregistered)
+        self.plan_dir = self.tmp_path / "plan"
+        self.other_plan_dir = self.tmp_path / "other-plan"
+        self.other_plan_dir.mkdir()
+        self.state_dir = self.tmp_path / "state"
+        self.config_home = self.tmp_path / "config"
+        write_multi_repo_plan(
+            self.plan_dir,
+            ("pending",),
+            specs=DEFAULT_MULTI_REPO_SPECS[:2],
+            contracts_by_id={
+                "1": _contract_block(
+                    '{"type": "file_exists", "repo": "SVC", '
+                    '"path": "README.md", "name": "svc-readme"}',
+                    session="1",
+                )
+            },
+        )
+        registry = plans.read_repository_registry(self.plan_dir)
+        assert registry is not None
+        plans.save_workspace_plan_metadata(
+            self.plan_dir,
+            self.workspace_root,
+            registry.digest,
+        )
+        fake_codex = install_fake_codex(self.tmp_path)
+        config_path = (
+            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        )
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps({"codex": {"executable": str(fake_codex)}}),
+            encoding="utf-8",
+        )
+
+    def _root(self, path: Path) -> str:
+        return str(plans.canonicalize_path(path))
+
+    def _publish_rival_claim(self, roots: tuple[Path, ...], *, pid: int) -> None:
+        canonical = plans.canonicalize_path(self.other_plan_dir)
+        rival_state = self.state_dir / plans.path_sha256(canonical)
+        rival_state.mkdir(parents=True, exist_ok=True)
+        (rival_state / session_overview.STATE_JSON_NAME).write_text(
+            json.dumps(
+                {
+                    "plan_dir": str(canonical),
+                    "run_id": "20260812T000000Z-1",
+                    "harness": "codex",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (rival_state / session_overview.LOCK_JSON_NAME).write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "plan_dir": str(canonical),
+                    "pid": pid,
+                    "hostname": socket.gethostname(),
+                    "repositories": sorted(self._root(root) for root in roots),
+                    "created_at": "2026-08-12T00:00:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _complete_session_one(
+        self, *_args: object, **_kwargs: object
+    ) -> harnesses.HarnessResult:
+        session_path = self.plan_dir / "session-1.md"
+        session_path.write_text(
+            session_path.read_text(encoding="utf-8").replace(
+                "- **Status**: pending", "- **Status**: complete", 1
+            ),
+            encoding="utf-8",
+        )
+        return harnesses.HarnessResult(
+            name="codex",
+            argv=["fake"],
+            returncode=0,
+            stdout="ok\n",
+            stderr="",
+        )
+
+    def _run(self, harness_side_effect: object) -> tuple[int, dict[str, object]]:
+        argv = [
+            "run",
+            str(self.plan_dir),
+            "--cwd",
+            str(self.workspace_root),
+            "--harness",
+            "codex",
+            "--state-dir",
+            str(self.state_dir),
+            "--json",
+            "--allow-not-loop-ready",
+        ]
+        args = cli.build_parser().parse_args(argv)
+        out, err = io.StringIO(), io.StringIO()
+        with patched_env(XDG_CONFIG_HOME=str(self.config_home)), mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=harness_side_effect,
+        ), redirect_stdout(out), redirect_stderr(err):
+            code = runner.run_from_args(args, run_argv=argv)
+        return code, json.loads(out.getvalue())
+
+    def test_overlapping_live_claim_refuses_before_any_harness_launch(
+        self,
+    ) -> None:
+        self._publish_rival_claim(
+            (self.repositories["OAK"], self.unregistered), pid=os.getpid()
+        )
+
+        exit_code, payload = self._run(
+            AssertionError("the refusal must stop before the harness")
+        )
+
+        self.assertEqual(1, exit_code)
+        self.assertTrue(payload["paused"])
+        self.assertEqual(
+            events.PAUSE_REASON_WORKSPACE_REPOSITORY_CONTENTION,
+            payload["pause_reason"],
+        )
+        self.assertEqual([], payload["turns"])
+        contention = payload["pause_details"]["repository_contention"]
+        self.assertEqual(
+            [self._root(self.repositories["OAK"])], contention["repositories"]
+        )
+        self.assertEqual(1, len(contention["conflicts"]))
+        conflict = contention["conflicts"][0]
+        self.assertEqual(
+            self._root(self.other_plan_dir), conflict["plan_dir"]
+        )
+        self.assertEqual(os.getpid(), conflict["pid"])
+        self.assertEqual(socket.gethostname(), conflict["hostname"])
+        self.assertEqual("20260812T000000Z-1", conflict["run_id"])
+        self.assertIn(self._root(self.other_plan_dir), payload["pause_message"])
+        self.assertIn("there is no override", payload["pause_message"])
+        self.assertIn(
+            "- **Status**: pending",
+            (self.plan_dir / "session-1.md").read_text(encoding="utf-8"),
+        )
+        # The refusal is a startup exit, not a run pause: no run state exists.
+        self.assertFalse(
+            (
+                state.plan_state_dir(self.plan_dir, self.state_dir)
+                / events.EVENTS_FILE_NAME
+            ).exists()
+        )
+
+    def test_disjoint_live_claim_lets_the_run_start(self) -> None:
+        self._publish_rival_claim((self.unregistered,), pid=os.getpid())
+
+        exit_code, payload = self._run(self._complete_session_one)
+
+        self.assertEqual(0, exit_code, payload)
+        self.assertFalse(payload["paused"])
+        self.assertEqual(1, len(payload["turns"]))
+        self.assertIn(
+            "- **Status**: complete",
+            (self.plan_dir / "session-1.md").read_text(encoding="utf-8"),
+        )
+
+    def test_an_overlapping_claim_from_a_dead_pid_does_not_refuse(self) -> None:
+        self._publish_rival_claim(
+            (self.repositories["SVC"],), pid=self.DEAD_PID
+        )
+
+        with mock.patch.object(
+            state,
+            "is_pid_running",
+            side_effect=lambda pid: pid == os.getpid(),
+        ):
+            exit_code, payload = self._run(self._complete_session_one)
+
+        self.assertEqual(0, exit_code, payload)
+        self.assertFalse(payload["paused"])
+        self.assertIn(
+            "- **Status**: complete",
+            (self.plan_dir / "session-1.md").read_text(encoding="utf-8"),
         )
 
 

@@ -2997,7 +2997,9 @@ class MultiRepositoryPreflightTests(unittest.TestCase):
         self.assertEqual("repository-root", findings[0].category)
         self.assertIn("SVC", findings[0].message)
 
-    def test_uninspectable_undeclared_repository_is_non_blocking(self) -> None:
+    def test_uninspectable_undeclared_repository_produces_no_finding(
+        self,
+    ) -> None:
         sibling = self.workspace_root / "undeclared-broken"
         (sibling / ".git").mkdir(parents=True)
 
@@ -3010,14 +3012,53 @@ class MultiRepositoryPreflightTests(unittest.TestCase):
             report.ok,
             msg=[(f.category, f.severity, f.message) for f in report.findings],
         )
-        diagnostics = [
+        self.assertEqual(
+            [],
+            [
+                (finding.category, finding.severity, finding.message)
+                for finding in report.findings
+                if "undeclared-broken"
+                in f"{finding.message}\n{finding.path}\n{finding.detail}"
+            ],
+        )
+
+    def test_undeclared_breakage_is_ignored_while_registered_still_fails(
+        self,
+    ) -> None:
+        sibling = self.workspace_root / "undeclared-broken"
+        (sibling / ".git").mkdir(parents=True)
+        unavailable = {
+            "git": True,
+            "unavailable": {"reason": "git-command-failed"},
+        }
+        with mock.patch.object(
+            preflight.repository_evidence,
+            "capture_repository_fingerprint",
+            side_effect=[unavailable, {"git": True}],
+        ):
+            report = preflight.run_preflight(
+                self.plan_dir,
+                cwd=self.workspace_root,
+            )
+
+        findings = [
             finding
             for finding in report.findings
-            if "undeclared workspace repository inventory" in finding.message
+            if "evidence is unavailable" in finding.message
         ]
-        self.assertEqual(1, len(diagnostics))
-        self.assertEqual("green", diagnostics[0].severity)
-        self.assertIn("undeclared-broken", diagnostics[0].detail)
+        self.assertEqual(1, len(findings))
+        self.assertEqual("red", findings[0].severity)
+        self.assertEqual("repository-root", findings[0].category)
+        self.assertIn("SVC", findings[0].message)
+        self.assertEqual(
+            [],
+            [
+                (finding.category, finding.severity, finding.message)
+                for finding in report.findings
+                if "undeclared-broken"
+                in f"{finding.message}\n{finding.path}\n{finding.detail}"
+            ],
+        )
 
     def test_commit_mode_requires_every_registered_tree_clean(self) -> None:
         (self.repositories["OAK"] / "dirty.txt").write_text(

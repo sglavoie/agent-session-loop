@@ -1357,7 +1357,6 @@ def ensure_plan_metadata(
     cwd: str | Path,
     *,
     defer_registered_binding: bool = False,
-    workspace_inventory_excludes: Iterable[str] | None = None,
 ) -> Path:
     """Persist prepare's workspace without silently rebinding an existing plan."""
     canonical_cwd = canonicalize_path(cwd)
@@ -1373,10 +1372,6 @@ def ensure_plan_metadata(
 
     metadata = plans.load_plan_metadata(plan_dir)
     if registry is None:
-        if workspace_inventory_excludes is not None:
-            raise PlanError(
-                "workspace inventory exclusions require a registered plan"
-            )
         if metadata is not None and (
             not isinstance(metadata, plans.PlanMetadata)
             or canonicalize_path(metadata.cwd) != canonical_cwd
@@ -1400,24 +1395,10 @@ def ensure_plan_metadata(
         raise PlanError("prepare workspace does not match stored plan metadata")
     if metadata is None and defer_registered_binding:
         return plans.plan_metadata_path(plan_dir)
-    raw_inventory_excludes = (
-        metadata.workspace_inventory_excludes
-        if workspace_inventory_excludes is None
-        and isinstance(metadata, plans.WorkspacePlanMetadata)
-        else tuple(workspace_inventory_excludes or ())
-    )
-    try:
-        inventory_excludes = workspaces.normalize_workspace_inventory_excludes(
-            raw_inventory_excludes,
-            registry,
-        )
-    except workspaces.WorkspaceError as error:
-        raise PlanError(str(error)) from error
     return plans.save_workspace_plan_metadata(
         plan_dir,
         workspace.root,
         registry.digest,
-        inventory_excludes,
     )
 
 
@@ -2528,8 +2509,6 @@ def _format_resume_command(
     review_harness: str | None,
     review_harness_model: str | None,
     rebind_workspace: bool = False,
-    workspace_inventory_excludes: tuple[str, ...] | None = None,
-    clear_workspace_inventory_excludes: bool = False,
 ) -> str:
     argv = [
         "asl",
@@ -2545,10 +2524,6 @@ def _format_resume_command(
     ]
     if rebind_workspace:
         argv.append("--rebind-workspace")
-    for excluded in workspace_inventory_excludes or ():
-        argv.extend(["--workspace-inventory-exclude", excluded])
-    if clear_workspace_inventory_excludes:
-        argv.append("--clear-workspace-inventory-excludes")
     if harness_model:
         argv.extend(["--harness-model", harness_model])
     if review_harness:
@@ -2563,7 +2538,6 @@ def _workspace_rebind_summary(
     registry: workspaces.RepositoryRegistry,
     *,
     resolved: workspaces.ResolvedWorkspace | None = None,
-    inventory_excludes: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Return a credential-free workspace binding projection for prepare JSON."""
     canonical_root = canonicalize_path(workspace_root)
@@ -2592,7 +2566,6 @@ def _workspace_rebind_summary(
         "workspace_root": str(canonical_root),
         "registry_digest": registry.digest,
         "repositories": repositories,
-        "workspace_inventory_excludes": list(inventory_excludes),
     }
 
 
@@ -2719,7 +2692,6 @@ def _prepare_workspace_rebind(
     unsafe_bypass: bool,
     validator_timeout: int | None,
     state_dir: str | Path | None,
-    workspace_inventory_excludes: tuple[str, ...],
 ) -> PrepareResult:
     """Rebuild workspace-dependent preparation evidence off-disk, then publish."""
     plan_dir = canonicalize_path(plan_dir_value)
@@ -2737,7 +2709,6 @@ def _prepare_workspace_rebind(
         old_workspace = _workspace_rebind_summary(
             metadata.workspace_root,
             registry,
-            inventory_excludes=metadata.workspace_inventory_excludes,
         )
     elif isinstance(metadata, plans.PlanMetadata):
         # A plan that grew a registry after it was bound in legacy mode: the
@@ -2751,11 +2722,7 @@ def _prepare_workspace_rebind(
     else:
         raise PlanError("--rebind-workspace requires an existing workspace binding")
 
-    unresolved_new_workspace = _workspace_rebind_summary(
-        cwd,
-        registry,
-        inventory_excludes=workspace_inventory_excludes,
-    )
+    unresolved_new_workspace = _workspace_rebind_summary(cwd, registry)
     lock_info = state.inspect_lock_info(plan_dir, state_dir)
     if lock_info is not None and lock_info.active:
         raise _WorkspaceRebindConcurrencyError(
@@ -2774,7 +2741,6 @@ def _prepare_workspace_rebind(
         review_harness=review_harness,
         review_harness_model=review_harness_model,
         rebind_workspace=True,
-        workspace_inventory_excludes=workspace_inventory_excludes,
     )
     try:
         resolved_workspace = workspaces.resolve_workspace(cwd, registry)
@@ -2792,7 +2758,6 @@ def _prepare_workspace_rebind(
         cwd,
         registry,
         resolved=resolved_workspace,
-        inventory_excludes=workspace_inventory_excludes,
     )
 
     try:
@@ -2834,7 +2799,6 @@ def _prepare_workspace_rebind(
                         staged_plan_dir,
                         resolved_workspace.root,
                         registry.digest,
-                        workspace_inventory_excludes,
                     )
                 except (OSError, PlanError) as error:
                     return _workspace_rebind_failure(
@@ -3033,8 +2997,6 @@ def prepare_plan(
     validator_timeout: int | None = None,
     state_dir: str | Path | None = None,
     rebind_workspace: bool = False,
-    workspace_inventory_excludes: tuple[str, ...] | None = None,
-    clear_workspace_inventory_excludes: bool = False,
 ) -> PrepareResult:
     """Run the full preparation pipeline for one source plan (or resume one).
 
@@ -3054,11 +3016,6 @@ def prepare_plan(
     pipeline whose successful artifacts publish through one transaction.
     """
     canonical_cwd = canonicalize_path(cwd)
-    if workspace_inventory_excludes is not None and clear_workspace_inventory_excludes:
-        raise PlanError(
-            "--workspace-inventory-exclude cannot be combined with "
-            "--clear-workspace-inventory-excludes"
-        )
     if validator is None:
         selected_validator: ValidatorRunner = lambda packet: _launch_validator(
             validator_harness,
@@ -3075,15 +3032,6 @@ def prepare_plan(
         registry = plans.read_repository_registry(resume_plan_dir)
         if registry is None:
             raise PlanError("--rebind-workspace requires a registered plan")
-        try:
-            rebind_inventory_excludes = (
-                workspaces.normalize_workspace_inventory_excludes(
-                    workspace_inventory_excludes or (),
-                    registry,
-                )
-            )
-        except workspaces.WorkspaceError as error:
-            raise PlanError(str(error)) from error
         return _prepare_workspace_rebind(
             resume_plan_dir,
             cwd=canonical_cwd,
@@ -3097,7 +3045,6 @@ def prepare_plan(
             unsafe_bypass=unsafe_bypass,
             validator_timeout=validator_timeout,
             state_dir=state_dir,
-            workspace_inventory_excludes=rebind_inventory_excludes,
         )
 
     steps: list[PrepareStep] = []
@@ -3201,37 +3148,10 @@ def prepare_plan(
             verification_context.root,
             verification_context.workspace.registry,
             resolved=verification_context.workspace,
-            inventory_excludes=(
-                verification_context.workspace_inventory_excludes
-            ),
         )
         if verification_context.workspace is not None
         else None
     )
-
-    requested_inventory_excludes: tuple[str, ...] | None
-    if clear_workspace_inventory_excludes:
-        if verification_context.workspace is None:
-            raise PlanError(
-                "workspace inventory exclusions require a registered plan"
-            )
-        requested_inventory_excludes = ()
-    elif workspace_inventory_excludes is not None:
-        if verification_context.workspace is None:
-            raise PlanError(
-                "workspace inventory exclusions require a registered plan"
-            )
-        try:
-            requested_inventory_excludes = (
-                workspaces.normalize_workspace_inventory_excludes(
-                    workspace_inventory_excludes,
-                    verification_context.workspace.registry,
-                )
-            )
-        except workspaces.WorkspaceError as error:
-            raise PlanError(str(error)) from error
-    else:
-        requested_inventory_excludes = None
 
     resume_command = _format_resume_command(
         plan_dir,
@@ -3241,14 +3161,6 @@ def prepare_plan(
         validator_harness=validator_harness,
         review_harness=review_harness,
         review_harness_model=review_harness_model,
-        workspace_inventory_excludes=(
-            requested_inventory_excludes
-            if workspace_inventory_excludes is not None
-            else None
-        ),
-        clear_workspace_inventory_excludes=(
-            clear_workspace_inventory_excludes
-        ),
     )
 
     def _failed(
@@ -3334,11 +3246,7 @@ def prepare_plan(
         )
     )
 
-    ensure_plan_metadata(
-        plan_dir,
-        canonical_cwd,
-        workspace_inventory_excludes=requested_inventory_excludes,
-    )
+    ensure_plan_metadata(plan_dir, canonical_cwd)
     verification_context = VerificationContext.from_plan(
         plan_dir, canonical_cwd
     )
@@ -3347,9 +3255,6 @@ def prepare_plan(
             verification_context.root,
             verification_context.workspace.registry,
             resolved=verification_context.workspace,
-            inventory_excludes=(
-                verification_context.workspace_inventory_excludes
-            ),
         )
         if verification_context.workspace is not None
         else None
@@ -3553,12 +3458,6 @@ def prepare_from_args(args: Any) -> int:
     validator_harness = args.validator_harness
     review_harness = args.review_harness
     review_harness_model = args.review_harness_model
-    workspace_inventory_excludes = getattr(
-        args, "workspace_inventory_exclude", None
-    )
-    clear_workspace_inventory_excludes = bool(
-        getattr(args, "clear_workspace_inventory_excludes", False)
-    )
     common_fields = {
         "plan": plan_arg,
         "cwd": str(args.cwd),
@@ -3569,10 +3468,6 @@ def prepare_from_args(args: Any) -> int:
         "review_harness_model": review_harness_model,
         "resume": resume,
         "base_dir": str(args.base_dir) if args.base_dir else None,
-        "workspace_inventory_excludes": workspace_inventory_excludes,
-        "clear_workspace_inventory_excludes": (
-            clear_workspace_inventory_excludes
-        ),
     }
     if rebind_workspace:
         common_fields["rebind_workspace"] = True
@@ -3656,14 +3551,6 @@ def prepare_from_args(args: Any) -> int:
             unsafe_bypass=getattr(args, "unsafe_bypass", True),
             state_dir=getattr(args, "state_dir", None),
             rebind_workspace=rebind_workspace,
-            workspace_inventory_excludes=(
-                tuple(workspace_inventory_excludes)
-                if workspace_inventory_excludes is not None
-                else None
-            ),
-            clear_workspace_inventory_excludes=(
-                clear_workspace_inventory_excludes
-            ),
         )
     except _WorkspaceRebindConcurrencyError as error:
         return _emit_input_error(

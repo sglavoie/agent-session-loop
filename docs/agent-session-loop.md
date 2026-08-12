@@ -413,8 +413,8 @@ asl verify PLAN_DIR --session ID [--cwd ROOT] [--artifact-dir DIR] [--json]
 asl contract-check PLAN_DIR [--session ID] [--cwd ROOT] [--json]
 asl baseline PLAN_DIR [--cwd ROOT] [--per-check-timeout SECONDS] [--total-timeout SECONDS] [--json]
 asl split (--plan-file PATH | --inline-stdin) --contracts-file PATH [--cwd ROOT] [--base-dir DIR] [--skill-prefix auto|codex|claude|copilot] [--analysis-file PATH] [--json]
-asl prepare PLAN.md [--cwd ROOT] [--workspace-inventory-exclude PATH ...|--clear-workspace-inventory-excludes] [--harness codex|claude|copilot] [--harness-model MODEL] [--validator-harness H] [--review-harness H] [--review-harness-model MODEL] [--base-dir DIR] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--json]
-asl prepare --resume PLAN_DIR [--workspace-inventory-exclude PATH ...|--clear-workspace-inventory-excludes] [--rebind-workspace ...]
+asl prepare PLAN.md [--cwd ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--validator-harness H] [--review-harness H] [--review-harness-model MODEL] [--base-dir DIR] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--json]
+asl prepare --resume PLAN_DIR [--rebind-workspace ...]
 asl expand-ingest PLAN_DIR --batch-file PATH [--json]
 asl register-repositories (PLAN_DIR | --plan-file PATH | --inline-stdin) [--cwd ROOT] [--output PATH] [--state-dir DIR] [--json]
 asl status PLAN_DIR_OR_ID [--state-dir DIR] [--json]
@@ -1059,41 +1059,39 @@ and the `Alias:path/to/file` handoff/reference rule. They reveal
 absolute resolved roots only for aliases in that session's read scope. The
 harness invocation cwd is the bound workspace root. Before every registered
 implementation turn (including reply and resolution resumes), the runner
-recursively inventories all registered and unregistered Git worktrees beneath
-that root and captures fail-closed content evidence. It repeats the capture
-before handling any harness result. Changes pass only for repositories named
+captures fail-closed content evidence for exactly the repositories the plan
+registered, and for no others. It repeats the capture before handling any
+harness result. Changes pass only for repositories named
 by the session's write aliases; an empty write set makes the turn read-only.
-Changes in read-only, out-of-read-scope, or unregistered repositories and all
-added or removed repositories pause as `workspace-write-scope-violation`.
-Unavailable inventory or fingerprint evidence pauses as
+Changes in read-only or out-of-read-scope registered repositories and all
+added or removed registered repositories pause as
+`workspace-write-scope-violation`. Unavailable repository or fingerprint
+evidence pauses as
 `workspace-write-guard-unavailable`. Both post-turn failures retain repository
 contents, restore the handoff to pending, record qualified evidence, and run
 before verification or commit. Scope violations require a durable scope repair
-and fresh expansion/preflight before continuing. The workspace write guard
-prunes only subtrees listed in the plan's persisted
-`workspace_inventory_excludes` policy before traversal. This policy is for
-uninspectable non-repository workspace content; it cannot name, contain, or be
-contained by a registered repository. Other inventory and Git errors remain
-fail-closed. Guard evidence reports these paths as `inventory_excluded`,
-separately from repo-content `excluded` paths supplied by
-`--review-guard-exclude`. The guard shares the
-`--review-guard-include-ignored` setting with the review mutation
+and fresh expansion/preflight before continuing. A worktree the plan never
+registered is outside the guard's domain: another `asl run` process working in
+a sibling checkout beneath the same root cannot pause this run, and no
+exclusion policy is needed to keep it quiet. Git errors inside a registered
+repository remain fail-closed. Repo-content `excluded` paths supplied by
+`--review-guard-exclude` apply to every registered repository. The guard
+shares the `--review-guard-include-ignored` setting with the review mutation
 guard. By default it cannot observe untracked paths hidden by Git ignore rules,
 including ignored cache/build output; tracked changes remain observable. Pass
 `--review-guard-include-ignored` to include ignored untracked paths in both
-guards. Generated registered reviews use the same workspace-wide guard with
-all declared aliases readable and an empty write set, so any registered or
-unregistered repository mutation is retained, qualified, and rejected before
-the turn outcome can take precedence.
+guards. Generated registered reviews use the same registry-scoped guard with
+all declared aliases readable and an empty write set, so any mutation of a
+registered repository is retained, qualified, and rejected before the turn
+outcome can take precedence.
 
 Registered repository paths may not traverse symlinks, even when the target is
 another directory beneath the workspace; resolution rejects such a binding
 before preparation can make it runnable. Preflight captures every declared
 repository directly and fails closed with its alias when that evidence is
-unavailable. Its recursive inventory of undeclared siblings is supplementary:
-an uninspectable sibling or an exceeded inventory bound is reported as a
-non-blocking diagnostic and does not prevent a valid registered plan from
-remaining loop-ready.
+unavailable. It does not look at undeclared siblings at all: an uninspectable
+checkout the plan never registered produces no finding, blocking or otherwise,
+and cannot stop a valid registered plan from remaining loop-ready.
 
 `--review-harness codex|claude|copilot` appends a final pure-critique session
 after the implementation sessions finish. The flag must differ from the startup
@@ -1142,9 +1140,9 @@ check carries `repo`; aliases are validated against the plan registry. Readers
 continue to accept historical artifact v2 and generated review marker versions.
 
 Legacy review turns use the single-repository mutation guard described below.
-Registered review turns use the generic workspace vector guard across every
-registered and unregistered worktree; any content or topology change pauses
-with repository-qualified evidence and restores the generated review handoff
+Registered review turns use the generic vector guard across every repository
+the plan registered; any content or topology change pauses with
+repository-qualified evidence and restores the generated review handoff
 to pending while retaining the mutation. The post-turn
 comparison runs ahead of every other result branch, so a review turn that also
 timed out, exited nonzero, was interrupted, emitted `RUNNER_PAUSE`, or left the
@@ -1218,9 +1216,8 @@ pending).
 repo-relative files or directories the guard ignores — use it for a *tracked*
 path a harness rewrites on its own, or an untracked one git does not already
 ignore. In a registered workspace each value applies independently to every
-discovered repository, including unregistered worktrees; this is the escape
-hatch for an unsupported nested untracked repository or other node reported by
-an undeclared checkout. Values must be
+registered repository; a checkout the plan never registered needs no exclusion
+because no guard captures it. Values must be
 repo-relative and free of `..` segments; anything else is an `input-error`
 before the first turn. Each value is matched literally against the repository
 root — `*`, `?`, and `[]` are ordinary filename characters, not wildcards — and
@@ -1599,7 +1596,7 @@ Command Behavior.
 For a registered plan, `--cwd` is the non-Git-capable common workspace root.
 Preflight resolves the ordered registry once; validates child existence,
 directory type, exact Git top-level, origin, disjointness, scope, and contract
-locations; inventories all workspace Git roots fail-closed; and reuses the
+locations; captures every registered repository fail-closed; and reuses the
 resolved repository context for command and baseline checks. Commit mode
 requires every registered tree to be clean. Registered JSON adds
 `workspace_root`, `registry_digest`, and ordered `repositories` summaries;
@@ -2145,25 +2142,6 @@ relative `published_files` list on success. Failed rebind guidance retains
 the distinct `workspace-rebind-failed` reason and include `workspace_rebind`
 context rather than being classified as input errors.
 
-A registered plan may persist explicit workspace inventory exclusions during
-preparation:
-
-```text
-asl prepare PLAN_DIR --resume --cwd WORKSPACE_ROOT \
-  --workspace-inventory-exclude 'Library/Application Support/Protected.dv'
-```
-
-The option is repeatable. Supplied values replace the existing policy after
-being normalized as literal workspace-relative POSIX paths, sorted, and
-deduplicated. Absolute paths, `..` traversal, the workspace root, and any path
-that equals, contains, or sits beneath a registered repository are rejected.
-ASL never discovers or adds these exclusions automatically. An ordinary
-same-root resume with neither policy option preserves the stored list;
-`--clear-workspace-inventory-excludes` empties it. A deliberate workspace
-rebind clears the old list unless replacement exclusions are supplied, because
-the paths belong to the old root. The two policy options are mutually
-exclusive.
-
 `asl expand-ingest` is the standalone ingestion step `prepare` runs internally,
 exposed for the manual `session-expand` path: it reads one validator-output
 batch file (`--batch-file`), parses it fail-closed, merges it into the stored
@@ -2190,18 +2168,19 @@ schema:
 }
 ```
 
-Registered plans write version 3 with `workspace_root`, the ordered registry
-digest, and `workspace_inventory_excludes`. Version 2 remains readable and is
-interpreted as an empty exclusion list; the next prepare metadata write uses
-version 3. On ordinary resume, `prepare` refuses to rebind when the stored root,
+Registered plans write version 3 with `workspace_root` and the ordered registry
+digest. Version 2 remains readable; the next prepare metadata write uses
+version 3. Version 3 files written before the retired workspace inventory
+policy was removed still carry a `workspace_inventory_excludes` array; the
+loader accepts a well-formed one and discards it. On ordinary resume, `prepare`
+refuses to rebind when the stored root,
 digest, or validation aggregate differs from the resolved workspace; the
 explicit staged replacement flow above is the only exception. `asl run` also
 refuses a root or registry mismatch and never rewrites an existing binding;
 only an unbound legacy plan is backfilled on a non-dry run. `--dry-run` does not
 write metadata. Registered runner state and JSON surfaces add `workspace_root`,
-`registry_digest`, ordered resolved `repositories`, and
-`workspace_inventory_excludes`, while retaining `cwd` as the workspace-root
-compatibility alias. Resume validates those persisted workspace fields against
+`registry_digest`, and ordered resolved `repositories`, while retaining `cwd` as
+the workspace-root compatibility alias. Resume validates those persisted workspace fields against
 the current durable binding before continuing. The
 metadata file is not plan prose and is excluded from both the plan content and
 stable readiness hashes.
@@ -3301,6 +3280,13 @@ Common pause reasons:
   missing, or derived status ledgers could not be synced.
 - `unknown-status`: a handoff status is not `pending` or `complete`.
 - `lock-contention`: another active runner holds the plan lock.
+- `workspace-repository-contention`: another live run — or a lock recorded on
+  another host — already claims a repository this plan's registry declares. The
+  run refuses at startup, before any harness launches, because two agents in one
+  working tree corrupt each other and no guard can attribute the writes
+  afterwards. `details.repository_contention` names each conflicting plan
+  directory, pid, host, run id, start time, and the shared repositories. There
+  is no override flag: stop the other run, or narrow this plan's registry.
 - `runner-pause`: the harness output contained a `RUNNER_PAUSE:` or paused
   runner status signal.
 - `no-pending-but-incomplete`: no pending session exists, but not all sessions
@@ -3362,7 +3348,9 @@ Common pause reasons:
   marker) but the run was started without `--review-harness`. Rerun with
   `--review-harness codex|claude|copilot`.
 - `workspace-write-scope-violation`: a registered implementation turn changed
-  a repository outside its exact write aliases, or added/removed a worktree.
+  a registered repository outside its exact write aliases, or added/removed
+  one. A write in a repository the plan never registered is not a violation,
+  so a concurrent `asl run` in a sibling checkout cannot raise this pause.
   The guard compares against the fresh pre-turn vector, so unchanged dirty
   baseline content is not adopted as a turn mutation. The pause retains all
   content, returns the selected handoff to pending, precedes the turn's own
@@ -3378,14 +3366,13 @@ Common pause reasons:
   bounded, credential-redacted intent report; its `git_roots` names the
   conflicting repositories. The fix is to declare the registry and per-session
   scopes, never to widen `--cwd` to their common parent.
-- `workspace-write-guard-unavailable`: the runner could not inventory the
-  workspace or capture complete Git evidence before or after a registered
+- `workspace-write-guard-unavailable`: the runner could not capture complete
+  Git evidence for a registered repository before or after a registered
   implementation turn. A before-turn failure spends no harness turn. An
   after-turn failure retains content, returns the handoff to pending, and
   outranks every harness-result branch because the runner cannot prove scope.
-  An operator may prepare an explicit persisted inventory exclusion only when
-  the failing subtree is outside every registered repository; all other
-  evidence failures stay fail-closed.
+  Every such failure names a registered repository and stays fail-closed;
+  repair that repository's evidence rather than excluding anything.
 - `review-mutated-worktree`: the review harness changed repo content outside
   the plan directory. The pre/post fingerprint covers the working tree's
   `HEAD`, tracked diff, the separate `--cached` (index) diff — so staging a

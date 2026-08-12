@@ -23,6 +23,7 @@ __all__ = [
     "RepositoryEvidenceError",
     "RepositoryFingerprint",
     "WorkspaceSnapshot",
+    "capture_registered_snapshot",
     "capture_repository_fingerprint",
     "capture_workspace_snapshot",
     "compare_repository_fingerprints",
@@ -1311,9 +1312,10 @@ def capture_workspace_snapshot(
     """Capture an ordered root-to-evidence vector for every nested worktree.
 
     ``exclude`` overrides exclusions for named workspace-relative roots, while
-    ``default_exclude`` applies to every other discovered repository. This lets
-    callers give unregistered worktrees the same operator-controlled escape
-    hatch as registered repositories without knowing their roots in advance.
+    ``default_exclude`` applies to every other discovered repository, so a
+    caller can state one content policy for roots discovery has yet to find.
+    Guards capture the plan's registry through ``capture_registered_snapshot``
+    instead; this walking capture describes a whole workspace tree.
     """
     root = Path(os.path.realpath(os.path.abspath(os.fspath(workspace_root))))
     git_token = _GIT_RUNNER.set(_run_git_fn)
@@ -1340,6 +1342,90 @@ def capture_workspace_snapshot(
                 # Discovery proved this was a worktree moments ago. Losing that
                 # fact during capture is a race, not evidence that the guard no
                 # longer applies.
+                fingerprint = {
+                    "git": True,
+                    "unavailable": {
+                        "reason": "repository-disappeared",
+                        "argv": ["rev-parse", "--show-toplevel"],
+                    },
+                }
+            snapshot[relative] = fingerprint
+        return snapshot
+    finally:
+        _GIT_BYTES_RUNNER.reset(bytes_token)
+        _GIT_RUNNER.reset(git_token)
+
+
+def _is_exact_worktree_root(repository: Path) -> bool:
+    """Report whether Git calls `repository` its own worktree root."""
+    try:
+        result = _run_git(repository, ["rev-parse", "--show-toplevel"])
+    except Exception:
+        return False
+    if result.returncode != 0:
+        return False
+    reported = result.stdout.strip()
+    if not reported:
+        return False
+    try:
+        resolved = Path(os.path.realpath(os.path.abspath(reported)))
+    except OSError:
+        return False
+    return resolved == repository
+
+
+def capture_registered_snapshot(
+    workspace_root: str | Path,
+    plan_dir: str | Path,
+    repositories: Sequence[str],
+    *,
+    exclude: Mapping[str, tuple[str, ...]] | None = None,
+    default_exclude: tuple[str, ...] = (),
+    include_ignored: bool = False,
+    _run_git_fn: GitRunner | None = None,
+    _run_git_bytes_fn: GitBytesRunner | None = None,
+) -> WorkspaceSnapshot:
+    """Capture an evidence vector for exactly the registered repositories.
+
+    ``repositories`` holds workspace-relative POSIX paths as the plan registry
+    declares them, and the snapshot keys repeat them verbatim. Nothing else
+    under `workspace_root` is inspected, so repositories the plan never
+    registered cannot enter the evidence at all.
+
+    A registered path that is missing, is not a directory, or no longer names
+    the node it reaches is omitted rather than recorded, so
+    :func:`compare_workspace_snapshots` reports it as removed. A path that
+    exists but is no longer its own Git worktree root carries the same
+    fail-closed ``repository-disappeared`` evidence
+    :func:`capture_workspace_snapshot` uses, because losing that fact is a race
+    rather than proof the guard stopped applying.
+    """
+    root = Path(os.path.realpath(os.path.abspath(os.fspath(workspace_root))))
+    git_token = _GIT_RUNNER.set(_run_git_fn)
+    bytes_token = _GIT_BYTES_RUNNER.set(_run_git_bytes_fn)
+    try:
+        snapshot: WorkspaceSnapshot = OrderedDict()
+        per_repository_excludes = exclude or {}
+        for relative in sorted(dict.fromkeys(repositories)):
+            repository = Path(os.path.abspath(root / relative))
+            # Canonicalizing here would fingerprint whatever a replacement
+            # symlink points at under the declared key, so a checkout swapped
+            # for a link to an identical sibling would compare as unchanged.
+            if os.path.realpath(repository) != os.fspath(repository):
+                continue
+            if not repository.is_dir():
+                continue
+            fingerprint: RepositoryFingerprint = {"git": False}
+            if _is_exact_worktree_root(repository):
+                fingerprint = _capture_review_repo_fingerprint(
+                    repository,
+                    plan_dir,
+                    exclude=tuple(
+                        per_repository_excludes.get(relative, default_exclude)
+                    ),
+                    include_ignored=include_ignored,
+                )
+            if not fingerprint.get("git"):
                 fingerprint = {
                     "git": True,
                     "unavailable": {

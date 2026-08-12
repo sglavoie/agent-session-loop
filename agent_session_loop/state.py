@@ -8,7 +8,7 @@ record.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -159,6 +159,19 @@ class LockInfo:
         """
         hostname = self.owner_hostname
         return hostname is not None and hostname != socket.gethostname()
+
+    @property
+    def repository_roots(self) -> tuple[str, ...]:
+        """Repository roots this lock claims, or ``()`` for a version 1 lock.
+
+        Empty means "declares nothing", not "claims nothing": a version 1 lock
+        predates the claim, so a caller comparing registries cannot read it as
+        proof that the owning run touches no repository of its own.
+        """
+        raw_roots = self.raw.get("repositories")
+        if not isinstance(raw_roots, list):
+            return ()
+        return tuple(root for root in raw_roots if isinstance(root, str) and root)
 
 
 @dataclass(frozen=True)
@@ -645,11 +658,40 @@ def inspect_lock_info(
     )
 
 
+def _sorted_repository_roots(repository_roots: Sequence[str]) -> list[str]:
+    return sorted({str(root) for root in repository_roots if str(root)})
+
+
+def _publish_lock_payload(lock_path: Path, payload: dict[str, Any]) -> None:
+    """Make the lock file appear complete or not appear at all.
+
+    Creating the file and then writing it leaves a window where a reader sees
+    zero bytes, which classifies as unparseable garbage — the same shape a
+    takeover treats as reclaimable. Renaming a fully written sibling onto the
+    path removes the window: the only states an unsynchronized reader can
+    observe are absent and complete.
+    """
+    temp_path = lock_path.with_name(f"{lock_path.name}.{os.getpid()}.tmp")
+    try:
+        fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as lock_file:
+            json.dump(payload, lock_file, sort_keys=True)
+            lock_file.write("\n")
+        os.replace(temp_path, lock_path)
+    except BaseException:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def acquire_lock(
     plan_dir: str | Path,
     state_dir: str | Path | None = None,
     *,
     owner: str = "agent-session-loop",
+    repository_roots: Sequence[str] = (),
 ) -> LockInfo:
     """Create a lock for a plan, removing stale locks this host can judge.
 
@@ -658,12 +700,17 @@ def acquire_lock(
 
     The takeover and the publication run under the per-plan mutex, so a reader
     that proved the old lock dead cannot unlink the replacement published here.
+
+    ``repository_roots`` are the repositories this run claims. They are written
+    with the lock rather than with the run's first ``state.json``, because
+    everything between those two writes is time in which another starter can
+    see a live run and no claim at all.
     """
     snapshot = plans.inspect_plan(plan_dir)
     lock_path = lock_path_for_plan(snapshot.plan_dir, state_dir)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "version": 1,
+        "version": 2,
         "owner": owner,
         "pid": os.getpid(),
         # A pid only identifies a process on the host that recorded it, so
@@ -672,6 +719,7 @@ def acquire_lock(
         "plan_dir": str(snapshot.plan_dir),
         "plan_path_hash": snapshot.path_hash,
         "plan_hash": snapshot.plan_hash,
+        "repositories": _sorted_repository_roots(repository_roots),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -680,26 +728,19 @@ def acquire_lock(
         if not held:
             raise _lock_mutex_error(lock_path)
         for _attempt in range(2):
-            try:
-                fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-            except FileExistsError as error:
-                # Reading with `reclaim=False`: the mutex is already held, and
-                # this path does its own proven removal below.
-                existing = _read_lock_path(
-                    lock_path, snapshot.plan_dir, reclaim=False
-                )
-                if (
-                    existing is not None
-                    and existing.stale
-                    and not existing.foreign_host
-                ):
+            # Reading with `reclaim=False`: the mutex is already held, and this
+            # path does its own proven removal below. Every mutator of the lock
+            # path holds that mutex, so this read is as exclusive as the
+            # `O_EXCL` create it replaces, and it leaves the publication free
+            # to land the payload in a single rename.
+            existing = _read_lock_path(lock_path, snapshot.plan_dir, reclaim=False)
+            if existing is not None:
+                if existing.stale and not existing.foreign_host:
                     stolen_lock = existing
                     try:
                         lock_path.unlink()
                     except FileNotFoundError:
                         pass
-                    continue
-                if existing is None:
                     continue
                 if existing.foreign_host:
                     raise StateError(
@@ -707,14 +748,12 @@ def acquire_lock(
                         f"{existing.owner_hostname} at {lock_path}; this host cannot "
                         "tell whether that runner is alive — clear it with "
                         "'asl unlock' once you have confirmed it is gone"
-                    ) from error
+                    )
                 raise StateError(
                     f"plan is locked by pid {existing.pid} at {lock_path}"
-                ) from error
+                )
 
-            with os.fdopen(fd, "w", encoding="utf-8") as lock_file:
-                json.dump(payload, lock_file, sort_keys=True)
-                lock_file.write("\n")
+            _publish_lock_payload(lock_path, payload)
             lock_info = _read_lock_path(lock_path, snapshot.plan_dir, reclaim=False)
             if lock_info is None:
                 raise StateError(f"created lock disappeared: {lock_path}")
@@ -1044,9 +1083,6 @@ def _runner_state_payload(
                 "workspace_root": raw.get("workspace_root"),
                 "registry_digest": raw.get("registry_digest"),
                 "repositories": raw.get("repositories"),
-                "workspace_inventory_excludes": raw.get(
-                    "workspace_inventory_excludes"
-                ),
             }
             if raw.get("workspace_root") is not None
             else {}
@@ -1769,12 +1805,7 @@ def status_payload(
     )
     workspace_fields = {
         key: runner_state.get(key)
-        for key in (
-            "workspace_root",
-            "registry_digest",
-            "repositories",
-            "workspace_inventory_excludes",
-        )
+        for key in ("workspace_root", "registry_digest", "repositories")
         if runner_state.get(key) is not None
     }
     if not workspace_fields:
@@ -1787,9 +1818,6 @@ def status_payload(
             workspace_fields = {
                 "workspace_root": str(workspace_root),
                 "registry_digest": metadata.registry_digest,
-                "workspace_inventory_excludes": list(
-                    metadata.workspace_inventory_excludes
-                ),
                 "repositories": [
                     {
                         "alias": repository.alias,
@@ -1804,18 +1832,6 @@ def status_payload(
                     for repository in registry.repositories
                 ],
             }
-    elif "workspace_inventory_excludes" not in workspace_fields:
-        metadata = plans.load_plan_metadata(snapshot.plan_dir)
-        if (
-            isinstance(metadata, plans.WorkspacePlanMetadata)
-            and workspace_fields.get("workspace_root")
-            == metadata.workspace_root
-            and workspace_fields.get("registry_digest")
-            == metadata.registry_digest
-        ):
-            workspace_fields["workspace_inventory_excludes"] = list(
-                metadata.workspace_inventory_excludes
-            )
     cwd_fields = (
         {"cwd": workspace_fields["workspace_root"]}
         if workspace_fields

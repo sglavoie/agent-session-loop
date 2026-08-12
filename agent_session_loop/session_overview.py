@@ -88,6 +88,10 @@ class RunningRow:
     workspace_root: str | None = None
     registry_digest: str | None = None
     repositories: tuple[dict[str, Any], ...] = ()
+    # Claimed by the lock itself, so it is readable before the run has written
+    # any state; empty for a version 1 lock, which declares nothing.
+    repository_roots: tuple[str, ...] = ()
+    hostname: str | None = None
 
 
 @dataclass(frozen=True)
@@ -156,6 +160,11 @@ class StaleLock:
     pid: int | None
     reason: str
     created_at: str
+    # A lock recorded on another host is stale only in the sense that nothing
+    # here can judge its owner, so it still holds whatever it claims.
+    foreign_host: bool = False
+    repository_roots: tuple[str, ...] = ()
+    hostname: str | None = None
 
 
 @dataclass(frozen=True)
@@ -634,6 +643,8 @@ def _build_running_row(
         workspace_root=workspace_root,
         registry_digest=registry_digest,
         repositories=repositories,
+        repository_roots=lock_info.repository_roots,
+        hostname=lock_info.owner_hostname,
     )
 
 
@@ -747,6 +758,9 @@ def scan_running_rows(
                     pid=lock_info.pid,
                     reason=lock_info.reason,
                     created_at=lock_info.created_at,
+                    foreign_host=lock_info.foreign_host,
+                    repository_roots=lock_info.repository_roots,
+                    hostname=lock_info.owner_hostname,
                 )
             )
             continue

@@ -309,11 +309,23 @@ def _state_still_describes(pending: PendingRun) -> bool:
     return isinstance(parsed, dict) and parsed.get("run_id") == pending.run_id
 
 
-def _inventory_excludes(pending: PendingRun) -> tuple[str, ...]:
-    recorded = pending.run_config.get("workspace_inventory_excludes")
+def _registered_repositories(pending: PendingRun) -> tuple[tuple[str, ...], bool]:
+    """Rebuild the dead run's registry, and say whether it recorded one at all.
+
+    A record that names no repositories is a legacy single-repository run,
+    whose one repository is the workspace root it recorded. That root is often
+    not a worktree root, so the audit is told those paths are synthesized and
+    must not be graded as strictly as a registry the run actually declared.
+    """
+    recorded = pending.run_config.get("repositories")
     if not isinstance(recorded, Sequence) or isinstance(recorded, (str, bytes)):
-        return ()
-    return tuple(str(item) for item in recorded)
+        return (".",), False
+    paths = tuple(
+        str(entry["path"])
+        for entry in recorded
+        if isinstance(entry, Mapping) and entry.get("path")
+    )
+    return (paths, True) if paths else ((".",), False)
 
 
 def process_run(
@@ -365,6 +377,7 @@ def process_run(
             return result(
                 OUTCOME_UNUSABLE, reason=REASON_AUDIT_CONFIG_UNAVAILABLE
             )
+        repositories, registry_declared = _registered_repositories(pending)
         summary = supervisor_audit.audit_terminal_run(
             plan,
             run_id=pending.run_id,
@@ -373,7 +386,8 @@ def process_run(
             plan_dir=pending.plan_dir,
             workspace_root=pending.workspace_root,
             ledger_state_dir=state_dir,
-            inventory_excludes=_inventory_excludes(pending),
+            repositories=repositories,
+            registry_declared=registry_declared,
             **audit_kwargs,
         )
     return result(

@@ -5709,7 +5709,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
 
         self.assertEqual(os.getpid(), lock_info.pid)
         self.assertEqual(socket.gethostname(), lock_info.raw["hostname"])
-        self.assertEqual(1, lock_info.raw["version"])
+        self.assertEqual(2, lock_info.raw["version"])
 
         persisted = self.persisted_state()
         self.assertEqual(state.ABANDONED_REASON, persisted["reason"])
@@ -5898,6 +5898,115 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.assertEqual(state.ABANDONED_REASON, persisted["reason"])
         self.assertNotIn("assurance_pending", persisted)
         self.assertEqual(1, len(read_jsonl(self.events_path)))
+
+
+class LockRepositoryClaimTests(unittest.TestCase):
+    """The registry a lock publishes, and the window in which it publishes it."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        self.plan_dir = root / "plan"
+        self.state_dir = root / "state"
+        write_plan(self.plan_dir, ("pending",))
+        self.lock_path = state.lock_path_for_plan(self.plan_dir, self.state_dir)
+
+    def read_payload(self) -> dict[str, object]:
+        return json.loads(self.lock_path.read_text(encoding="utf-8"))
+
+    def test_lock_publishes_a_version_two_sorted_repository_claim(self) -> None:
+        lock_info = state.acquire_lock(
+            self.plan_dir,
+            self.state_dir,
+            repository_roots=("/w/zebra", "/w/apple", "/w/zebra"),
+        )
+        self.addCleanup(state.release_lock, self.plan_dir, self.state_dir)
+
+        payload = self.read_payload()
+        self.assertEqual(2, payload["version"])
+        self.assertEqual(["/w/apple", "/w/zebra"], payload["repositories"])
+        self.assertEqual(("/w/apple", "/w/zebra"), lock_info.repository_roots)
+
+    def test_lock_without_a_claim_publishes_an_empty_registry(self) -> None:
+        lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+        self.addCleanup(state.release_lock, self.plan_dir, self.state_dir)
+
+        self.assertEqual([], self.read_payload()["repositories"])
+        self.assertEqual((), lock_info.repository_roots)
+
+    def test_version_one_lock_declares_no_repositories(self) -> None:
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self.lock_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "owner": "agent-session-loop",
+                    "pid": os.getpid(),
+                    "hostname": socket.gethostname(),
+                    "plan_dir": str(plans.canonicalize_path(self.plan_dir)),
+                    "created_at": "2026-06-19T12:00:00+00:00",
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+
+        lock_info = state.read_lock_info(self.plan_dir, self.state_dir)
+
+        assert lock_info is not None
+        self.assertTrue(lock_info.active)
+        self.assertEqual((), lock_info.repository_roots)
+
+    def test_a_malformed_repositories_value_reads_as_no_claim(self) -> None:
+        raw = {"version": 2, "repositories": {"a": "/w/apple"}}
+        lock_info = state.LockInfo(
+            path=self.lock_path,
+            pid=os.getpid(),
+            plan_dir=str(self.plan_dir),
+            created_at="2026-06-19T12:00:00+00:00",
+            stale=False,
+            reason="active",
+            raw=raw,
+        )
+
+        self.assertEqual((), lock_info.repository_roots)
+
+    def test_a_reader_never_observes_a_partial_lock(self) -> None:
+        observed: list[state.LockInfo | None] = []
+        real_replace = os.replace
+
+        def observing_replace(src: str | Path, dst: str | Path) -> None:
+            # Whatever a concurrent reader sees at the lock path, it sees it
+            # here: everything before this call happened on the sibling.
+            observed.append(state.read_lock_info(self.plan_dir, self.state_dir))
+            real_replace(src, dst)
+
+        with mock.patch.object(state.os, "replace", observing_replace):
+            state.acquire_lock(
+                self.plan_dir, self.state_dir, repository_roots=("/w/apple",)
+            )
+        self.addCleanup(state.release_lock, self.plan_dir, self.state_dir)
+
+        self.assertEqual([None], observed)
+        self.assertEqual(["/w/apple"], self.read_payload()["repositories"])
+        self.assertEqual(
+            [state.LOCK_FILE_NAME, state.LOCK_MUTEX_FILE_NAME],
+            sorted(path.name for path in self.lock_path.parent.iterdir()),
+        )
+
+    def test_a_failed_payload_write_leaves_no_lock_at_the_lock_path(self) -> None:
+        with mock.patch.object(
+            state.json, "dump", side_effect=RuntimeError("disk gave up")
+        ):
+            with self.assertRaises(RuntimeError):
+                state.acquire_lock(self.plan_dir, self.state_dir)
+
+        self.assertFalse(self.lock_path.exists())
+        self.assertEqual(
+            [state.LOCK_MUTEX_FILE_NAME],
+            sorted(path.name for path in self.lock_path.parent.iterdir()),
+        )
 
 
 def _plan_state_dir(state_root: Path, plan_dir: Path) -> Path:

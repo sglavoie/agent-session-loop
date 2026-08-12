@@ -130,6 +130,10 @@ PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION = (
 # spelled literally here so the low-level event vocabulary keeps no dependency
 # on the resolution engine.
 PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED = "repository-registry-required"
+# Another live run already claims a repository this run's registry declares.
+# Two agents writing one working tree cannot be made safe, so the overlap is
+# refused at startup rather than explained by a guard afterwards.
+PAUSE_REASON_WORKSPACE_REPOSITORY_CONTENTION = "workspace-repository-contention"
 
 # The subset of harness-failure categories that a supervisor may safely retry
 # by relaunching the same session. Quota, authentication, invalid-model, and
@@ -167,6 +171,7 @@ PAUSE_REASONS: tuple[str, ...] = (
     PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
     PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
     PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED,
+    PAUSE_REASON_WORKSPACE_REPOSITORY_CONTENTION,
     PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
     PAUSE_REASON_QUOTA_EXHAUSTED,
     PAUSE_REASON_AUTH_FAILED,

@@ -23,8 +23,9 @@ environment findings; ``run_preflight`` aggregates both into a single
 report. Registered plans additionally resolve one workspace context, validate
 and capture fail-closed evidence for every declared checkout beneath the
 non-Git-capable common parent, and reuse those roots for command, baseline,
-and commit-mode checks. Recursive undeclared-checkout inventory is diagnostic
-only, so an unrelated broken sibling cannot block an otherwise valid plan.
+and commit-mode checks. Undeclared checkouts beneath the workspace root are
+never inspected, so an unrelated broken sibling cannot block an otherwise
+valid plan.
 Session 13 attaches machine-readable repair hints at the report
 level — every finding resolves to a stable :class:`RepairHint` via
 :func:`repair_hint_for_finding`, and runtime pause reasons emitted by
@@ -52,7 +53,6 @@ from typing import Any, Literal
 from . import (
     baseline,
     harnesses,
-    plans,
     progress_repair,
     repository_evidence,
     repository_intent,
@@ -573,8 +573,8 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
         check_id="repository-root.repair",
         severity_hint="red",
         message=(
-            "Restore the registered checkout as an exact Git worktree root and "
-            "make workspace repository inventory readable."
+            "Restore the registered checkout as an exact Git worktree root "
+            "with readable Git evidence."
         ),
         question_template=(
             "A registered repository root is invalid ({message}). Should I "
@@ -1429,51 +1429,14 @@ def _resolve_preflight_context(
             ),
         ), summaries
 
-    inventory_excludes: tuple[str, ...] = ()
-    try:
-        metadata = load_plan_metadata(plan_dir)
-    except PlanError as error:
-        return None, (
-            _finding(
-                "red",
-                "workspace-root",
-                str(error),
-                path=str(plan_dir / plans.PLAN_METADATA_FILE_NAME),
-            ),
-        ), summaries
-    if (
-        isinstance(metadata, plans.WorkspacePlanMetadata)
-        and metadata.workspace_root == str(workspace.root)
-        and metadata.registry_digest == registry.digest
-    ):
-        try:
-            inventory_excludes = (
-                workspaces.normalize_workspace_inventory_excludes(
-                    metadata.workspace_inventory_excludes,
-                    registry,
-                )
-            )
-        except workspaces.WorkspaceError as error:
-            return None, (
-                _finding(
-                    "red",
-                    "workspace-root",
-                    str(error),
-                    path=str(plan_dir / plans.PLAN_METADATA_FILE_NAME),
-                ),
-            ), summaries
-
-    context = VerificationContext.resolved_workspace(
-        workspace,
-        inventory_excludes=inventory_excludes,
-    )
+    context = VerificationContext.resolved_workspace(workspace)
     summaries = _repository_summaries(registry, context)
     inventory_findings: list[PreflightFinding] = []
     registered_by_path = {
         repository.repository.path: repository
         for repository in workspace.repositories
     }
-    for relative_path, repository in registered_by_path.items():
+    for repository in registered_by_path.values():
         fingerprint = repository_evidence.capture_repository_fingerprint(
             repository.root,
             plan_dir,
@@ -1495,55 +1458,6 @@ def _resolve_preflight_context(
                 )
             )
 
-    try:
-        inventory = repository_evidence.capture_workspace_snapshot(
-            canonical_cwd,
-            plan_dir,
-            inventory_excludes=inventory_excludes,
-        )
-    except repository_evidence.RepositoryEvidenceError as error:
-        inventory_findings.append(
-            _finding(
-                "green",
-                "repository-root",
-                "undeclared workspace repository inventory is incomplete; "
-                "registered repositories were checked directly",
-                path=str(canonical_cwd),
-                detail=str(error),
-            )
-        )
-        return context, tuple(inventory_findings), summaries
-
-    for relative_path, fingerprint in inventory.items():
-        if relative_path in registered_by_path:
-            continue
-        unavailable = repository_evidence.repository_evidence_unavailable(
-            fingerprint
-        )
-        if unavailable is not None or not fingerprint.get("git"):
-            inventory_findings.append(
-                _finding(
-                    "green",
-                    "repository-root",
-                    "repository evidence is unavailable for undeclared "
-                    f"repository {relative_path}",
-                    path=str(canonical_cwd / relative_path),
-                    detail=str(
-                        unavailable or {"reason": "repository-unavailable"}
-                    ),
-                )
-            )
-    if inventory_excludes:
-        inventory_findings.append(
-            _finding(
-                "green",
-                "repository-root",
-                "workspace repository inventory uses operator-approved "
-                "subtree exclusions",
-                path=str(canonical_cwd),
-                detail=", ".join(inventory_excludes),
-            )
-        )
     return context, tuple(inventory_findings), summaries
 
 
@@ -3736,11 +3650,6 @@ def _preflight_payload_fields(
                 "repositories": [
                     asdict(repository) for repository in report.repositories
                 ],
-                "workspace_inventory_excludes": list(
-                    report.verification_context.workspace_inventory_excludes
-                    if report.verification_context is not None
-                    else ()
-                ),
             }
         )
     footprint_payload = _repository_footprint_payload(report)

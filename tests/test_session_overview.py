@@ -334,6 +334,93 @@ class ScanRunningRowsTests(unittest.TestCase):
             self.assertEqual(DEAD_PID, stale.pid)
             self.assertIn(str(DEAD_PID), stale.reason)
 
+    def test_running_row_carries_the_locks_repository_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "state"
+            plan_dir = Path(tmp) / "plans" / "claimed"
+            plan_dir.mkdir(parents=True)
+            _make_plan_state_dir(
+                state_root,
+                plan_dir,
+                lock={
+                    "version": 2,
+                    "pid": os.getpid(),
+                    "repositories": ["/w/apple", "/w/zebra"],
+                },
+                state_payload={"active_turn": _active_turn_payload()},
+            )
+
+            rows, _, _ = session_overview.scan_running_rows(state_root)
+
+            self.assertEqual(1, len(rows))
+            self.assertEqual(("/w/apple", "/w/zebra"), rows[0].repository_roots)
+
+    def test_running_row_from_a_v1_lock_claims_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "state"
+            plan_dir = Path(tmp) / "plans" / "legacy-claim"
+            plan_dir.mkdir(parents=True)
+            _make_plan_state_dir(
+                state_root,
+                plan_dir,
+                lock={"version": 1, "pid": os.getpid()},
+                state_payload={"active_turn": _active_turn_payload()},
+            )
+
+            rows, _, _ = session_overview.scan_running_rows(state_root)
+
+            self.assertEqual(1, len(rows))
+            self.assertEqual((), rows[0].repository_roots)
+
+    def test_foreign_host_stale_lock_keeps_its_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "state"
+            plan_dir = Path(tmp) / "plans" / "elsewhere"
+            plan_dir.mkdir(parents=True)
+            _make_plan_state_dir(
+                state_root,
+                plan_dir,
+                lock={
+                    "version": 2,
+                    "pid": os.getpid(),
+                    "hostname": "some-other-host",
+                    "repositories": ["/w/apple"],
+                },
+            )
+
+            rows, stale_locks, _ = session_overview.scan_running_rows(state_root)
+
+            self.assertEqual((), rows)
+            self.assertEqual(1, len(stale_locks))
+            stale = stale_locks[0]
+            self.assertTrue(stale.foreign_host)
+            self.assertEqual(("/w/apple",), stale.repository_roots)
+
+    def test_dead_local_lock_is_stale_without_being_foreign(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp) / "state"
+            plan_dir = Path(tmp) / "plans" / "dead-local"
+            plan_dir.mkdir(parents=True)
+            _make_plan_state_dir(
+                state_root,
+                plan_dir,
+                lock={
+                    "version": 2,
+                    "pid": DEAD_PID,
+                    "repositories": ["/w/apple"],
+                },
+            )
+
+            with mock.patch.object(
+                state, "is_pid_running", side_effect=_force_pid_alive
+            ):
+                _, stale_locks, _ = session_overview.scan_running_rows(state_root)
+
+            self.assertEqual(1, len(stale_locks))
+            stale = stale_locks[0]
+            self.assertFalse(stale.foreign_host)
+            self.assertEqual(("/w/apple",), stale.repository_roots)
+
     def test_orphan_active_turn_without_lock_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_root = Path(tmp) / "state"

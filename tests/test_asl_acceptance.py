@@ -558,6 +558,7 @@ class AdvisoryVerdictTests(unittest.TestCase):
             state_dir=state_dir,
             plan_dir=plan_dir,
             workspace_root=workspace,
+            repositories=("app",),
             ledger_state_dir=state_dir.parent,
             durable=False,
             now=lambda: FIXED_CLOCK,

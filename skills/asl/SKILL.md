@@ -331,16 +331,15 @@ not generic retry candidates:
 
 - `workspace-write-scope-violation` retains the worker's changes, restores the
   handoff to pending, and reports qualified `Alias:path` evidence for writes in
-  read-only, out-of-scope, or unregistered repositories and for added/removed
-  worktrees. Do not revert or adopt that delta; the operator must restore it or
+  read-only or out-of-scope registered repositories and for added/removed
+  registered repositories. A repository the plan never registered cannot raise
+  it. Do not revert or adopt that delta; the operator must restore it or
   durably repair scope and refresh preparation evidence.
 - `workspace-write-guard-unavailable` means complete Git evidence could not be
-  captured. Treat it fail-closed and surface the affected aliases/topology. If
-  the failure is an uninspectable subtree outside every registered repository,
-  the operator may persist that exact subtree with `asl prepare PLAN_DIR
-  --resume --cwd WORKSPACE_ROOT --workspace-inventory-exclude PATH`, then
-  preflight and resume. Never add an inventory exclusion automatically, and do
-  not use one for missing Git evidence inside a registered repository.
+  captured for a registered repository. Treat it fail-closed and surface the
+  affected aliases/topology. The failing node always sits inside the registry,
+  so the repair is that repository's own evidence — there is no exclusion that
+  waives it.
 - `commit-failed` may represent a partial multi-repository commit group. Read
   the unresolved group, successful per-repository SHAs, failed alias, remaining
   aliases, and qualified artifacts from status/recovery output. Never undo or

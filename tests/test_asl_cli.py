@@ -3967,9 +3967,12 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                 plan_dir,
                 workspace_root,
                 registry.digest,
-                ("Library/Protected.dv",),
             )
-            metadata_before = (plan_dir / plans.PLAN_METADATA_FILE_NAME).read_bytes()
+            metadata_path = plan_dir / plans.PLAN_METADATA_FILE_NAME
+            legacy = json.loads(metadata_path.read_text(encoding="utf-8"))
+            legacy["workspace_inventory_excludes"] = ["Library/Protected.dv"]
+            metadata_path.write_text(json.dumps(legacy), encoding="utf-8")
+            metadata_before = metadata_path.read_bytes()
             completed = self._run(
                 plan_dir, workspace_root, tmp_dir / "state", "--dry-run"
             )
@@ -3983,13 +3986,9 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             self.assertEqual(root, payload["workspace_root"])
             self.assertEqual(root, payload["run_config"]["workspace_root"])
             self.assertEqual(root, payload["planned"]["workspace_root"])
-            self.assertEqual(
-                ["Library/Protected.dv"],
-                payload["workspace_inventory_excludes"],
-            )
-            self.assertEqual(
-                ["Library/Protected.dv"],
-                payload["run_config"]["workspace_inventory_excludes"],
+            self.assertNotIn("workspace_inventory_excludes", payload)
+            self.assertNotIn(
+                "workspace_inventory_excludes", payload["run_config"]
             )
             invocation = payload["planned"]["invocation"]
             self.assertEqual(root, invocation["cwd"])
@@ -4775,28 +4774,24 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                 )
             )
 
-    def test_multi_repo_scope_violation_can_be_repaired_by_inventory_exclusion(
+    def test_multi_repo_scope_violation_repair_may_register_a_repository(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             state_dir = tmp_dir / "state"
-            workspace_root, plan_dir, _repositories = self._workspace_plan(tmp_dir)
-            unrelated = workspace_root / "unrelated-active-work"
-            unrelated.mkdir()
-            subprocess.run(
-                ["git", "init", "-q", str(unrelated)],
-                check=True,
-                text=True,
-                capture_output=True,
-            )
+            workspace_root, plan_dir, repositories = self._workspace_plan(tmp_dir)
+            newly_registered = DEFAULT_MULTI_REPO_SPECS[2]
+            init_multi_repo_workspace(workspace_root, (newly_registered,))
             first = self._run(
                 plan_dir,
                 workspace_root,
                 state_dir,
                 env_overrides=self._fake_codex_env(
                     tmp_dir,
-                    FAKE_CODEX_MUTATION_PATH=str(unrelated / "concurrent.txt"),
+                    FAKE_CODEX_MUTATION_PATH=str(
+                        repositories["OAK"] / "README.md"
+                    ),
                 ),
             )
             self.assertEqual(1, first.returncode, first.stderr)
@@ -4804,21 +4799,40 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                 "workspace_write_guard"
             ]
             self.assertEqual(
-                "unregistered-repository",
+                "outside-read-scope",
                 first_guard["violations"][0]["kind"],
             )
 
+            manifest_path = plan_dir / "manifest.md"
+            alias, relative_path, origin = newly_registered
+            manifest_path.write_text(
+                manifest_path.read_text(encoding="utf-8")
+                + f"| {alias} | {relative_path} | {origin} |\n",
+                encoding="utf-8",
+            )
+            session_path = plan_dir / "session-1.md"
+            session_path.write_text(
+                session_path.read_text(encoding="utf-8")
+                .replace(
+                    "**Reads repositories**: SVC",
+                    "**Reads repositories**: SVC, OAK",
+                )
+                .replace(
+                    "**Writes repositories**: SVC",
+                    "**Writes repositories**: SVC, OAK",
+                ),
+                encoding="utf-8",
+            )
+            (plan_dir / "session-1.expand.md").write_text(
+                "# Refreshed expansion after registering a repository\n",
+                encoding="utf-8",
+            )
             registry = plans.read_repository_registry(plan_dir)
             assert registry is not None
             plans.save_workspace_plan_metadata(
                 plan_dir,
                 workspace_root,
                 registry.digest,
-                ("unrelated-active-work",),
-            )
-            (plan_dir / "session-1.expand.md").write_text(
-                "# Refreshed expansion after inventory exclusion\n",
-                encoding="utf-8",
             )
             plans.write_readiness_metadata(
                 plan_dir,
@@ -4857,10 +4871,10 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                 "workspace_write_guard"
             ]
             self.assertEqual(
-                ["unrelated-active-work"],
-                repair_guard["repair_inventory_excluded"],
+                [relative_path],
+                repair_guard["repair_registry_delta"],
             )
-            self.assertEqual([], repair_guard["removed"])
+            self.assertEqual([], repair_guard["added"])
 
     def test_multi_repo_read_only_session_has_empty_write_set(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4924,7 +4938,9 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             self.assertEqual([], guard["write_aliases"])
             self.assertEqual({}, guard["changed"])
 
-    def test_multi_repo_real_turn_rejects_new_unregistered_repository(self) -> None:
+    def test_multi_repo_real_turn_ignores_new_unregistered_repository(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             workspace_root, plan_dir, _repositories = self._workspace_plan(tmp_dir)
@@ -4940,11 +4956,11 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                 ),
             )
 
-            self.assertEqual(1, completed.returncode, completed.stderr)
+            self.assertEqual(0, completed.returncode, completed.stderr)
             payload = json.loads(completed.stdout)
             guard = payload["turns"][0]["workspace_write_guard"]
-            self.assertEqual(["surprise-repository"], guard["added"])
-            self.assertEqual("repository-added", guard["violations"][0]["kind"])
+            self.assertTrue(guard["passed"])
+            self.assertEqual([], guard["added"])
             self.assertTrue((added / ".git").is_dir())
 
     def test_multi_repo_real_turn_rejects_removed_repository(self) -> None:
@@ -5133,8 +5149,11 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                 plan_dir,
                 workspace_root,
                 registry.digest,
-                ("Library/Protected.dv",),
             )
+            metadata_path = plan_dir / plans.PLAN_METADATA_FILE_NAME
+            legacy = json.loads(metadata_path.read_text(encoding="utf-8"))
+            legacy["workspace_inventory_excludes"] = ["Library/Protected.dv"]
+            metadata_path.write_text(json.dumps(legacy), encoding="utf-8")
             before_run = state.status_payload(
                 plans.inspect_plan(plan_dir),
                 state_dir,
@@ -5143,10 +5162,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                 str(workspace_root.resolve()), before_run["workspace_root"]
             )
             self.assertEqual(before_run["workspace_root"], before_run["cwd"])
-            self.assertEqual(
-                ["Library/Protected.dv"],
-                before_run["workspace_inventory_excludes"],
-            )
+            self.assertNotIn("workspace_inventory_excludes", before_run)
             run_completed = self._run(
                 plan_dir, workspace_root, state_dir, "--dry-run"
             )
@@ -5174,10 +5190,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                 payload["workspace_root"],
                 payload["runner_state"]["workspace_root"],
             )
-            self.assertEqual(
-                ["Library/Protected.dv"],
-                payload["workspace_inventory_excludes"],
-            )
+            self.assertNotIn("workspace_inventory_excludes", payload)
             self.assertEqual(
                 ["SVC", "OAK"],
                 [repository["alias"] for repository in payload["repositories"]],

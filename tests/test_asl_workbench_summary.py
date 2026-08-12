@@ -95,8 +95,11 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 plan_dir,
                 workspace_root,
                 registry.digest,
-                ("Library/Protected.dv",),
             )
+            metadata_path = plan_dir / plans.PLAN_METADATA_FILE_NAME
+            legacy = json.loads(metadata_path.read_text(encoding="utf-8"))
+            legacy["workspace_inventory_excludes"] = ["Library/Protected.dv"]
+            metadata_path.write_text(json.dumps(legacy), encoding="utf-8")
 
             payload = workbench.build_workbench_summary(
                 _discovered(plan_dir), state_dir=tmp_path / "state"
@@ -105,10 +108,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             self.assertEqual(str(workspace_root.resolve()), payload["cwd"])
             self.assertEqual(str(workspace_root.resolve()), payload["workspace_root"])
             self.assertEqual(2, payload["repository_count"])
-            self.assertEqual(
-                ["Library/Protected.dv"],
-                payload["workspace_inventory_excludes"],
-            )
+            self.assertNotIn("workspace_inventory_excludes", payload)
             self.assertEqual(["SVC", "OAK"], [row["alias"] for row in payload["repositories"]])
 
     def test_invalid_when_plan_directory_does_not_exist(self) -> None:

@@ -1317,19 +1317,11 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
                 "OAK:untracked.txt",
             ),
             (
-                "repository-added",
-                lambda _repos, case_workspace, _unregistered: {
-                    "path": str(case_workspace / "surprise"),
-                    "action": "git-init",
-                },
-                "repository-added",
-            ),
-            (
                 "repository-removed",
-                lambda _repos, _workspace, case_unregistered: {
-                    "path": str(case_unregistered),
+                lambda repos, case_workspace, _unregistered: {
+                    "path": str(repos["Kiln"]),
                     "action": "rename",
-                    "destination": str(case_unregistered.parent.parent / "retained"),
+                    "destination": str(case_workspace.parent / "retained"),
                 },
                 "repository-removed",
             ),
@@ -1372,11 +1364,7 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
                     self.assertIn(Path(str(mutation["path"])).name, status)
                 else:
                     self.assertEqual(expected, guard["violations"][0]["kind"])
-                    retained = (
-                        Path(str(mutation["path"]))
-                        if expected == "repository-added"
-                        else Path(str(mutation["destination"]))
-                    )
+                    retained = Path(str(mutation["destination"]))
                     self.assertTrue((retained / ".git").is_dir())
                 self.assertIn(
                     "- **Status**: pending",

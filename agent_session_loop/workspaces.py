@@ -7,7 +7,7 @@ credential-free, filesystem-verified workspace binding.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -75,42 +75,6 @@ def normalize_repository_path(path: str | PurePosixPath) -> str:
     if normalized in {"", "."}:
         raise WorkspaceError("repository path must identify a workspace descendant")
     return normalized
-
-
-def normalize_workspace_inventory_excludes(
-    paths: Iterable[str | PurePosixPath],
-    registry: "RepositoryRegistry | None" = None,
-) -> tuple[str, ...]:
-    """Return canonical workspace-relative subtrees excluded from inventory.
-
-    Inventory exclusions are an explicit, auditable blind spot in the
-    workspace-wide unregistered-repository guard.  They therefore use the
-    same portable path grammar as repository declarations, and may never
-    overlap a registered repository in either direction.
-    """
-    normalized: set[str] = set()
-    for path in paths:
-        try:
-            candidate = normalize_repository_path(path)
-        except WorkspaceError as error:
-            raise WorkspaceError(
-                f"workspace inventory exclusion is invalid: {error}"
-            ) from error
-        normalized.add(candidate)
-
-    if registry is not None:
-        for candidate in sorted(normalized):
-            for repository in registry:
-                if (
-                    candidate == repository.path
-                    or _path_contains(candidate, repository.path)
-                    or _path_contains(repository.path, candidate)
-                ):
-                    raise WorkspaceError(
-                        "workspace inventory exclusion must not overlap "
-                        f"registered repository {repository.alias}: {candidate}"
-                    )
-    return tuple(sorted(normalized))
 
 
 def _canonicalize_origin(origin: str, *, prefer_scp: bool) -> str:

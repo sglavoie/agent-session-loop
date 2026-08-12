@@ -360,6 +360,75 @@ def _mutation_comparison(comparison: Mapping[str, Any]) -> dict[str, Any] | None
     }
 
 
+# The checks below decide when registered evidence is too thin to accept a
+# verdict over. A path omitted from the before snapshot refuses the audit
+# outright, and so does a repository the plan really registered whose evidence
+# is already unavailable there: unavailable on both sides compares as unchanged,
+# so an auditor could write inside it and still be graded clean. A path whose
+# evidence stops or starts being probeable across the turn refuses the verdict
+# after the turn. Evidence unavailable on both sides is tolerated only for a
+# synthesized registry, because a plan that registered nothing names its run
+# root as its one repository even when that root is not a worktree root, and
+# refusing there would withdraw every such run's audit permanently.
+def _evidence_unprobeable(fingerprint: Mapping[str, Any] | None) -> bool:
+    """Report whether one snapshot entry carries no comparable content evidence."""
+    if not fingerprint:
+        return True
+    return (
+        not fingerprint.get("git")
+        or repository_evidence.repository_evidence_unavailable(fingerprint) is not None
+    )
+
+
+def _snapshot_omits_registered(
+    snapshot: Mapping[str, Mapping[str, Any]],
+    repositories: Sequence[str],
+) -> bool:
+    """Report whether the snapshot has no entry for some registered repository.
+
+    ``capture_registered_snapshot`` omits a declared path that is missing, is
+    not a directory, or no longer names the node it declares. An omitted path
+    contributes nothing to the comparison, so a repository omitted from both
+    sides — a checkout that was already a symlink when the audit started — would
+    otherwise compare as silently unchanged.
+    """
+    return any(relative not in snapshot for relative in repositories)
+
+
+def _registered_evidence_unavailable(
+    snapshot: Mapping[str, Mapping[str, Any]],
+    repositories: Sequence[str],
+) -> bool:
+    """Report whether some registered repository is present but unfingerprintable.
+
+    ``capture_registered_snapshot`` records fail-closed ``repository-disappeared``
+    evidence for a declared directory that is not its own Git worktree root, so a
+    checkout swapped for a plain directory keeps its key while carrying nothing
+    the comparison can read.
+    """
+    return any(
+        _evidence_unprobeable(snapshot.get(relative)) for relative in repositories
+    )
+
+
+def _observability_changed(
+    before: Mapping[str, Mapping[str, Any]],
+    after: Mapping[str, Mapping[str, Any]],
+    repositories: Sequence[str],
+) -> bool:
+    """Report whether any registered repository stopped or started being probeable.
+
+    A repository the audit could fingerprint before the turn and not after it
+    (or the reverse) has no comparable evidence, which is silence rather than
+    proof of an intact boundary.
+    """
+    return any(
+        _evidence_unprobeable(before.get(relative))
+        != _evidence_unprobeable(after.get(relative))
+        for relative in repositories
+    )
+
+
 def _record_mutation_issue(
     mutation: Mapping[str, Any],
     *,
@@ -428,19 +497,35 @@ def run_restricted_audit(
     workspace_root: Path | str,
     plan_dir: Path | str,
     prompt: str,
+    repositories: Sequence[str],
+    registry_declared: bool = True,
     state_dir: Path | str | None = None,
     timeout: int | None = None,
-    inventory_excludes: Sequence[str] = (),
     stream_callback: harnesses.StreamCallback | None = None,
     now: Callable[[], datetime] | None = None,
     _run_harness_fn: Callable[..., harnesses.HarnessResult] | None = None,
 ) -> AuditAttemptResult:
     """Run one audit attempt under the read-only profile, guarded by evidence.
 
-    The workspace is fingerprinted on both sides of the turn. Any change makes
-    the audit unavailable regardless of what the auditor reported, because a
-    read-only turn that mutated anything has already disproved the boundary its
-    verdict depends on.
+    ``repositories`` holds the workspace-relative paths the plan registered,
+    and they alone are fingerprinted on both sides of the turn. Any change to
+    one of them makes the audit unavailable regardless of what the auditor
+    reported, because a read-only turn that mutated a registered repository has
+    already disproved the boundary its verdict depends on. A registered
+    repository the snapshot cannot name at all, one whose evidence is already
+    unavailable before the turn, or one whose evidence stops (or starts) being
+    probeable across the turn, makes the audit unavailable for the same reason:
+    silence about a repository is not proof that it was left alone, and no
+    verdict may be accepted over it. Worktrees the plan never registered are
+    outside that boundary: concurrent runs write to them routinely, so reading
+    their state as this auditor's doing would report a breach nobody committed.
+
+    ``registry_declared`` is the caller's statement that ``repositories`` came
+    from a plan registry. A run whose plan registered nothing is audited over a
+    synthesized run root instead, which is routinely not a worktree root and
+    therefore carries permanently unavailable evidence; passing ``False`` keeps
+    that compatibility case auditable without extending the same tolerance to a
+    repository a plan really registered.
     """
     run_dir = Path(run_dir)
     unavailable = harnesses.audit_read_only_unavailable_reason(role.harness)
@@ -450,15 +535,27 @@ def run_restricted_audit(
         )
 
     def snapshot() -> repository_evidence.WorkspaceSnapshot:
-        return repository_evidence.capture_workspace_snapshot(
+        return repository_evidence.capture_registered_snapshot(
             workspace_root,
             plan_dir,
-            inventory_excludes=tuple(inventory_excludes),
+            tuple(repositories),
         )
 
     try:
         before = snapshot()
     except repository_evidence.RepositoryEvidenceError:
+        return AuditAttemptResult(
+            outcome="unavailable",
+            state="unavailable",
+            reason=REASON_WORKSPACE_EVIDENCE_UNAVAILABLE,
+        )
+    if _snapshot_omits_registered(before, repositories) or (
+        registry_declared and _registered_evidence_unavailable(before, repositories)
+    ):
+        # Nothing is launched: a registered path the snapshot cannot name, or
+        # one it can name but not fingerprint, contributes the same evidence to
+        # both sides of the comparison, so the boundary check would pass over it
+        # no matter what the auditor did.
         return AuditAttemptResult(
             outcome="unavailable",
             state="unavailable",
@@ -521,6 +618,16 @@ def run_restricted_audit(
                 state_dir=state_dir,
                 observed_at=clock.isoformat(),
             ),
+        )
+
+    if _observability_changed(before, after, repositories):
+        return AuditAttemptResult(
+            outcome="unavailable",
+            state="unavailable",
+            reason=REASON_WORKSPACE_EVIDENCE_UNAVAILABLE,
+            argv=argv,
+            returncode=result.returncode,
+            last_message=result.last_message,
         )
 
     if result.interrupted:
@@ -1384,9 +1491,6 @@ def _registry_section(
         ),
         "digest": state_payload.get("registry_digest"),
         "repositories": collector.redact(list(repositories)),
-        "inventory_excludes": collector.redact(
-            list(state_payload.get("workspace_inventory_excludes") or ())
-        ),
     }
 
 
@@ -3670,9 +3774,10 @@ def run_agent_audit(
     run_dir: Path | str,
     workspace_root: Path | str,
     plan_dir: Path | str,
+    repositories: Sequence[str],
+    registry_declared: bool = True,
     state_dir: Path | str | None = None,
     results: Sequence[assurance_models.DeterministicResult] | None = None,
-    inventory_excludes: Sequence[str] = (),
     stream_callback: harnesses.StreamCallback | None = None,
     durable: bool = True,
     now: Callable[[], datetime] | None = None,
@@ -3706,8 +3811,9 @@ def run_agent_audit(
             workspace_root=workspace_root,
             plan_dir=plan_dir,
             prompt=prompt,
+            repositories=repositories,
+            registry_declared=registry_declared,
             state_dir=state_dir,
-            inventory_excludes=inventory_excludes,
             stream_callback=stream_callback,
             now=now,
             _run_harness_fn=_run_harness_fn,
@@ -3861,10 +3967,11 @@ def audit_terminal_run(
     state_dir: Path | str,
     plan_dir: Path | str,
     workspace_root: Path | str,
+    repositories: Sequence[str],
+    registry_declared: bool = True,
     ledger_state_dir: Path | str | None = None,
     state_payload: Mapping[str, Any] | None = None,
     workspace_snapshot: Mapping[str, Any] | None = None,
-    inventory_excludes: Sequence[str] = (),
     stream_callback: harnesses.StreamCallback | None = None,
     durable: bool = True,
     now: Callable[[], datetime] | None = None,
@@ -3949,8 +4056,9 @@ def audit_terminal_run(
                 run_dir=run_dir,
                 workspace_root=workspace_root,
                 plan_dir=plan_dir,
+                repositories=repositories,
+                registry_declared=registry_declared,
                 state_dir=ledger_state_dir,
-                inventory_excludes=inventory_excludes,
                 stream_callback=stream_callback,
                 durable=durable,
                 now=now,

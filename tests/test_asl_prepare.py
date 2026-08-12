@@ -970,32 +970,8 @@ class PrepareCliTests(unittest.TestCase):
         self.assertIsNone(args.review_harness_model)
         self.assertIsNone(args.base_dir)
         self.assertIsNone(args.state_dir)
-        self.assertIsNone(args.workspace_inventory_exclude)
-        self.assertFalse(args.clear_workspace_inventory_excludes)
         self.assertTrue(args.unsafe_bypass)
         self.assertFalse(args.json)
-
-    def test_parser_accepts_repeatable_inventory_exclusions_or_clear(self) -> None:
-        parser = cli.build_parser()
-        excluded = parser.parse_args(
-            [
-                "prepare",
-                "plan.md",
-                "--workspace-inventory-exclude",
-                "Library/Protected.dv",
-                "--workspace-inventory-exclude",
-                "Caches/Protected.dv",
-            ]
-        )
-        cleared = parser.parse_args(
-            ["prepare", "plan.md", "--clear-workspace-inventory-excludes"]
-        )
-
-        self.assertEqual(
-            ["Library/Protected.dv", "Caches/Protected.dv"],
-            excluded.workspace_inventory_exclude,
-        )
-        self.assertTrue(cleared.clear_workspace_inventory_excludes)
 
     def test_review_harness_equal_to_harness_is_input_error(self) -> None:
         source = self._write_source()
@@ -1789,7 +1765,6 @@ class PrepareEndToEndTests(unittest.TestCase):
         self.assertIsInstance(metadata, plans.WorkspacePlanMetadata)
         assert isinstance(metadata, plans.WorkspacePlanMetadata)
         self.assertEqual(3, metadata.version)
-        self.assertEqual((), metadata.workspace_inventory_excludes)
         validation = prepare.load_prepare_validation(result.plan_dir)
         assert validation is not None
         self.assertEqual(prepare.PREPARE_VALIDATION_VERSION, validation.version)
@@ -1800,77 +1775,6 @@ class PrepareEndToEndTests(unittest.TestCase):
             {str(path.resolve()) for path in repositories.values()},
             {entry["resolved_root"] for entry in result.baseline["checks"]},
         )
-
-    def test_registered_prepare_persists_replaces_and_clears_inventory_policy(
-        self,
-    ) -> None:
-        specs = DEFAULT_MULTI_REPO_SPECS[:2]
-        workspace = self.tmp_path / "workspace"
-        init_multi_repo_workspace(workspace, specs)
-        source = self._write_registered_source(specs)
-        first = self._prepare(
-            source,
-            _recording_validator([]),
-            cwd=workspace,
-            workspace_inventory_excludes=("Library/Protected.dv",),
-        )
-        self.assertTrue(first.ok, first)
-        assert first.plan_dir is not None
-
-        preserved = self._prepare(
-            None,
-            _recording_validator([]),
-            cwd=workspace,
-            resume_plan_dir=first.plan_dir,
-        )
-        self.assertTrue(preserved.ok, preserved)
-        metadata = plans.load_plan_metadata(first.plan_dir)
-        assert isinstance(metadata, plans.WorkspacePlanMetadata)
-        self.assertEqual(
-            ("Library/Protected.dv",), metadata.workspace_inventory_excludes
-        )
-
-        replaced = self._prepare(
-            None,
-            _recording_validator([]),
-            cwd=workspace,
-            resume_plan_dir=first.plan_dir,
-            workspace_inventory_excludes=("Caches/Protected.dv",),
-        )
-        self.assertTrue(replaced.ok, replaced)
-        metadata = plans.load_plan_metadata(first.plan_dir)
-        assert isinstance(metadata, plans.WorkspacePlanMetadata)
-        self.assertEqual(
-            ("Caches/Protected.dv",), metadata.workspace_inventory_excludes
-        )
-
-        cleared = self._prepare(
-            None,
-            _recording_validator([]),
-            cwd=workspace,
-            resume_plan_dir=first.plan_dir,
-            clear_workspace_inventory_excludes=True,
-        )
-        self.assertTrue(cleared.ok, cleared)
-        metadata = plans.load_plan_metadata(first.plan_dir)
-        assert isinstance(metadata, plans.WorkspacePlanMetadata)
-        self.assertEqual((), metadata.workspace_inventory_excludes)
-
-    def test_legacy_prepare_rejects_workspace_inventory_policy(self) -> None:
-        source = self._write_source()
-        result = self._prepare(source, _recording_validator([]))
-        self.assertTrue(result.ok, result)
-        assert result.plan_dir is not None
-
-        with self.assertRaisesRegex(
-            plans.PlanError, "workspace inventory exclusions require a registered plan"
-        ):
-            self._prepare(
-                None,
-                _recording_validator([]),
-                resume_plan_dir=result.plan_dir,
-                workspace_inventory_excludes=("Library/Protected.dv",),
-            )
 
     def test_registered_cached_baselines_capture_fingerprint_once(self) -> None:
         specs = DEFAULT_MULTI_REPO_SPECS[:2]

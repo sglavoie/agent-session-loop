@@ -36,7 +36,6 @@ from .workspaces import (
     Repository,
     RepositoryRegistry,
     WorkspaceError,
-    normalize_workspace_inventory_excludes,
     validate_repository_alias,
 )
 
@@ -226,24 +225,18 @@ class PlanMetadata:
 
 @dataclass(frozen=True)
 class WorkspacePlanMetadata:
-    """Durable binding and inventory policy for a registered workspace."""
+    """Durable binding for a registered workspace."""
 
     workspace_root: str
     registry_digest: str
-    workspace_inventory_excludes: tuple[str, ...] = ()
     version: int = PLAN_METADATA_V3_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, object]:
-        payload: dict[str, object] = {
+        return {
             "version": self.version,
             "workspace_root": self.workspace_root,
             "registry_digest": self.registry_digest,
         }
-        if self.version >= PLAN_METADATA_V3_SCHEMA_VERSION:
-            payload["workspace_inventory_excludes"] = list(
-                self.workspace_inventory_excludes
-            )
-        return payload
 
 
 PlanMetadataV2 = WorkspacePlanMetadata
@@ -1026,13 +1019,6 @@ def _parse_workspace_plan_metadata(
             f"expected {PLAN_METADATA_V2_SCHEMA_VERSION} or "
             f"{PLAN_METADATA_V3_SCHEMA_VERSION}"
         )
-    if (
-        version == PLAN_METADATA_V3_SCHEMA_VERSION
-        and "workspace_inventory_excludes" not in payload
-    ):
-        raise PlanError(
-            f"{path} is missing required field 'workspace_inventory_excludes'"
-        )
     workspace_root = payload.get("workspace_root")
     if not isinstance(workspace_root, str) or not workspace_root.strip():
         raise PlanError(
@@ -1058,6 +1044,8 @@ def _parse_workspace_plan_metadata(
         raise PlanError(
             f"{path} field 'registry_digest' must be a lowercase SHA-256 digest"
         )
+    # Version 3 files written before the policy was retired still carry this
+    # key; accept a well-formed value and discard it rather than churn versions.
     raw_excludes = payload.get("workspace_inventory_excludes", [])
     if not isinstance(raw_excludes, list) or not all(
         isinstance(value, str) for value in raw_excludes
@@ -1065,21 +1053,9 @@ def _parse_workspace_plan_metadata(
         raise PlanError(
             f"{path} field 'workspace_inventory_excludes' must be a string array"
         )
-    try:
-        inventory_excludes = normalize_workspace_inventory_excludes(raw_excludes)
-    except WorkspaceError as error:
-        raise PlanError(
-            f"{path} field 'workspace_inventory_excludes' is invalid: {error}"
-        ) from error
-    if list(inventory_excludes) != raw_excludes:
-        raise PlanError(
-            f"{path} field 'workspace_inventory_excludes' must be sorted, "
-            "deduplicated, and canonical"
-        )
     return WorkspacePlanMetadata(
         workspace_root=workspace_root,
         registry_digest=registry_digest,
-        workspace_inventory_excludes=inventory_excludes,
         version=version,
     )
 
@@ -1098,21 +1074,13 @@ def save_workspace_plan_metadata(
     plan_dir: str | Path,
     workspace_root: str | Path,
     registry_digest: str,
-    workspace_inventory_excludes: Iterable[str] = (),
 ) -> Path:
-    """Atomically persist a registered workspace binding and inventory policy."""
+    """Atomically persist a registered workspace binding."""
     path = plan_metadata_path(plan_dir)
     canonical_root = canonicalize_path(workspace_root)
-    try:
-        inventory_excludes = normalize_workspace_inventory_excludes(
-            workspace_inventory_excludes
-        )
-    except WorkspaceError as error:
-        raise PlanError(str(error)) from error
     metadata = WorkspacePlanMetadata(
         workspace_root=str(canonical_root),
         registry_digest=registry_digest,
-        workspace_inventory_excludes=inventory_excludes,
     )
     # Validate the digest through the same strict parser used for disk reads.
     _parse_workspace_plan_metadata(path, metadata.to_dict())

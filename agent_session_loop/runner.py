@@ -55,6 +55,7 @@ from . import (
     review,
     review_continuation,
     review_repair,
+    run_contention,
     run_control,
     run_flags,
     state,
@@ -1161,6 +1162,17 @@ def _resolved_repositories_payload(
     ]
 
 
+def _claimed_repository_roots(
+    context: verification.VerificationContext,
+) -> tuple[str, ...]:
+    """Return the resolved repository roots this run is about to claim."""
+    if context.workspace is None:
+        return ()
+    return tuple(
+        str(repository.root) for repository in context.workspace.repositories
+    )
+
+
 def _workspace_payload_fields(
     context: verification.VerificationContext,
 ) -> dict[str, Any]:
@@ -1171,9 +1183,6 @@ def _workspace_payload_fields(
         "workspace_root": str(context.root),
         "registry_digest": context.registry_digest,
         "repositories": _resolved_repositories_payload(context.workspace),
-        "workspace_inventory_excludes": list(
-            context.workspace_inventory_excludes
-        ),
     }
 
 
@@ -3014,10 +3023,7 @@ def _resolve_run_verification_context(
         raise plans.PlanError(
             "run workspace does not match the prepared workspace binding"
         )
-    return verification.VerificationContext.resolved_workspace(
-        workspace,
-        inventory_excludes=metadata.workspace_inventory_excludes,
-    )
+    return verification.VerificationContext.resolved_workspace(workspace)
 
 
 def _validate_resume_workspace_binding(
@@ -3038,14 +3044,7 @@ def _validate_resume_workspace_binding(
             )
         return
     current = _workspace_payload_fields(context)
-    keys = ["workspace_root", "registry_digest", "repositories"]
-    # Run state written before metadata v3 has no inventory-policy field. An
-    # operator may deliberately prepare that policy before resuming the old
-    # run, so absence adopts the current durable binding. Once persisted, the
-    # field is authoritative and mismatches still fail closed.
-    if "workspace_inventory_excludes" in persisted:
-        keys.append("workspace_inventory_excludes")
-    for key in keys:
+    for key in ("workspace_root", "registry_digest", "repositories"):
         if persisted.get(key) != current[key]:
             raise plans.PlanError(
                 "resume workspace binding does not match the persisted run"
@@ -7937,7 +7936,34 @@ class _TerminalAuditContext:
     #: The state root holding the one shared assurance ledger, not this plan's
     #: state directory. ``None`` resolves to the default root.
     ledger_state_dir: Path | None = None
-    inventory_excludes: tuple[str, ...] = ()
+    #: Workspace-relative paths of the repositories the plan registered, which
+    #: are the only ones the audit's read-only boundary check fingerprints.
+    repositories: tuple[str, ...] = ()
+    #: Whether those paths came from a plan registry rather than being
+    #: synthesized for a legacy plan that registered none.
+    registry_declared: bool = True
+
+
+def _audited_repositories(
+    context: verification.VerificationContext,
+) -> tuple[tuple[str, ...], bool]:
+    """Name the repositories the audit's boundary check covers, and their source.
+
+    A legacy plan registers no repositories, so the run root is its one
+    repository. Naming nothing there would leave the boundary check comparing
+    two empty snapshots, which can never notice a read-only auditor writing.
+    That run root is routinely not a worktree root, so the audit is told the
+    paths are synthesized: the tolerance that keeps such a run auditable must
+    never reach a repository a plan really registered.
+    """
+    if context.workspace is None:
+        return (".",), False
+    return (
+        tuple(
+            repository.repository.path for repository in context.workspace.repositories
+        ),
+        True,
+    )
 
 
 def _terminal_outcome(payload: Mapping[str, Any]) -> str:
@@ -7986,7 +8012,8 @@ def _attach_terminal_assurance(
             workspace_root=context.workspace_root,
             ledger_state_dir=context.ledger_state_dir,
             state_payload=state_payload,
-            inventory_excludes=context.inventory_excludes,
+            repositories=context.repositories,
+            registry_declared=context.registry_declared,
         )
     except KeyboardInterrupt:
         # Cancelling an advisory audit cancels the audit alone: the outcome and
@@ -10322,20 +10349,24 @@ def _capture_workspace_write_guard_snapshot(
     plan_dir: Path,
     exclude: tuple[str, ...],
     include_ignored: bool,
-    inventory_excludes: tuple[str, ...] = (),
 ) -> repository_evidence.WorkspaceSnapshot:
-    """Capture every registered and unregistered worktree in ``workspace``.
+    """Capture exactly the repositories the plan registered in ``workspace``.
 
-    The public review-guard exclusions are repository-relative and apply
-    independently to every discovered repository, including unregistered
-    worktrees. Git's ordinary ignore policy is still honored everywhere unless
-    ``include_ignored`` was explicitly requested.
+    Repositories the plan never registered are not the plan's business: a
+    concurrent run working in a sibling worktree must not appear as evidence
+    about this turn. The public review-guard exclusions are
+    repository-relative and apply to every registered repository. Git's
+    ordinary ignore policy is still honored unless ``include_ignored`` was
+    explicitly requested.
     """
-    return repository_evidence.capture_workspace_snapshot(
+    return repository_evidence.capture_registered_snapshot(
         workspace.root,
         plan_dir,
+        tuple(
+            repository.repository.path
+            for repository in workspace.repositories
+        ),
         default_exclude=exclude,
-        inventory_excludes=inventory_excludes,
         include_ignored=include_ignored,
         _run_git_fn=_run_git,
         _run_git_bytes_fn=_run_git_bytes,
@@ -10440,7 +10471,6 @@ def _workspace_write_guard_evidence(
     comparison: Mapping[str, Any],
     exclude: tuple[str, ...],
     include_ignored: bool,
-    inventory_excludes: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Classify workspace-vector changes against one session's write scope."""
     registered = {
@@ -10474,9 +10504,7 @@ def _workspace_write_guard_evidence(
             if alias is not None and alias in scope.writes:
                 authorized.append(alias)
                 continue
-            if alias is None:
-                kind = "unregistered-repository"
-            elif alias in scope.reads:
+            if alias in scope.reads:
                 kind = "read-only-repository"
             else:
                 kind = "outside-read-scope"
@@ -10533,7 +10561,6 @@ def _workspace_write_guard_evidence(
         "unavailable": unavailable_payload,
         "violations": violations,
         "excluded": list(exclude),
-        "inventory_excluded": list(inventory_excludes),
         "include_ignored": include_ignored,
     }
 
@@ -10650,41 +10677,38 @@ def _workspace_scope_repair_is_fresh(
 
 def _workspace_scope_repair_comparison(
     comparison: Mapping[str, Any],
-    inventory_excludes: tuple[str, ...],
+    registered_paths: frozenset[str],
 ) -> tuple[dict[str, Any], list[str]]:
-    """Acknowledge repositories hidden by a newly prepared inventory policy.
+    """Acknowledge topology moved by a repair that changed the registry.
 
     A retained-scope repair compares the original pre-turn snapshot with a
-    newly captured baseline. When the operator durably excludes an unrelated
-    subtree after the pause, repositories below that subtree intentionally
-    disappear from the new inventory. Treating that disappearance as a real
-    repository removal would make the explicit exclusion unusable for repair.
+    newly captured baseline. Both snapshots cover only the repositories the
+    plan registered when each was taken, so the sanctioned repair of
+    registering the repository that was written to makes that repository
+    appear from nothing, and deregistering one makes it vanish. Reading either
+    as real topology change would make a registry repair permanently
+    unpassable.
 
-    Registered repositories cannot overlap inventory exclusions (enforced by
-    workspace metadata validation), so suppressing these repair-only topology
-    removals cannot hide removal of an in-scope repository.
+    A repository that is registered now cannot have been added by the harness
+    and a repository that is not registered now is outside the guard's domain,
+    so neither suppression can hide topology change to an in-scope repository.
     """
     repaired = dict(comparison)
-    raw_removed = comparison.get("removed")
-    if not isinstance(raw_removed, Sequence) or isinstance(
-        raw_removed, (str, bytes)
-    ):
-        return repaired, []
-
-    exclusion_parts = [PurePosixPath(path).parts for path in inventory_excludes]
     suppressed: list[str] = []
-    retained: list[str] = []
-    for raw_repository in raw_removed:
-        repository = str(raw_repository)
-        repository_parts = PurePosixPath(repository).parts
-        if any(
-            repository_parts[: len(parts)] == parts
-            for parts in exclusion_parts
+    for kind, suppress_registered in (("added", True), ("removed", False)):
+        raw_roots = comparison.get(kind)
+        if not isinstance(raw_roots, Sequence) or isinstance(
+            raw_roots, (str, bytes)
         ):
-            suppressed.append(repository)
-        else:
-            retained.append(repository)
-    repaired["removed"] = retained
+            continue
+        retained: list[str] = []
+        for raw_repository in raw_roots:
+            repository = str(raw_repository)
+            if (repository in registered_paths) == suppress_registered:
+                suppressed.append(repository)
+            else:
+                retained.append(repository)
+        repaired[kind] = retained
     return repaired, suppressed
 
 
@@ -10699,7 +10723,6 @@ def _enforce_workspace_write_guard(
     after: plans.PlanSnapshot | None,
     snapshot_before: repository_evidence.WorkspaceSnapshot,
     exclude: tuple[str, ...],
-    inventory_excludes: tuple[str, ...],
     include_ignored: bool,
     session_id: str,
     session_label: str,
@@ -10714,7 +10737,6 @@ def _enforce_workspace_write_guard(
             workspace=workspace,
             plan_dir=before.plan_dir,
             exclude=exclude,
-            inventory_excludes=inventory_excludes,
             include_ignored=include_ignored,
         )
     except repository_evidence.RepositoryEvidenceError as error:
@@ -10741,7 +10763,6 @@ def _enforce_workspace_write_guard(
         scope=scope,
         comparison=comparison,
         exclude=exclude,
-        inventory_excludes=inventory_excludes,
         include_ignored=include_ignored,
     )
     if evidence["passed"]:
@@ -10756,13 +10777,13 @@ def _enforce_workspace_write_guard(
         )
         reason = events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE
         failure_note = (
-            "workspace write guard unavailable; repository evidence could "
-            f"not be captured safely{unavailable_summary}"
+            "workspace write guard unavailable; evidence for a registered "
+            f"repository could not be captured safely{unavailable_summary}"
         )
         message = (
             f"workspace write guard unavailable after {session_label}; "
-            "repository evidence could not be captured safely"
-            f"{unavailable_summary}"
+            "evidence for a registered repository could not be captured "
+            f"safely{unavailable_summary}"
         )
     else:
         reason = events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION
@@ -10773,8 +10794,8 @@ def _enforce_workspace_write_guard(
             "expansion/preflight before continuing"
         )
         message = (
-            f"{session_label} changed repositories outside its write aliases"
-            f"{summary}; changes were retained"
+            f"{session_label} changed registered repositories outside its "
+            f"write aliases{summary}; changes were retained"
         )
 
     revert_target = after if after is not None else before
@@ -11725,8 +11746,8 @@ def _run_locked(
     mailbox_enabled = bool(mailbox_activation["enabled"])
     review_guard_excludes = _review_guard_excludes(args)
     review_guard_include_ignored = _review_guard_include_ignored(args)
-    workspace_inventory_excludes = (
-        verification_context.workspace_inventory_excludes
+    audited_repositories, audited_registry_declared = _audited_repositories(
+        verification_context
     )
     audit_context = _TerminalAuditContext(
         plan=supervisor_audit.plan_audit(args),
@@ -11741,7 +11762,8 @@ def _run_locked(
         ledger_state_dir=(
             None if args.state_dir is None else Path(args.state_dir)
         ),
-        inventory_excludes=tuple(workspace_inventory_excludes),
+        repositories=audited_repositories,
+        registry_declared=audited_registry_declared,
     )
 
     # Detect state stranded under a moved plan's old path hash *before* this
@@ -12184,9 +12206,10 @@ def _run_locked(
             payload,
             reason=events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
             message=(
-                f"{_session_label(session_id)} has retained out-of-scope "
-                "changes; repair its durable repository scope and rerun "
-                "expansion plus preflight before continuing"
+                f"{_session_label(session_id)} has retained changes to "
+                "registered repositories outside its write aliases; repair "
+                "its durable repository scope and rerun expansion plus "
+                "preflight before continuing"
             ),
             details=details,
             persistence=persistence,
@@ -12786,9 +12809,6 @@ def _run_locked(
                                     workspace=review_workspace,
                                     plan_dir=snapshot.plan_dir,
                                     exclude=review_guard_excludes,
-                                    inventory_excludes=(
-                                        workspace_inventory_excludes
-                                    ),
                                     include_ignored=(
                                         review_guard_include_ignored
                                     ),
@@ -13014,9 +13034,6 @@ def _run_locked(
                                     workspace=review_workspace,
                                     plan_dir=snapshot.plan_dir,
                                     exclude=review_guard_excludes,
-                                    inventory_excludes=(
-                                        workspace_inventory_excludes
-                                    ),
                                     include_ignored=(
                                         review_guard_include_ignored
                                     ),
@@ -13024,7 +13041,7 @@ def _run_locked(
                             )
                         except repository_evidence.RepositoryEvidenceError as error:
                             raise plans.PlanError(
-                                "combined workspace review base inventory "
+                                "combined workspace review base capture "
                                 f"failed: {error}"
                             ) from error
                         unavailable = _workspace_snapshot_unavailable(
@@ -13480,7 +13497,6 @@ def _run_locked(
                                 workspace=workspace,
                                 plan_dir=before.plan_dir,
                                 exclude=review_guard_excludes,
-                                inventory_excludes=workspace_inventory_excludes,
                                 include_ignored=review_guard_include_ignored,
                             )
                         )
@@ -13514,9 +13530,6 @@ def _run_locked(
                         "read_aliases": list(session_scope.reads),
                         "write_aliases": list(session_scope.writes),
                         "excluded": list(review_guard_excludes),
-                        "inventory_excluded": list(
-                            workspace_inventory_excludes
-                        ),
                         "include_ignored": review_guard_include_ignored,
                     }
                     with persistence.lock:
@@ -13529,8 +13542,9 @@ def _run_locked(
                         ),
                         message=(
                             "workspace write guard unavailable before "
-                            f"{session_label}; repository evidence could not "
-                            f"be captured safely{unavailable_summary}"
+                            f"{session_label}; evidence for a registered "
+                            "repository could not be captured safely"
+                            f"{unavailable_summary}"
                         ),
                         details={
                             **session_details,
@@ -13555,21 +13569,23 @@ def _run_locked(
                         )
                         (
                             repair_comparison,
-                            repair_inventory_excluded,
+                            repair_registry_delta,
                         ) = _workspace_scope_repair_comparison(
                             repair_comparison,
-                            workspace_inventory_excludes,
+                            frozenset(
+                                repository.repository.path
+                                for repository in workspace.repositories
+                            ),
                         )
                         repair_evidence = _workspace_write_guard_evidence(
                             workspace=workspace,
                             scope=session_scope,
                             comparison=repair_comparison,
                             exclude=review_guard_excludes,
-                            inventory_excludes=workspace_inventory_excludes,
                             include_ignored=review_guard_include_ignored,
                         )
-                        repair_evidence["repair_inventory_excluded"] = (
-                            repair_inventory_excluded
+                        repair_evidence["repair_registry_delta"] = (
+                            repair_registry_delta
                         )
                     else:
                         repair_evidence = {
@@ -13864,7 +13880,6 @@ def _run_locked(
                     after=after,
                     snapshot_before=workspace_snapshot_before,
                     exclude=review_guard_excludes,
-                    inventory_excludes=workspace_inventory_excludes,
                     include_ignored=review_guard_include_ignored,
                     session_id=session_id,
                     session_label=session_label,
@@ -14664,7 +14679,6 @@ def _run_locked(
                     after=after,
                     snapshot_before=guard_context["snapshot_before"],
                     exclude=review_guard_excludes,
-                    inventory_excludes=workspace_inventory_excludes,
                     include_ignored=review_guard_include_ignored,
                     session_id=str(guard_context["session_id"]),
                     session_label=str(guard_context["session_label"]),
@@ -14826,9 +14840,6 @@ def _error_payload(
                     "cwd": str(workspace_root),
                     "workspace_root": str(workspace_root),
                     "registry_digest": metadata.registry_digest,
-                    "workspace_inventory_excludes": list(
-                        metadata.workspace_inventory_excludes
-                    ),
                     "repositories": [
                         {
                             "alias": repository.alias,
@@ -15251,10 +15262,6 @@ def _apply_resume_config(
         "registry_digest": run_config.get("registry_digest"),
         "repositories": run_config.get("repositories"),
     }
-    if "workspace_inventory_excludes" in run_config:
-        args._resume_workspace_config["workspace_inventory_excludes"] = (
-            run_config.get("workspace_inventory_excludes")
-        )
     for dest in _RESUME_OVERLAY_DESTS:
         if dest in explicit or dest not in run_config:
             continue
@@ -15426,8 +15433,13 @@ def run_from_args(
         return 1
 
     run_id = _utc_run_id()
+    claimed_repository_roots = _claimed_repository_roots(verification_context)
     try:
-        lock_info = state.acquire_lock(initial_snapshot.plan_dir, args.state_dir)
+        lock_info = state.acquire_lock(
+            initial_snapshot.plan_dir,
+            args.state_dir,
+            repository_roots=claimed_repository_roots,
+        )
     except state.StateError as error:
         reason, paused = _state_error_reason(error)
         payload = _error_payload(
@@ -15443,6 +15455,36 @@ def run_from_args(
 
     try:
         try:
+            # Checked after acquiring, not before: a check-before-acquire leaves
+            # two racing starters blind to each other and both proceed, whereas
+            # checking under our own published claim means the worst case is
+            # both refusing, which only happens on a genuine overlap.
+            if verification_context.workspace is not None:
+                conflicts = run_contention.detect_conflicts(
+                    plan_dir=initial_snapshot.plan_dir,
+                    repository_roots=claimed_repository_roots,
+                    state_dir=args.state_dir,
+                )
+                if conflicts:
+                    payload = _error_payload(
+                        args,
+                        reason=(
+                            events.PAUSE_REASON_WORKSPACE_REPOSITORY_CONTENTION
+                        ),
+                        message=run_contention.conflict_message(
+                            initial_snapshot.plan_dir, conflicts
+                        ),
+                        paused=True,
+                        cwd=verification_context.root,
+                        snapshot=initial_snapshot,
+                    )
+                    contention_details = run_contention.conflict_details(
+                        conflicts
+                    )
+                    payload["details"] = contention_details
+                    payload["pause_details"] = dict(contention_details)
+                    _emit_run_payload(args, payload)
+                    return 1
             exit_code, payload = _run_locked(
                 args=args,
                 cwd=verification_context.root,

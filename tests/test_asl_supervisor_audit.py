@@ -6,6 +6,8 @@ import argparse
 import io
 import json
 import shutil
+import subprocess
+from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
@@ -817,8 +819,15 @@ class _RecordingHarness:
     and the audit must catch it from evidence alone.
     """
 
-    def __init__(self, *, writes: Path | None = None, returncode: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        writes: Path | None = None,
+        action: Callable[[], None] | None = None,
+        returncode: int = 0,
+    ) -> None:
         self.writes = writes
+        self.action = action
         self.returncode = returncode
         self.calls: list[dict[str, object]] = []
 
@@ -835,6 +844,8 @@ class _RecordingHarness:
         )
         if self.writes is not None:
             self.writes.write_text("escaped\n", encoding="utf-8")
+        if self.action is not None:
+            self.action()
         return harnesses.HarnessResult(
             argv=argv,
             returncode=self.returncode,
@@ -873,6 +884,8 @@ class RestrictedAuditTests(unittest.TestCase):
         plan_dir: Path,
         state_dir: Path,
         run_dir: Path,
+        repositories: tuple[str, ...] = ("app",),
+        registry_declared: bool = True,
     ) -> supervisor_audit.AuditAttemptResult:
         return supervisor_audit.run_restricted_audit(
             self._role(harness),
@@ -881,6 +894,8 @@ class RestrictedAuditTests(unittest.TestCase):
             workspace_root=workspace,
             plan_dir=plan_dir,
             prompt="Audit this run.",
+            repositories=repositories,
+            registry_declared=registry_declared,
             state_dir=state_dir,
             _run_harness_fn=fake,
         )
@@ -930,6 +945,180 @@ class RestrictedAuditTests(unittest.TestCase):
                     supervisor_audit.REASON_WORKSPACE_MUTATED, result.reason
                 )
                 self.assertIn("app", (result.mutation or {})["changed"])
+
+    def test_a_write_to_an_unregistered_sibling_leaves_the_audit_available(
+        self,
+    ) -> None:
+        """A concurrent run's worktree is outside the boundary this checks."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
+            init_git_repo(workspace / "sibling")
+            fake = _RecordingHarness(writes=workspace / "sibling" / "escaped.txt")
+
+            result = self._run(
+                "claude", Path(tmp), fake, workspace, plan_dir, state_dir, run_dir
+            )
+
+            self.assertEqual("ok", result.outcome)
+            self.assertEqual("pending", result.state)
+            self.assertIsNone(result.mutation)
+            self.assertIsNone(result.issue_id)
+            self.assertFalse(
+                (run_dir / supervisor_audit.MUTATION_ARTIFACT_NAME).exists()
+            )
+
+    def test_a_symlinked_registered_checkout_is_not_audited_as_its_target(
+        self,
+    ) -> None:
+        """An identical clone reached through a link is a topology change."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
+            checkout = workspace / "app"
+            twin = Path(tmp) / "twin"
+            subprocess.run(
+                ["git", "clone", str(checkout), str(twin)],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            def swap() -> None:
+                shutil.rmtree(checkout)
+                checkout.symlink_to(twin)
+
+            fake = _RecordingHarness(action=swap)
+
+            result = self._run(
+                "claude", Path(tmp), fake, workspace, plan_dir, state_dir, run_dir
+            )
+
+            self.assertEqual("mutation-detected", result.outcome)
+            self.assertEqual("unavailable", result.state)
+            self.assertEqual(
+                supervisor_audit.REASON_WORKSPACE_MUTATED, result.reason
+            )
+            self.assertEqual(["app"], (result.mutation or {})["removed"])
+            self.assertEqual({}, (result.mutation or {})["changed"])
+
+    def test_a_checkout_symlinked_before_the_audit_cannot_be_audited(self) -> None:
+        """Both snapshots omit it, so the empty comparison must not read as ok."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
+            checkout = workspace / "app"
+            twin = Path(tmp) / "twin"
+            subprocess.run(
+                ["git", "clone", str(checkout), str(twin)],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            shutil.rmtree(checkout)
+            checkout.symlink_to(twin)
+            fake = _RecordingHarness()
+
+            result = self._run(
+                "claude", Path(tmp), fake, workspace, plan_dir, state_dir, run_dir
+            )
+
+            self.assertEqual("unavailable", result.outcome)
+            self.assertEqual("unavailable", result.state)
+            self.assertEqual(
+                supervisor_audit.REASON_WORKSPACE_EVIDENCE_UNAVAILABLE, result.reason
+            )
+            self.assertIsNone(result.mutation)
+            self.assertEqual([], fake.calls)
+
+    def test_a_registered_repository_that_stops_being_a_worktree_is_unavailable(
+        self,
+    ) -> None:
+        """Fail-closed probe evidence after the turn is silence, not an all-clear."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
+            checkout = workspace / "app"
+            fake = _RecordingHarness(action=lambda: shutil.rmtree(checkout / ".git"))
+
+            result = self._run(
+                "claude", Path(tmp), fake, workspace, plan_dir, state_dir, run_dir
+            )
+
+            self.assertEqual("unavailable", result.outcome)
+            self.assertEqual("unavailable", result.state)
+            self.assertEqual(
+                supervisor_audit.REASON_WORKSPACE_EVIDENCE_UNAVAILABLE, result.reason
+            )
+            self.assertIsNone(result.mutation)
+            self.assertEqual(1, len(fake.calls))
+
+    def test_a_registered_repository_unfingerprintable_throughout_is_refused(
+        self,
+    ) -> None:
+        """Unavailable on both sides compares as unchanged, so it cannot be graded."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
+            checkout = workspace / "app"
+            shutil.rmtree(checkout / ".git")
+            escaped = checkout / "escaped.txt"
+            fake = _RecordingHarness(writes=escaped)
+
+            result = self._run(
+                "claude", Path(tmp), fake, workspace, plan_dir, state_dir, run_dir
+            )
+
+            self.assertEqual("unavailable", result.outcome)
+            self.assertEqual("unavailable", result.state)
+            self.assertEqual(
+                supervisor_audit.REASON_WORKSPACE_EVIDENCE_UNAVAILABLE, result.reason
+            )
+            self.assertIsNone(result.mutation)
+            self.assertEqual([], fake.calls)
+            self.assertFalse(escaped.exists())
+
+    def test_a_synthesized_run_root_that_is_not_a_worktree_is_still_audited(
+        self,
+    ) -> None:
+        """A plan that registered nothing keeps the audit its run root allows."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
+            fake = _RecordingHarness()
+
+            result = self._run(
+                "claude",
+                Path(tmp),
+                fake,
+                workspace,
+                plan_dir,
+                state_dir,
+                run_dir,
+                repositories=(".",),
+                registry_declared=False,
+            )
+
+            self.assertEqual("ok", result.outcome)
+            self.assertEqual("pending", result.state)
+            self.assertEqual(1, len(fake.calls))
+
+    def test_the_same_root_declared_by_a_registry_is_refused(self) -> None:
+        """The legacy tolerance follows the caller's claim, not the path."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
+            fake = _RecordingHarness()
+
+            result = self._run(
+                "claude",
+                Path(tmp),
+                fake,
+                workspace,
+                plan_dir,
+                state_dir,
+                run_dir,
+                repositories=(".",),
+            )
+
+            self.assertEqual("unavailable", result.outcome)
+            self.assertEqual(
+                supervisor_audit.REASON_WORKSPACE_EVIDENCE_UNAVAILABLE, result.reason
+            )
+            self.assertEqual([], fake.calls)
 
     def test_a_detected_mutation_opens_a_system_issue_with_its_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1009,6 +1198,7 @@ class RestrictedAuditTests(unittest.TestCase):
                 workspace_root=workspace,
                 plan_dir=plan_dir,
                 prompt="Audit this run.",
+                repositories=("app",),
                 state_dir=state_dir,
                 _run_harness_fn=fake,
             )
@@ -1818,6 +2008,7 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             run_dir=run_dir,
             workspace_root=workspace,
             plan_dir=plan_dir,
+            repositories=("app",),
             state_dir=state_dir,
             durable=False,
             now=lambda: FIXED_CLOCK,
@@ -2059,6 +2250,7 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
                 workspace_root=workspace,
                 plan_dir=plan_dir,
                 prompt="grade this run",
+                repositories=("app",),
                 state_dir=state_dir,
                 _run_harness_fn=auditor,
             )

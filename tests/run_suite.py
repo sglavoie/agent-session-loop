@@ -27,6 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Unit/schema/parser modules: no fake-harness runs, no HTTP servers, no
 # multi-second subprocess orchestration. Ordered longest-first.
 FAST_MODULES = (
+    "tests.test_daily_remind",
     "tests.test_asl_cli",
     "tests.test_asl_preflight",
     "tests.test_asl_verification",
@@ -60,6 +61,7 @@ FAST_MODULES = (
     "tests.test_asl_compaction",
     "tests.test_asl_authoring",
     "tests.test_session_overview",
+    "tests.test_asl_run_contention",
     "tests.test_asl_state_migration",
     "tests.test_asl_process_tree",
     "tests.test_asl_retention",

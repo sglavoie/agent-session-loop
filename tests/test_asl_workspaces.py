@@ -360,7 +360,7 @@ class WorkspaceResolutionTests(unittest.TestCase):
 
 
 class WorkspaceMetadataTests(unittest.TestCase):
-    def test_v3_round_trip_includes_inventory_exclusions(self) -> None:
+    def test_v3_round_trip_persists_only_the_workspace_binding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             plan_dir = root / "plan"
@@ -373,7 +373,6 @@ class WorkspaceMetadataTests(unittest.TestCase):
                 plan_dir,
                 workspace_root / ".." / "workspace",
                 digest,
-                ("Library/Protected.dv",),
             )
             metadata = plans.load_plan_metadata(plan_dir)
 
@@ -381,7 +380,6 @@ class WorkspaceMetadataTests(unittest.TestCase):
                 plans.WorkspacePlanMetadata(
                     workspace_root=str(workspace_root.resolve()),
                     registry_digest=digest,
-                    workspace_inventory_excludes=("Library/Protected.dv",),
                 ),
                 metadata,
             )
@@ -389,13 +387,12 @@ class WorkspaceMetadataTests(unittest.TestCase):
                 {
                     "registry_digest": digest,
                     "version": 3,
-                    "workspace_inventory_excludes": ["Library/Protected.dv"],
                     "workspace_root": str(workspace_root.resolve()),
                 },
                 json.loads(path.read_text(encoding="utf-8")),
             )
 
-    def test_v2_loader_defaults_inventory_exclusions_and_hashes_stay_stable(
+    def test_v2_loader_reads_the_binding_and_hashes_stay_stable(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -423,7 +420,6 @@ class WorkspaceMetadataTests(unittest.TestCase):
             self.assertIsInstance(metadata, plans.WorkspacePlanMetadata)
             assert isinstance(metadata, plans.WorkspacePlanMetadata)
             self.assertEqual(2, metadata.version)
-            self.assertEqual((), metadata.workspace_inventory_excludes)
 
             self.assertEqual(content_before, plans.plan_content_sha256(plan_dir))
             self.assertEqual(
@@ -442,44 +438,45 @@ class WorkspaceMetadataTests(unittest.TestCase):
             with self.assertRaisesRegex(plans.PlanError, "SHA-256"):
                 plans.load_plan_metadata(plan_dir)
 
-    def test_v3_loader_requires_inventory_exclusions_field(self) -> None:
+    def test_v3_loader_accepts_and_discards_a_legacy_inventory_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             plan_dir = root / "plan"
             workspace_root = root / "workspace"
             plan_dir.mkdir()
             workspace_root.mkdir()
-            (plan_dir / plans.PLAN_METADATA_FILE_NAME).write_text(
-                json.dumps(
-                    {
-                        "version": plans.PLAN_METADATA_V3_SCHEMA_VERSION,
-                        "workspace_root": str(workspace_root.resolve()),
-                        "registry_digest": "0" * 64,
-                    }
+            metadata_path = plan_dir / plans.PLAN_METADATA_FILE_NAME
+
+            def write(excludes: object) -> None:
+                metadata_path.write_text(
+                    json.dumps(
+                        {
+                            "version": plans.PLAN_METADATA_V3_SCHEMA_VERSION,
+                            "workspace_root": str(workspace_root.resolve()),
+                            "registry_digest": "0" * 64,
+                            "workspace_inventory_excludes": excludes,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            write(["Library/Protected.dv"])
+            self.assertEqual(
+                plans.WorkspacePlanMetadata(
+                    workspace_root=str(workspace_root.resolve()),
+                    registry_digest="0" * 64,
                 ),
-                encoding="utf-8",
+                plans.load_plan_metadata(plan_dir),
             )
 
+            write("Library/Protected.dv")
             with self.assertRaisesRegex(
                 plans.PlanError,
-                "missing required field 'workspace_inventory_excludes'",
+                "'workspace_inventory_excludes' must be a string array",
             ):
                 plans.load_plan_metadata(plan_dir)
 
-    def test_inventory_exclusions_reject_registered_repository_overlap(self) -> None:
-        registry = _registry()
-        for candidate in (
-            "tundra_svc",
-            "tundra_svc/cache",
-            ".",
-        ):
-            with self.subTest(candidate=candidate):
-                with self.assertRaises(workspaces.WorkspaceError):
-                    workspaces.normalize_workspace_inventory_excludes(
-                        (candidate,), registry
-                    )
-
-    def test_pre_v3_run_binding_adopts_prepared_inventory_policy(self) -> None:
+    def test_resume_binding_ignores_a_persisted_inventory_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace_root = Path(tmp) / "workspace"
             specs = DEFAULT_MULTI_REPO_SPECS[:2]
@@ -489,15 +486,19 @@ class WorkspaceMetadataTests(unittest.TestCase):
                 _registry(specs),
             )
             context = verification.VerificationContext.resolved_workspace(
-                resolved,
-                inventory_excludes=("Library/Protected.dv",),
+                resolved
             )
-            legacy_run_binding = runner._workspace_payload_fields(context)
-            legacy_run_binding.pop("workspace_inventory_excludes")
+            current_binding = runner._workspace_payload_fields(context)
+            self.assertNotIn("workspace_inventory_excludes", current_binding)
 
             runner._validate_resume_workspace_binding(
                 argparse.Namespace(
-                    _resume_workspace_config=legacy_run_binding
+                    _resume_workspace_config={
+                        **current_binding,
+                        "workspace_inventory_excludes": [
+                            "Library/Protected.dv"
+                        ],
+                    }
                 ),
                 context,
             )
@@ -506,8 +507,8 @@ class WorkspaceMetadataTests(unittest.TestCase):
                 runner._validate_resume_workspace_binding(
                     argparse.Namespace(
                         _resume_workspace_config={
-                            **legacy_run_binding,
-                            "workspace_inventory_excludes": [],
+                            **current_binding,
+                            "registry_digest": "stale",
                         }
                     ),
                     context,

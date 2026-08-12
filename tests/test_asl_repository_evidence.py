@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -16,6 +17,15 @@ from tests.support import (
     init_multi_repo_workspace,
     write_multi_repo_plan,
 )
+
+
+def clone_git_repo(source: Path, target: Path) -> None:
+    subprocess.run(
+        ["git", "clone", str(source), str(target)],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
 
 
 class RepositoryEvidenceParityTests(unittest.TestCase):
@@ -275,6 +285,147 @@ class WorkspaceInventoryTests(unittest.TestCase):
                     self.assertIn(f"{case}:renamed.md", qualified)
 
 
+class RegisteredSnapshotTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.workspace = self.root / "workspace"
+        self.workspace.mkdir()
+        self.plan_dir = self.root / "plan"
+        self.plan_dir.mkdir()
+
+    def test_snapshot_covers_registered_paths_only(self) -> None:
+        alpha = self.workspace / "alpha"
+        beta = self.workspace / "group" / "beta"
+        sibling = self.workspace / "sibling"
+        init_git_repo(alpha)
+        init_git_repo(beta)
+        init_git_repo(sibling)
+        (sibling / "collateral.txt").write_text("other run\n", encoding="utf-8")
+
+        snapshot = repository_evidence.capture_registered_snapshot(
+            self.workspace, self.plan_dir, ["group/beta", "alpha"]
+        )
+
+        self.assertIsInstance(snapshot, OrderedDict)
+        self.assertEqual(["alpha", "group/beta"], list(snapshot))
+        self.assertRegex(snapshot["alpha"]["head"], r"^[0-9a-f]{40,64}$")
+
+    def test_missing_registered_path_is_omitted_and_compares_as_removed(
+        self,
+    ) -> None:
+        alpha = self.workspace / "alpha"
+        init_git_repo(alpha)
+        (self.workspace / "not-a-directory").write_text("file\n", encoding="utf-8")
+        registered = ["alpha", "never-cloned", "not-a-directory"]
+
+        snapshot = repository_evidence.capture_registered_snapshot(
+            self.workspace, self.plan_dir, registered
+        )
+
+        self.assertEqual(["alpha"], list(snapshot))
+        comparison = repository_evidence.compare_workspace_snapshots(
+            OrderedDict(
+                (("alpha", snapshot["alpha"]), ("never-cloned", {"git": True}))
+            ),
+            snapshot,
+        )
+        self.assertEqual(["never-cloned"], comparison["removed"])
+
+    def test_registered_path_that_stops_being_a_worktree_fails_closed(
+        self,
+    ) -> None:
+        alpha = self.workspace / "alpha"
+        init_git_repo(alpha)
+        (alpha / ".git").rename(self.root / "detached-git")
+
+        snapshot = repository_evidence.capture_registered_snapshot(
+            self.workspace, self.plan_dir, ["alpha"]
+        )
+
+        self.assertEqual(
+            {
+                "git": True,
+                "unavailable": {
+                    "reason": "repository-disappeared",
+                    "argv": ["rev-parse", "--show-toplevel"],
+                },
+            },
+            snapshot["alpha"],
+        )
+
+    def test_a_symlink_to_an_identical_sibling_cannot_compare_cleanly(
+        self,
+    ) -> None:
+        alpha = self.workspace / "alpha"
+        init_git_repo(alpha)
+        twin = self.root / "twin"
+        clone_git_repo(alpha, twin)
+        before = repository_evidence.capture_registered_snapshot(
+            self.workspace, self.plan_dir, ["alpha"]
+        )
+        twin_snapshot = repository_evidence.capture_registered_snapshot(
+            self.root, self.plan_dir, ["twin"]
+        )
+        self.assertEqual(before["alpha"], twin_snapshot["twin"])
+
+        shutil.rmtree(alpha)
+        alpha.symlink_to(twin)
+        after = repository_evidence.capture_registered_snapshot(
+            self.workspace, self.plan_dir, ["alpha"]
+        )
+
+        self.assertEqual([], list(after))
+        comparison = repository_evidence.compare_workspace_snapshots(
+            before, after
+        )
+        self.assertEqual(["alpha"], comparison["removed"])
+        self.assertEqual({}, comparison["changed"])
+
+    def test_a_symlinked_parent_component_is_not_the_declared_node(
+        self,
+    ) -> None:
+        init_git_repo(self.workspace / "real-group" / "beta")
+        (self.workspace / "group").symlink_to(self.workspace / "real-group")
+
+        snapshot = repository_evidence.capture_registered_snapshot(
+            self.workspace, self.plan_dir, ["group/beta", "real-group/beta"]
+        )
+
+        self.assertEqual(["real-group/beta"], list(snapshot))
+
+    def test_fingerprints_are_byte_identical_to_the_walking_capture(
+        self,
+    ) -> None:
+        alpha = self.workspace / "alpha"
+        beta = self.workspace / "group" / "beta"
+        init_git_repo(alpha)
+        init_git_repo(beta)
+        (alpha / "README.md").write_text("changed\n", encoding="utf-8")
+        (alpha / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+        (beta / "excluded.txt").write_text("excluded\n", encoding="utf-8")
+        (beta / "new.txt").write_text("new\n", encoding="utf-8")
+        exclude = {"group/beta": ("excluded.txt",)}
+
+        walked = repository_evidence.capture_workspace_snapshot(
+            self.workspace,
+            self.plan_dir,
+            exclude=exclude,
+            default_exclude=("untracked.txt",),
+        )
+        registered = repository_evidence.capture_registered_snapshot(
+            self.workspace,
+            self.plan_dir,
+            ["alpha", "group/beta"],
+            exclude=exclude,
+            default_exclude=("untracked.txt",),
+        )
+
+        self.assertEqual(walked, registered)
+        self.assertEqual(list(walked), list(registered))
+
+
 class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -291,9 +442,7 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
             self.workspace_root, registry
         )
 
-    def test_guard_classifies_read_only_outside_and_unregistered_changes(
-        self,
-    ) -> None:
+    def test_guard_classifies_read_only_and_topology_changes(self) -> None:
         comparison = {
             "changed": OrderedDict(
                 (
@@ -304,10 +453,6 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
                     (
                         "tundra_OAK",
                         {"qualified_paths": ["tundra_OAK:readonly.py"]},
-                    ),
-                    (
-                        "scratch",
-                        {"qualified_paths": ["scratch:unknown.py"]},
                     ),
                 )
             ),
@@ -323,17 +468,13 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
             comparison=comparison,
             exclude=(),
             include_ignored=False,
-            inventory_excludes=("Library/Protected.dv",),
         )
 
         self.assertFalse(evidence["passed"])
         self.assertEqual(["SVC"], evidence["authorized_aliases"])
-        self.assertEqual(
-            ["Library/Protected.dv"], evidence["inventory_excluded"]
-        )
+        self.assertNotIn("inventory_excluded", evidence)
         self.assertEqual(
             [
-                "unregistered-repository",
                 "read-only-repository",
                 "repository-added",
                 "repository-removed",
@@ -342,7 +483,7 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
         )
         self.assertEqual(
             ["OAK:readonly.py"],
-            evidence["violations"][1]["qualified_paths"],
+            evidence["violations"][0]["qualified_paths"],
         )
 
     def test_guard_fails_closed_for_unavailable_evidence(self) -> None:
@@ -377,43 +518,39 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
             missing["tundra_svc"]["reason"],
         )
 
-    def test_exclusion_applies_inside_unregistered_repository(self) -> None:
+    def test_guard_snapshot_covers_registered_repositories_only(self) -> None:
         scratch = self.workspace_root / "scratch"
-        nested = scratch / "inner"
         init_git_repo(scratch)
-        init_git_repo(nested)
+        init_git_repo(scratch / "inner")
 
-        unavailable_snapshot = runner._capture_workspace_write_guard_snapshot(
+        snapshot = runner._capture_workspace_write_guard_snapshot(
             workspace=self.workspace,
             plan_dir=self.plan_dir,
             exclude=(),
             include_ignored=False,
         )
-        detail = runner._workspace_snapshot_unavailable(unavailable_snapshot)
-        self.assertEqual(
-            "untracked-node-unsupported",
-            detail["scratch"]["reason"],
-        )
-        self.assertEqual("inner/", detail["scratch"]["path"])
-        self.assertEqual(
-            ": scratch:inner/ (untracked-node-unsupported)",
-            runner._workspace_unavailable_summary(
-                detail,
-                workspace=self.workspace,
-            ),
+
+        self.assertEqual(["tundra_OAK", "tundra_svc"], list(snapshot))
+        self.assertEqual({}, runner._workspace_snapshot_unavailable(snapshot))
+
+    def test_repair_comparison_suppresses_registry_delta_only(self) -> None:
+        comparison = {
+            "changed": {},
+            "added": ["surprise-repository", "tundra_OAK"],
+            "removed": ["deregistered-repository", "tundra_svc"],
+            "unavailable": {},
+        }
+
+        repaired, suppressed = runner._workspace_scope_repair_comparison(
+            comparison,
+            frozenset({"tundra_svc", "tundra_OAK"}),
         )
 
-        excluded_snapshot = runner._capture_workspace_write_guard_snapshot(
-            workspace=self.workspace,
-            plan_dir=self.plan_dir,
-            exclude=("inner",),
-            include_ignored=False,
+        self.assertEqual(
+            ["tundra_OAK", "deregistered-repository"], suppressed
         )
-
-        self.assertNotIn(
-            "scratch",
-            runner._workspace_snapshot_unavailable(excluded_snapshot),
-        )
+        self.assertEqual(["surprise-repository"], repaired["added"])
+        self.assertEqual(["tundra_svc"], repaired["removed"])
 
 
 if __name__ == "__main__":
