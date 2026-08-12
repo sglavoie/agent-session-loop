@@ -6481,6 +6481,56 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
         state = json.loads(self.state_path.read_text(encoding="utf-8"))
         self.assertNotIn("hang_cpu_progress", state["active_turn"])
 
+    def test_churning_tree_persists_a_non_decreasing_cpu_total(self) -> None:
+        """ASI-58 end to end: worker churn must not persist a hang suspicion."""
+
+        def proc(pid: int, cpu_seconds: float, birth: str) -> dict[str, object]:
+            return {
+                "pid": pid,
+                "ppid": 1 if pid == 4242 else 4242,
+                "state": "S",
+                "cpu_seconds": cpu_seconds,
+                "birth": birth,
+                "command": "python3 -m worker",
+            }
+
+        samples = [
+            [proc(4242, 9.0, "root"), proc(5001, 6.0, "w1")],
+            [proc(4242, 9.2, "root"), proc(5002, 4.0, "w2")],
+            [proc(4242, 9.4, "root")],
+            [proc(4242, 9.6, "root"), proc(5003, 5.0, "w3")],
+        ]
+        live_turn = self._live_turn(lambda pid: samples.pop(0))
+        live_turn.note_harness_pid(4242)
+
+        for _ in range(4):
+            live_turn._record_heartbeat()
+
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        active_turn = state["active_turn"]
+        self.assertNotIn("hang_suspected", active_turn)
+        progress = active_turn["hang_cpu_progress"]
+        self.assertTrue(progress["progressing"])
+        self.assertEqual(4, progress["tracked_processes"])
+        self.assertEqual(2, progress["sampled_processes"])
+
+        records = read_jsonl(self.event_path)
+        self.assertEqual(
+            [],
+            [
+                record
+                for record in records
+                if record["name"] == events.TURN_HANG_SUSPECTED_EVENT
+            ],
+        )
+        totals = [
+            record["payload"]["hang_cpu_progress"]["cpu_total_seconds"]
+            for record in records
+            if record["name"] == events.TURN_HEARTBEAT_EVENT
+        ]
+        self.assertEqual(4, len(totals))
+        self.assertEqual(sorted(totals), totals)
+
     def test_cpu_progress_absent_while_the_turn_is_not_sampled(self) -> None:
         def never_sampled(pid: int):  # pragma: no cover - guard
             raise AssertionError("a busy turn must not be sampled")

@@ -6482,9 +6482,11 @@ class _HangAssessment:
     ``cpu_progress`` is the tick's raw CPU sampling result, published whenever
     a process tree was sampled — including ticks that raise no suspicion at
     all. A supervisor deciding on idle time alone has no ``suspected`` block to
-    read, and a silent turn whose tree is burning CPU is working, not hung.
-    ``None`` means no fresh sample this tick and must never be read as
-    "not progressing".
+    read, and a silent turn whose tree is burning CPU is working, not hung. Its
+    ``cpu_total_seconds`` is accumulated by process identity rather than summed
+    over the live tree, so consecutive ticks prove the delta and its
+    non-negativity. ``None`` means no fresh sample this tick and must never be
+    read as "not progressing".
     """
 
     suspected: dict[str, Any] | None = None
@@ -6537,6 +6539,7 @@ class _HangSentinel:
         self._result_seen_at: datetime | None = None
         self._result_seen_monotonic: float | None = None
         self._last_cpu_seconds: float | None = None
+        self._cpu_high_water: dict[process_tree.CpuIdentity, float] = {}
         self._zero_cpu_streak = 0
         self._suspected: dict[str, Any] | None = None
         # Bumped on every note_activity; assessments carry the generation
@@ -6550,7 +6553,16 @@ class _HangSentinel:
 
     def note_harness_pid(self, pid: int) -> None:
         with self._lock:
+            if pid == self._harness_pid:
+                return
+            # A different root makes the accumulated identities another tree's:
+            # the dead root's frozen CPU would inflate the total forever and
+            # mask a real hang. Re-notifying the same pid changes nothing, so a
+            # repeat call cannot keep resetting the streak.
             self._harness_pid = pid
+            self._cpu_high_water = {}
+            self._last_cpu_seconds = None
+            self._zero_cpu_streak = 0
 
     def note_final_result(self) -> None:
         with self._lock:
@@ -6572,6 +6584,7 @@ class _HangSentinel:
             self._announced = False
             self._zero_cpu_streak = 0
             self._last_cpu_seconds = None
+            self._cpu_high_water = {}
             return retracted
 
     def confirm_assessment(self, assessment: _HangAssessment) -> bool:
@@ -6631,8 +6644,14 @@ class _HangSentinel:
 
             cpu_delta: float | None = None
             cpu_positive = False
+            cpu_total: float | None = None
             if tree is not None:
-                cpu_total = process_tree.total_cpu_seconds(tree)
+                # Accumulated per process identity, never summed over the live
+                # tree: a descendant that exits between two samples must not
+                # subtract the CPU it burned, which would read as stillness.
+                cpu_total, self._cpu_high_water = process_tree.accumulate_cpu_seconds(
+                    tree, self._cpu_high_water
+                )
                 if self._last_cpu_seconds is not None:
                     cpu_delta = cpu_total - self._last_cpu_seconds
                     if cpu_delta <= self._cpu_epsilon_seconds:
@@ -6646,6 +6665,7 @@ class _HangSentinel:
                 # run of successful zero-delta samples.
                 self._zero_cpu_streak = 0
                 self._last_cpu_seconds = None
+                self._cpu_high_water = {}
 
             checked_at = _isoformat(now)
             cpu_progress: dict[str, Any] | None = None
@@ -6654,6 +6674,9 @@ class _HangSentinel:
                     "harness_pid": pid,
                     "progressing": cpu_positive,
                     "cpu_delta_seconds": cpu_delta,
+                    "cpu_total_seconds": cpu_total,
+                    "tracked_processes": len(self._cpu_high_water),
+                    "sampled_processes": len(tree),
                     "confirm_samples": self._zero_cpu_streak,
                     "last_checked_at": checked_at,
                 }

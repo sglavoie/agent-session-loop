@@ -2889,6 +2889,24 @@ class HangSentinelTests(unittest.TestCase):
             }
         ]
 
+    @staticmethod
+    def proc(
+        pid: int,
+        cpu_seconds: float,
+        *,
+        birth: str | None = None,
+        ppid: int = 123,
+    ) -> dict[str, object]:
+        """One process row for the multi-process, churning-tree fixtures."""
+        return {
+            "pid": pid,
+            "ppid": ppid,
+            "state": "S",
+            "cpu_seconds": cpu_seconds,
+            "birth": birth,
+            "command": "python3 -m worker",
+        }
+
     def make_sentinel(
         self,
         samples: list[list[dict[str, object]] | None],
@@ -3195,6 +3213,209 @@ class HangSentinelTests(unittest.TestCase):
 
         self.assertIsNone(assessment.cpu_progress)
         self.assertEqual([], calls)
+
+    def test_churning_tree_never_advances_the_streak(self) -> None:
+        """ASI-58 replay: workers exiting must not read as CPU stillness.
+
+        The root creeps under the epsilon while multi-second workers come and
+        go. Summing the live tree makes each departure a negative delta, which
+        the zero-progress test reads as a hang; accumulating by identity keeps
+        the new workers' CPU visible as the progress it is.
+        """
+        root = "Sun Jul 26 17:57:01 2026"
+        sentinel, _calls = self.make_sentinel(
+            [
+                [
+                    self.proc(123, 10.00, birth=root, ppid=1),
+                    self.proc(200, 8.86, birth="w1"),
+                    self.proc(201, 5.93, birth="w2"),
+                ],
+                [
+                    self.proc(123, 10.33, birth=root, ppid=1),
+                    self.proc(201, 5.93, birth="w2"),
+                    self.proc(202, 3.10, birth="w3"),
+                ],
+                [
+                    self.proc(123, 10.66, birth=root, ppid=1),
+                    self.proc(202, 3.10, birth="w3"),
+                    self.proc(203, 2.50, birth="w4"),
+                ],
+                [
+                    self.proc(123, 11.00, birth=root, ppid=1),
+                    self.proc(204, 4.00, birth="w5"),
+                ],
+            ]
+        )
+        sentinel.note_harness_pid(123)
+
+        deltas: list[float | None] = []
+        for idle in (120.0, 150.0, 180.0, 210.0):
+            assessment = sentinel.evaluate(idle_seconds=idle, now=self.NOW)
+            self.assertIsNone(assessment.suspected)
+            self.assertIsNone(assessment.transition)
+            progress = assessment.cpu_progress
+            assert progress is not None
+            deltas.append(progress["cpu_delta_seconds"])
+
+        self.assertIsNone(deltas[0])
+        for delta in deltas[1:]:
+            assert delta is not None
+            self.assertGreaterEqual(delta, 0.0)
+
+    def test_static_multi_process_tree_still_confirms_a_hang(self) -> None:
+        static = [
+            self.proc(123, 10.0, birth="root", ppid=1),
+            self.proc(200, 5.0, birth="w1"),
+        ]
+        sentinel, _calls = self.make_sentinel([list(static) for _ in range(3)])
+        sentinel.note_harness_pid(123)
+
+        self.assertIsNone(
+            sentinel.evaluate(idle_seconds=120.0, now=self.NOW).suspected
+        )
+        self.assertIsNone(
+            sentinel.evaluate(idle_seconds=150.0, now=self.NOW).suspected
+        )
+        confirmed = sentinel.evaluate(idle_seconds=180.0, now=self.NOW)
+
+        self.assertEqual("suspected", confirmed.transition)
+        assert confirmed.suspected is not None
+        self.assertEqual(runner.HANG_REASON_ZERO_CPU, confirmed.suspected["reason"])
+        self.assertEqual(0.0, confirmed.suspected["cpu_delta_seconds"])
+
+    def test_new_descendant_cpu_clears_a_live_suspicion(self) -> None:
+        static = [
+            self.proc(123, 10.0, birth="root", ppid=1),
+            self.proc(200, 5.0, birth="w1"),
+        ]
+        sentinel, _calls = self.make_sentinel(
+            [
+                list(static),
+                list(static),
+                list(static),
+                [
+                    self.proc(123, 10.0, birth="root", ppid=1),
+                    self.proc(201, 9.0, birth="w2"),
+                ],
+            ]
+        )
+        sentinel.note_harness_pid(123)
+
+        for idle in (120.0, 150.0):
+            sentinel.evaluate(idle_seconds=idle, now=self.NOW)
+        self.assertEqual(
+            "suspected",
+            sentinel.evaluate(idle_seconds=180.0, now=self.NOW).transition,
+        )
+
+        cleared = sentinel.evaluate(idle_seconds=210.0, now=self.NOW)
+        self.assertEqual("cleared", cleared.transition)
+        assert cleared.retracted is not None
+        self.assertAlmostEqual(9.0, cleared.retracted["cpu_delta_seconds"], places=6)
+
+    def test_departure_alone_yields_a_zero_delta_and_confirms(self) -> None:
+        sentinel, _calls = self.make_sentinel(
+            [
+                [
+                    self.proc(123, 10.0, birth="root", ppid=1),
+                    self.proc(200, 4.0, birth="w1"),
+                ],
+                [self.proc(123, 10.0, birth="root", ppid=1)],
+                [self.proc(123, 10.0, birth="root", ppid=1)],
+            ]
+        )
+        sentinel.note_harness_pid(123)
+
+        sentinel.evaluate(idle_seconds=120.0, now=self.NOW)
+        second = sentinel.evaluate(idle_seconds=150.0, now=self.NOW)
+        self.assertEqual(0.0, second.cpu_progress["cpu_delta_seconds"])
+        confirmed = sentinel.evaluate(idle_seconds=180.0, now=self.NOW)
+
+        self.assertEqual("suspected", confirmed.transition)
+        assert confirmed.suspected is not None
+        self.assertEqual(0.0, confirmed.suspected["cpu_delta_seconds"])
+
+    def test_pid_reuse_with_a_new_birth_counts_as_new_work(self) -> None:
+        sentinel, _calls = self.make_sentinel(
+            [
+                [
+                    self.proc(123, 10.0, birth="root", ppid=1),
+                    self.proc(200, 1.0, birth="Sun Jul 26 17:57:01 2026"),
+                ],
+                [
+                    self.proc(123, 10.0, birth="root", ppid=1),
+                    self.proc(200, 1.0, birth="Sun Jul 26 17:57:01 2026"),
+                ],
+                [
+                    self.proc(123, 10.0, birth="root", ppid=1),
+                    self.proc(200, 3.0, birth="Sun Jul 26 18:03:44 2026"),
+                ],
+            ]
+        )
+        sentinel.note_harness_pid(123)
+
+        sentinel.evaluate(idle_seconds=120.0, now=self.NOW)
+        sentinel.evaluate(idle_seconds=150.0, now=self.NOW)
+        reused = sentinel.evaluate(idle_seconds=180.0, now=self.NOW)
+
+        self.assertIsNone(reused.suspected)
+        progress = reused.cpu_progress
+        assert progress is not None
+        self.assertTrue(progress["progressing"])
+        self.assertAlmostEqual(3.0, progress["cpu_delta_seconds"], places=6)
+        self.assertEqual(3, progress["tracked_processes"])
+
+    def test_harness_pid_change_rebaselines_the_accounting(self) -> None:
+        sentinel, calls = self.make_sentinel(
+            [
+                [self.proc(123, 10.0, birth="root", ppid=1)],
+                [self.proc(123, 10.0, birth="root", ppid=1)],
+                [self.proc(456, 4.0, birth="root-2", ppid=1)],
+            ]
+        )
+        sentinel.note_harness_pid(123)
+
+        sentinel.evaluate(idle_seconds=120.0, now=self.NOW)
+        second = sentinel.evaluate(idle_seconds=150.0, now=self.NOW)
+        assert second.cpu_progress is not None
+        self.assertEqual(1, second.cpu_progress["confirm_samples"])
+
+        sentinel.note_harness_pid(456)
+        rebaselined = sentinel.evaluate(idle_seconds=180.0, now=self.NOW)
+
+        progress = rebaselined.cpu_progress
+        assert progress is not None
+        self.assertIsNone(progress["cpu_delta_seconds"])
+        self.assertEqual(0, progress["confirm_samples"])
+        self.assertAlmostEqual(4.0, progress["cpu_total_seconds"], places=6)
+        self.assertEqual(1, progress["tracked_processes"])
+        self.assertEqual([123, 123, 456], calls)
+
+    def test_cpu_progress_publishes_the_accounting_evidence(self) -> None:
+        sentinel, _calls = self.make_sentinel(
+            [
+                [
+                    self.proc(123, 10.0, birth="root", ppid=1),
+                    self.proc(200, 2.0, birth="w1"),
+                ],
+                [self.proc(123, 10.0, birth="root", ppid=1)],
+            ]
+        )
+        sentinel.note_harness_pid(123)
+
+        first = sentinel.evaluate(idle_seconds=120.0, now=self.NOW)
+        assert first.cpu_progress is not None
+        self.assertAlmostEqual(12.0, first.cpu_progress["cpu_total_seconds"])
+        self.assertEqual(2, first.cpu_progress["tracked_processes"])
+        self.assertEqual(2, first.cpu_progress["sampled_processes"])
+
+        second = sentinel.evaluate(idle_seconds=150.0, now=self.NOW)
+        progress = second.cpu_progress
+        assert progress is not None
+        self.assertAlmostEqual(12.0, progress["cpu_total_seconds"])
+        self.assertEqual(0.0, progress["cpu_delta_seconds"])
+        self.assertEqual(2, progress["tracked_processes"])
+        self.assertEqual(1, progress["sampled_processes"])
 
     def test_note_activity_retracts_and_resets_counters(self) -> None:
         sentinel, _calls = self.make_sentinel(

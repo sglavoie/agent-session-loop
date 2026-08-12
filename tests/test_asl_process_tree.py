@@ -807,25 +807,131 @@ class SweepEnabledTests(unittest.TestCase):
             self.assertTrue(process_tree.sweep_enabled())
 
 
-class TotalCpuSecondsTests(unittest.TestCase):
+class AccumulateCpuSecondsTests(unittest.TestCase):
     def test_sums_cpu_across_tree(self) -> None:
         tree = [
             {"pid": 10, "cpu_seconds": 60.0},
             {"pid": 11, "cpu_seconds": 0.03},
             {"pid": 12, "cpu_seconds": 1.5},
         ]
-        self.assertAlmostEqual(61.53, process_tree.total_cpu_seconds(tree))
+        total, tracked = process_tree.accumulate_cpu_seconds(tree)
+        self.assertAlmostEqual(61.53, total)
+        self.assertEqual(3, len(tracked))
 
     def test_empty_tree_is_zero(self) -> None:
-        self.assertEqual(0.0, process_tree.total_cpu_seconds([]))
+        self.assertEqual((0.0, {}), process_tree.accumulate_cpu_seconds([]))
 
     def test_missing_cpu_field_counts_as_zero(self) -> None:
-        self.assertEqual(
-            2.0,
-            process_tree.total_cpu_seconds(
-                [{"pid": 10}, {"pid": 11, "cpu_seconds": 2.0}]
-            ),
+        total, _tracked = process_tree.accumulate_cpu_seconds(
+            [{"pid": 10}, {"pid": 11, "cpu_seconds": 2.0}]
         )
+        self.assertEqual(2.0, total)
+
+    def test_row_without_a_pid_is_skipped(self) -> None:
+        total, tracked = process_tree.accumulate_cpu_seconds(
+            [{"cpu_seconds": 9.0}, {"pid": "x", "cpu_seconds": 9.0}]
+        )
+        self.assertEqual(0.0, total)
+        self.assertEqual({}, tracked)
+
+    def test_departed_descendant_keeps_its_cpu(self) -> None:
+        first = [
+            {"pid": 10, "cpu_seconds": 1.0, "birth": "a"},
+            {"pid": 11, "cpu_seconds": 8.0, "birth": "b"},
+        ]
+        _total, tracked = process_tree.accumulate_cpu_seconds(first)
+
+        total, tracked = process_tree.accumulate_cpu_seconds(
+            [{"pid": 10, "cpu_seconds": 1.2, "birth": "a"}], tracked
+        )
+
+        self.assertAlmostEqual(9.2, total)
+        self.assertEqual(2, len(tracked))
+
+    def test_new_descendant_adds_its_cpu(self) -> None:
+        _total, tracked = process_tree.accumulate_cpu_seconds(
+            [{"pid": 10, "cpu_seconds": 1.0, "birth": "a"}]
+        )
+
+        total, tracked = process_tree.accumulate_cpu_seconds(
+            [
+                {"pid": 10, "cpu_seconds": 1.0, "birth": "a"},
+                {"pid": 12, "cpu_seconds": 4.0, "birth": "c"},
+            ],
+            tracked,
+        )
+
+        self.assertAlmostEqual(5.0, total)
+
+    def test_pid_reuse_with_a_new_birth_is_new_work(self) -> None:
+        _total, tracked = process_tree.accumulate_cpu_seconds(
+            [{"pid": 11, "cpu_seconds": 8.0, "birth": "Sun Jul 26 17:57:01 2026"}]
+        )
+
+        total, tracked = process_tree.accumulate_cpu_seconds(
+            [{"pid": 11, "cpu_seconds": 0.5, "birth": "Sun Jul 26 18:03:44 2026"}],
+            tracked,
+        )
+
+        self.assertAlmostEqual(8.5, total)
+        self.assertEqual(2, len(tracked))
+
+    def test_absent_birth_is_one_stable_identity(self) -> None:
+        _total, tracked = process_tree.accumulate_cpu_seconds(
+            [{"pid": 11, "cpu_seconds": 8.0}]
+        )
+
+        total, tracked = process_tree.accumulate_cpu_seconds(
+            [{"pid": 11, "cpu_seconds": 9.0, "birth": None}], tracked
+        )
+
+        self.assertAlmostEqual(9.0, total)
+        self.assertEqual(1, len(tracked))
+
+    def test_lower_re_reading_keeps_the_high_water_mark(self) -> None:
+        _total, tracked = process_tree.accumulate_cpu_seconds(
+            [{"pid": 10, "cpu_seconds": 6.0, "birth": "a"}]
+        )
+
+        total, _tracked = process_tree.accumulate_cpu_seconds(
+            [{"pid": 10, "cpu_seconds": 2.0, "birth": "a"}], tracked
+        )
+
+        self.assertAlmostEqual(6.0, total)
+
+    def test_total_never_decreases_across_a_churning_sequence(self) -> None:
+        """Regression anchor for ``resources.cpu-delta-monotonicity`` (ASI-58).
+
+        Replays the grow/shrink/grow shape of a harness running a test suite
+        that constantly spawns and reaps short-lived workers.
+        """
+        samples = [
+            [
+                {"pid": 10, "cpu_seconds": 1.0, "birth": "root"},
+                {"pid": 11, "cpu_seconds": 5.0, "birth": "w1"},
+                {"pid": 12, "cpu_seconds": 4.0, "birth": "w2"},
+            ],
+            [
+                {"pid": 10, "cpu_seconds": 1.1, "birth": "root"},
+                {"pid": 12, "cpu_seconds": 4.5, "birth": "w2"},
+            ],
+            [{"pid": 10, "cpu_seconds": 1.2, "birth": "root"}],
+            [
+                {"pid": 10, "cpu_seconds": 1.3, "birth": "root"},
+                {"pid": 11, "cpu_seconds": 0.4, "birth": "w3"},
+                {"pid": 12, "cpu_seconds": 0.2, "birth": "w4"},
+            ],
+        ]
+
+        tracked: dict[tuple[int, str | None], float] = {}
+        totals: list[float] = []
+        for sample in samples:
+            total, tracked = process_tree.accumulate_cpu_seconds(sample, tracked)
+            totals.append(total)
+
+        self.assertEqual(sorted(totals), totals)
+        self.assertAlmostEqual(10.0, totals[0])
+        self.assertAlmostEqual(11.4, totals[3])
 
 
 if __name__ == "__main__":

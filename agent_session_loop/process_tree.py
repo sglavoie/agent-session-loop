@@ -9,6 +9,10 @@ absent root — yields ``None`` so callers stay fail-open.
 the harness turn or verification check they belonged to. The sweep is
 best-effort cleanup of something already finished, so nothing in this module
 raises: every failure degrades to ``None`` or an empty report instead.
+
+:func:`accumulate_cpu_seconds` folds successive samples into an identity-keyed
+CPU high-water map, so turn-hang accounting survives tree churn: a descendant
+that exits between two samples no longer takes the CPU it burned with it.
 """
 
 from __future__ import annotations
@@ -166,9 +170,44 @@ def sample_process_tree(
     return [processes[pid] for pid in walk]
 
 
-def total_cpu_seconds(tree: Iterable[Mapping[str, Any]]) -> float:
-    """Sum ``cpu_seconds`` across every sampled process in the tree."""
-    return sum(float(entry.get("cpu_seconds") or 0.0) for entry in tree)
+#: A process identity that survives pid reuse: its pid plus its start time, or
+#: ``None`` where ``ps`` reported no parsable birth.
+CpuIdentity = tuple[int, str | None]
+
+
+def accumulate_cpu_seconds(
+    tree: Iterable[Mapping[str, Any]],
+    previous: Mapping[CpuIdentity, float] | None = None,
+) -> tuple[float, dict[CpuIdentity, float]]:
+    """Fold one sample into a ``(pid, birth) -> max cpu_seconds`` high-water map.
+
+    Returns the total across every identity ever observed and the merged map to
+    pass back on the next sample. Entries with no parsable ``pid`` are skipped.
+
+    Postcondition: for a map carried forward across samples the total never
+    decreases. A process that leaves the tree keeps contributing its last
+    observed CPU — frozen, so it can never manufacture progress — while a newly
+    appeared process contributes its CPU as genuine new work. Summing a live
+    sample instead makes the total drop whenever a busy descendant exits, which
+    reads as a stalled tree.
+
+    Two honest limits, both of which under-count progress rather than invent it:
+    a process that starts *and* exits between two samples is never seen at all,
+    and where ``ps`` reported no birth a reused pid hides under the older
+    identity's high-water mark.
+    """
+    merged: dict[CpuIdentity, float] = dict(previous or {})
+    for entry in tree:
+        try:
+            pid = int(entry["pid"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        identity: CpuIdentity = (pid, entry.get("birth"))
+        cpu_seconds = float(entry.get("cpu_seconds") or 0.0)
+        seen = merged.get(identity)
+        if seen is None or cpu_seconds > seen:
+            merged[identity] = cpu_seconds
+    return sum(merged.values()), merged
 
 
 _LAST_TREE_LOCK = threading.Lock()

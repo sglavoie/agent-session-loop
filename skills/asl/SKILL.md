@@ -379,7 +379,9 @@ Two hard hang bars sit above the soft `WARN possibly stalled` line: the
 runner's `result_received_process_alive` suspicion observed on consecutive
 probes, or a probe whose idle time reaches the idle ceiling (classed
 `zero_cpu_idle` when the runner's suspicion says so, else
-`idle_ceiling_exceeded`). Both rest on the runner's process-tree CPU sampling:
+`idle_ceiling_exceeded`). Both rest on the runner's process-tree CPU sampling,
+accumulated per process identity so a descendant exiting between two samples is
+not read as the tree going idle:
 it raises neither suspicion class while the tree is burning CPU, and the idle
 ceiling stands down whenever the live `hang_cpu_progress` sample reports
 `progressing: true` — a worker piping through a buffering consumer is silent,
