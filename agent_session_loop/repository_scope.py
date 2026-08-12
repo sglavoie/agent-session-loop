@@ -21,6 +21,12 @@ Two layers with deliberately different dependencies:
 Only ``hard`` targets can force a refusal. ``soft`` prose is advisory and
 feeds :attr:`RepositoryFootprint.ambiguous`, which tells a caller to ask a
 human rather than guess an alias.
+
+Escaping the bound root is not by itself a refusal. As in
+:mod:`repository_intent`, a target that resolves outside any Git worktree is
+classified separately, in :attr:`RepositoryFootprint.external`, and never
+forces a registry: external artifacts are legitimately non-Git, and a registry
+row can only describe a Git repository, so demanding one is unsatisfiable.
 """
 
 from __future__ import annotations
@@ -121,13 +127,21 @@ class AmbiguousTarget:
 
 @dataclass(frozen=True)
 class RepositoryFootprint:
-    """Which repositories a plan touches, judged against one bound root."""
+    """Which repositories a plan touches, judged against one bound root.
+
+    ``out_of_root`` holds only the escaping targets a registry could describe:
+    each one is owned by some Git worktree. A target that escapes the bound
+    root and belongs to no Git worktree lands in ``external`` instead, matching
+    :mod:`repository_intent` — it is a legitimately non-Git artifact, and no
+    registry row could ever name it.
+    """
 
     root: Path
     repo_roots: tuple[Path, ...]
     out_of_root: tuple[PathTarget, ...]
     unresolved: tuple[PathTarget, ...]
     ambiguous: tuple[AmbiguousTarget, ...] = ()
+    external: tuple[PathTarget, ...] = ()
 
     @property
     def registry_required(self) -> bool:
@@ -301,6 +315,7 @@ def resolve_footprint(
     git_root_cache: dict[Path, Path | None] = {}
     repo_roots: dict[Path, None] = {}
     out_of_root: list[PathTarget] = []
+    external: list[PathTarget] = []
     unresolved: list[PathTarget] = []
     soft_targets: list[tuple[PathTarget, Path]] = []
 
@@ -318,9 +333,12 @@ def resolve_footprint(
         if not resolved.exists():
             unresolved.append(target)
             continue
-        if not is_descendant(resolved, bound_root, allow_equal=True):
-            out_of_root.append(target)
         git_root = nearest_git_root(resolved, git_root_cache)
+        if not is_descendant(resolved, bound_root, allow_equal=True):
+            if git_root is None:
+                external.append(target)
+            else:
+                out_of_root.append(target)
         if git_root is not None:
             repo_roots[git_root] = None
 
@@ -332,6 +350,7 @@ def resolve_footprint(
         out_of_root=tuple(out_of_root),
         unresolved=tuple(unresolved),
         ambiguous=ambiguous,
+        external=tuple(external),
     )
 
 
@@ -636,6 +655,7 @@ def footprint_payload(
         "registry_required": True,
         "detected": detected,
         "out_of_root": [target.as_dict() for target in footprint.out_of_root],
+        "external": [target.as_dict() for target in footprint.external],
         "unattributed": [
             {
                 "line": entry.target.line,

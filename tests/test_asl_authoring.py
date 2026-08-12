@@ -1483,6 +1483,22 @@ class SplitRepositoryFootprintTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertNotIn("repository_footprint", payload)
 
+    def test_a_non_git_path_outside_the_root_still_checks_clean(self) -> None:
+        loose = self.root / "loose.txt"
+        loose.write_text("x\n", encoding="utf-8")
+        plan_file = self._write_plan(
+            "# Plan\n\n"
+            "## Session 1: First\n\n"
+            f"Edit {self.first}/README.md carefully.\n\n"
+            "## Session 2: Second\n\n"
+            f"Then read {loose} for reference.\n"
+        )
+
+        payload = self._check(plan_file, self.first)
+
+        self.assertTrue(payload["ok"])
+        self.assertNotIn("repository_footprint", payload)
+
     def test_paths_inside_a_fenced_block_are_not_evidence(self) -> None:
         plan_file = self._write_plan(
             "# Plan\n\n"

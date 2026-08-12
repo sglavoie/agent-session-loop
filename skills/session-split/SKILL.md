@@ -62,11 +62,27 @@ Read the payload:
 - `ok: true` — record `session_ids` (the canonical ids to key contracts by in Step 5). When the payload also carries ordered `repositories` and `registry_digest`, retain that registry context through Steps 3–7; the parser has already validated the exact top-level `## Repositories` table and every session's `Reads repositories` / `Writes repositories` scope. Continue to Step 3.
 - `reason: single-session` — apply the Step 4 single-session outcome and stop.
 - `reason: malformed-plan` — repair the plan, then re-check. Each finding carries `line`, `category`, `message`, `source_line`, and `suggested_line`.
-- `reason: repository-registry-required` — the plan's own paths already resolve into two or more Git repositories. Apply the registry repair below; never proceed to Step 5 while this reason stands.
+- `reason: repository-registry-required` — the plan's own paths already resolve into two or more Git repositories. Run the migration below; never proceed to Step 5 while this reason stands.
 
-**`missing-repository-registry`**: the plan reaches a second repository, or escapes `--cwd`, while declaring no registry. The payload's `repository_footprint` object carries the repair: paste `suggested_registry_table` above the first session heading, add `**Reads repositories**:` / `**Writes repositories**:` lines to each session from `suggested_scopes`, then re-check. If `unattributed` is still non-empty after one pass, stop and ask the user which repository owns those paths — that is the only part ASL cannot decide.
+**`missing-repository-registry`**: the plan reaches a second Git repository, or escapes `--cwd` into a path some Git repository still owns, while declaring no registry. A target that resolves into no Git worktree at all — an ASL plan-store artifact, a scratch directory, any external file — is classified separately and never raises this finding, so it needs no registry, no rewording, and no question: leave that prose exactly as the user wrote it.
 
-When `--check` returns `reason: repository-registry-required` it also carries a `repository_intent` object: its `git_roots` lists every Git top-level the plan resolves into, and each `candidates` entry names the declaring `surface`, the `resolved` path, its `git_root`, and any `exemption`. Read it as evidence, not as a table to transcribe — the registry rows still come from `repository_footprint.suggested_registry_table`, which ASL derived from disk. Never write an alias or an origin the payload did not supply; a repository whose origin renders as `<add-origin-remote>` needs the user to fill it in. A clean `--check` does not clear this condition on its own: `asl split` re-runs the same gate with the contracts file, whose `path`/`cwd` targets the prose never mentions, and refuses with the same reason before creating any output directory.
+**Migrate instead of asking.** For either `missing-repository-registry` or `reason: repository-registry-required`, do not transcribe a table and do not ask the user for aliases. Run the derivation over the source plan:
+
+```bash
+asl register-repositories --plan-file "<plan-file>" --cwd "$PWD" --json
+```
+
+For inline input use `--inline-stdin` with the same content Step 1 captured. The command reads the plan's repository intent from disk and emits the whole migrated plan on `markdown`: the `## Repositories` table above the first session heading, `**Reads repositories**:` / `**Writes repositories**:` lines under every session heading, and a rewritten contract carrying a `repo` alias plus repository-relative `path`/`cwd` in every session that has one. Every other byte survives. The input file is never written.
+
+Read `status`:
+
+- `applied` — the migrated `markdown` is now the split source. Re-run `asl split --check --inline-stdin --cwd "$PWD" --json` on it: the plan is registered from here on, so that payload carries ordered `repositories` and `registry_digest`, and Step 5 authors registered-style contracts. Pipe the same text to `asl split --inline-stdin` in Step 6, and report the user's original path alongside the resolved `source_path`.
+- `already-registered` / `not-required` — `markdown` is the input verbatim and nothing changed. `not-required` on a `missing-repository-registry` finding means every target lives in one Git repository and only `--cwd` sits below its top-level; re-run the check with `--cwd` at that Git top-level rather than inventing a registry a single repository cannot justify.
+- `refused` — `markdown` is `null` and zero bytes were written. Print `missing_fact` verbatim (`workspace-root`, `repository-origin`, `contract-path-outside-registry`, or `command-check-repo`) with its `detail` and stop; that one fact is the only part a human has to supply.
+
+ASL derives every alias and origin from disk and refuses when it cannot observe one, so the standing rule is unchanged: never write an alias, an origin, or a scope ASL did not emit, and never substitute a plausible URL for a repository whose `origin` remote is missing — that is the `repository-origin` refusal, and the user has to add the remote.
+
+When `--check` returns `reason: repository-registry-required` it also carries a `repository_intent` object: its `git_roots` lists every Git top-level the plan resolves into, and each `candidates` entry names the declaring `surface`, the `resolved` path, its `git_root`, and any `exemption`. Read it as evidence for the report, not as a table to transcribe. A clean `--check` does not clear this condition on its own: `asl split` re-runs the same gate with the contracts file, whose `path`/`cwd` targets the prose never mentions, and refuses with the same reason before creating any output directory.
 
 **Repair loop** (at most 3 rounds):
 
@@ -98,7 +114,7 @@ Attribute paths from `repository_footprint.detected[].evidence`; only
 advisory research context, while the write scope is the durable mutation
 authority the runner will enforce.
 
-**Stop when the scan spans repositories.** If the extracted paths resolve into more than one Git top-level and the plan declares no `## Repositories` table, stop here and ask the user to supply the registry; do not continue to Step 4, and do not split. Re-run `asl split --check --cwd "$PWD" --json` and hand the user the `repository_intent.git_roots` list and the `repository_footprint.suggested_registry_table` rows verbatim. Aliases and origins are the user's to confirm — never invent an alias from a directory name yourself, never guess an origin remote, and never substitute a plausible URL for `<add-origin-remote>`.
+**Migrate when the scan spans repositories.** If the extracted paths resolve into more than one Git top-level and the plan declares no `## Repositories` table, do not ask the user for a registry and do not stop: run the Step 2 migration (`asl register-repositories --plan-file "<plan-file>" --cwd "$PWD" --json`), continue Steps 3b–7 against its migrated `markdown`, and split that text. Only a `refused` result stops the skill, and then only to name its `missing_fact`. A path that resolves into no Git worktree spans nothing and needs no migration. Aliases and origins still come from ASL alone — never invent an alias from a directory name yourself and never guess an origin remote.
 
 **3b. Probe files**: For each extracted path, run `wc -l <path> 2>/dev/null || echo "NEW"`. Record a tuple `(path, lines | NEW, session_number)` — where `session_number` is the session the reference appeared in (or `0` for context).
 

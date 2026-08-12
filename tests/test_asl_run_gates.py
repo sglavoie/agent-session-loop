@@ -179,6 +179,54 @@ class RunReadinessGateTests(unittest.TestCase):
         )
         return completed, json.loads(completed.stdout)
 
+    def _add_origin(self, repo: Path, origin: str) -> None:
+        subprocess.run(
+            ["git", "remote", "add", "origin", origin],
+            cwd=repo,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+    def _plan_dir_bytes(self) -> dict[str, bytes]:
+        return {
+            str(path.relative_to(self.plan_dir)): path.read_bytes()
+            for path in sorted(self.plan_dir.rglob("*"))
+            if path.is_file()
+        }
+
+    def _write_cross_repo_plan(
+        self, statuses: tuple[str, ...] = ("pending",)
+    ) -> Path:
+        """A legacy plan whose session 1 check lives in a second repository."""
+        other_repo = self.tmp_path / "other"
+        init_git_repo(other_repo)
+        contracts_by_id = {
+            "1": _contract_block(
+                json.dumps(
+                    {
+                        "type": "file_exists",
+                        "path": str(other_repo / "README.md"),
+                        "name": "cross-repo",
+                    }
+                ),
+                session="1",
+            )
+        }
+        for index in range(2, len(statuses) + 1):
+            contracts_by_id[str(index)] = _contract_block(
+                json.dumps(
+                    {
+                        "type": "file_exists",
+                        "path": "README.md",
+                        "name": f"readme-{index}",
+                    }
+                ),
+                session=str(index),
+            )
+        self._write_plan(statuses, contracts_by_id=contracts_by_id)
+        return other_repo
+
     def test_run_auto_repairs_when_readiness_metadata_missing(self) -> None:
         self._write_plan(("pending",), readiness=None)
 
@@ -460,12 +508,14 @@ class RunReadinessGateTests(unittest.TestCase):
     def test_allow_not_loop_ready_does_not_bypass_repository_footprint(
         self,
     ) -> None:
-        # A non-Git sibling escapes the bound root without adding a second
-        # repository, so the readiness gate — not the hard intent gate — is
-        # what has to refuse it.
-        external = self.tmp_path / "external"
-        external.mkdir()
-        (external / "README.md").write_text("external\n", encoding="utf-8")
+        # A target above the bound root but inside the same repository escapes
+        # without adding a second repository, so the readiness gate — not the
+        # hard intent gate — is what has to refuse it. A target owned by no
+        # repository at all is released deliberately: no registry row could
+        # describe it.
+        escaping = self.repo_root / "README.md"
+        self.repo_root = self.repo_root / "src"
+        self.repo_root.mkdir()
         self._write_plan(
             ("pending",),
             contracts_by_id={
@@ -473,7 +523,7 @@ class RunReadinessGateTests(unittest.TestCase):
                     json.dumps(
                         {
                             "type": "file_exists",
-                            "path": str(external / "README.md"),
+                            "path": str(escaping),
                             "name": "out-of-root",
                         }
                     ),
@@ -533,6 +583,108 @@ class RunReadinessGateTests(unittest.TestCase):
         )
         self.assertEqual([], payload["turns"])
         self.assertFalse(payload["pause_policy"]["recoverable"])
+
+    def test_hard_gate_applies_the_registry_before_the_first_session(
+        self,
+    ) -> None:
+        self._add_origin(self.repo_root, "git@github.com:tundra/repo.git")
+        other_repo = self._write_cross_repo_plan()
+        self._add_origin(other_repo, "git@github.com:tundra/other.git")
+
+        completed, payload = self._run()
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertTrue(payload["paused"])
+        self.assertEqual(
+            events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED,
+            payload["pause_reason"],
+        )
+        self.assertEqual([], payload["turns"])
+        registration = payload["pause_details"]["repository_registration"]
+        self.assertEqual("applied", registration["status"])
+        self.assertEqual(
+            str(plans.canonicalize_path(self.tmp_path)),
+            registration["workspace_root"],
+        )
+        self.assertEqual(2, len(registration["repositories"]))
+        repairs = payload["pause_details"]["auto_repairs"]
+        self.assertEqual(1, len(repairs))
+        self.assertEqual("repository-registry", repairs[0]["action"])
+        self.assertEqual(
+            "repository-registry-required", repairs[0]["category"]
+        )
+        self.assertEqual(
+            str(plans.canonicalize_path(self.plan_dir)), repairs[0]["path"]
+        )
+        self.assertEqual(len(registration["files"]), repairs[0]["entries_written"])
+        # The files are migrated, so only the rebind and the re-run are left.
+        manifest = (self.plan_dir / "manifest.md").read_text(encoding="utf-8")
+        self.assertIn("## Repositories", manifest)
+        session = (self.plan_dir / "session-1.md").read_text(encoding="utf-8")
+        self.assertIn("**Writes repositories**:", session)
+        self.assertEqual(2, len(registration["next_commands"]))
+        for command in registration["next_commands"]:
+            self.assertIn(command, payload["pause_message"])
+
+    def test_hard_gate_refuses_to_migrate_a_completed_legacy_handoff(
+        self,
+    ) -> None:
+        # A registry makes a completed handoff's unqualified `Files modified`
+        # entries illegal, so the plan would stop parsing entirely. The gate
+        # delegates that judgement to the migration itself, which refuses.
+        self._add_origin(self.repo_root, "git@github.com:tundra/repo.git")
+        other_repo = self._write_cross_repo_plan(("complete", "pending"))
+        self._add_origin(other_repo, "git@github.com:tundra/other.git")
+        session = self.plan_dir / "session-1.md"
+        session.write_text(
+            session.read_text(encoding="utf-8").replace(
+                "- **Files modified**: (none)",
+                "- **Files modified**: src/new.py",
+            ),
+            encoding="utf-8",
+        )
+        before = self._plan_dir_bytes()
+
+        completed, payload = self._run()
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertTrue(payload["paused"])
+        self.assertEqual(
+            events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED,
+            payload["pause_reason"],
+        )
+        self.assertEqual([], payload["turns"])
+        registration = payload["pause_details"]["repository_registration"]
+        self.assertEqual("refused", registration["status"])
+        self.assertEqual(
+            "completed-handoff-paths", registration["missing_fact"]
+        )
+        self.assertIn("session-1.md", registration["detail"])
+        self.assertNotIn("auto_repairs", payload["pause_details"])
+        self.assertIn("completed-handoff-paths", payload["pause_message"])
+        self.assertEqual(before, self._plan_dir_bytes())
+
+    def test_hard_gate_refuses_to_migrate_a_repository_without_an_origin(
+        self,
+    ) -> None:
+        self._write_cross_repo_plan()
+        before = self._plan_dir_bytes()
+
+        completed, payload = self._run()
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertTrue(payload["paused"])
+        self.assertEqual(
+            events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED,
+            payload["pause_reason"],
+        )
+        self.assertEqual([], payload["turns"])
+        registration = payload["pause_details"]["repository_registration"]
+        self.assertEqual("refused", registration["status"])
+        self.assertEqual("repository-origin", registration["missing_fact"])
+        self.assertNotIn("auto_repairs", payload["pause_details"])
+        self.assertIn("repository-origin", payload["pause_message"])
+        self.assertEqual(before, self._plan_dir_bytes())
 
     def test_hard_gate_refuses_a_loop_ready_plan_that_skips_preflight(
         self,

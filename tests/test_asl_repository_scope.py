@@ -140,11 +140,31 @@ class ResolveFootprintTests(unittest.TestCase):
         )
         self.assertTrue(footprint.registry_required)
 
-    def test_out_of_root_target_requires_a_registry_on_its_own(self) -> None:
+    def test_git_owned_out_of_root_target_requires_a_registry_on_its_own(self) -> None:
+        outside = self.second / "src" / "main.py"
+        footprint = self._footprint(f"Check {outside} exists.\n", self.first)
+        self.assertEqual([str(outside)], _values(footprint.out_of_root))
+        self.assertEqual((), footprint.external)
+        self.assertTrue(footprint.registry_required)
+
+    def test_non_git_escape_is_external_and_requires_no_registry(self) -> None:
         outside = Path(self._temp.name) / "loose.txt"
         outside.write_text("x\n", encoding="utf-8")
         footprint = self._footprint(f"Check {outside} exists.\n", self.first)
-        self.assertEqual([str(outside)], _values(footprint.out_of_root))
+        self.assertEqual([str(outside)], _values(footprint.external))
+        self.assertEqual((), footprint.out_of_root)
+        self.assertFalse(footprint.registry_required)
+
+    def test_target_above_the_bound_root_inside_the_repository_still_blocks(
+        self,
+    ) -> None:
+        footprint = self._footprint(
+            f"Read {self.first}/README.md first.\n", self.first / "src"
+        )
+        self.assertEqual(
+            [f"{self.first}/README.md"], _values(footprint.out_of_root)
+        )
+        self.assertEqual((), footprint.external)
         self.assertTrue(footprint.registry_required)
 
     def test_absolute_target_inside_the_root_stays_clean(self) -> None:
@@ -294,6 +314,32 @@ class SuggestionTests(unittest.TestCase):
         self.assertEqual(
             ["left", "right"], payload["suggested_scopes"]["1"]["writes"]
         )
+
+    def test_payload_reports_a_non_git_escape_beside_out_of_root(self) -> None:
+        loose = Path(self._temp.name) / "loose.txt"
+        loose.write_text("x\n", encoding="utf-8")
+        targets = tuple(
+            repository_scope.PathTarget(
+                value=str(value),
+                kind="contract-path",
+                line=0,
+                confidence="hard",
+            )
+            for value in (
+                self.repositories["SVC"] / "README.md",
+                self.repositories["OAK"] / "README.md",
+                loose,
+            )
+        )
+        footprint = repository_scope.resolve_footprint(targets, self.workspace)
+
+        payload = repository_scope.footprint_payload(
+            {"1": targets}, footprint, registry_present=False
+        )
+
+        assert payload is not None
+        self.assertEqual([], payload["out_of_root"])
+        self.assertEqual([str(loose)], [entry["text"] for entry in payload["external"]])
 
     def test_registry_refuses_a_repository_outside_the_workspace(self) -> None:
         stray = Path(self._temp.name) / "stray"

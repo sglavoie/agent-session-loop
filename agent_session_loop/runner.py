@@ -50,6 +50,7 @@ from . import (
     qna,
     repository_evidence,
     repository_intent,
+    repository_registration,
     responses,
     review,
     review_continuation,
@@ -3070,14 +3071,39 @@ def _runner_owned_roots(
 
 
 def _repository_intent_message(
-    report: Mapping[str, Any], *, subject: str = "run"
+    report: Mapping[str, Any],
+    *,
+    subject: str = "run",
+    registration: repository_registration.RegistrationResult | None = None,
 ) -> str:
-    """Name the conflicting roots. ``report`` is already credential-redacted."""
+    """Name the conflicting roots. ``report`` is already credential-redacted.
+
+    ``registration`` is the outcome of the migration the run gate applies
+    before pausing; without it the message asks for the whole repair by hand.
+    """
     git_roots = ", ".join(report.get("git_roots", ()))
-    return (
+    head = (
         f"{subject} reaches {report.get('git_root_count', 0)} git repositories "
         f"({git_roots}) but manifest.md declares no top-level `## Repositories` "
-        "table; declare the registry, give every session read and write "
+        "table"
+    )
+    if registration is not None and registration.status == "applied":
+        commands = "; then: ".join(registration.next_commands)
+        return (
+            f"{head}; the registry was derived from disk and written into the "
+            f"plan ({len(registration.files)} file(s) rewritten), so nothing is "
+            f"left to hand-edit; run: {commands}"
+        )
+    if registration is not None and registration.status == "refused":
+        return (
+            f"{head}; the registry could not be derived automatically "
+            f"({registration.missing_fact}: {registration.detail}); supply "
+            "that fact, then declare the registry, give every session read and "
+            "write repository scopes, and prepare the workspace before running "
+            "this plan"
+        )
+    return (
+        f"{head}; declare the registry, give every session read and write "
         "repository scopes, and prepare the workspace before running this plan"
     )
 
@@ -3103,6 +3129,31 @@ def _run_repository_intent_report(
         extra_exempt_roots=_runner_owned_roots(plan_dir, state_dir_arg),
     )
     return report
+
+
+def _apply_repository_registry(
+    snapshot: plans.PlanSnapshot,
+    *,
+    cwd: Path,
+) -> tuple[repository_registration.RegistrationResult | None, str | None]:
+    """Write the registry this gate refuses for, when that is still safe.
+
+    Safety is the migration's own rule rather than a private one repeated
+    here: a registry makes a completed handoff's unqualified ``Files
+    modified`` entries illegal, so
+    :func:`repository_registration.register_repositories` refuses a plan
+    carrying one before writing a byte. The run pauses either way, because the
+    rebind the migration names re-runs the prepare pipeline — a validator
+    harness and fresh baselines — which is too large a side effect to trigger
+    silently from a gate.
+    """
+    try:
+        result = repository_registration.register_repositories(
+            snapshot.plan_dir, cwd=cwd
+        )
+    except (plans.PlanError, OSError) as error:
+        return None, str(error)
+    return result, None
 
 
 def _task_packet_artifact_paths(
@@ -15335,15 +15386,40 @@ def run_from_args(
         state_dir_arg=args.state_dir,
     )
     if intent_report is not None:
+        registration, registration_error = _apply_repository_registry(
+            initial_snapshot,
+            cwd=verification_context.root,
+        )
         payload = _error_payload(
             args,
             reason=events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED,
-            message=_repository_intent_message(intent_report),
+            message=_repository_intent_message(
+                intent_report, registration=registration
+            ),
             paused=True,
             cwd=verification_context.root,
             snapshot=initial_snapshot,
         )
-        details = {"repository_intent": intent_report}
+        details: dict[str, Any] = {"repository_intent": intent_report}
+        if registration is not None:
+            details["repository_registration"] = (
+                repository_registration.result_payload(registration)
+            )
+            if registration.status == "applied":
+                details["auto_repairs"] = [
+                    asdict(
+                        preflight.AutoRepair(
+                            action="repository-registry",
+                            category="repository-registry-required",
+                            path=str(initial_snapshot.plan_dir),
+                            entries_written=len(registration.files),
+                            completed_session_ids=(),
+                            journal_replaced=False,
+                        )
+                    )
+                ]
+        if registration_error is not None:
+            details["repository_registration_error"] = registration_error
         payload["details"] = details
         payload["pause_details"] = dict(details)
         _emit_run_payload(args, payload)

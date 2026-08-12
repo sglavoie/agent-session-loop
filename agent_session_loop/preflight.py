@@ -362,17 +362,20 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
         severity_hint="red",
         message=(
             "This plan reaches outside the single root it is bound to, so it "
-            "cannot stay in legacy single-repository mode. Migrate it: "
-            "(1) add a `## Repositories` table to manifest.md above the first "
-            "session heading; (2) add **Reads repositories:** and **Writes "
-            "repositories:** lines to every session-N.md; (3) give each "
-            "contract check a `repo` alias and a repository-relative "
-            "`path`/`cwd`; (4) run `asl prepare <plan-dir> --resume "
-            "--rebind-workspace --cwd <workspace-root>`."
+            "cannot stay in legacy single-repository mode. Run "
+            "`asl register-repositories <plan-dir> --cwd <repo-root>` to "
+            "migrate it: the command derives from disk the `## Repositories` "
+            "table, the per-session **Reads repositories**: and **Writes "
+            "repositories**: scopes, and the `repo` alias plus "
+            "repository-relative `path`/`cwd` on every contract check, then "
+            "prints the `asl prepare --resume --rebind-workspace` command to "
+            "run next. It writes nothing and names the missing fact when a "
+            "fact cannot be observed."
         ),
         question_template=(
-            "Plan reaches outside its bound root ({detail}). Should I migrate "
-            "it to a registered workspace?"
+            "Plan reaches outside its bound root ({detail}). Should I run "
+            "`asl register-repositories` to migrate it to a registered "
+            "workspace?"
         ),
         fix_category="plan-edit",
     ),
@@ -383,19 +386,21 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
         message=(
             "This plan intends to reach more than one Git repository, so it "
             "cannot run in legacy single-repository mode and no single child "
-            "checkout may be selected as its root. Declare the registry: "
-            "(1) add a top-level `## Repositories` table to manifest.md above "
-            "the first session heading, one row per repository; (2) give every "
-            "session-N.md per-session **Reads repositories:** and **Writes "
-            "repositories:** scopes; (3) attribute every contract check to a "
-            "repository with a `repo` alias and a repository-relative "
-            "`path`/`cwd`; (4) run `asl prepare <plan-dir> --resume "
-            "--rebind-workspace --cwd <workspace-root>`."
+            "checkout may be selected as its root. Run "
+            "`asl register-repositories <plan-dir> --cwd <repo-root>` to "
+            "declare the registry: the command derives from disk the "
+            "top-level `## Repositories` table, the per-session **Reads "
+            "repositories**: and **Writes repositories**: scopes, and the "
+            "`repo` alias plus repository-relative `path`/`cwd` attributing "
+            "every contract check, then prints the `asl prepare --resume "
+            "--rebind-workspace` command to run next. It writes nothing and "
+            "names the missing fact when a fact cannot be observed."
         ),
         question_template=(
             "Plan intends to reach several Git repositories with no "
-            "`## Repositories` registry ({detail}). Should I declare the "
-            "registry and per-session repository scopes?"
+            "`## Repositories` registry ({detail}). Should I run "
+            "`asl register-repositories` to declare the registry and "
+            "per-session repository scopes?"
         ),
         fix_category="plan-edit",
     ),
@@ -740,18 +745,20 @@ _CATEGORY_HINT_OVERRIDES: dict[str, RepairHint] = {
         message=(
             "The plan names locations in more than one Git repository while "
             "bound to a single root, so nothing snapshots the other "
-            "repositories. Declare them: (1) add a `## Repositories` table to "
-            "manifest.md above the first session heading (preflight's "
-            "`repository_footprint.suggested_registry_table` is ready to "
-            "paste); (2) add **Reads repositories:** and **Writes "
-            "repositories:** lines to every session-N.md; (3) give each "
-            "contract check a `repo` alias and a repository-relative "
-            "`path`/`cwd`; (4) run `asl prepare <plan-dir> --resume "
-            "--rebind-workspace --cwd <workspace-root>`."
+            "repositories. Run `asl register-repositories <plan-dir> --cwd "
+            "<repo-root>` to declare them: the command derives the same "
+            "`## Repositories` table preflight reports as "
+            "`repository_footprint.suggested_registry_table`, adds the "
+            "per-session **Reads repositories**: and **Writes "
+            "repositories**: scopes and the `repo` alias plus "
+            "repository-relative `path`/`cwd` on every contract check, then "
+            "prints the `asl prepare --resume --rebind-workspace` command to "
+            "run next."
         ),
         question_template=(
             "Plan spans several repositories with no registry ({detail}). "
-            "Should I migrate it to a registered workspace?"
+            "Should I run `asl register-repositories` to migrate it to a "
+            "registered workspace?"
         ),
         fix_category="plan-edit",
     ),
@@ -762,17 +769,20 @@ _CATEGORY_HINT_OVERRIDES: dict[str, RepairHint] = {
         message=(
             "A contract check points outside the root this plan is bound to, "
             "where no snapshot or write guard applies. Either rewrite the "
-            "target as a path beneath the bound root, or declare the other "
-            "location: (1) add a `## Repositories` table to manifest.md above "
-            "the first session heading; (2) add **Reads repositories:** and "
-            "**Writes repositories:** lines to every session-N.md; (3) give "
-            "each contract check a `repo` alias and a repository-relative "
-            "`path`/`cwd`; (4) run `asl prepare <plan-dir> --resume "
-            "--rebind-workspace --cwd <workspace-root>`."
+            "target as a path beneath the bound root, or run "
+            "`asl register-repositories <plan-dir> --cwd <repo-root>` to "
+            "declare the other location: the command derives the "
+            "`## Repositories` table, the per-session **Reads repositories**: "
+            "and **Writes repositories**: scopes, and the `repo` alias plus "
+            "repository-relative `path`/`cwd` on every contract check, then "
+            "prints the `asl prepare --resume --rebind-workspace` command to "
+            "run next. It applies only to a plan reaching several "
+            "repositories; a single-repository escape has to be rewritten."
         ),
         question_template=(
             "Contract target escapes the bound root ({detail}). Rewrite it, or "
-            "migrate the plan to a registered workspace?"
+            "run `asl register-repositories` to migrate the plan to a "
+            "registered workspace?"
         ),
         fix_category="plan-edit",
     ),
@@ -3361,11 +3371,15 @@ def repair_hint_payload(
 # ``suggested_pause`` so a skill can drive the exact bounded repairs that
 # ``skills/session-run/SKILL.md`` Step 4a prescribes, without re-encoding the
 # ordering or pause vocabulary in prose:
-#   1. stale env-lock -> `asl unlock <plan-dir> --json` (one attempt); an
+#   1. a required registry -> `asl register-repositories <plan-dir> --cwd
+#      <bound-root> --json` then `asl prepare <plan-dir> --resume
+#      --rebind-workspace --cwd <workspace-root>`; the migration writes the
+#      plan files and the rebind republishes the workspace-bound evidence.
+#   2. stale env-lock -> `asl unlock <plan-dir> --json` (one attempt); an
 #      active lock never unlocks/`--force` — it emits a ``blocked`` step and a
 #      ``lock-contention`` suggested pause.
-#   2. progress-journal-missing -> `asl backfill-progress --force <plan-dir>`.
-#   3. readiness-only residue -> `asl preflight <plan-dir> --json
+#   3. progress-journal-missing -> `asl backfill-progress --force <plan-dir>`.
+#   4. readiness-only residue -> `asl preflight <plan-dir> --json
 #      --mark-loop-ready`.
 # Any residual blocker the plan cannot clear becomes an ``unsafe`` suggested
 # pause so the skill emits ``RUNNER_PAUSE: <reason> - <detail>`` verbatim.
@@ -3376,6 +3390,15 @@ LOCK_CONTENTION_PAUSE_DETAIL = (
 
 _AUTO_REPAIR_HANDLED_LOCK_IDS: frozenset[str] = frozenset(
     {"env-lock.active", "env-lock.stale"}
+)
+
+#: Categories the registry-migration steps clear. Both describe one condition —
+#: a legacy plan reaching repositories its single bound root does not cover — so
+#: ``asl register-repositories`` plus the rebind it prints answers both at once.
+#: They are only dropped from the residual blockers when those steps are
+#: actually emitted (see :func:`_registry_repair`).
+_AUTO_REPAIR_HANDLED_CATEGORIES: frozenset[str] = frozenset(
+    {"repository-footprint", "repository-registry-required"}
 )
 
 
@@ -3390,15 +3413,25 @@ def _blocking_findings(
 
 
 def _residual_blocking_findings(
-    report: PreflightReport,
+    report: PreflightReport, *, registry_handled: bool = False
 ) -> tuple[PreflightFinding, ...]:
-    """Blockers not already handled by the lock/progress repair steps."""
+    """Blockers not already handled by the lock/progress repair steps.
+
+    ``registry_handled`` additionally drops
+    :data:`_AUTO_REPAIR_HANDLED_CATEGORIES`; it defaults to ``False`` so a
+    caller that cannot say whether the registry steps were emitted keeps
+    reporting the blocker.
+    """
+    handled_categories = (
+        _AUTO_REPAIR_HANDLED_CATEGORIES if registry_handled else frozenset()
+    )
     return tuple(
         finding
         for finding in _blocking_findings(report)
         if _override_check_id_for_finding(finding)
         not in _AUTO_REPAIR_HANDLED_LOCK_IDS
         and finding.category != "progress-journal-missing"
+        and finding.category not in handled_categories
     )
 
 
@@ -3422,15 +3455,98 @@ def _command_repair_step(
     }
 
 
+@dataclass(frozen=True)
+class _RegistryRepair:
+    """Whether preflight may advertise the registry migration, and why not.
+
+    ``missing_fact`` is the fact the derivation refused for, so the fallback
+    pause can name the one thing a human has to supply.
+    """
+
+    steps: tuple[dict[str, Any], ...] = ()
+    missing_fact: str | None = None
+
+
+def _registry_repair(
+    report: PreflightReport,
+    *,
+    plan_dir: str,
+    cwd: str | None,
+    state_dir: str | None,
+) -> _RegistryRepair:
+    """The registry migration for a registry-less multi-repository plan.
+
+    Admissibility is the migration's own: preflight runs the same read-only
+    derivation ``asl register-repositories`` runs rather than judging from
+    repository topology, so a plan the command would decline — an unobservable
+    ``origin``, a contract check under no registered repository, a completed
+    handoff a registry would invalidate — never gets a step advertised for it.
+    A refusal emits neither step and reports its missing fact instead. The
+    rebind's workspace root comes from that same derivation, so the command
+    mirrors the first entry of the migration's own ``next_commands``.
+    """
+    if cwd is None:
+        return _RegistryRepair()
+    driving = next(
+        (
+            finding.category
+            for finding in _blocking_findings(report)
+            if finding.category in _AUTO_REPAIR_HANDLED_CATEGORIES
+        ),
+        None,
+    )
+    if driving is None:
+        return _RegistryRepair()
+
+    from . import repository_registration  # local: it imports preflight
+
+    try:
+        derived = repository_registration.derive_registration(
+            plan_dir, cwd=cwd
+        )
+    except (PlanError, OSError, workspaces.WorkspaceError):
+        # Fails closed: the command reads the same files and would fail too.
+        return _RegistryRepair()
+    if not isinstance(derived, repository_registration.RegistrationPlan):
+        return _RegistryRepair(missing_fact=derived.missing_fact)
+
+    register = ["asl", "register-repositories", plan_dir, "--cwd", cwd]
+    rebind = [
+        "asl",
+        "prepare",
+        plan_dir,
+        "--resume",
+        "--rebind-workspace",
+        "--cwd",
+        str(derived.workspace_root),
+    ]
+    if state_dir is not None:
+        register.extend(["--state-dir", state_dir])
+        rebind.extend(["--state-dir", state_dir])
+    register.append("--json")
+    return _RegistryRepair(
+        steps=tuple(
+            _command_repair_step(argv, category=driving, pause_reason="unsafe")
+            for argv in (register, rebind)
+        )
+    )
+
+
 def build_auto_repair_plan(
-    report: PreflightReport, *, plan_dir: str
+    report: PreflightReport,
+    *,
+    plan_dir: str,
+    cwd: str | None,
+    state_dir: str | None = None,
 ) -> tuple[dict[str, Any], ...]:
     """Ordered bounded repairs mirroring session-run Step 4a, or ``()``.
 
     Empty when the report is already ok. An active lock short-circuits to a
     single ``blocked`` step (never unlock, never ``--force``). Otherwise the
-    plan lists the applicable stale-lock, progress-journal, and readiness
-    repairs in Step 4a order, each with ``max_attempts: 1``.
+    plan leads with the registry migration when the derivation that migration
+    runs returns a plan, then lists the applicable stale-lock,
+    progress-journal, and readiness repairs in Step 4a order, each with
+    ``max_attempts: 1``.
     """
     if report.ok:
         return ()
@@ -3454,7 +3570,10 @@ def build_auto_repair_plan(
             },
         )
 
-    steps: list[dict[str, Any]] = []
+    registry = _registry_repair(
+        report, plan_dir=plan_dir, cwd=cwd, state_dir=state_dir
+    )
+    steps: list[dict[str, Any]] = list(registry.steps)
     if stale_lock is not None:
         steps.append(
             _command_repair_step(
@@ -3474,7 +3593,9 @@ def build_auto_repair_plan(
             )
         )
 
-    residual = _residual_blocking_findings(report)
+    residual = _residual_blocking_findings(
+        report, registry_handled=bool(registry.steps)
+    )
     readiness = [f for f in residual if f.category == "manifest-readiness"]
     hard = [f for f in residual if f.category != "manifest-readiness"]
     if readiness and not hard:
@@ -3489,14 +3610,21 @@ def build_auto_repair_plan(
 
 
 def build_suggested_pause(
-    report: PreflightReport, *, plan_dir: str
+    report: PreflightReport,
+    *,
+    plan_dir: str,
+    cwd: str | None = None,
+    state_dir: str | None = None,
 ) -> dict[str, str] | None:
     """The pause a skill should emit if the auto-repair plan cannot clear it.
 
     ``None`` when the report is ok or every blocker is auto-repairable
-    (stale lock, progress journal, readiness-only). An active lock yields a
-    ``lock-contention`` pause; any other residual blocker yields ``unsafe``
-    with the failing categories named — matching Step 4a's fallback pause.
+    (stale lock, progress journal, readiness-only, or a registry migration the
+    plan emits). An active lock yields a ``lock-contention`` pause; any other
+    residual blocker yields ``unsafe`` with the failing categories named —
+    matching Step 4a's fallback pause. A registry migration the derivation
+    refused adds the fact it refused for, which is the one thing a human has
+    to supply before the category can clear.
     """
     if report.ok:
         return None
@@ -3509,15 +3637,23 @@ def build_suggested_pause(
             "reason": "lock-contention",
             "detail": LOCK_CONTENTION_PAUSE_DETAIL,
         }
-    residual = _residual_blocking_findings(report)
+    registry = _registry_repair(
+        report, plan_dir=plan_dir, cwd=cwd, state_dir=state_dir
+    )
+    residual = _residual_blocking_findings(
+        report, registry_handled=bool(registry.steps)
+    )
     hard = sorted(
         {f.category for f in residual if f.category != "manifest-readiness"}
     )
     if hard:
-        return {
-            "reason": "unsafe",
-            "detail": f"automatic plan repair failed: {', '.join(hard)}",
-        }
+        detail = f"automatic plan repair failed: {', '.join(hard)}"
+        if registry.missing_fact is not None:
+            detail += (
+                "; the registry migration refuses for missing fact "
+                f"{registry.missing_fact}"
+            )
+        return {"reason": "unsafe", "detail": detail}
     return None
 
 
@@ -3580,10 +3716,12 @@ def _preflight_payload_fields(
         ],
         "auto_repairs": [asdict(repair) for repair in auto_repairs],
         "auto_repair_plan": list(
-            build_auto_repair_plan(report, plan_dir=plan_dir_arg)
+            build_auto_repair_plan(
+                report, plan_dir=plan_dir_arg, cwd=cwd, state_dir=state_dir
+            )
         ),
         "suggested_pause": build_suggested_pause(
-            report, plan_dir=plan_dir_arg
+            report, plan_dir=plan_dir_arg, cwd=cwd, state_dir=state_dir
         ),
     }
     if report.repository_registry is not None:

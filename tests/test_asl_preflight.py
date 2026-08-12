@@ -51,6 +51,7 @@ from agent_session_loop import (
     progress_cli,
     progress_repair,
     qna,
+    repository_registration,
     review,
     review_repair,
     run_control,
@@ -1498,6 +1499,17 @@ class RepositoryFootprintPreflightTests(unittest.TestCase):
         self.assertEqual([], self._footprint_findings(report))
         self.assertFalse(report.repository_footprint.registry_required)
 
+    def test_non_git_target_outside_the_bound_root_stays_green(self) -> None:
+        loose = self.root / "loose.txt"
+        loose.write_text("x\n", encoding="utf-8")
+        self._write_plan(self.first / "README.md", loose)
+        plans.save_plan_metadata(self.plan_dir, str(self.first))
+
+        report = preflight.run_core_preflight(self.plan_dir)
+
+        self.assertEqual([], self._footprint_findings(report))
+        self.assertFalse(report.repository_footprint.registry_required)
+
     def test_without_plan_metadata_the_explicit_cwd_supplies_the_root(self) -> None:
         self._write_plan(self.first / "README.md", self.second / "README.md")
 
@@ -1561,6 +1573,26 @@ class RepositoryFootprintPreflightTests(unittest.TestCase):
         self.assertEqual([], self._footprint_findings(report))
         self.assertIsNone(report.repository_footprint)
 
+    def test_footprint_blockers_are_cleared_by_the_registry_steps(self) -> None:
+        self._write_plan(self.first / "README.md", self.second / "README.md")
+        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        report = preflight.run_core_preflight(self.plan_dir)
+        self.assertEqual(2, len(self._footprint_findings(report)))
+
+        steps = preflight.build_auto_repair_plan(
+            report, plan_dir=str(self.plan_dir), cwd=str(self.first)
+        )
+
+        self.assertEqual(
+            ["register-repositories", "prepare"],
+            [step["argv"][1] for step in steps],
+        )
+        self.assertIsNone(
+            preflight.build_suggested_pause(
+                report, plan_dir=str(self.plan_dir), cwd=str(self.first)
+            )
+        )
+
 
 class RepositoryIntentPreflightTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -1577,7 +1609,9 @@ class RepositoryIntentPreflightTests(unittest.TestCase):
             (repository / "README.md").write_text("x\n", encoding="utf-8")
         self.plan_dir = self.root / "plan"
 
-    def _write_plan(self, *paths: Path) -> None:
+    def _write_plan(
+        self, *paths: Path, statuses: tuple[str, ...] = ("pending",)
+    ) -> None:
         contract = _contract_block(
             ", ".join(
                 json.dumps(
@@ -1592,8 +1626,21 @@ class RepositoryIntentPreflightTests(unittest.TestCase):
             session="1",
         )
         _write_loop_ready_plan(
-            self.plan_dir, ("pending",), contracts_by_id={"1": contract}
+            self.plan_dir, statuses, contracts_by_id={"1": contract}
         )
+
+    def _set_handoff(
+        self, session_id: str, *, status: str, files_modified: str
+    ) -> None:
+        path = self.plan_dir / f"session-{session_id}.md"
+        lines = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("- **Status**: "):
+                line = f"- **Status**: {status}"
+            elif line.startswith("- **Files modified**: "):
+                line = f"- **Files modified**: {files_modified}"
+            lines.append(line)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def _intent_findings(
         self, report: preflight.PreflightReport
@@ -1627,12 +1674,35 @@ class RepositoryIntentPreflightTests(unittest.TestCase):
         # is exactly the gap the intent check closes.
         self.assertFalse(report.repository_footprint.registry_required)
 
-    def test_repair_guidance_names_the_table_scopes_and_attribution(self) -> None:
-        message = preflight.REPAIR_HINTS["repository-registry-required"].message
-        self.assertIn("`## Repositories` table", message)
-        self.assertIn("Reads repositories:", message)
-        self.assertIn("Writes repositories:", message)
-        self.assertIn("`repo` alias", message)
+    def test_repair_guidance_names_the_migration_command(self) -> None:
+        hint = preflight.REPAIR_HINTS["repository-registry-required"]
+        self.assertIn(
+            "asl register-repositories <plan-dir> --cwd <repo-root>",
+            hint.message,
+        )
+        self.assertIn("`## Repositories` table", hint.message)
+        self.assertIn("Reads repositories**:", hint.message)
+        self.assertIn("Writes repositories**:", hint.message)
+        self.assertIn("`repo` alias", hint.message)
+        self.assertIn("asl register-repositories", hint.question_template)
+
+    def test_every_repository_hint_names_the_migration_command(self) -> None:
+        hints = (
+            preflight.REPAIR_HINTS["repository-footprint"],
+            preflight.REPAIR_HINTS["repository-registry-required"],
+            preflight._CATEGORY_HINT_OVERRIDES["repository-footprint.multi-repo"],
+            preflight._CATEGORY_HINT_OVERRIDES[
+                "repository-footprint.out-of-root"
+            ],
+        )
+        for hint in hints:
+            with self.subTest(check_id=hint.check_id):
+                self.assertIn("asl register-repositories", hint.message)
+                self.assertIn(
+                    "asl register-repositories", hint.question_template
+                )
+                # The hand-edit recipe is gone: no numbered step list survives.
+                self.assertNotIn("(1) add", hint.message)
 
     def test_single_repository_legacy_plan_is_unchanged(self) -> None:
         self._write_plan(self.first / "README.md", self.first / "src" / "new.py")
@@ -1715,23 +1785,239 @@ class RepositoryIntentPreflightTests(unittest.TestCase):
         self.assertIn("non-bypassable", error)
         self.assertIn("repository-registry-required", error)
 
-    def test_generic_auto_repair_offers_no_step_that_clears_it(self) -> None:
+    def _registry_required_report(self) -> preflight.PreflightReport:
         self._write_plan(
             self.first / "README.md", self.second / "src" / "new_module.py"
         )
         plans.save_plan_metadata(self.plan_dir, str(self.first))
+        return preflight.run_core_preflight(self.plan_dir)
+
+    def test_auto_repair_migrates_the_registry_and_clears_the_pause(self) -> None:
+        report = self._registry_required_report()
+
+        steps = preflight.build_auto_repair_plan(
+            report, plan_dir=str(self.plan_dir), cwd=str(self.first)
+        )
+
+        workspace = workspaces.canonicalize_filesystem_path(self.workspace)
+        self.assertEqual(
+            [
+                [
+                    "asl",
+                    "register-repositories",
+                    str(self.plan_dir),
+                    "--cwd",
+                    str(self.first),
+                    "--json",
+                ],
+                [
+                    "asl",
+                    "prepare",
+                    str(self.plan_dir),
+                    "--resume",
+                    "--rebind-workspace",
+                    "--cwd",
+                    str(workspace),
+                ],
+            ],
+            [step["argv"] for step in steps],
+        )
+        for step in steps:
+            self.assertEqual(1, step["max_attempts"])
+            self.assertEqual("repository-registry-required", step["category"])
+        self.assertIsNone(
+            preflight.build_suggested_pause(
+                report, plan_dir=str(self.plan_dir), cwd=str(self.first)
+            )
+        )
+
+    def test_registry_steps_forward_a_state_directory_override(self) -> None:
+        report = self._registry_required_report()
+
+        steps = preflight.build_auto_repair_plan(
+            report,
+            plan_dir=str(self.plan_dir),
+            cwd=str(self.first),
+            state_dir="/state/dir",
+        )
+
+        for step in steps:
+            self.assertIn("--state-dir", step["argv"])
+            self.assertEqual(
+                "/state/dir",
+                step["argv"][step["argv"].index("--state-dir") + 1],
+            )
+
+    def test_completed_handoff_blocks_automatic_registry_steps(self) -> None:
+        """Preflight never advertises a migration the command would refuse."""
+        self._write_plan(
+            self.first / "README.md",
+            self.second / "src" / "new_module.py",
+            statuses=("complete", "pending"),
+        )
+        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        self._set_handoff("1", status="complete", files_modified="src/new.py")
         report = preflight.run_core_preflight(self.plan_dir)
 
         steps = preflight.build_auto_repair_plan(
-            report, plan_dir=str(self.plan_dir)
+            report, plan_dir=str(self.plan_dir), cwd=str(self.first)
         )
 
         self.assertEqual(
-            [], [step for step in steps if "--mark-loop-ready" in step["command"]]
+            [],
+            [step for step in steps if "register-repositories" in step["argv"]],
         )
-        pause = preflight.build_suggested_pause(report, plan_dir=str(self.plan_dir))
-        self.assertIsNotNone(pause)
+        pause = preflight.build_suggested_pause(
+            report, plan_dir=str(self.plan_dir), cwd=str(self.first)
+        )
+        self.assertEqual("unsafe", pause["reason"])
         self.assertIn("repository-registry-required", pause["detail"])
+
+        # The rule is the entry, not the status: a completed handoff that
+        # modified nothing survives the registry, so the steps come back.
+        self._set_handoff("1", status="complete", files_modified="(none)")
+        report = preflight.run_core_preflight(self.plan_dir)
+
+        steps = preflight.build_auto_repair_plan(
+            report, plan_dir=str(self.plan_dir), cwd=str(self.first)
+        )
+
+        self.assertEqual(
+            [
+                "asl",
+                "register-repositories",
+                str(self.plan_dir),
+                "--cwd",
+                str(self.first),
+                "--json",
+            ],
+            steps[0]["argv"],
+        )
+        self.assertIsNone(
+            preflight.build_suggested_pause(
+                report, plan_dir=str(self.plan_dir), cwd=str(self.first)
+            )
+        )
+
+    def test_missing_origin_keeps_registry_blocker_and_suggested_pause(
+        self,
+    ) -> None:
+        """Topology alone cannot see this refusal; the derivation can."""
+        subprocess.run(
+            ["git", "remote", "remove", "origin"],
+            cwd=self.second,
+            check=True,
+            capture_output=True,
+        )
+        report = self._registry_required_report()
+        self.assertTrue(self._intent_findings(report))
+        self.assertEqual(
+            "repository-origin",
+            repository_registration.derive_registration(
+                self.plan_dir, cwd=self.first
+            ).missing_fact,
+        )
+
+        steps = preflight.build_auto_repair_plan(
+            report, plan_dir=str(self.plan_dir), cwd=str(self.first)
+        )
+
+        self.assertEqual([], list(steps))
+        pause = preflight.build_suggested_pause(
+            report, plan_dir=str(self.plan_dir), cwd=str(self.first)
+        )
+        self.assertEqual("unsafe", pause["reason"])
+        self.assertIn("repository-registry-required", pause["detail"])
+        self.assertIn("repository-origin", pause["detail"])
+
+    def test_unattributable_contract_keeps_registry_blocker_and_suggested_pause(
+        self,
+    ) -> None:
+        """A check under no repository refuses, so neither step is offered."""
+        self._write_plan(
+            self.first / "README.md",
+            self.second / "src" / "new_module.py",
+            self.root / "outside" / "artifact.txt",
+        )
+        plans.save_plan_metadata(self.plan_dir, str(self.first))
+        report = preflight.run_core_preflight(self.plan_dir)
+        self.assertTrue(self._intent_findings(report))
+        self.assertEqual(
+            "contract-path-outside-registry",
+            repository_registration.derive_registration(
+                self.plan_dir, cwd=self.first
+            ).missing_fact,
+        )
+
+        steps = preflight.build_auto_repair_plan(
+            report, plan_dir=str(self.plan_dir), cwd=str(self.first)
+        )
+
+        self.assertEqual([], list(steps))
+        pause = preflight.build_suggested_pause(
+            report, plan_dir=str(self.plan_dir), cwd=str(self.first)
+        )
+        self.assertEqual("unsafe", pause["reason"])
+        self.assertIn("repository-registry-required", pause["detail"])
+        self.assertIn("contract-path-outside-registry", pause["detail"])
+
+    def test_without_a_cwd_no_registry_step_is_emitted(self) -> None:
+        report = self._registry_required_report()
+
+        steps = preflight.build_auto_repair_plan(
+            report, plan_dir=str(self.plan_dir), cwd=None
+        )
+
+        self.assertEqual([], list(steps))
+        pause = preflight.build_suggested_pause(
+            report, plan_dir=str(self.plan_dir), cwd=None
+        )
+        self.assertEqual("unsafe", pause["reason"])
+        self.assertIn("repository-registry-required", pause["detail"])
+
+    def test_an_active_lock_still_wins_over_the_registry_steps(self) -> None:
+        report = self._registry_required_report()
+        locked = dataclasses.replace(
+            report,
+            findings=report.findings
+            + (
+                _finding(
+                    "red", "env-lock", "active lock held by pid 9 at /p/lock"
+                ),
+            ),
+        )
+
+        plan = preflight.build_auto_repair_plan(
+            locked, plan_dir=str(self.plan_dir), cwd=str(self.first)
+        )
+
+        self.assertEqual(1, len(plan))
+        self.assertTrue(plan[0]["blocked"])
+        self.assertEqual("lock-contention", plan[0]["pause_reason"])
+        self.assertEqual(
+            "lock-contention",
+            preflight.build_suggested_pause(
+                locked, plan_dir=str(self.plan_dir), cwd=str(self.first)
+            )["reason"],
+        )
+
+    def test_the_rebind_step_matches_the_command_the_migration_prints(
+        self,
+    ) -> None:
+        # The two surfaces emit the same follow-up command, so neither can
+        # drift into telling an operator to run something the other does not.
+        report = self._registry_required_report()
+        plan_dir = str(workspaces.canonicalize_filesystem_path(self.plan_dir))
+
+        steps = preflight.build_auto_repair_plan(
+            report, plan_dir=plan_dir, cwd=str(self.first)
+        )
+        applied = repository_registration.register_repositories(
+            self.plan_dir, cwd=self.first
+        )
+
+        self.assertEqual("applied", applied.status)
+        self.assertEqual(applied.next_commands[0], steps[1]["command"])
 
     def test_category_is_not_bypassable(self) -> None:
         self.assertIn(
@@ -2109,7 +2395,8 @@ class AutoRepairPlanTests(unittest.TestCase):
     def test_ok_report_has_empty_plan_and_no_pause(self) -> None:
         report = _report(_finding("green", "env-amx", "optional"))
         self.assertEqual(
-            (), preflight.build_auto_repair_plan(report, plan_dir="/plan")
+            (),
+            preflight.build_auto_repair_plan(report, plan_dir="/plan", cwd=None),
         )
         self.assertIsNone(
             preflight.build_suggested_pause(report, plan_dir="/plan")
@@ -2121,7 +2408,9 @@ class AutoRepairPlanTests(unittest.TestCase):
             _finding("yellow", "progress-journal-missing", "progress journal not initialized"),
             _finding("yellow", "env-lock", "stale lock present at /p/lock"),
         )
-        plan = preflight.build_auto_repair_plan(report, plan_dir="/plans/x")
+        plan = preflight.build_auto_repair_plan(
+            report, plan_dir="/plans/x", cwd=None
+        )
         commands = [step["command"] for step in plan]
         self.assertEqual(
             [
@@ -2143,7 +2432,9 @@ class AutoRepairPlanTests(unittest.TestCase):
             _finding("red", "env-lock", "active lock held by pid 9 at /p/lock"),
             _finding("yellow", "progress-journal-missing", "journal missing"),
         )
-        plan = preflight.build_auto_repair_plan(report, plan_dir="/plans/x")
+        plan = preflight.build_auto_repair_plan(
+            report, plan_dir="/plans/x", cwd=None
+        )
         self.assertEqual(1, len(plan))
         step = plan[0]
         self.assertTrue(step["blocked"])
@@ -2162,7 +2453,9 @@ class AutoRepairPlanTests(unittest.TestCase):
             _finding("red", "manifest-readiness", "manifest is missing readiness metadata"),
             _finding("red", "missing-contract", "session 1 is missing a ## Completion Contract section"),
         )
-        plan = preflight.build_auto_repair_plan(report, plan_dir="/plans/x")
+        plan = preflight.build_auto_repair_plan(
+            report, plan_dir="/plans/x", cwd=None
+        )
         # A non-readiness blocker (missing-contract) means mark-loop-ready would
         # be refused, so no readiness repair step is offered.
         self.assertEqual([], [s for s in plan if "command" in s])
@@ -2175,7 +2468,9 @@ class AutoRepairPlanTests(unittest.TestCase):
         report = _report(
             _finding("yellow", "progress-journal-missing", "journal missing"),
         )
-        plan = preflight.build_auto_repair_plan(report, plan_dir="/plans/x")
+        plan = preflight.build_auto_repair_plan(
+            report, plan_dir="/plans/x", cwd=None
+        )
         self.assertEqual(
             ["asl backfill-progress --force /plans/x"],
             [s["command"] for s in plan],
@@ -2204,7 +2499,7 @@ class AutoRepairPlanTests(unittest.TestCase):
             ),
             _finding("yellow", "env-lock", "stale lock present at /p/lock"),
         )
-        plan = preflight.build_auto_repair_plan(report, plan_dir=weird)
+        plan = preflight.build_auto_repair_plan(report, plan_dir=weird, cwd=None)
         self.assertEqual(
             [
                 ["asl", "unlock", weird, "--json"],

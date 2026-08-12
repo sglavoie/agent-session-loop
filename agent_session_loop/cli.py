@@ -700,6 +700,71 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     )
     expand_ingest_parser.set_defaults(handler_ref="prepare:expand_ingest_from_args")
 
+    register_repositories_parser = subparsers.add_parser(
+        "register-repositories",
+        help=(
+            "Derive and apply the `## Repositories` registry a legacy "
+            "multi-repository plan needs, or name the fact that refuses it."
+        ),
+    )
+    register_repositories_parser.add_argument(
+        "plan_dir",
+        nargs="?",
+        default=None,
+        help="Split plan directory to migrate in place",
+    )
+    register_repositories_source = (
+        register_repositories_parser.add_mutually_exclusive_group()
+    )
+    register_repositories_source.add_argument(
+        "--plan-file",
+        dest="plan_file",
+        default=None,
+        help=(
+            "Source plan markdown file to migrate; the migrated markdown is "
+            "emitted and the input file is never written"
+        ),
+    )
+    register_repositories_source.add_argument(
+        "--inline-stdin",
+        dest="inline_stdin",
+        action="store_true",
+        help=(
+            "Read the source plan from stdin (the last <proposed_plan> block, "
+            "else the raw input)"
+        ),
+    )
+    register_repositories_parser.add_argument(
+        "--output",
+        default=None,
+        help=(
+            "Write the migrated source plan here instead of stdout "
+            "(source-plan mode only)"
+        ),
+    )
+    register_repositories_parser.add_argument(
+        "--cwd",
+        default=".",
+        help=(
+            "Root the plan is currently bound to; the workspace root is "
+            "derived from the repositories the plan reaches "
+            "(default: current directory)"
+        ),
+    )
+    register_repositories_parser.add_argument(
+        "--state-dir",
+        default=None,
+        help="Override operational state directory",
+    )
+    register_repositories_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    register_repositories_parser.set_defaults(
+        handler_ref="repository_registration:register_repositories_from_args"
+    )
+
     preflight_parser = subparsers.add_parser(
         "preflight",
         help="Check that a split plan directory is loop-ready.",

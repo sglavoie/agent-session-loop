@@ -58,6 +58,7 @@ from agent_session_loop import (
     progress_cli,
     progress_repair,
     qna,
+    repository_registration,
     retention,
     review,
     review_continuation,
@@ -176,6 +177,106 @@ class SkillInstructionTests(unittest.TestCase):
             self.assertIn(reason, surfaces["asl"])
         self.assertIn("one combined read-only review", surfaces["asl"])
         self.assertIn("preserve partial commit SHAs", surfaces["asl"])
+
+        # `plans.READS_REPOSITORIES_PREFIX` puts the colon outside the bold;
+        # any other spelling is prose the parser rejects.
+        for name, text in surfaces.items():
+            self.assertNotIn("**Reads repositories:**", text, msg=name)
+            self.assertNotIn("**Writes repositories:**", text, msg=name)
+
+        # Every skill drives `asl register-repositories` instead of asking a
+        # human to hand-write the registry it derives from disk.
+        self.assertIn(
+            "asl register-repositories --plan-file", surfaces["split"]
+        )
+        self.assertIn("Migrate instead of asking", surfaces["split"])
+        # `--cwd` is the root the plan is bound to; the workspace root is what
+        # the migration derives, and only the rebind is invoked with it.
+        for name in ("expand", "run", "preflight"):
+            self.assertIn(
+                "asl register-repositories <plan-dir> --cwd <bound-root> --json",
+                surfaces[name],
+                msg=name,
+            )
+            self.assertNotIn(
+                "asl register-repositories <plan-dir> --cwd <workspace-root>",
+                surfaces[name],
+                msg=name,
+            )
+            self.assertIn(
+                "asl prepare <plan-dir> --resume --rebind-workspace "
+                "--cwd <workspace-root>",
+                surfaces[name],
+                msg=name,
+            )
+        self.assertNotIn(
+            "No `--mark-loop-ready` or auto-repair step can clear it",
+            surfaces["preflight"],
+        )
+        self.assertNotIn("no auto-repair step exists for them", surfaces["preflight"])
+        # A refusal is the only stop condition, and it names one fact.
+        for name in ("split", "preflight"):
+            for fact in (
+                "workspace-root",
+                "repository-origin",
+                "contract-path-outside-registry",
+                "command-check-repo",
+            ):
+                self.assertIn(fact, surfaces[name], msg=name)
+        # The completed-handoff refusal belongs to plan-directory mode alone: a
+        # source plan carries no handoff a registry could invalidate.
+        for name in ("expand", "preflight"):
+            self.assertIn("completed-handoff-paths", surfaces[name], msg=name)
+        self.assertNotIn("completed-handoff-paths", surfaces["split"])
+        # Session 1 released non-Git targets: they are no longer a stop
+        # condition anywhere, because no registry row could describe them.
+        self.assertIn("never raises this finding", surfaces["split"])
+
+    def test_docs_describe_the_automatic_registry_migration(self) -> None:
+        docs = (REPO_ROOT / "docs/agent-session-loop.md").read_text(
+            encoding="utf-8"
+        )
+        readme = (REPO_ROOT / "agent_session_loop/README.md").read_text(
+            encoding="utf-8"
+        )
+
+        for text in (docs, readme):
+            self.assertNotIn("**Reads repositories:**", text)
+            self.assertNotIn("**Writes repositories:**", text)
+            self.assertNotIn("no auto-repair step can clear it", text)
+            self.assertNotIn("no auto-repair step targets the category", text)
+
+        self.assertIn(
+            "asl register-repositories PLAN_DIR --cwd BOUND_ROOT --json", docs
+        )
+        self.assertIn(
+            "asl register-repositories <plan-dir> --cwd <bound-root> --json",
+            docs,
+        )
+        self.assertIn(
+            "asl prepare <plan-dir> --resume --rebind-workspace "
+            "--cwd <workspace-root>",
+            docs,
+        )
+        self.assertIn(
+            "`asl run` applies the file migration itself on that same "
+            "admissibility rule",
+            readme,
+        )
+        # One rule, three surfaces: a registry that would make a completed
+        # handoff unparsable is refused rather than advertised.
+        for text in (docs, readme):
+            self.assertIn("completed-handoff-paths", text)
+
+        # Session 1: an escaping target owned by no Git repository is external
+        # evidence, never a refusal, because a registry row can only describe
+        # a Git repository.
+        self.assertIn("belongs to *no* Git worktree", docs)
+        self.assertIn("`external` lists the escaping targets", docs)
+        self.assertIn("belongs to no Git worktree", readme)
+        self.assertIn(
+            "an escaping target that belongs to no Git worktree", readme
+        )
 
     def test_session_split_names_current_contract_categories(self) -> None:
         text = (REPO_ROOT / "skills/session-split/SKILL.md").read_text(
@@ -2230,6 +2331,27 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
         self.assertIn("[--artifact-dir DIR]", self.docs)
         self.assertIn("asl prepare --resume PLAN_DIR", self.docs)
         self.assertIn("[--max-review-fix-cycles N]", self.docs)
+        self.assertIn(
+            "asl register-repositories (PLAN_DIR | --plan-file PATH | "
+            "--inline-stdin) [--cwd ROOT] [--output PATH] "
+            "[--state-dir DIR] [--json]",
+            self.docs,
+        )
+
+    def test_registry_migration_follow_up_order_is_documented(self) -> None:
+        agent_readme = (
+            REPO_ROOT / "agent_session_loop" / "README.md"
+        ).read_text(encoding="utf-8")
+        for text in (self.docs, agent_readme):
+            rebind = text.index(
+                "asl prepare PLAN_DIR --resume --rebind-workspace "
+                "--cwd WORKSPACE_ROOT"
+            )
+            rerun = text.index("asl run PLAN_DIR --cwd WORKSPACE_ROOT")
+            self.assertLess(rebind, rerun)
+        self.assertIn("missing fact: <fact>", self.docs)
+        for fact in repository_registration.MISSING_FACTS:
+            self.assertIn(f"`{fact}`", self.docs)
 
     def test_run_help_default_matches_authoritative_review_cycle_default(
         self,

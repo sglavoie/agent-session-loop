@@ -38,6 +38,7 @@ FAST_MODULES = (
     "tests.test_asl_repository_evidence",
     "tests.test_asl_repository_scope",
     "tests.test_asl_repository_intent",
+    "tests.test_asl_repository_registration",
     "tests.test_asl_assurance_models",
     "tests.test_asl_assurance_ledger",
     "tests.test_asl_assurance_projection",

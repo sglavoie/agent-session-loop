@@ -1068,7 +1068,7 @@ def lint_plan_document(
                         "no `## Repositories` table; paste "
                         "`repository_footprint.suggested_registry_table` above "
                         "the first session heading and add "
-                        "`**Reads repositories:**` / `**Writes repositories:**` "
+                        "`**Reads repositories**:` / `**Writes repositories**:` "
                         "lines from `repository_footprint.suggested_scopes`"
                     ),
                     source_line=lines[heading_line - 1] if lines else "",

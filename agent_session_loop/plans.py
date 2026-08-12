@@ -1524,6 +1524,55 @@ def validate_completed_handoff_paths(
     return tuple(qualified)
 
 
+def completed_handoff_registry_blocker(
+    handoff: SessionHandoff,
+    *,
+    scope: SessionScope | None = None,
+    registry_aliases: Iterable[str] | None = None,
+) -> str | None:
+    """Say why a new repository registry would make this handoff unparsable.
+
+    Giving a registry to a plan that already has completed sessions turns
+    every legacy ``Files modified`` entry into a value
+    :func:`validate_completed_handoff_paths` must accept, so a migration that
+    ignored this stops the plan from parsing at all. With the migration's own
+    derived ``scope`` and aliases the answer is that function's; without them
+    it is syntactic, because an entry that is not already ``Alias:path``
+    survives no registry.
+    """
+    if handoff.status != "complete":
+        return None
+    if scope is not None and registry_aliases is not None:
+        try:
+            validate_completed_handoff_paths(handoff, scope, registry_aliases)
+        except PlanError as error:
+            return str(error)
+        return None
+
+    inline = handoff.files_modified[0].strip() if handoff.files_modified else ""
+    if not inline:
+        return (
+            f"{handoff.session.filename} completed handoff is missing "
+            "Files modified"
+        )
+    if inline == "(none)":
+        return None
+    if inline == "(none yet)":
+        return (
+            f"{handoff.session.filename} completed handoff retains the pending "
+            "Files modified placeholder"
+        )
+    for entry in (part.strip() for part in inline.split(",")):
+        try:
+            parse_qualified_path(entry)
+        except ValueError as error:
+            return (
+                f"{handoff.session.filename} has invalid Files modified entry "
+                f"{entry!r}: {error}"
+            )
+    return None
+
+
 def _session_id_from_cell(value: str) -> SessionId | None:
     text = value.strip().strip("`")
     match = re.fullmatch(

@@ -416,6 +416,7 @@ asl split (--plan-file PATH | --inline-stdin) --contracts-file PATH [--cwd ROOT]
 asl prepare PLAN.md [--cwd ROOT] [--workspace-inventory-exclude PATH ...|--clear-workspace-inventory-excludes] [--harness codex|claude|copilot] [--harness-model MODEL] [--validator-harness H] [--review-harness H] [--review-harness-model MODEL] [--base-dir DIR] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--json]
 asl prepare --resume PLAN_DIR [--workspace-inventory-exclude PATH ...|--clear-workspace-inventory-excludes] [--rebind-workspace ...]
 asl expand-ingest PLAN_DIR --batch-file PATH [--json]
+asl register-repositories (PLAN_DIR | --plan-file PATH | --inline-stdin) [--cwd ROOT] [--output PATH] [--state-dir DIR] [--json]
 asl status PLAN_DIR_OR_ID [--state-dir DIR] [--json]
 asl questions PLAN_DIR [--state-dir DIR] [--json]
 asl review-verdict PLAN_DIR [--state-dir DIR] [--json]
@@ -1528,18 +1529,26 @@ Consumers should branch on these
 category values and the paired repair hint rather than parsing message prose.
 
 `repository-footprint` is red-only and applies to legacy plans: it fires when a
-contract or handoff target resolves outside the bound root, or when the plan's
-targets resolve into more than one Git repository. An absolute path that stays
-inside the bound root is accepted, so plans predating repo-relative authoring
-keep passing. The finding is derived from the plan's stored `cwd` when
+contract or handoff target that some Git repository owns resolves outside the
+bound root, or when the plan's targets resolve into more than one Git
+repository. An absolute path that stays inside the bound root is accepted, so
+plans predating repo-relative authoring keep passing. A target that escapes the
+bound root and belongs to *no* Git worktree is classified as `external` instead
+and never forces a registry: a registry row can only describe a Git repository,
+so refusing such a plan would demand a declaration nobody could write. A plan
+naming an ASL plan-store artifact or any other non-Git path therefore needs no
+repair and no reworded prose. The finding is derived from the plan's stored `cwd` when
 `plan-metadata.json` is present, so `asl preflight PLAN_DIR --json` reports it
 without `--cwd`. It is one of two non-bypassable categories: `asl run
 --allow-not-loop-ready` still pauses with `pause_reason: not-loop-ready` and
 the category listed in `pause_details.blocker`, and `verification` refuses
 the escaping check at run time even if the gate is skipped. The JSON payload
 carries a `repository_footprint` object (described under JSON Output) whose
-`suggested_registry_table` is the exact `## Repositories` block to paste. The
-fix is to declare the registry and per-session scopes, not to widen `--cwd`.
+`suggested_registry_table` is the exact `## Repositories` block the migration
+writes. The fix is `asl register-repositories`, not a widened `--cwd`; a plan
+that escapes its bound root while staying inside one repository is the one case
+the migration answers `not-required`, and its escaping target has to be
+rewritten instead.
 
 `repository-registry-required` is the second non-bypassable category. It is
 red-only, applies to legacy plans, and fires when the plan *intends* to reach
@@ -1549,14 +1558,38 @@ only counts paths that already exist. Candidates are collected from session
 prose, `context.md`, `manifest.md`, parsed contracts, and stored plan
 metadata, resolved through symlinks to the nearest existing ancestor, and
 anchored to the plan's stored `cwd` or an explicit `--cwd`. Its repair hint
-(`repository-registry-required.declare`) names the three missing declarations:
-a top-level `## Repositories` table, per-session **Reads repositories:** and
-**Writes repositories:** scopes, and a `repo` alias on every contract check.
-The JSON payload carries a bounded, credential-redacted `repository_intent`
-object whose `git_roots` names the repositories to register. Neither
-`--mark-loop-ready` nor generic auto-repair can silence it: `_mark_loop_ready`
-refuses outright while any non-bypassable category is red, and no auto-repair
-step targets the category. `asl prepare` refuses the same plan before
+(`repository-registry-required.declare`) names `asl register-repositories` and
+the three declarations that command derives from disk: a top-level
+`## Repositories` table, per-session `**Reads repositories**:` and
+`**Writes repositories**:` scopes, and a `repo` alias plus repository-relative
+`path`/`cwd` on every contract check. The JSON payload carries a bounded,
+credential-redacted `repository_intent` object whose `git_roots` names the
+repositories to register. `--mark-loop-ready` cannot silence it —
+`_mark_loop_ready` refuses outright while any non-bypassable category is red —
+but the category is no longer outside auto-repair. When preflight was given a
+`--cwd` and the same read-only derivation `asl register-repositories` runs
+returns a migration for the plan, `auto_repair_plan` leads with two steps:
+
+```text
+asl register-repositories <plan-dir> --cwd <bound-root> --json
+asl prepare <plan-dir> --resume --rebind-workspace --cwd <workspace-root>
+```
+
+Both carry `--state-dir` when preflight was given one, so the migration
+inspects the lock preflight inspected. `suggested_pause` is then `None`,
+because a skill driving the plan clears the blocker mechanically. Both steps
+are withheld — and the pause stands — whenever that derivation does not
+return a migration, so a single-repository escape (a `repository-footprint`
+finding with one Git root) still pauses with no step: `asl register-repositories`
+would answer `not-required` there and the rebind would fail with
+`--rebind-workspace requires a registered plan`. A derivation that refuses is
+withheld the same way and additionally names its `missing_fact` in the pause
+detail, because advertising a step the command has already decided to refuse —
+for an unobservable `origin`, a contract check under no registered repository,
+or a completed handoff a registry would invalidate — would advertise a repair
+that cannot land. `asl run` applies the same migration
+itself at its intent gate, on that same admissibility rule rather than one of
+its own, then still pauses once for the rebind. `asl prepare` refuses the same plan before
 publishing any change with exit reason `repository-registry-required`, and
 `asl expand-ingest` emits the same reason with the `repository_intent`
 payload. Never resolve the condition by selecting one child checkout as the
@@ -1863,12 +1896,16 @@ title, so it is left for a human decision. Repository declarations add
 `malformed-repositories`, `invalid-repository`, `invalid-session-scope`, and
 `missing-repository-registry`. The last one needs `--cwd` (default `.`): the
 check resolves the plan's absolute and `Alias:path` targets against that root
-and reports a source that reaches a second repository, or escapes the root,
-while declaring no `## Repositories` section. Only paths that exist on disk
-count, and anything inside a code fence is ignored, so illustrative paths do
-not invent repositories. The `--json` payload then carries a
+and reports a source that reaches a second Git repository, or escapes the root
+into a path a Git repository still owns, while declaring no `## Repositories`
+section. Only paths that exist on disk count, anything inside a code fence is
+ignored, and a target belonging to no Git worktree is `external` rather than a
+finding — so illustrative paths, plan-store artifacts, and other non-Git files
+invent no repositories and need no repair. The `--json` payload then carries a
 `repository_footprint` object with `suggested_registry_table` and
-`suggested_scopes`; the write path (`asl split` without `--check`) applies the
+`suggested_scopes`, and `asl register-repositories --plan-file PATH --cwd ROOT`
+writes that migration into the source markdown rather than leaving it to be
+pasted; the write path (`asl split` without `--check`) applies the
 same test to the plan text *and* to every `--contracts-file` `path`/`cwd`
 value, failing with `reason: malformed-plan`. A clean check exits `0` with
 `ok: true`, `checked: true`, `session_ids`, and `session_count` — the canonical
@@ -1920,18 +1957,88 @@ workspace behavior. A legacy plan that nonetheless reaches a second repository
 is refused rather than reinterpreted: `split --check`, `preflight`, `prepare`,
 `expand-ingest`, and `run` all fail closed until the registry exists.
 
-To migrate an existing legacy plan that has outgrown one repository:
+Migrating an existing legacy plan that has outgrown one repository is two
+commands, not a hand edit:
 
-1. Paste `repository_footprint.suggested_registry_table` into `manifest.md`
-   above the first session heading.
-2. Add `**Reads repositories**:` / `**Writes repositories**:` to each
-   `session-<id>.md`, using `repository_footprint.suggested_scopes`.
-3. Add a `repo` alias and a repository-relative `path`/`cwd` to every contract
-   check.
-4. Run `asl prepare PLAN_DIR --resume --rebind-workspace --cwd WORKSPACE_ROOT`.
-   `--rebind-workspace` accepts a plan whose `manifest.md` now carries a
-   registry while `plan-metadata.json` is still the legacy single-root form;
-   the stale binding is discarded rather than compared against the registry.
+```text
+asl register-repositories PLAN_DIR --cwd BOUND_ROOT --json
+asl prepare PLAN_DIR --resume --rebind-workspace --cwd WORKSPACE_ROOT
+```
+
+The first writes the declarations; the second rebinds the plan to the derived
+workspace root. `--rebind-workspace` accepts a plan whose `manifest.md` now
+carries a registry while `plan-metadata.json` is still the legacy single-root
+form; the stale binding is discarded rather than compared against the registry.
+Preflight emits the same pair as `auto_repair_plan` steps, so a skill driving
+that plan performs the migration without an operator, and `asl run` applies the
+first step itself whenever the migration admits the plan. The equivalent hand edit —
+pasting `repository_footprint.suggested_registry_table` into `manifest.md`
+above the first session heading, adding `**Reads repositories**:` /
+`**Writes repositories**:` to each `session-<id>.md` from
+`repository_footprint.suggested_scopes`, and adding a `repo` alias and a
+repository-relative `path`/`cwd` to every contract check — is what the command
+derives, and is worth doing by hand only when the command refuses and names the
+fact it could not observe.
+
+`register-repositories` writes all three declarations for a split plan
+directory, deriving every value from disk rather than asking a human to paste
+one. It
+resolves the plan's repository intent against `--cwd`, derives the workspace
+root, the ordered registry, one read/write scope per session, and a `repo`
+alias plus repository-relative `path`/`cwd` for every contract check, then
+writes `manifest.md` and every `session-N.md` through one `PlanTransaction` and
+refreshes `**Readiness SHA-256**` while preserving the readiness state.
+`plan-metadata.json` is deliberately untouched: replacing a legacy v1 binding
+is the rebind's job. Prose, handoffs, and every byte outside those regions stay
+verbatim, and re-running is a fixed point that reports `already-registered`.
+The command fails closed. When a fact cannot be observed it writes zero bytes,
+exits `1`, and names the one thing it could not see as
+`missing fact: <fact>`; the vocabulary is `workspace-root`,
+`repository-origin`, `contract-path-outside-registry`,
+`command-check-repo`, and `completed-handoff-paths`. A registry row with a
+guessed origin would fail validation later, so nothing is invented. The last
+fact is the part-way plan: a registry makes a completed handoff's bare
+`Files modified` entries illegal, so a plan whose finished sessions recorded
+unqualified paths is refused rather than migrated into a plan nothing can
+parse. Qualify those entries as `Alias:path` and re-run. A completed handoff
+of `(none)` records no path and migrates normally. A plan whose lock is held by a live
+run exits `1` with `reason: lock-contention` instead of rewriting session files
+underneath that run.
+
+Applying the migration is not the whole repair, and the order of what remains
+is authoritative rather than advisory. The registry changes the plan's registry
+digest, which invalidates the prepared binding and the baseline evidence
+captured under it, so the command prints — and reports as `next_commands` — the
+rebind first and the re-run second:
+
+```text
+asl prepare PLAN_DIR --resume --rebind-workspace --cwd WORKSPACE_ROOT
+asl run PLAN_DIR --cwd WORKSPACE_ROOT
+```
+
+Both name the derived workspace root, not the `--cwd` the plan was bound to.
+The rebind re-runs validation and re-captures baselines, which is why it is a
+separate deliberate command instead of a side effect of the migration. The
+`--json` payload serializes the whole result: `status`, `missing_fact`,
+`detail`, `workspace_root`, ordered `repositories`, `sessions_changed`,
+`files`, `readiness`, and `next_commands`.
+
+The same gate fires earlier, in `asl split --check`, when no plan directory
+exists yet. `asl register-repositories (--plan-file PATH | --inline-stdin)`
+runs the identical derivation over a source plan's markdown and emits the
+migrated plan instead of writing files: the registry above the first session
+heading, both scope lines under every session heading, and a rewritten
+contract in each session that has one. The input is never written. Without
+`--output` the migrated markdown is the whole of stdout, so it can be piped
+straight into `asl split`; with `--output PATH` it is written there and stdout
+carries the human summary, and `--output` naming the input is refused. The
+registry rows spell each origin as an absolute Git URL, because that is what a
+source plan's `## Repositories` table accepts, while a split plan's manifest
+records the transport-neutral identity. The refusal taxonomy is the same four
+facts, and a refusal emits no markdown at all rather than a partial plan. The
+`--json` payload adds `source_path`, `output_path`, and `markdown`;
+`markdown` is the input verbatim when the migration is unnecessary and `null`
+when it is refused.
 
 Each session in a multi-repository source must contain these exact fields:
 
@@ -3106,6 +3213,9 @@ omitted entirely otherwise:
   "out_of_root": [
     {"line": 42, "text": "…", "kind": "contract-path", "confidence": "hard"}
   ],
+  "external": [
+    {"line": 51, "text": "…", "kind": "prose", "confidence": "hard"}
+  ],
   "unattributed": [{"line": 88, "text": "…", "candidates": ["Kiln", "SVC"]}],
   "suggested_registry_table": ["| Alias | Path | Origin |", "| --- | --- | --- |"],
   "suggested_scopes": {"1": {"reads": ["Kiln"], "writes": ["Kiln"]}}
@@ -3120,7 +3230,12 @@ validated as aliases with deterministic numeric dedup — so nothing in
 `suggested_registry_table` is invented. `kind` is one of `contract-path`,
 `contract-cwd`, `handoff`, or `prose`, and `confidence` is `hard` or `soft`;
 `soft` targets are advisory and never on their own force `registry_required`.
-`out_of_root` lists the targets that escaped `bound_root`. `unattributed` lists
+`out_of_root` lists the targets that escaped `bound_root` while still belonging
+to a Git repository — the ones a registry row can describe, and the only ones
+that force `registry_required`. `external` lists the escaping targets that
+belong to no Git worktree at all; they are reported as evidence and never force
+a registry, so a payload exists only when some other target already required
+one. `unattributed` lists
 path prose that resolved to no single repository and is the only part requiring
 a human decision. `suggested_scopes` is keyed by session ID and derived from the
 aliases that session's own checks and handoff entries resolve into, with writes
