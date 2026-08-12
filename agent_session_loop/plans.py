@@ -59,6 +59,17 @@ READS_REPOSITORIES_PREFIX = "**Reads repositories**:"
 WRITES_REPOSITORIES_PREFIX = "**Writes repositories**:"
 DISCOVERED_FACTS_HEADING = "### Discovered Facts"
 OPEN_QUESTIONS_HEADING = "### Open Questions"
+# The generated final-review session owns these artifacts in the plan directory,
+# not in a repository under review.  Keep the marker recognition local to the
+# plan parser so a completed review can be inspected before the runner imports
+# its higher-level review orchestration.
+_GENERATED_REVIEW_SESSION_MARKER = "<!-- asl:generated-review-session -->"
+_GENERATED_REVIEW_SESSION_VERSION_MARKER_RE = re.compile(
+    r"<!--\s*asl:generated-review-session\s+version=[0-9]+\s*-->"
+)
+_GENERATED_REVIEW_PLAN_ARTIFACTS = frozenset(
+    {"final-review.md", "final-review.json"}
+)
 PROGRESS_FILE_NAME = "progress.md"
 PROGRESS_SCHEMA_VERSION = 1
 PLAN_METADATA_FILE_NAME = "plan-metadata.json"
@@ -1213,6 +1224,90 @@ def _final_handoff_start(lines: list[str]) -> int | None:
     return None
 
 
+def _is_generated_review_session_text(text: str) -> bool:
+    """Return whether ``text`` belongs to a generated final-review session."""
+    return (
+        _GENERATED_REVIEW_SESSION_MARKER in text
+        or _GENERATED_REVIEW_SESSION_VERSION_MARKER_RE.search(text) is not None
+    )
+
+
+def _normalize_generated_review_handoff_artifacts_text(text: str) -> str:
+    """Project generated review artifacts out of a completed handoff.
+
+    ``final-review.md`` and ``final-review.json`` live beside session files;
+    they are evidence produced by a generated review, never files modified in
+    one of the repositories under review.  A review harness can nevertheless
+    record them in its own handoff.  Treat that exact, bounded case as
+    ``(none)`` during inspection so registered-plan path validation remains
+    about repository changes.  Any other entry stays untouched and therefore
+    retains the ordinary fail-closed validation behavior.
+    """
+    if not _is_generated_review_session_text(text):
+        return text
+
+    lines = text.splitlines(keepends=True)
+    plain_lines = [line.rstrip("\r\n") for line in lines]
+    handoff_start = _final_handoff_start(plain_lines)
+    if handoff_start is None:
+        return text
+
+    section_end = len(lines)
+    for index in range(handoff_start + 1, len(lines)):
+        if plain_lines[index].startswith("## "):
+            section_end = index
+            break
+
+    status = "empty"
+    files_index: int | None = None
+    for index in range(handoff_start + 1, section_end):
+        line = plain_lines[index]
+        if line.startswith(STATUS_PREFIX):
+            status = parse_status_value(line[len(STATUS_PREFIX) :])
+        elif line.startswith(HANDOFF_FILES_PREFIX):
+            files_index = index
+
+    if status != "complete" or files_index is None:
+        return text
+
+    inline = plain_lines[files_index][len(HANDOFF_FILES_PREFIX) :].strip()
+    entries = tuple(part.strip() for part in inline.split(",") if part.strip())
+    if not entries or not set(entries).issubset(_GENERATED_REVIEW_PLAN_ARTIFACTS):
+        return text
+
+    line_ending = "\r\n" if lines[files_index].endswith("\r\n") else "\n"
+    if not lines[files_index].endswith(("\n", "\r")):
+        line_ending = ""
+    lines[files_index] = f"{HANDOFF_FILES_PREFIX} (none){line_ending}"
+    return "".join(lines)
+
+
+def normalize_generated_review_handoff_artifacts(
+    plan_dir: str | Path,
+) -> tuple[Path, ...]:
+    """Persist the bounded generated-review handoff normalization.
+
+    This is an idempotent recovery for a completed generated review that wrote
+    only review-owned plan artifacts into ``Files modified``.  It deliberately
+    leaves every other handoff entry alone, including unqualified repository
+    paths, so multi-repository validation continues to fail closed.
+    """
+    recover_pending_plan_transaction(plan_dir)
+    canonical_dir = canonicalize_path(plan_dir)
+    changed_paths: list[Path] = []
+    for session in discover_session_files(canonical_dir):
+        try:
+            text = session.path.read_text(encoding="utf-8")
+        except OSError as error:
+            _raise_read_error(session.path, error)
+        normalized = _normalize_generated_review_handoff_artifacts_text(text)
+        if normalized == text:
+            continue
+        _atomic_write_text(session.path, normalized)
+        changed_paths.append(session.path)
+    return tuple(changed_paths)
+
+
 _REPOSITORY_REGISTRY_UNSET = object()
 
 
@@ -1238,9 +1333,10 @@ def read_session_handoff(
     """
     recover_pending_plan_transaction(session.path.parent)
     try:
-        lines = session.path.read_text(encoding="utf-8").splitlines()
+        text = session.path.read_text(encoding="utf-8")
     except OSError as error:
         _raise_read_error(session.path, error)
+    lines = _normalize_generated_review_handoff_artifacts_text(text).splitlines()
 
     registry = (
         read_repository_registry(session.path.parent)

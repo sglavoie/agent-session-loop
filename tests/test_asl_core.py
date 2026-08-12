@@ -853,6 +853,68 @@ class ParserAndStateTests(unittest.TestCase):
                 handoff.files_modified,
             )
 
+    def test_generated_review_artifacts_are_not_repository_handoff_paths(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            (plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
+            (plan_dir / "manifest.md").write_text(
+                "# Manifest\n\n## Repositories\n\n"
+                "| Alias | Path | Origin |\n"
+                "| --- | --- | --- |\n"
+                "| SVC | svc | https://example.com/svc.git |\n",
+                encoding="utf-8",
+            )
+            session_path = plan_dir / "session-1.md"
+            template = (
+                "# Session 1: Final Review\n\n"
+                "**Reads repositories**: SVC\n"
+                "**Writes repositories**: (none)\n\n"
+                "<!-- asl:generated-review-session -->\n\n"
+                "## Handoff\n\n"
+                "- **Status**: complete\n"
+                "- **Files modified**: {files}\n"
+                "- **Key decisions**: reviewed the repository\n"
+                "- **Blockers for next session**: (none)\n"
+                "- **Notes**:\n"
+            )
+            session_path.write_text(
+                template.format(files="final-review.md, final-review.json"),
+                encoding="utf-8",
+            )
+
+            handoff = plans.read_session_handoff(self._session_file(plan_dir))
+            snapshot = plans.inspect_plan(plan_dir)
+
+            self.assertEqual("complete", handoff.status)
+            self.assertEqual(("(none)",), handoff.files_modified)
+            self.assertEqual("complete", snapshot.sessions[0].status)
+            self.assertIn(
+                "- **Files modified**: final-review.md, final-review.json",
+                session_path.read_text(encoding="utf-8"),
+            )
+
+            self.assertEqual(
+                (plans.canonicalize_path(session_path),),
+                plans.normalize_generated_review_handoff_artifacts(plan_dir),
+            )
+            self.assertIn(
+                "- **Files modified**: (none)",
+                session_path.read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                (), plans.normalize_generated_review_handoff_artifacts(plan_dir)
+            )
+
+            session_path.write_text(
+                template.format(files="final-review.md, README.md"),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(plans.PlanError, "Alias:path"):
+                plans.read_session_handoff(self._session_file(plan_dir))
+
     def test_session_scope_participates_in_readiness_hash(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             roots = (Path(tmp) / "left", Path(tmp) / "right")

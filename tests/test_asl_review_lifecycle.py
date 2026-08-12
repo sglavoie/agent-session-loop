@@ -567,6 +567,64 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual("complete", payload["readiness_state_initial"])
         self.assertEqual("complete", payload["readiness_state_final"])
 
+    def test_completed_review_handoff_plan_artifacts_are_normalized(self) -> None:
+        self._write_plan(("complete",), readiness=None)
+        review_path = self._write_pending_review_session().path
+        review_path.write_text(
+            review_path.read_text(encoding="utf-8")
+            .replace("- **Status**: pending", "- **Status**: complete")
+            .replace(
+                "- **Files modified**: (none yet)",
+                "- **Files modified**: final-review.md, final-review.json",
+            ),
+            encoding="utf-8",
+        )
+        self._precreate_final_review()
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        assert payload is not None
+        self.assertEqual([str(review_path)], payload["normalized_review_handoffs"])
+        self.assertIn(
+            "- **Files modified**: (none)",
+            review_path.read_text(encoding="utf-8"),
+        )
+
+    def test_fresh_review_handoff_plan_artifacts_are_normalized(self) -> None:
+        self._write_plan(("complete",), readiness="complete")
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        self._precreate_final_review()
+
+        completed, payload = self._run(
+            review_harness="claude",
+            extra_env={
+                "FAKE_CODEX_HANDOFF_FILES_JSON": json.dumps(
+                    {"2": ["final-review.md", "final-review.json"]}
+                )
+            },
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        assert payload is not None
+        review_path = self.plan_dir / "session-2.md"
+        self.assertEqual(
+            [str(plans.canonicalize_path(review_path))],
+            payload["normalized_review_handoffs"],
+        )
+        self.assertIn(
+            "- **Files modified**: (none)",
+            review_path.read_text(encoding="utf-8"),
+        )
+
     def test_complete_plan_review_harness_repairs_progress_journal(
         self,
     ) -> None:

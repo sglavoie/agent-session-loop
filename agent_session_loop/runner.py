@@ -11828,6 +11828,9 @@ def _run_locked(
     if verification_context is None:
         verification_context = verification.VerificationContext.legacy(cwd)
     plan_cache = plans.PlanSnapshotCache()
+    normalized_review_handoffs = list(
+        plans.normalize_generated_review_handoff_artifacts(args.plan_dir)
+    )
     snapshot = plan_cache.get(args.plan_dir)
     if not args.dry_run:
         _ensure_legacy_run_metadata(snapshot.plan_dir, verification_context)
@@ -11912,6 +11915,10 @@ def _run_locked(
         mailbox_activation=mailbox_activation,
         verification_context=verification_context,
     )
+    if normalized_review_handoffs:
+        payload["normalized_review_handoffs"] = [
+            str(path) for path in normalized_review_handoffs
+        ]
     if unresolved_commit_group is not None:
         _upsert_commit_group(payload, unresolved_commit_group)
     if commit_group_load_error is not None:
@@ -13928,6 +13935,18 @@ def _run_locked(
             with run_control_lock:
                 run_control_context = None
             previous_turn_finished_at = turn_finished_at
+            if is_review_session:
+                normalized_after_review = (
+                    plans.normalize_generated_review_handoff_artifacts(
+                        before.plan_dir
+                    )
+                )
+                if normalized_after_review:
+                    normalized_review_handoffs.extend(normalized_after_review)
+                    with persistence.lock:
+                        payload["normalized_review_handoffs"] = [
+                            str(path) for path in normalized_review_handoffs
+                        ]
             plan_error = None
             try:
                 after = plan_cache.get_fresh(before.plan_dir)
