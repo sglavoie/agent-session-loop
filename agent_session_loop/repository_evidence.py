@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 import contextvars
+from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path
@@ -20,6 +21,7 @@ from typing import Any
 
 
 __all__ = [
+    "GitWorktreeInventory",
     "RepositoryEvidenceError",
     "RepositoryFingerprint",
     "WorkspaceSnapshot",
@@ -28,6 +30,7 @@ __all__ = [
     "capture_workspace_snapshot",
     "compare_repository_fingerprints",
     "compare_workspace_snapshots",
+    "discover_git_worktree_inventory",
     "discover_git_worktrees",
     "format_repository_changes",
     "repository_evidence_unavailable",
@@ -37,6 +40,14 @@ __all__ = [
 
 class RepositoryEvidenceError(RuntimeError):
     """Raised when repository inventory cannot be captured safely."""
+
+
+@dataclass(frozen=True)
+class GitWorktreeInventory:
+    """The repositories and hidden workspace subtrees recursive inventory skipped."""
+
+    repositories: tuple[Path, ...]
+    skipped_hidden_subtrees: int
 
 
 GitRunner = Callable[[Path, list[str]], subprocess.CompletedProcess[str]]
@@ -1232,11 +1243,10 @@ def _qualified_paths(repository: str, changes: Mapping[str, Any]) -> list[str]:
 
 def _inventory_candidates(
     workspace_root: Path,
-    inventory_excludes: tuple[str, ...] = (),
-) -> tuple[list[Path], list[OSError]]:
+) -> tuple[list[Path], list[OSError], int]:
     candidates: list[Path] = []
     errors: list[OSError] = []
-    excluded = set(inventory_excludes)
+    skipped_hidden_subtrees = 0
 
     def record_error(error: OSError) -> None:
         errors.append(error)
@@ -1256,31 +1266,38 @@ def _inventory_candidates(
                 marker_present = stat.S_ISDIR(marker_mode) or stat.S_ISREG(
                     marker_mode
                 )
-        directory_names[:] = sorted(
-            name
-            for name in directory_names
-            if name != ".git"
-            and _workspace_relative(root=workspace_root, repository=current / name)
-            not in excluded
-            and not (current / name).is_symlink()
-        )
+        descendable: list[str] = []
+        for name in directory_names:
+            if name == ".git":
+                # This marker belongs to ``current`` and was considered above;
+                # never recurse into Git metadata or count it as an excluded
+                # workspace subtree.
+                continue
+            if name.startswith("."):
+                skipped_hidden_subtrees += 1
+                continue
+            if (current / name).is_symlink():
+                continue
+            descendable.append(name)
+        directory_names[:] = sorted(descendable)
         if marker_present:
             # A .git file is the linked-worktree form; a directory is an
             # ordinary worktree. Its internals were pruned above.
             candidates.append(current)
-    return candidates, errors
+    return candidates, errors, skipped_hidden_subtrees
 
 
-def discover_git_worktrees(
+def discover_git_worktree_inventory(
     workspace_root: str | Path,
     *,
-    inventory_excludes: tuple[str, ...] = (),
     max_repositories: int = 1024,
-) -> tuple[Path, ...]:
-    """Recursively find exact Git worktree roots without following symlinks.
+) -> GitWorktreeInventory:
+    """Recursively inventory worktree roots and skipped hidden subtrees.
 
-    The explicit repository bound prevents an accidentally broad workspace
-    from producing unbounded Git subprocess work.
+    The supplied workspace root is always inspected, even if it is itself
+    hidden. Descendant directories whose names begin with ``.`` are pruned
+    before they can yield a Git candidate; Git metadata directories are pruned
+    separately and do not inflate ``skipped_hidden_subtrees``.
     """
     root = Path(os.path.realpath(os.path.abspath(os.fspath(workspace_root))))
     if not root.is_dir():
@@ -1289,7 +1306,7 @@ def discover_git_worktrees(
         )
     if max_repositories < 1:
         raise ValueError("max_repositories must be positive")
-    candidates, errors = _inventory_candidates(root, inventory_excludes)
+    candidates, errors, skipped_hidden_subtrees = _inventory_candidates(root)
     if errors:
         raise RepositoryEvidenceError(
             f"workspace inventory unreadable: {errors[0]}"
@@ -1327,7 +1344,22 @@ def discover_git_worktrees(
                 "does not identify an exact Git worktree root"
             )
         repositories.append(candidate)
-    return tuple(repositories)
+    return GitWorktreeInventory(
+        repositories=tuple(repositories),
+        skipped_hidden_subtrees=skipped_hidden_subtrees,
+    )
+
+
+def discover_git_worktrees(
+    workspace_root: str | Path,
+    *,
+    max_repositories: int = 1024,
+) -> tuple[Path, ...]:
+    """Return exact Git worktree roots without diagnostic inventory details."""
+    return discover_git_worktree_inventory(
+        workspace_root,
+        max_repositories=max_repositories,
+    ).repositories
 
 
 def capture_workspace_snapshot(
@@ -1336,13 +1368,12 @@ def capture_workspace_snapshot(
     *,
     exclude: Mapping[str, tuple[str, ...]] | None = None,
     default_exclude: tuple[str, ...] = (),
-    inventory_excludes: tuple[str, ...] = (),
     include_ignored: bool = False,
     max_repositories: int = 1024,
     _run_git_fn: GitRunner | None = None,
     _run_git_bytes_fn: GitBytesRunner | None = None,
 ) -> WorkspaceSnapshot:
-    """Capture an ordered root-to-evidence vector for every nested worktree.
+    """Capture an ordered root-to-evidence vector for discovered worktrees.
 
     ``exclude`` overrides exclusions for named workspace-relative roots, while
     ``default_exclude`` applies to every other discovered repository, so a
@@ -1354,11 +1385,10 @@ def capture_workspace_snapshot(
     git_token = _GIT_RUNNER.set(_run_git_fn)
     bytes_token = _GIT_BYTES_RUNNER.set(_run_git_bytes_fn)
     try:
-        repositories = discover_git_worktrees(
+        repositories = discover_git_worktree_inventory(
             root,
-            inventory_excludes=inventory_excludes,
             max_repositories=max_repositories,
-        )
+        ).repositories
         snapshot: WorkspaceSnapshot = OrderedDict()
         per_repository_excludes = exclude or {}
         for repository in repositories:

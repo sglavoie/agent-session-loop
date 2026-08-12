@@ -209,38 +209,88 @@ class WorkspaceInventoryTests(unittest.TestCase):
                 self.workspace, max_repositories=23
             )
 
-    def test_inventory_prunes_approved_subtree_before_permission_error(self) -> None:
+    def test_inventory_prunes_hidden_subtree_before_permission_error(self) -> None:
         visible = self.workspace / "visible"
-        blocked = self.workspace / "blocked"
+        blocked = self.workspace / ".cache"
         init_git_repo(visible)
         blocked.mkdir()
 
         def fake_walk(root, *, topdown, onerror, followlinks):
             walk_root = Path(root)
-            directory_names = ["blocked", "visible"]
+            directory_names = [".cache", "visible"]
             yield str(walk_root), directory_names, []
-            if "blocked" in directory_names:
+            if ".cache" in directory_names:
                 onerror(
                     PermissionError(
-                        1, "not permitted", str(walk_root / "blocked")
+                        1, "not permitted", str(walk_root / ".cache")
                     )
                 )
             if "visible" in directory_names:
                 yield str(walk_root / "visible"), [".git"], []
 
         with mock.patch.object(repository_evidence.os, "walk", fake_walk):
-            discovered = repository_evidence.discover_git_worktrees(
-                self.workspace,
-                inventory_excludes=("blocked",),
+            inventory = repository_evidence.discover_git_worktree_inventory(
+                self.workspace
             )
-        self.assertEqual((visible.resolve(),), discovered)
+        self.assertEqual((visible.resolve(),), inventory.repositories)
+        self.assertEqual(1, inventory.skipped_hidden_subtrees)
 
         with mock.patch.object(repository_evidence.os, "walk", fake_walk):
-            with self.assertRaisesRegex(
-                repository_evidence.RepositoryEvidenceError,
-                "workspace inventory unreadable",
-            ):
-                repository_evidence.discover_git_worktrees(self.workspace)
+            self.assertEqual(
+                (visible.resolve(),),
+                repository_evidence.discover_git_worktrees(self.workspace),
+            )
+
+    def test_inventory_skips_hidden_invalid_git_marker_and_counts_root(
+        self,
+    ) -> None:
+        visible = self.workspace / "visible"
+        init_git_repo(visible)
+        malformed = self.workspace / ".cache" / "uv" / "sdists-v5" / ".git"
+        malformed.parent.mkdir(parents=True)
+        malformed.write_text("not Git metadata\n", encoding="utf-8")
+
+        inventory = repository_evidence.discover_git_worktree_inventory(
+            self.workspace
+        )
+
+        self.assertEqual((visible.resolve(),), inventory.repositories)
+        self.assertEqual(1, inventory.skipped_hidden_subtrees)
+
+    def test_inventory_keeps_visible_invalid_git_marker_fail_closed(self) -> None:
+        malformed = self.workspace / "visible" / ".git"
+        malformed.parent.mkdir()
+        malformed.write_text("not Git metadata\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            repository_evidence.RepositoryEvidenceError,
+            "repository visible could not be inspected",
+        ):
+            repository_evidence.discover_git_worktree_inventory(self.workspace)
+
+    def test_inventory_inspects_hidden_workspace_root(self) -> None:
+        hidden_workspace = self.root / ".workspace"
+        init_git_repo(hidden_workspace)
+
+        inventory = repository_evidence.discover_git_worktree_inventory(
+            hidden_workspace
+        )
+
+        self.assertEqual((hidden_workspace.resolve(),), inventory.repositories)
+        self.assertEqual(0, inventory.skipped_hidden_subtrees)
+
+    def test_registered_snapshot_inspects_declared_hidden_repository(self) -> None:
+        repository = self.workspace / ".worktrees" / "target"
+        init_git_repo(repository)
+
+        snapshot = repository_evidence.capture_registered_snapshot(
+            self.workspace,
+            self.plan_dir,
+            (".worktrees/target",),
+        )
+
+        self.assertEqual([".worktrees/target"], list(snapshot))
+        self.assertTrue(snapshot[".worktrees/target"]["git"])
 
     def test_comparison_covers_tracked_staged_deleted_renamed_and_untracked(
         self,
