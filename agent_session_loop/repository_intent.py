@@ -74,9 +74,24 @@ INTENT_REPORT_LIMIT = 40
 #: prefix carries none and is preserved.
 REDACTED_CREDENTIAL = "***@"
 
+#: Plan-document metadata fields whose value says where a plan *came from*
+#: rather than naming anything it will touch. The document a plan was split
+#: from is read-only by construction — the split and iterate skills refuse to
+#: modify it — so the repository that happens to hold it is not evidence the
+#: plan reaches two repositories. Operators routinely keep their source plans
+#: in a versioned home directory, which would otherwise force a registry onto
+#: every single-repository plan.
+PROVENANCE_METADATA_FIELDS: tuple[str, ...] = ("Split from",)
+
 _CREDENTIAL_RE = re.compile(r"[^\s/@:]+:[^\s/@]+@")
 _FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 _BACKTICK_RE = re.compile(r"`([^`\n]+)`")
+_PROVENANCE_LINE_RE = re.compile(
+    r"^\s*(?:[-*]\s+)?\*\*(?:"
+    + "|".join(re.escape(field) for field in PROVENANCE_METADATA_FIELDS)
+    + r")\*\*\s*:",
+    re.IGNORECASE,
+)
 
 
 def redact_credentials(text: str) -> str:
@@ -158,6 +173,28 @@ def candidates_from_text(text: str) -> tuple[IntentCandidate, ...]:
         )
     candidates.extend(_backtick_candidates(text))
     return _deduplicate(candidates)
+
+
+def candidates_from_plan_document(text: str) -> tuple[IntentCandidate, ...]:
+    """Extract locations from a plan document, ignoring provenance metadata.
+
+    ``manifest.md`` records the document a plan was split from. That pointer
+    is where the plan came from, not somewhere it will write, so a plan whose
+    source lives in an unrelated checkout must not read as reaching two
+    repositories. Every other line is scanned exactly as
+    :func:`candidates_from_text` scans it.
+    """
+    return candidates_from_text(_without_provenance_metadata(text))
+
+
+def _without_provenance_metadata(text: str) -> str:
+    """Blank provenance metadata lines, keeping every other line's number."""
+    lines = text.splitlines()
+    if not any(_PROVENANCE_LINE_RE.match(line) for line in lines):
+        return text
+    return "\n".join(
+        "" if _PROVENANCE_LINE_RE.match(line) else line for line in lines
+    )
 
 
 def _backtick_candidates(text: str) -> list[IntentCandidate]:

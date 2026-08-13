@@ -1877,14 +1877,18 @@ def _repository_intent_candidates(
         for status in snapshot.sessions:
             text = _read_session_text(status.session)
             if text is not None:
-                candidates.extend(repository_intent.candidates_from_text(text))
+                candidates.extend(
+                    repository_intent.candidates_from_plan_document(text)
+                )
     if plan_dir is not None:
         for name in ("context.md", "manifest.md"):
             try:
                 text = (plan_dir / name).read_text(encoding="utf-8")
             except OSError:
                 continue
-            candidates.extend(repository_intent.candidates_from_text(text))
+            candidates.extend(
+                repository_intent.candidates_from_plan_document(text)
+            )
         try:
             metadata = load_plan_metadata(plan_dir)
         except PlanError:

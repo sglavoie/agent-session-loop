@@ -13241,31 +13241,58 @@ def _run_locked(
 
             with persistence.lock:
                 turn_index = len(payload["turns"]) + 1
+                turns_already_run = bool(payload["turns"])
             paths = _turn_paths(
                 run_dir,
                 turn_index=turn_index,
                 session_id=session_id,
             )
             implementation_overrides: Mapping[str, Mapping[str, str]] = {}
+            pre_turn_control_context = {
+                **session_identity,
+                "turn_index": turn_index,
+                "total_sessions": sum(_status_counts(before).values()),
+            }
+            _drain_external_control_queue(
+                plan_dir=before.plan_dir,
+                state_dir_arg=args.state_dir,
+                control_state=run_controls.state,
+                seen_ids=seen_external_command_ids,
+                payload=payload,
+                event_path=event_path,
+                control_payload=control_payload,
+                context=pre_turn_control_context,
+                persistence=persistence,
+                run_control_lock=run_control_lock,
+            )
+            with run_control_lock:
+                # A stop observed here must never let another turn start. Only
+                # a stop that lands after a turn already ran in this process
+                # qualifies: one queued before the run began still means "run
+                # the first session, then stop". A pending reply or resolution
+                # continuation belongs to the session already in flight, so it
+                # runs before the stop is honored.
+                stop_before_turn = (
+                    turns_already_run
+                    and pending_reply is None
+                    and pending_resolution is None
+                    and run_controls.state.stop_after_current
+                )
+                if stop_before_turn:
+                    _honor_stop_after_current(
+                        run_controls,
+                        snapshot=before,
+                        payload=payload,
+                        event_path=event_path,
+                        control_payload=control_payload,
+                        context=pre_turn_control_context,
+                        persistence=persistence,
+                    )
+            if stop_before_turn:
+                break
             if is_review_session:
                 turn_harness = args.review_harness
             else:
-                _drain_external_control_queue(
-                    plan_dir=before.plan_dir,
-                    state_dir_arg=args.state_dir,
-                    control_state=run_controls.state,
-                    seen_ids=seen_external_command_ids,
-                    payload=payload,
-                    event_path=event_path,
-                    control_payload=control_payload,
-                    context={
-                        **session_identity,
-                        "turn_index": turn_index,
-                        "total_sessions": sum(_status_counts(before).values()),
-                    },
-                    persistence=persistence,
-                    run_control_lock=run_control_lock,
-                )
                 with run_control_lock:
                     turn_harness = _selected_future_harness(args, control_payload)
                     implementation_overrides = (

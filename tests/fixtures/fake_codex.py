@@ -482,6 +482,20 @@ def _validation_prompt() -> str | None:
     )
 
 
+def _validation_plan_dir(prompt: str) -> Path | None:
+    """Derive the plan directory from the rendered validation packet.
+
+    The codex audit argv intentionally omits ``--add-dir`` (on codex it grants
+    write access), so the packet's shared-context path is the only plan-dir
+    signal available on a validator turn.
+    """
+    marker = "- Shared context: "
+    for line in prompt.splitlines():
+        if line.startswith(marker):
+            return Path(line[len(marker) :].strip()).parent
+    return None
+
+
 def _run_prepare_validator(plan_dir: Path, prompt: str) -> int:
     """Return a real packet-derived validation aggregate for prepare E2E tests."""
     mode = os.environ.get("FAKE_CODEX_VALIDATOR_MODE", "success")
@@ -582,6 +596,14 @@ def _wait_for_stream_continue(session_label: str) -> bool:
 
 
 def main() -> int:
+    validation_prompt = _validation_prompt()
+    if validation_prompt is not None:
+        validation_plan_dir = _validation_plan_dir(validation_prompt)
+        if validation_plan_dir is None:
+            print("missing shared context path in validation packet", file=sys.stderr)
+            return 2
+        return _run_prepare_validator(validation_plan_dir, validation_prompt)
+
     plan_dir_arg = _arg_value("--add-dir")
     if plan_dir_arg is None:
         print("missing --add-dir", file=sys.stderr)
@@ -589,10 +611,6 @@ def main() -> int:
 
     mode = os.environ.get("FAKE_CODEX_MODE", "success")
     plan_dir = Path(plan_dir_arg)
-
-    validation_prompt = _validation_prompt()
-    if validation_prompt is not None:
-        return _run_prepare_validator(plan_dir, validation_prompt)
 
     _write_last_message(f"fake codex mode: {mode}\n")
     stdout_text = os.environ.get("FAKE_CODEX_STDOUT_TEXT")

@@ -52,6 +52,56 @@ class CandidateExtractionTests(unittest.TestCase):
 
         self.assertEqual({"/Users/dev/work/repoA/src/main.py"}, values)
 
+    def test_provenance_metadata_is_where_a_plan_came_from(self) -> None:
+        text = (
+            "# Plan\n"
+            "\n"
+            "**Split from**: `/Users/dev/notes/repoB/plans/source.md`\n"
+            "\n"
+            "Edit /Users/dev/work/repoA/src/main.py.\n"
+        )
+
+        values = {
+            candidate.value
+            for candidate in repository_intent.candidates_from_plan_document(
+                text
+            )
+        }
+
+        self.assertEqual({"/Users/dev/work/repoA/src/main.py"}, values)
+        # The unfiltered scanner still sees it, so the filter is doing the work.
+        self.assertIn(
+            "/Users/dev/notes/repoB/plans/source.md",
+            {
+                candidate.value
+                for candidate in repository_intent.candidates_from_text(text)
+            },
+        )
+
+    def test_provenance_filtering_preserves_line_numbers(self) -> None:
+        text = (
+            "# Plan\n"
+            "\n"
+            "- **Split from**: `session-1.md`\n"
+            "\n"
+            "Edit /Users/dev/work/repoA/src/main.py.\n"
+        )
+
+        candidates = repository_intent.candidates_from_plan_document(text)
+
+        self.assertEqual(
+            [("/Users/dev/work/repoA/src/main.py", 5)],
+            [(candidate.value, candidate.line) for candidate in candidates],
+        )
+
+    def test_documents_without_provenance_are_scanned_unchanged(self) -> None:
+        text = "Edit /Users/dev/work/repoA/src/main.py and `tests/support.py`.\n"
+
+        self.assertEqual(
+            repository_intent.candidates_from_text(text),
+            repository_intent.candidates_from_plan_document(text),
+        )
+
     def test_contract_checks_yield_path_and_cwd_surfaces(self) -> None:
         contract = authoring.contract_from_payload(
             "1",

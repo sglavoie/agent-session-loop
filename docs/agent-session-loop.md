@@ -1560,7 +1560,11 @@ created yet, which `repository-footprint` structurally cannot see because it
 only counts paths that already exist. Candidates are collected from session
 prose, `context.md`, `manifest.md`, parsed contracts, and stored plan
 metadata, resolved through symlinks to the nearest existing ancestor, and
-anchored to the plan's stored `cwd` or an explicit `--cwd`. Its repair hint
+anchored to the plan's stored `cwd` or an explicit `--cwd`. Provenance metadata
+is excluded: a `**Split from**:` line records the document a plan was split
+from, which the split and iterate skills refuse to modify, so a source plan kept
+in a versioned home directory is not evidence the plan reaches a second
+repository. Every other line of the same document is scanned normally. Its repair hint
 (`repository-registry-required.declare`) names `asl register-repositories` and
 the three declarations that command derives from disk: a top-level
 `## Repositories` table, per-session `**Reads repositories**:` and

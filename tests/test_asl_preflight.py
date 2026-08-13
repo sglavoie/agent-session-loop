@@ -1713,6 +1713,32 @@ class RepositoryIntentPreflightTests(unittest.TestCase):
         self.assertEqual([], self._intent_findings(report))
         self.assertFalse(report.repository_intent.registry_required)
 
+    def test_source_plan_in_another_repository_is_not_a_second_target(
+        self,
+    ) -> None:
+        self._write_plan(self.first / "README.md", self.first / "src" / "new.py")
+        manifest = self.plan_dir / "manifest.md"
+        source = self.second / "plans" / "source.md"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8")
+            + f"\n**Split from**: `{source}`\n",
+            encoding="utf-8",
+        )
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        plans.save_plan_metadata(self.plan_dir, str(self.first))
+
+        report = preflight.run_core_preflight(self.plan_dir)
+
+        self.assertEqual([], self._intent_findings(report))
+        self.assertFalse(report.repository_intent.registry_required)
+
     def test_registered_multi_repository_plan_passes(self) -> None:
         write_multi_repo_plan(
             self.plan_dir, ("pending",), specs=DEFAULT_MULTI_REPO_SPECS[:2]
