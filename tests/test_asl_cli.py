@@ -1061,6 +1061,18 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertEqual(
             retention.DEFAULT_MAX_AGE_DAYS, cli._RETENTION_DEFAULT_MAX_AGE_DAYS
         )
+        self.assertEqual(
+            prepare.DEFAULT_VALIDATOR_JOBS,
+            cli._PREPARE_DEFAULT_VALIDATOR_JOBS,
+        )
+        self.assertEqual(
+            prepare.DEFAULT_VALIDATOR_TIMEOUT_SECONDS,
+            cli._PREPARE_DEFAULT_VALIDATOR_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(
+            prepare.DEFAULT_VALIDATOR_HEARTBEAT_SECONDS,
+            cli._PREPARE_DEFAULT_VALIDATOR_HEARTBEAT_SECONDS,
+        )
 
     def test_expand_ingest_requires_batch_file(self) -> None:
         parser = cli.build_parser()

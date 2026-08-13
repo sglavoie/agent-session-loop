@@ -20,6 +20,10 @@ validated, versioned pipeline:
   artifact excluded from the stable readiness hash by construction (the hash
   only walks ``context.md``, ``manifest.md``, session files, and expansion
   files).
+- **Versioned per-session cache** — ``prepare-validation-cache.json`` retains
+  schema-valid worker outputs under a complete repository/workspace, plan, and
+  validator identity, so resume can safely reuse only unchanged sessions after
+  a partial concurrent validation wave.
 - **Expansion rendering** — :func:`render_expansion` produces
   ``session-<id>.expand.md`` markdown compatible with the historical
   ``session-expand`` output schema, from validated data only, so expansion
@@ -45,17 +49,21 @@ preflight through the canonical :mod:`agent_session_loop.preflight` gate.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import shlex
 import shutil
 import sys
 import tempfile
-from typing import Any, Callable, Iterable
+import time
+from collections.abc import Callable, Iterable
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
 from . import (
     authoring,
@@ -64,6 +72,7 @@ from . import (
     harnesses,
     plans,
     preflight,
+    repository_evidence,
     repository_intent,
     responses,
     state,
@@ -74,6 +83,7 @@ from .baseline_cache import (
     BASELINE_RESULTS_FILENAME,
     BaselineCache,
 )
+from .contracts import COMPLETION_CONTRACT_HEADING
 from .plans import (
     HANDOFF_HEADING,
     PlanError,
@@ -83,19 +93,25 @@ from .plans import (
     inspect_plan,
     parse_session_id,
 )
-from .contracts import COMPLETION_CONTRACT_HEADING
 from .verification import VerificationContext
-
 
 LEGACY_PREPARE_VALIDATION_VERSION = 1
 PREPARE_VALIDATION_VERSION = 2
 PREPARE_VALIDATION_FILENAME = "prepare-validation.json"
+PREPARE_VALIDATION_CACHE_VERSION = 1
+PREPARE_VALIDATION_CACHE_FILENAME = "prepare-validation-cache.json"
 
 VALIDATION_PACKET_HEADING_PREFIX = "# ASL preparation validation packet"
 
 #: Sessions validated per worker packet; keeps each packet's research scope
 #: bounded so one worker context window covers the whole batch.
 DEFAULT_VALIDATION_BATCH_SIZE = 4
+
+#: Defaults for bounded, read-only validation workers. Model and effort remain
+#: ``None`` by default so each harness retains its own native selection.
+DEFAULT_VALIDATOR_JOBS = 2
+DEFAULT_VALIDATOR_TIMEOUT_SECONDS = 900
+DEFAULT_VALIDATOR_HEARTBEAT_SECONDS = 30
 
 #: Claim taxonomy from the session-expand skill: Path, Signature,
 #: Field/property, Dependency, Behavioral, Naming.
@@ -115,6 +131,7 @@ ISSUE_TYPES: tuple[str, ...] = (
 )
 
 REPOSITORY_AMBIGUITY_ISSUE = "repository-ambiguous"
+CONTRACT_PROBLEM_CATEGORY = "contract-problem"
 
 DEPENDENCY_DIRECTIONS: tuple[str, ...] = ("requires", "provides")
 
@@ -257,7 +274,7 @@ class SessionDependency:
 
 @dataclass(frozen=True)
 class ContractProblem:
-    """An advisory contract finding (schema error, stale reference, placeholder)."""
+    """A contract defect that must be repaired before readiness can publish."""
 
     message: str
     suggested_fix: str
@@ -319,9 +336,7 @@ class SessionValidation:
             "contract_problems": [
                 problem.to_dict() for problem in self.contract_problems
             ],
-            "corrections": [
-                correction.to_dict() for correction in self.corrections
-            ],
+            "corrections": [correction.to_dict() for correction in self.corrections],
         }
 
 
@@ -381,6 +396,68 @@ class ValidatorRepository:
         }
 
 
+@dataclass(frozen=True)
+class PrepareValidationCacheEntry:
+    """One independently reusable session-validation result.
+
+    ``identity`` is intentionally retained alongside its digest.  It keeps the
+    cache inspectable and lets the loader reject a hand-edited key rather than
+    silently accepting a result under an identity it was not validated for.
+    ``validation`` always contains exactly one session.
+    """
+
+    session_id: SessionId
+    key: str
+    identity: dict[str, object]
+    validation: PrepareValidation
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "session_id": self.session_id.value,
+            "key": self.key,
+            "identity": self.identity,
+            "validation": self.validation.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class PrepareValidationCache:
+    """Versioned cache of validator outputs, independent of the aggregate."""
+
+    entries: tuple[PrepareValidationCacheEntry, ...] = ()
+    version: int = PREPARE_VALIDATION_CACHE_VERSION
+
+    def entry(
+        self, session_id: int | str | SessionId
+    ) -> PrepareValidationCacheEntry | None:
+        canonical = parse_session_id(session_id)
+        for entry in self.entries:
+            if entry.session_id == canonical:
+                return entry
+        return None
+
+    def with_entry(
+        self, replacement: PrepareValidationCacheEntry
+    ) -> PrepareValidationCache:
+        entries = {entry.session_id.value: entry for entry in self.entries}
+        entries[replacement.session_id.value] = replacement
+        return PrepareValidationCache(
+            entries=tuple(
+                sorted(
+                    entries.values(),
+                    key=lambda entry: entry.session_id.sort_key,
+                )
+            ),
+            version=self.version,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "entries": [entry.to_dict() for entry in self.entries],
+        }
+
+
 # ---------------------------------------------------------------------------
 # Fail-closed parsing
 # ---------------------------------------------------------------------------
@@ -427,9 +504,7 @@ class RepositoryRegistryRequiredError(PlanError):
         self.payload = payload
 
 
-def _require_legacy_repository_intent(
-    plan_dir: str | Path, root: str | Path
-) -> None:
+def _require_legacy_repository_intent(plan_dir: str | Path, root: str | Path) -> None:
     """Refuse a legacy plan that intends to reach several repositories."""
     _, payload = preflight.plan_repository_intent(plan_dir, root)
     if payload is None:
@@ -482,9 +557,7 @@ def _require_bool(value: object, *, label: str, default: bool = False) -> bool:
     return value
 
 
-def _require_choice(
-    value: object, *, label: str, choices: tuple[str, ...]
-) -> str:
+def _require_choice(value: object, *, label: str, choices: tuple[str, ...]) -> str:
     if value not in choices:
         allowed = ", ".join(choices)
         raise _fail(f"{label} must be one of: {allowed}; got {value!r}")
@@ -506,9 +579,7 @@ def _parse_repo(data: dict, *, label: str, required: bool) -> str | None:
     return _require_text(value, label=f"{label} 'repo'")
 
 
-def _parse_claim(
-    payload: object, *, label: str, repo_required: bool
-) -> VerifiedClaim:
+def _parse_claim(payload: object, *, label: str, repo_required: bool) -> VerifiedClaim:
     data = _require_object(
         payload,
         label=label,
@@ -588,9 +659,7 @@ def _parse_detail(
     )
 
 
-def _parse_pattern(
-    payload: object, *, label: str, repo_required: bool
-) -> ReusePattern:
+def _parse_pattern(payload: object, *, label: str, repo_required: bool) -> ReusePattern:
     data = _require_object(
         payload,
         label=label,
@@ -885,7 +954,11 @@ def batch_sessions(
     batch_size: int = DEFAULT_VALIDATION_BATCH_SIZE,
 ) -> tuple[tuple[str, ...], ...]:
     """Split session ids into bounded, order-preserving validation batches."""
-    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+    if (
+        isinstance(batch_size, bool)
+        or not isinstance(batch_size, int)
+        or batch_size < 1
+    ):
         raise PlanError("validation batch size must be a positive integer")
     ordered = [parse_session_id(session_id).value for session_id in session_ids]
     return tuple(
@@ -915,7 +988,9 @@ class ValidationTaskPacket:
 
     def render(self) -> str:
         joined_ids = ", ".join(self.session_ids)
-        root_label = "workspace" if self.version == PREPARE_VALIDATION_VERSION else "codebase"
+        root_label = (
+            "workspace" if self.version == PREPARE_VALIDATION_VERSION else "codebase"
+        )
         lines: list[str] = [
             f"{VALIDATION_PACKET_HEADING_PREFIX} — sessions {joined_ids}",
             "",
@@ -1150,6 +1225,192 @@ def prepare_validation_path(plan_dir: str | Path) -> Path:
     return canonicalize_path(plan_dir) / PREPARE_VALIDATION_FILENAME
 
 
+def prepare_validation_cache_path(plan_dir: str | Path) -> Path:
+    """Return the per-session validator-result cache path for ``plan_dir``."""
+    return canonicalize_path(plan_dir) / PREPARE_VALIDATION_CACHE_FILENAME
+
+
+def _canonical_json_digest(payload: object) -> str:
+    """Return a stable SHA-256 digest for a JSON-compatible payload."""
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _parse_prepare_validation_cache(payload: object) -> PrepareValidationCache:
+    if not isinstance(payload, dict):
+        raise _fail("prepare validation cache must be a JSON object")
+    recorded_version = payload.get("version")
+    if (
+        not isinstance(recorded_version, bool)
+        and isinstance(recorded_version, int)
+        and recorded_version != PREPARE_VALIDATION_CACHE_VERSION
+    ):
+        # A cache has no authority of its own. An older/newer schema is a
+        # deliberate cache miss even when its payload shape also changed.
+        return PrepareValidationCache()
+    allowed = {"version", "entries"}
+    data = _require_object(
+        payload,
+        label="prepare validation cache",
+        allowed_keys=tuple(sorted(allowed)),
+    )
+    unknown = sorted(set(data) - allowed)
+    missing = sorted(allowed - set(data))
+    if unknown or missing:
+        problems: list[str] = []
+        if unknown:
+            problems.append("unknown keys " + ", ".join(repr(key) for key in unknown))
+        if missing:
+            problems.append("missing keys " + ", ".join(repr(key) for key in missing))
+        raise _fail("prepare validation cache has " + "; ".join(problems))
+    version = data["version"]
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise _fail("prepare validation cache 'version' must be an integer")
+    if version != PREPARE_VALIDATION_CACHE_VERSION:
+        raise _fail(
+            "prepare validation cache 'version' must be "
+            f"{PREPARE_VALIDATION_CACHE_VERSION}"
+        )
+
+    raw_entries = data["entries"]
+    if not isinstance(raw_entries, list):
+        raise _fail("prepare validation cache 'entries' must be a list")
+    entries: list[PrepareValidationCacheEntry] = []
+    seen: set[str] = set()
+    for index, raw_entry in enumerate(raw_entries, start=1):
+        entry_allowed = {"session_id", "key", "identity", "validation"}
+        entry = _require_object(
+            raw_entry,
+            label=f"prepare validation cache entry #{index}",
+            allowed_keys=tuple(sorted(entry_allowed)),
+        )
+        entry_unknown = sorted(set(entry) - entry_allowed)
+        entry_missing = sorted(entry_allowed - set(entry))
+        if entry_unknown or entry_missing:
+            problems = []
+            if entry_unknown:
+                problems.append(
+                    "unknown keys " + ", ".join(repr(key) for key in entry_unknown)
+                )
+            if entry_missing:
+                problems.append(
+                    "missing keys " + ", ".join(repr(key) for key in entry_missing)
+                )
+            raise _fail(
+                f"prepare validation cache entry #{index} has " + "; ".join(problems)
+            )
+        session_id = parse_session_id(
+            _require_text(entry["session_id"], label=f"cache entry #{index} session_id")
+        )
+        if session_id.value in seen:
+            raise _fail(
+                f"duplicate prepare validation cache session {session_id.value!r}"
+            )
+        seen.add(session_id.value)
+        key = _require_text(entry["key"], label=f"cache entry #{index} key")
+        if re.fullmatch(r"[0-9a-f]{64}", key) is None:
+            raise _fail(f"cache entry #{index} key must be a lowercase SHA-256 digest")
+        identity = entry["identity"]
+        if not isinstance(identity, dict):
+            raise _fail(f"cache entry #{index} identity must be a JSON object")
+        if _canonical_json_digest(identity) != key:
+            raise _fail(f"cache entry #{index} key does not match its identity")
+        validation_payload = entry["validation"]
+        validation_version = (
+            validation_payload.get("version")
+            if isinstance(validation_payload, dict)
+            else None
+        )
+        if (
+            not isinstance(validation_version, bool)
+            and isinstance(validation_version, int)
+            and validation_version
+            not in (
+                LEGACY_PREPARE_VALIDATION_VERSION,
+                PREPARE_VALIDATION_VERSION,
+            )
+        ):
+            # The cache record can outlive a validator-output schema upgrade.
+            # It has no authority, so refresh rather than asking the current
+            # strict parser to understand an obsolete result format.
+            return PrepareValidationCache()
+        validation = parse_validator_output(validation_payload)
+        if len(validation.sessions) != 1:
+            raise _fail(
+                f"cache entry #{index} validation must contain exactly one session"
+            )
+        if validation.sessions[0].session_id != session_id:
+            raise _fail(
+                f"cache entry #{index} session_id does not match validation output"
+            )
+        entries.append(
+            PrepareValidationCacheEntry(
+                session_id=session_id,
+                key=key,
+                identity=identity,
+                validation=validation,
+            )
+        )
+    return PrepareValidationCache(entries=tuple(entries), version=version)
+
+
+def load_prepare_validation_cache(
+    plan_dir: str | Path,
+) -> PrepareValidationCache:
+    """Load reusable per-session validator output, or an empty cache.
+
+    Unlike ``prepare-validation.json``, this artifact is strictly an
+    optimization. A cache schema version mismatch intentionally becomes an
+    empty cache so an upgraded preparer refreshes every result; an obsolete
+    validator-output schema does the same. Malformed data in the current
+    schema remains a fail-closed error.
+    """
+    plans.recover_pending_plan_transaction(plan_dir)
+    path = prepare_validation_cache_path(plan_dir)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return PrepareValidationCache()
+    except OSError as error:
+        raise PlanError(f"cannot read {path}: {error}") from error
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise PlanError(
+            f"{path} is not valid JSON: {error.msg} at line {error.lineno}"
+        ) from error
+    return _parse_prepare_validation_cache(payload)
+
+
+def serialize_prepare_validation_cache(cache: PrepareValidationCache) -> str:
+    """Serialize the cache using one stable, inspectable representation."""
+    return json.dumps(cache.to_dict(), indent=2, sort_keys=True) + "\n"
+
+
+def save_prepare_validation_cache(
+    plan_dir: str | Path, cache: PrepareValidationCache
+) -> Path:
+    """Atomically persist a cache update without coupling it to the aggregate."""
+    path = prepare_validation_cache_path(plan_dir)
+    text = serialize_prepare_validation_cache(cache)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    try:
+        tmp_path.write_text(text, encoding="utf-8")
+        os.replace(tmp_path, path)
+    except OSError as error:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise PlanError(f"cannot write {path}: {error}") from error
+    return path
+
+
 def load_prepare_validation(plan_dir: str | Path) -> PrepareValidation | None:
     """Load the stored aggregate, ``None`` when absent, fail-closed when malformed."""
     plans.recover_pending_plan_transaction(plan_dir)
@@ -1226,8 +1487,7 @@ def _validate_validation_authority(
     unknown_ids = sorted(returned_ids - authoritative_ids)
     if unknown_ids:
         raise _fail(
-            "session ids do not match the authoritative plan: "
-            + ", ".join(unknown_ids)
+            "session ids do not match the authoritative plan: " + ", ".join(unknown_ids)
         )
     if expected_session_ids is not None:
         expected = {parse_session_id(value).value for value in expected_session_ids}
@@ -1273,12 +1533,12 @@ def _validate_validation_authority(
     try:
         workspace = workspaces.resolve_workspace(canonical_root, registry)
     except workspaces.WorkspaceError as error:
-        raise _fail(f"workspace does not match the authoritative registry: {error}") from error
+        raise _fail(
+            f"workspace does not match the authoritative registry: {error}"
+        ) from error
     expected_repositories = _validator_repositories(workspace)
     if validation.repositories != expected_repositories:
-        raise _fail(
-            "repositories do not match the authoritative resolved registry"
-        )
+        raise _fail("repositories do not match the authoritative resolved registry")
 
     for session in validation.sessions:
         session_path = canonical_dir / session.session_id.filename
@@ -1420,9 +1680,7 @@ def merge_validations(
             f"aggregate version {base.version}"
         )
     if base.repositories != update.repositories:
-        raise PlanError(
-            "validator output repositories do not match stored aggregate"
-        )
+        raise PlanError("validator output repositories do not match stored aggregate")
     merged: dict[str, SessionValidation] = {
         session.session_id.value: session for session in base.sessions
     }
@@ -1437,9 +1695,7 @@ def merge_validations(
     )
 
 
-def ingest_validator_output(
-    plan_dir: str | Path, payload: object
-) -> PrepareValidation:
+def ingest_validator_output(plan_dir: str | Path, payload: object) -> PrepareValidation:
     """Parse one batch payload, merge it into the stored aggregate, and save.
 
     The parse happens before any disk write, so malformed or incomplete
@@ -1572,7 +1828,9 @@ def render_expansion(
         lines.extend(["", "## Session Dependencies", ""])
         for dependency in session.dependencies:
             direction = (
-                "Requires from" if dependency.direction == "requires" else "Provides for"
+                "Requires from"
+                if dependency.direction == "requires"
+                else "Provides for"
             )
             lines.append(
                 f"- **{direction} session {dependency.session_id}**"
@@ -1801,9 +2059,7 @@ def _apply_one_correction(
 
     offset = text.find(correction.expected_text)
     lines = text.splitlines()
-    start_line, end_line = _match_line_span(
-        text, offset, len(correction.expected_text)
-    )
+    start_line, end_line = _match_line_span(text, offset, len(correction.expected_text))
     for range_start, range_end, blocker in _protected_line_ranges(lines):
         if start_line < range_end and end_line >= range_start:
             section = (
@@ -1885,14 +2141,16 @@ def ingest_expand_batch(
     payload: object,
     *,
     expanded: str | None = None,
+    replace_aggregate: bool = False,
 ) -> ExpandIngestResult:
     """Ingest one validator batch as a single all-or-nothing transaction.
 
-    Merges the batch into the stored ``prepare-validation.json`` aggregate,
-    renders the batch's ``session-<id>.expand.md`` documents and reference
-    lines, and applies its exact factual corrections — staging **every** write
-    (the aggregate, each expansion document, each session reference insertion,
-    and each applied correction) into one
+    Merges the batch into the stored ``prepare-validation.json`` aggregate
+    (or starts a fresh aggregate when ``replace_aggregate`` is true), renders
+    the batch's ``session-<id>.expand.md`` documents and reference lines, and
+    applies its exact factual corrections — staging **every** write (the
+    aggregate, each expansion document, each session reference insertion, and
+    each applied correction) into one
     :class:`~agent_session_loop.authoring.PlanTransaction` that commits
     atomically.
 
@@ -1910,7 +2168,10 @@ def ingest_expand_batch(
     canonical_dir = canonicalize_path(plan_dir)
     update = parse_validator_output(payload)
     metadata_text = _validate_validation_authority(canonical_dir, update)
-    aggregate = merge_validations(load_prepare_validation(plan_dir), update)
+    aggregate = merge_validations(
+        None if replace_aggregate else load_prepare_validation(plan_dir),
+        update,
+    )
 
     transaction = PlanTransaction(canonical_dir)
     if metadata_text is not None:
@@ -2092,21 +2353,30 @@ def _launch_validator(
     harness_name: str,
     packet: ValidationTaskPacket,
     *,
-    unsafe_bypass: bool = True,
+    model: str | None = None,
+    effort: str | None = None,
     timeout: int | None = None,
 ) -> object:
-    """Run one validation packet through a harness worker and decode its JSON."""
+    """Run one validator as a read-only harness turn and decode its JSON."""
+    read_roots = tuple(
+        dict.fromkeys((Path(packet.codebase_root), Path(packet.plan_dir))).keys()
+    )
     with tempfile.TemporaryDirectory(prefix="asl-prepare-") as tmp:
         last_message_path = Path(tmp) / "validator-last-message.txt"
         try:
             result = harnesses.run_harness(
                 harness_name,
                 cwd=Path(packet.codebase_root),
-                plan_dir=Path(packet.plan_dir),
+                plan_dir=None,
                 prompt=packet.render(),
-                unsafe_bypass=unsafe_bypass,
+                # Preparation validation is research-only. It must never
+                # inherit the implementation worker's unsafe-bypass setting.
+                unsafe_bypass=False,
                 last_message_path=last_message_path,
                 timeout=timeout,
+                model=model,
+                effort=effort,
+                access=harnesses.audit_read_only_access(read_roots),
             )
         except harnesses.HarnessError as error:
             raise PlanError(
@@ -2191,9 +2461,7 @@ def _author_plan_directory(
     force_new: bool = False,
 ) -> Path:
     """Author the split plan directory deterministically, in one transaction."""
-    resolver = authoring.resolve_plan_output(
-        source_path, base_dir, force_new=force_new
-    )
+    resolver = authoring.resolve_plan_output(source_path, base_dir, force_new=force_new)
     output_dir = Path(str(resolver["output_dir"]))
 
     transaction = PlanTransaction(output_dir)
@@ -2262,6 +2530,263 @@ def _refresh_draft_readiness(plan_dir: Path) -> None:
         pass
 
 
+def _positive_validator_control(value: object, *, name: str) -> int:
+    """Return a positive integer validator control or fail before work starts."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise PlanError(f"{name} must be a positive integer")
+    return value
+
+
+def _read_validation_text(path: Path, *, label: str) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise PlanError(f"cannot read {label} {path}: {error}") from error
+
+
+def _validation_session_hashes(
+    plan_dir: Path,
+    session_ids: tuple[str, ...],
+) -> dict[str, str]:
+    """Hash current session text without recapturing shared worker inputs."""
+    hashes: dict[str, str] = {}
+    for session_id in session_ids:
+        canonical_session_id = parse_session_id(session_id)
+        session_text = _read_validation_text(
+            plan_dir / canonical_session_id.filename,
+            label="session",
+        )
+        hashes[canonical_session_id.value] = hashlib.sha256(
+            session_text.encode("utf-8")
+        ).hexdigest()
+    return hashes
+
+
+def _validation_repository_identity(
+    plan_dir: Path,
+    codebase_root: str,
+) -> tuple[dict[str, object], bool]:
+    """Capture the repository portion shared by every session cache key.
+
+    A capture that Git cannot establish is retained for diagnostics but never
+    used as reusable evidence.  This is deliberately stricter than an empty
+    fingerprint: a probe failure must cause a fresh validator run, not make
+    two unknown repository states compare equal.
+    """
+    registry = plans.read_repository_registry(plan_dir)
+    canonical_root = canonicalize_path(codebase_root)
+    if registry is None:
+        fingerprint = repository_evidence.capture_repository_fingerprint(
+            canonical_root, plan_dir
+        )
+        reusable = bool(fingerprint.get("git")) and (
+            repository_evidence.repository_evidence_unavailable(fingerprint) is None
+        )
+        return (
+            {
+                "mode": "legacy",
+                "codebase_root": str(canonical_root),
+                "repository_fingerprint": _canonical_json_digest(fingerprint),
+            },
+            reusable,
+        )
+
+    try:
+        workspace = workspaces.resolve_workspace(canonical_root, registry)
+    except workspaces.WorkspaceError as error:
+        raise PlanError(f"invalid validation workspace: {error}") from error
+    repositories: list[dict[str, str]] = []
+    reusable = True
+    for repository in workspace.repositories:
+        fingerprint = repository_evidence.capture_repository_fingerprint(
+            repository.root, plan_dir
+        )
+        if (
+            not fingerprint.get("git")
+            or repository_evidence.repository_evidence_unavailable(fingerprint)
+            is not None
+        ):
+            reusable = False
+        repositories.append(
+            {
+                "alias": repository.alias,
+                "path": repository.repository.path,
+                "origin": repository.origin,
+                "root": str(repository.root),
+                "fingerprint": _canonical_json_digest(fingerprint),
+            }
+        )
+    return (
+        {
+            "mode": "registered",
+            "workspace_root": str(workspace.root),
+            "registry_digest": registry.digest,
+            "repositories": repositories,
+        },
+        reusable,
+    )
+
+
+def _validation_cache_identities(
+    plan_dir: Path,
+    session_ids: tuple[str, ...],
+    *,
+    codebase_root: str,
+    validator_harness: str,
+    validator_model: str | None,
+    validator_effort: str | None,
+    validator_schema_version: int,
+) -> tuple[dict[str, dict[str, object]], bool]:
+    """Snapshot all per-session cache identities before workers launch."""
+    context_text = _read_validation_text(plan_dir / "context.md", label="context")
+    registry = plans.read_repository_registry(plan_dir)
+    repository_identity, reusable = _validation_repository_identity(
+        plan_dir, codebase_root
+    )
+    identities: dict[str, dict[str, object]] = {}
+    for session_id in session_ids:
+        canonical_session_id = parse_session_id(session_id)
+        session_path = plan_dir / canonical_session_id.filename
+        session_text = _read_validation_text(session_path, label="session")
+        scope: dict[str, object] | None = None
+        if registry is not None:
+            parsed_scope = plans.parse_session_scope(session_text, registry.aliases)
+            scope = {
+                "reads": list(parsed_scope.reads),
+                "writes": list(parsed_scope.writes),
+            }
+        identities[canonical_session_id.value] = {
+            "cache_version": PREPARE_VALIDATION_CACHE_VERSION,
+            "validator_schema_version": validator_schema_version,
+            "repository": repository_identity,
+            "context_sha256": hashlib.sha256(context_text.encode("utf-8")).hexdigest(),
+            "session_sha256": hashlib.sha256(session_text.encode("utf-8")).hexdigest(),
+            "scope": scope,
+            "validator": {
+                "harness": validator_harness,
+                "model": validator_model,
+                "effort": validator_effort,
+            },
+        }
+    return identities, reusable
+
+
+def _single_session_validation(
+    validation: PrepareValidation,
+    session: SessionValidation,
+) -> PrepareValidation:
+    return PrepareValidation(
+        codebase_root=validation.codebase_root,
+        sessions=(session,),
+        version=validation.version,
+        repositories=validation.repositories,
+    )
+
+
+def _cache_entry_for_validation(
+    validation: PrepareValidation,
+    *,
+    identity: dict[str, object],
+) -> PrepareValidationCacheEntry:
+    if len(validation.sessions) != 1:
+        raise AssertionError("cache entries require exactly one session validation")
+    return PrepareValidationCacheEntry(
+        session_id=validation.sessions[0].session_id,
+        key=_canonical_json_digest(identity),
+        identity=identity,
+        validation=validation,
+    )
+
+
+def _cache_hit_validation(
+    cache: PrepareValidationCache,
+    session_id: str,
+    *,
+    identity: dict[str, object],
+    reusable: bool,
+    codebase_root: str,
+    validator_schema_version: int,
+) -> PrepareValidation | None:
+    """Return a usable cached result only when every identity field matches."""
+    if not reusable:
+        return None
+    entry = cache.entry(session_id)
+    if entry is None or entry.key != _canonical_json_digest(identity):
+        return None
+    if entry.identity != identity:
+        return None
+    validation = entry.validation
+    if (
+        validation.codebase_root != codebase_root
+        or validation.version != validator_schema_version
+        or validation.session_ids != (parse_session_id(session_id).value,)
+    ):
+        return None
+    return validation
+
+
+def _merge_batch_validation_results(
+    session_ids: tuple[str, ...],
+    results: dict[str, PrepareValidation],
+) -> PrepareValidation:
+    """Reassemble one original batch in deterministic session order."""
+    try:
+        first = results[session_ids[0]]
+    except KeyError as error:
+        raise _fail(
+            f"validator result is missing session {session_ids[0]!r}"
+        ) from error
+    sessions: list[SessionValidation] = []
+    for session_id in session_ids:
+        try:
+            validation = results[session_id]
+        except KeyError as error:
+            raise _fail(
+                f"validator result is missing session {session_id!r}"
+            ) from error
+        if (
+            validation.codebase_root != first.codebase_root
+            or validation.version != first.version
+            or validation.repositories != first.repositories
+        ):
+            raise _fail(
+                "validator batch results disagree on root or repository identity"
+            )
+        if len(validation.sessions) != 1:
+            raise _fail("validator cache result must contain exactly one session")
+        sessions.append(validation.sessions[0])
+    return PrepareValidation(
+        codebase_root=first.codebase_root,
+        sessions=tuple(sessions),
+        version=first.version,
+        repositories=first.repositories,
+    )
+
+
+def _validation_elapsed(started_at: float) -> str:
+    return f"{max(0.0, time.monotonic() - started_at):.1f}s"
+
+
+def _validation_progress(
+    message: str,
+    *,
+    completed: int,
+    total: int,
+    in_flight: int,
+    started_at: float,
+) -> None:
+    """Write human progress to stderr without contaminating JSON stdout."""
+    print(
+        (
+            "asl prepare: validator "
+            f"{message} ({completed}/{total} batches complete; "
+            f"{in_flight} in-flight; total elapsed {_validation_elapsed(started_at)})"
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def _run_validation_stage(
     plan_dir: Path,
     session_ids: tuple[str, ...],
@@ -2269,40 +2794,231 @@ def _run_validation_stage(
     codebase_root: str,
     validator: ValidatorRunner,
     batch_size: int,
+    validator_harness: str,
+    validator_model: str | None,
+    validator_effort: str | None,
+    validator_jobs: int,
+    validator_heartbeat: int,
 ) -> tuple[PrepareValidation, int, tuple[CorrectionOutcome, ...]]:
-    """Validate sessions not yet covered by the stored aggregate.
+    """Validate stale sessions concurrently, cache, then ingest in order.
 
-    Returns the full aggregate plus the number of newly validated sessions.
-    Each batch result must cover exactly the requested batch and match the
-    preparation's codebase root; anything else fails closed before storage.
+    The aggregate remains a rendered plan artifact, not the cache authority:
+    aggregates created before the cache existed deliberately cause one refresh.
+    Every worker packet is constructed before the first worker starts and no
+    expansion/correction mutation occurs until all launched workers have either
+    yielded schema-valid output or completed with an error. A successful output
+    is cached immediately, so a later failed worker leaves a resumable wave.
     """
-    aggregate = load_prepare_validation(plan_dir)
-    if aggregate is not None:
-        _validate_validation_authority(plan_dir, aggregate)
-    validated = set(aggregate.session_ids) if aggregate is not None else set()
-    pending = [sid for sid in session_ids if sid not in validated]
-    outcomes: list[CorrectionOutcome] = []
+    started_at = time.monotonic()
+    batch_size = _positive_validator_control(batch_size, name="validation batch size")
+    validator_jobs = _positive_validator_control(validator_jobs, name="validator jobs")
+    validator_heartbeat = _positive_validator_control(
+        validator_heartbeat, name="validator heartbeat"
+    )
 
-    for batch in batch_sessions(pending, batch_size):
+    # Parse an existing aggregate fail-closed, but do not make its historical
+    # authority assertions gate a refresh. A changed session scope is exactly
+    # the kind of key mismatch that must be allowed to revalidate that session.
+    # The ordered ingest below validates every result against current authority
+    # before it can affect the aggregate or plan files.
+    load_prepare_validation(plan_dir)
+
+    all_batches = batch_sessions(session_ids, batch_size)
+    if not all_batches:
+        raise _fail("no validator output was produced for this plan")
+    expected_schema_version = (
+        PREPARE_VALIDATION_VERSION
+        if plans.read_repository_registry(plan_dir) is not None
+        else LEGACY_PREPARE_VALIDATION_VERSION
+    )
+    identities, reusable = _validation_cache_identities(
+        plan_dir,
+        session_ids,
+        codebase_root=codebase_root,
+        validator_harness=validator_harness,
+        validator_model=validator_model,
+        validator_effort=validator_effort,
+        validator_schema_version=expected_schema_version,
+    )
+    cache = load_prepare_validation_cache(plan_dir)
+    results: dict[str, PrepareValidation] = {}
+    worker_batches: list[tuple[int, tuple[str, ...], ValidationTaskPacket]] = []
+    completed_batches = 0
+
+    for ordinal, batch in enumerate(all_batches, start=1):
+        stale: list[str] = []
+        for session_id in batch:
+            cached = _cache_hit_validation(
+                cache,
+                session_id,
+                identity=identities[session_id],
+                reusable=reusable,
+                codebase_root=codebase_root,
+                validator_schema_version=expected_schema_version,
+            )
+            if cached is None:
+                stale.append(session_id)
+            else:
+                results[session_id] = cached
+        if not stale:
+            completed_batches += 1
+            _validation_progress(
+                f"batch {ordinal}/{len(all_batches)} cache hit",
+                completed=completed_batches,
+                total=len(all_batches),
+                in_flight=0,
+                started_at=started_at,
+            )
+            continue
         packet = build_validation_packet(
-            plan_dir, batch, codebase_root=codebase_root
+            plan_dir, tuple(stale), codebase_root=codebase_root
         )
-        payload = validator(packet)
-        update = parse_validator_output(payload)
-        if update.codebase_root != codebase_root:
-            root_field = (
-                "workspace_root"
-                if update.version == PREPARE_VALIDATION_VERSION
-                else "codebase_root"
-            )
-            raise _fail(
-                f"{root_field} {update.codebase_root!r} does not match the "
-                f"preparation root {codebase_root!r}"
-            )
+        if packet.version != expected_schema_version:
+            raise _fail("validator packet schema changed while validation was starting")
+        worker_batches.append((ordinal, tuple(stale), packet))
+
+    newly_validated = sum(len(batch) for _ordinal, batch, _packet in worker_batches)
+    failures: dict[int, Exception] = {}
+    if worker_batches:
+        next_batch = 0
+        in_flight: dict[Future[object], tuple[int, tuple[str, ...]]] = {}
+        with ThreadPoolExecutor(max_workers=validator_jobs) as executor:
+
+            def launch_one() -> None:
+                nonlocal next_batch
+                ordinal, batch, packet = worker_batches[next_batch]
+                next_batch += 1
+                future = executor.submit(validator, packet)
+                in_flight[future] = (ordinal, batch)
+                _validation_progress(
+                    f"batch {ordinal}/{len(all_batches)} started: {', '.join(batch)}",
+                    completed=completed_batches,
+                    total=len(all_batches),
+                    in_flight=len(in_flight),
+                    started_at=started_at,
+                )
+
+            while next_batch < len(worker_batches) and len(in_flight) < validator_jobs:
+                launch_one()
+
+            next_heartbeat = time.monotonic() + validator_heartbeat
+            while in_flight:
+                timeout = max(0.0, next_heartbeat - time.monotonic())
+                done, _pending = wait(
+                    in_flight,
+                    timeout=timeout,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    _validation_progress(
+                        "heartbeat",
+                        completed=completed_batches,
+                        total=len(all_batches),
+                        in_flight=len(in_flight),
+                        started_at=started_at,
+                    )
+                    while next_heartbeat <= time.monotonic():
+                        next_heartbeat += validator_heartbeat
+                    continue
+
+                for future in sorted(done, key=lambda item: in_flight[item][0]):
+                    ordinal, batch = in_flight.pop(future)
+                    try:
+                        payload = future.result()
+                        update = parse_validator_output(payload)
+                        if update.codebase_root != codebase_root:
+                            root_field = (
+                                "workspace_root"
+                                if update.version == PREPARE_VALIDATION_VERSION
+                                else "codebase_root"
+                            )
+                            raise _fail(
+                                f"{root_field} {update.codebase_root!r} does not match the "
+                                f"preparation root {codebase_root!r}"
+                            )
+                        _validate_validation_authority(
+                            plan_dir, update, expected_session_ids=batch
+                        )
+                        for session in update.sessions:
+                            session_validation = _single_session_validation(
+                                update, session
+                            )
+                            results[session.session_id.value] = session_validation
+                            cache = cache.with_entry(
+                                _cache_entry_for_validation(
+                                    session_validation,
+                                    identity=identities[session.session_id.value],
+                                )
+                            )
+                        # Persist every successful worker result before starting
+                        # another batch. This is the recovery boundary for a
+                        # later failure in the same concurrent wave.
+                        save_prepare_validation_cache(plan_dir, cache)
+                    except Exception as error:  # noqa: BLE001 - worker boundary
+                        failures[ordinal] = error
+                        detail = str(error)
+                        _validation_progress(
+                            (
+                                f"batch {ordinal}/{len(all_batches)} failed"
+                                + (f": {detail}" if detail else "")
+                            ),
+                            completed=completed_batches,
+                            total=len(all_batches),
+                            in_flight=len(in_flight),
+                            started_at=started_at,
+                        )
+                    else:
+                        completed_batches += 1
+                        _validation_progress(
+                            f"batch {ordinal}/{len(all_batches)} completed: {', '.join(batch)}",
+                            completed=completed_batches,
+                            total=len(all_batches),
+                            in_flight=len(in_flight),
+                            started_at=started_at,
+                        )
+
+                # Once any result failed, finish only work that was already in
+                # flight. Its valid outputs still reach the cache, but no new
+                # workers launch into a known-failed wave.
+                if not failures:
+                    while (
+                        next_batch < len(worker_batches)
+                        and len(in_flight) < validator_jobs
+                    ):
+                        launch_one()
+
+        if failures:
+            first_ordinal = min(failures)
+            error = failures[first_ordinal]
+            if isinstance(error, (PlanError, harnesses.HarnessError)):
+                raise error
+            raise PlanError(
+                f"validator batch {first_ordinal} failed: {error}"
+            ) from error
+
+    # Only now are plan mutations allowed. Reassemble each original packet in
+    # batch order so corrections cannot change the files a later worker saw.
+    # Recheck every assembled payload here, including cache hits, before the
+    # first transaction replaces a historical aggregate.
+    batch_validations = tuple(
+        (batch, _merge_batch_validation_results(batch, results))
+        for batch in all_batches
+    )
+    for batch, batch_validation in batch_validations:
         _validate_validation_authority(
-            plan_dir, update, expected_session_ids=batch
+            plan_dir,
+            batch_validation,
+            expected_session_ids=batch,
         )
-        ingested = ingest_expand_batch(plan_dir, payload)
+
+    aggregate: PrepareValidation | None = None
+    outcomes: list[CorrectionOutcome] = []
+    for batch_index, (_batch, batch_validation) in enumerate(batch_validations):
+        ingested = ingest_expand_batch(
+            plan_dir,
+            batch_validation.to_dict(),
+            replace_aggregate=batch_index == 0,
+        )
         aggregate = ingested.aggregate
         outcomes.extend(ingested.outcomes)
 
@@ -2310,14 +3026,32 @@ def _run_validation_stage(
         raise _fail("no validator output was produced for this plan")
     missing = [sid for sid in session_ids if aggregate.session(sid) is None]
     if missing:
-        raise _fail(
-            f"stored aggregate is missing sessions: {', '.join(missing)}"
+        raise _fail(f"stored aggregate is missing sessions: {', '.join(missing)}")
+
+    # Ingesting a result inserts expansion references and can apply an exact
+    # factual correction. Re-key only the resulting session text. Everything
+    # shared by the worker wave remains frozen from its initial snapshot: in
+    # particular, a repository change that happens while workers run must not
+    # make old research look reusable under a new fingerprint.
+    post_ingest_session_hashes = _validation_session_hashes(plan_dir, session_ids)
+    refreshed_cache = PrepareValidationCache()
+    for session_id in session_ids:
+        session = aggregate.session(session_id)
+        if session is None:
+            raise _fail(f"stored aggregate is missing session {session_id}")
+        refreshed_identity = dict(identities[session_id])
+        refreshed_identity["session_sha256"] = post_ingest_session_hashes[session_id]
+        refreshed_cache = refreshed_cache.with_entry(
+            _cache_entry_for_validation(
+                _single_session_validation(aggregate, session),
+                identity=refreshed_identity,
+            )
         )
-    if not pending:
-        ingested = ingest_expand_batch(plan_dir, aggregate.to_dict())
-        aggregate = ingested.aggregate
-        outcomes.extend(ingested.outcomes)
-    return aggregate, len(pending), tuple(outcomes)
+    # Store the outputs even when repository evidence was temporarily
+    # unavailable. The next lookup simply refuses to reuse them until it can
+    # establish a trustworthy fingerprint again.
+    save_prepare_validation_cache(plan_dir, refreshed_cache)
+    return aggregate, newly_validated, tuple(outcomes)
 
 
 def _repository_ambiguity_findings(
@@ -2330,6 +3064,17 @@ def _repository_ambiguity_findings(
         for session in validation.sessions
         for issue in session.issues
         if issue.issue_type == REPOSITORY_AMBIGUITY_ISSUE
+    )
+
+
+def _contract_problem_findings(
+    validation: PrepareValidation,
+) -> tuple[tuple[str, ContractProblem], ...]:
+    """Return every validator-reported contract defect in plan order."""
+    return tuple(
+        (session.session_id.value, problem)
+        for session in validation.sessions
+        for problem in session.contract_problems
     )
 
 
@@ -2375,9 +3120,7 @@ def _cached_baseline_entries(
     check lacks valid (current-fingerprint, pass/fail) evidence."""
     cache = BaselineCache.load(plan_dir / BASELINE_RESULTS_FILENAME)
     entries: list[dict[str, Any]] = []
-    current_evidence = baseline.capture_baseline_repository_evidence(
-        context, plan_dir
-    )
+    current_evidence = baseline.capture_baseline_repository_evidence(context, plan_dir)
     for key, session_id, check in unique_checks:
         record = cache.get(key)
         if record is None:
@@ -2434,9 +3177,7 @@ def _run_baseline_stage(
     unique_checks: list[tuple[str, str, Any]] = []
     seen_keys: set[str] = set()
     for session_id, check in collected:
-        key = baseline.baseline_identity_key(
-            check, context.root, context=context
-        )
+        key = baseline.baseline_identity_key(check, context.root, context=context)
         if key in seen_keys:
             continue
         seen_keys.add(key)
@@ -2447,9 +3188,7 @@ def _run_baseline_stage(
         checks = cached
         reused = True
     else:
-        run = baseline.run_baseline(
-            plan_dir, context.root, context=context
-        )
+        run = baseline.run_baseline(plan_dir, context.root, context=context)
         checks = [
             _baseline_check_entry(
                 outcome.session_id,
@@ -2509,6 +3248,11 @@ def _format_resume_command(
     harness_name: str,
     harness_model: str | None,
     validator_harness: str,
+    validator_model: str | None,
+    validator_effort: str | None,
+    validator_jobs: int,
+    validator_timeout: int,
+    validator_heartbeat: int,
     review_harness: str | None,
     review_harness_model: str | None,
     rebind_workspace: bool = False,
@@ -2524,11 +3268,21 @@ def _format_resume_command(
         harness_name,
         "--validator-harness",
         validator_harness,
+        "--validator-jobs",
+        str(validator_jobs),
+        "--validator-timeout",
+        str(validator_timeout),
+        "--validator-heartbeat",
+        str(validator_heartbeat),
     ]
     if rebind_workspace:
         argv.append("--rebind-workspace")
     if harness_model:
         argv.extend(["--harness-model", harness_model])
+    if validator_model is not None:
+        argv.extend(["--validator-model", validator_model])
+    if validator_effort is not None:
+        argv.extend(["--validator-effort", validator_effort])
     if review_harness:
         argv.extend(["--review-harness", review_harness])
     if review_harness_model:
@@ -2658,6 +3412,7 @@ def _rebase_staged_rebind_diagnostics(
     plan_dir: Path,
 ) -> tuple[tuple[PrepareStep, ...], tuple[PrepareBlocker, ...]]:
     """Replace ephemeral staged-plan paths in operator-facing diagnostics."""
+
     def rewrite(value: str) -> str:
         return _rebase_staged_rebind_text(
             value,
@@ -2688,12 +3443,16 @@ def _prepare_workspace_rebind(
     harness: str,
     harness_model: str | None,
     validator_harness: str,
+    validator_model: str | None,
+    validator_effort: str | None,
+    validator_jobs: int,
+    validator_heartbeat: int,
     review_harness: str | None,
     review_harness_model: str | None,
     validator: ValidatorRunner,
     batch_size: int,
     unsafe_bypass: bool,
-    validator_timeout: int | None,
+    validator_timeout: int,
     state_dir: str | Path | None,
 ) -> PrepareResult:
     """Rebuild workspace-dependent preparation evidence off-disk, then publish."""
@@ -2741,6 +3500,11 @@ def _prepare_workspace_rebind(
         harness_name=harness,
         harness_model=harness_model,
         validator_harness=validator_harness,
+        validator_model=validator_model,
+        validator_effort=validator_effort,
+        validator_jobs=validator_jobs,
+        validator_timeout=validator_timeout,
+        validator_heartbeat=validator_heartbeat,
         review_harness=review_harness,
         review_harness_model=review_harness_model,
         rebind_workspace=True,
@@ -2790,10 +3554,13 @@ def _prepare_workspace_rebind(
             )
 
         try:
-            with tempfile.TemporaryDirectory(prefix="asl-rebind-") as staging_root_value:
+            with tempfile.TemporaryDirectory(
+                prefix="asl-rebind-"
+            ) as staging_root_value:
                 staged_plan_dir = Path(staging_root_value) / "plan"
                 shutil.copytree(plan_dir, staged_plan_dir, symlinks=True)
-                (staged_plan_dir / PREPARE_VALIDATION_FILENAME).unlink(
+                (staged_plan_dir / PREPARE_VALIDATION_FILENAME).unlink(missing_ok=True)
+                (staged_plan_dir / PREPARE_VALIDATION_CACHE_FILENAME).unlink(
                     missing_ok=True
                 )
                 (staged_plan_dir / BASELINE_RESULTS_FILENAME).unlink(missing_ok=True)
@@ -2825,6 +3592,10 @@ def _prepare_workspace_rebind(
                         harness=harness,
                         harness_model=harness_model,
                         validator_harness=validator_harness,
+                        validator_model=validator_model,
+                        validator_effort=validator_effort,
+                        validator_jobs=validator_jobs,
+                        validator_heartbeat=validator_heartbeat,
                         review_harness=review_harness,
                         review_harness_model=review_harness_model,
                         resume_plan_dir=staged_plan_dir,
@@ -2893,6 +3664,7 @@ def _prepare_workspace_rebind(
                     "manifest.md",
                     plans.PLAN_METADATA_FILE_NAME,
                     PREPARE_VALIDATION_FILENAME,
+                    PREPARE_VALIDATION_CACHE_FILENAME,
                     BASELINE_RESULTS_FILENAME,
                 ]
                 for session_id in session_ids:
@@ -2990,6 +3762,11 @@ def prepare_plan(
     harness: str = "codex",
     harness_model: str | None = None,
     validator_harness: str = "codex",
+    validator_model: str | None = None,
+    validator_effort: str | None = None,
+    validator_jobs: int = DEFAULT_VALIDATOR_JOBS,
+    validator_timeout: int = DEFAULT_VALIDATOR_TIMEOUT_SECONDS,
+    validator_heartbeat: int = DEFAULT_VALIDATOR_HEARTBEAT_SECONDS,
     review_harness: str | None = None,
     review_harness_model: str | None = None,
     base_dir: str | Path | None = None,
@@ -2998,7 +3775,6 @@ def prepare_plan(
     validator: ValidatorRunner | None = None,
     batch_size: int = DEFAULT_VALIDATION_BATCH_SIZE,
     unsafe_bypass: bool = True,
-    validator_timeout: int | None = None,
     state_dir: str | Path | None = None,
     rebind_workspace: bool = False,
 ) -> PrepareResult:
@@ -3012,19 +3788,28 @@ def prepare_plan(
     failure preserves the authored directory as ``draft`` with structured
     blockers and a resumable ``asl prepare --resume`` command.
 
-    ``resume_plan_dir`` reruns validation (only for sessions missing from the
-    stored aggregate) and baselines (reusing recorded evidence whose
-    repository fingerprint still matches) against an existing split directory
-    without creating another split. ``rebind_workspace`` is valid only with a
-    registered resumed plan and delegates to an isolated full replacement
-    pipeline whose successful artifacts publish through one transaction.
+    ``resume_plan_dir`` reuses only cache entries whose complete per-session
+    identity still matches, revalidates every stale session, and reuses
+    baseline evidence whose repository fingerprint still matches — all against
+    an existing split directory without creating another split.
+    ``rebind_workspace`` is valid only with a registered resumed plan and
+    delegates to an isolated full replacement pipeline whose successful
+    artifacts publish through one transaction.
     """
     canonical_cwd = canonicalize_path(cwd)
+    validator_jobs = _positive_validator_control(validator_jobs, name="validator jobs")
+    validator_timeout = _positive_validator_control(
+        validator_timeout, name="validator timeout"
+    )
+    validator_heartbeat = _positive_validator_control(
+        validator_heartbeat, name="validator heartbeat"
+    )
     if validator is None:
         selected_validator: ValidatorRunner = lambda packet: _launch_validator(
             validator_harness,
             packet,
-            unsafe_bypass=unsafe_bypass,
+            model=validator_model,
+            effort=validator_effort,
             timeout=validator_timeout,
         )
     else:
@@ -3042,6 +3827,10 @@ def prepare_plan(
             harness=harness,
             harness_model=harness_model,
             validator_harness=validator_harness,
+            validator_model=validator_model,
+            validator_effort=validator_effort,
+            validator_jobs=validator_jobs,
+            validator_heartbeat=validator_heartbeat,
             review_harness=review_harness,
             review_harness_model=review_harness_model,
             validator=selected_validator,
@@ -3146,12 +3935,8 @@ def prepare_plan(
             )
         )
 
-    ensure_plan_metadata(
-        plan_dir, canonical_cwd, defer_registered_binding=True
-    )
-    verification_context = VerificationContext.from_plan(
-        plan_dir, canonical_cwd
-    )
+    ensure_plan_metadata(plan_dir, canonical_cwd, defer_registered_binding=True)
+    verification_context = VerificationContext.from_plan(plan_dir, canonical_cwd)
     workspace_summary = (
         _workspace_rebind_summary(
             verification_context.root,
@@ -3168,6 +3953,11 @@ def prepare_plan(
         harness_name=harness,
         harness_model=harness_model,
         validator_harness=validator_harness,
+        validator_model=validator_model,
+        validator_effort=validator_effort,
+        validator_jobs=validator_jobs,
+        validator_timeout=validator_timeout,
+        validator_heartbeat=validator_heartbeat,
         review_harness=review_harness,
         review_harness_model=review_harness_model,
     )
@@ -3200,6 +3990,11 @@ def prepare_plan(
             codebase_root=str(canonical_cwd),
             validator=selected_validator,
             batch_size=batch_size,
+            validator_harness=validator_harness,
+            validator_model=validator_model,
+            validator_effort=validator_effort,
+            validator_jobs=validator_jobs,
+            validator_heartbeat=validator_heartbeat,
         )
     except RepositoryRegistryRequiredError as error:
         blockers.append(
@@ -3236,16 +4031,34 @@ def prepare_plan(
             f"{len(ambiguity_findings)} ambiguous unqualified repository "
             "path claim(s) require plan correction"
         )
+        steps.append(PrepareStep(PREPARE_STAGE_VALIDATION, PREPARE_STEP_FAILED, detail))
+        return _failed(PREPARE_EXIT_REASON_VALIDATION_FAILED, corrections=corrections)
+    contract_problem_findings = _contract_problem_findings(aggregate)
+    if contract_problem_findings:
+        for session_id, problem in contract_problem_findings:
+            blockers.append(
+                PrepareBlocker(
+                    stage=PREPARE_STAGE_VALIDATION,
+                    session_id=session_id,
+                    category=CONTRACT_PROBLEM_CATEGORY,
+                    message=f"{problem.message}: {problem.suggested_fix}",
+                )
+            )
         steps.append(
-            PrepareStep(PREPARE_STAGE_VALIDATION, PREPARE_STEP_FAILED, detail)
+            PrepareStep(
+                PREPARE_STAGE_VALIDATION,
+                PREPARE_STEP_FAILED,
+                (
+                    f"{len(contract_problem_findings)} completion-contract "
+                    "problem(s) require repair and revalidation"
+                ),
+            )
         )
-        return _failed(
-            PREPARE_EXIT_REASON_VALIDATION_FAILED, corrections=corrections
-        )
+        return _failed(PREPARE_EXIT_REASON_VALIDATION_FAILED, corrections=corrections)
     validation_detail = (
         f"{newly_validated} session(s) validated"
         if newly_validated
-        else "all sessions already validated; stored aggregate reused"
+        else "all sessions reused from the validator cache; aggregate refreshed"
     )
     steps.append(
         PrepareStep(
@@ -3256,9 +4069,7 @@ def prepare_plan(
     )
 
     ensure_plan_metadata(plan_dir, canonical_cwd)
-    verification_context = VerificationContext.from_plan(
-        plan_dir, canonical_cwd
-    )
+    verification_context = VerificationContext.from_plan(plan_dir, canonical_cwd)
     workspace_summary = (
         _workspace_rebind_summary(
             verification_context.root,
@@ -3282,8 +4093,7 @@ def prepare_plan(
     _refresh_draft_readiness(plan_dir)
 
     contracts_by_session = {
-        sid: contracts.read_completion_contract(plan_dir, sid)
-        for sid in session_ids
+        sid: contracts.read_completion_contract(plan_dir, sid) for sid in session_ids
     }
     baseline_summary = _run_baseline_stage(
         plan_dir, verification_context, contracts_by_session
@@ -3325,13 +4135,9 @@ def prepare_plan(
         )
         if baseline_summary["reused"]:
             baseline_detail += " (cached evidence reused)"
-    steps.append(
-        PrepareStep(PREPARE_STAGE_BASELINE, PREPARE_STEP_OK, baseline_detail)
-    )
+    steps.append(PrepareStep(PREPARE_STAGE_BASELINE, PREPARE_STEP_OK, baseline_detail))
 
-    report = preflight.run_preflight(
-        plan_dir, cwd=canonical_cwd, state_dir=state_dir
-    )
+    report = preflight.run_preflight(plan_dir, cwd=canonical_cwd, state_dir=state_dir)
     mark_blockers = preflight._mark_loop_ready_blockers(report)
     if mark_blockers:
         for finding in mark_blockers:
@@ -3376,9 +4182,7 @@ def prepare_plan(
             baseline_summary=baseline_summary,
         )
     steps.append(
-        PrepareStep(
-            PREPARE_STAGE_PREFLIGHT, PREPARE_STEP_OK, "plan marked loop-ready"
-        )
+        PrepareStep(PREPARE_STAGE_PREFLIGHT, PREPARE_STEP_OK, "plan marked loop-ready")
     )
 
     return PrepareResult(
@@ -3441,7 +4245,9 @@ def _print_text_prepare(result: PrepareResult, *, plan_arg: str) -> None:
         print(f"Workspace root: {result.workspace.get('workspace_root')}")
         repositories = result.workspace.get("repositories")
         if isinstance(repositories, list):
-            aliases = [str(row.get("alias")) for row in repositories if isinstance(row, dict)]
+            aliases = [
+                str(row.get("alias")) for row in repositories if isinstance(row, dict)
+            ]
             if aliases:
                 print("Repositories: " + ", ".join(aliases))
     for step in result.steps:
@@ -3465,6 +4271,15 @@ def prepare_from_args(args: Any) -> int:
     harness_name = args.harness
     harness_model = args.harness_model
     validator_harness = args.validator_harness
+    validator_model = getattr(args, "validator_model", None)
+    validator_effort = getattr(args, "validator_effort", None)
+    validator_jobs = getattr(args, "validator_jobs", DEFAULT_VALIDATOR_JOBS)
+    validator_timeout = getattr(
+        args, "validator_timeout", DEFAULT_VALIDATOR_TIMEOUT_SECONDS
+    )
+    validator_heartbeat = getattr(
+        args, "validator_heartbeat", DEFAULT_VALIDATOR_HEARTBEAT_SECONDS
+    )
     review_harness = args.review_harness
     review_harness_model = args.review_harness_model
     common_fields = {
@@ -3473,6 +4288,19 @@ def prepare_from_args(args: Any) -> int:
         "harness": harness_name,
         "harness_model": harness_model,
         "validator_harness": validator_harness,
+        "validator_model": validator_model,
+        "validator_effort": validator_effort,
+        "validator_jobs": validator_jobs,
+        "validator_timeout": validator_timeout,
+        "validator_heartbeat": validator_heartbeat,
+        "validator": {
+            "harness": validator_harness,
+            "model": validator_model,
+            "effort": validator_effort,
+            "jobs": validator_jobs,
+            "timeout_seconds": validator_timeout,
+            "heartbeat_seconds": validator_heartbeat,
+        },
         "review_harness": review_harness,
         "review_harness_model": review_harness_model,
         "resume": resume,
@@ -3506,6 +4334,19 @@ def prepare_from_args(args: Any) -> int:
         else:
             print(f"agent-session-loop prepare: {error}", file=sys.stderr)
         return 1
+
+    try:
+        validator_jobs = _positive_validator_control(
+            validator_jobs, name="--validator-jobs"
+        )
+        validator_timeout = _positive_validator_control(
+            validator_timeout, name="--validator-timeout"
+        )
+        validator_heartbeat = _positive_validator_control(
+            validator_heartbeat, name="--validator-heartbeat"
+        )
+    except PlanError as error:
+        return _emit_input_error(PREPARE_EXIT_REASON_INPUT_ERROR, str(error))
 
     if review_harness is not None and review_harness == harness_name:
         return _emit_input_error(
@@ -3555,6 +4396,11 @@ def prepare_from_args(args: Any) -> int:
             harness=harness_name,
             harness_model=harness_model,
             validator_harness=validator_harness,
+            validator_model=validator_model,
+            validator_effort=validator_effort,
+            validator_jobs=validator_jobs,
+            validator_timeout=validator_timeout,
+            validator_heartbeat=validator_heartbeat,
             review_harness=review_harness,
             review_harness_model=review_harness_model,
             base_dir=args.base_dir,

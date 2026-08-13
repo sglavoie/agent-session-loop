@@ -24,6 +24,9 @@ _WORKBENCH_DEFAULT_HOST = "127.0.0.1"  # workbench_server.DEFAULT_HOST
 _WORKBENCH_DEFAULT_PORT = 8765  # workbench_server.DEFAULT_PORT
 _METRICS_DEFAULT_SINCE_DAYS = 7  # metrics.DEFAULT_SINCE_DAYS
 _RETENTION_DEFAULT_MAX_AGE_DAYS = 30.0  # retention.DEFAULT_MAX_AGE_DAYS
+_PREPARE_DEFAULT_VALIDATOR_JOBS = 2  # prepare.DEFAULT_VALIDATOR_JOBS
+_PREPARE_DEFAULT_VALIDATOR_TIMEOUT_SECONDS = 900  # prepare.DEFAULT_VALIDATOR_TIMEOUT_SECONDS
+_PREPARE_DEFAULT_VALIDATOR_HEARTBEAT_SECONDS = 30  # prepare.DEFAULT_VALIDATOR_HEARTBEAT_SECONDS
 
 
 _WORKBENCH_SERVE_CHILD_DESTS = {
@@ -627,6 +630,52 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         choices=harnesses.HARNESS_NAMES,
         default="codex",
         help="Harness used to run preparation validation workers",
+    )
+    prepare_parser.add_argument(
+        "--validator-model",
+        dest="validator_model",
+        help=(
+            "Validator harness model to request (omit to preserve that "
+            "harness's native default)"
+        ),
+    )
+    prepare_parser.add_argument(
+        "--validator-effort",
+        dest="validator_effort",
+        help=(
+            "Validator harness reasoning effort to request (omit to preserve "
+            "that harness's native default)"
+        ),
+    )
+    prepare_parser.add_argument(
+        "--validator-jobs",
+        dest="validator_jobs",
+        type=int,
+        default=_PREPARE_DEFAULT_VALIDATOR_JOBS,
+        help=(
+            "Maximum concurrent read-only validator workers "
+            f"(default: {_PREPARE_DEFAULT_VALIDATOR_JOBS})"
+        ),
+    )
+    prepare_parser.add_argument(
+        "--validator-timeout",
+        dest="validator_timeout",
+        type=int,
+        default=_PREPARE_DEFAULT_VALIDATOR_TIMEOUT_SECONDS,
+        help=(
+            "Per-validator worker timeout in seconds "
+            f"(default: {_PREPARE_DEFAULT_VALIDATOR_TIMEOUT_SECONDS})"
+        ),
+    )
+    prepare_parser.add_argument(
+        "--validator-heartbeat",
+        dest="validator_heartbeat",
+        type=int,
+        default=_PREPARE_DEFAULT_VALIDATOR_HEARTBEAT_SECONDS,
+        help=(
+            "Seconds between validator progress heartbeats on stderr "
+            f"(default: {_PREPARE_DEFAULT_VALIDATOR_HEARTBEAT_SECONDS})"
+        ),
     )
     prepare_parser.add_argument(
         "--review-harness",
