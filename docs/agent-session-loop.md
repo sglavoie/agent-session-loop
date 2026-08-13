@@ -440,9 +440,10 @@ asl assurance merge ISSUE TARGET [--note TEXT] [--yes] [--state-dir DIR] [--json
 asl assurance closeout RUN_ID --outcome accepted|reworked|escaped [--rework-minutes N] [--issue ISSUE ...] [--note TEXT] [--plan PLAN_DIR_OR_ID] [--replace] [--state-dir DIR] [--json]
 asl assurance process-pending [--limit RUNS] [--run-id RUN_ID] [--plan PLAN_DIR_OR_ID] [--audit-harness NAME] [--audit-harness-model MODEL] [--audit-effort LEVEL] [--audit-timeout SECONDS] [--state-dir DIR] [--json]
 asl assurance plan ISSUE --harness NAME --output PATH [--harness-model MODEL] [--effort LEVEL] [--timeout SECONDS] [--state-dir DIR] [--json]
-asl control stop-after-current PLAN_DIR_OR_ID [--state-dir DIR] [--json]
-asl control select-harness PLAN_DIR_OR_ID --harness codex|claude|copilot [--state-dir DIR] [--json]
-asl control set-model PLAN_DIR_OR_ID [--harness codex|claude|copilot] [--harness-model MODEL|--clear-harness-model] [--effort EFFORT|--clear-effort] [--state-dir DIR] [--json]
+asl control stop-after-current PLAN_DIR_OR_ID [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
+asl control abort PLAN_DIR_OR_ID [--grace SECONDS] [--reason TEXT] [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
+asl control select-harness PLAN_DIR_OR_ID --harness codex|claude|copilot [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
+asl control set-model PLAN_DIR_OR_ID [--harness codex|claude|copilot] [--harness-model MODEL|--clear-harness-model] [--effort EFFORT|--clear-effort] [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
 asl compact-state PLAN_DIR [--state-dir DIR] [--apply] [--json]
 asl gc [PLAN_DIR] [--state-dir DIR] [--max-age-days DAYS] [--dry-run|--apply] [--json]
@@ -1688,6 +1689,15 @@ mutated — the runner alone owns `state.json`.
   the pending review`, `current session is the last; stop is a no-op` when
   nothing would follow, or `no active run; command applies when a runner next
   drains the queue`.
+- `asl control abort PLAN_DIR_OR_ID [--grace SECONDS] [--reason TEXT]` queues a
+  request to end the in-flight turn after a bounded grace window (default
+  `120` seconds). Its payload reports `enqueued`, `command_id`, `run_active`,
+  `turn_active`, `grace_seconds`, `reason`, and a `note`: `a turn is active;
+  abort will end it`, `no turn active; abort degrades to stop-after-current`, or
+  `no active run; command applies when a runner next drains the queue`. A grace
+  outside 1–86400 seconds fails with `reason: invalid-grace` and an empty
+  `--reason` fails with `reason: invalid-reason`, both before anything is
+  enqueued — an out-of-range window is rejected, never clamped.
 - `asl control select-harness PLAN_DIR_OR_ID --harness H` queues the `1`/`2`/`3`
   request. Its payload reports `enqueued`, `command_id`, `harness`,
   `run_active`, and a `note` naming the harness future sessions will use. An
@@ -1702,7 +1712,7 @@ mutated — the runner alone owns `state.json`.
   unknown target harness fails with `reason: invalid-harness`.
 
 Enqueueing succeeds for a readable plan even with no runner attached; the
-command simply waits in the queue for the next drain. All three subcommands
+command simply waits in the queue for the next drain. All four subcommands
 accept the same `PLAN_DIR_OR_ID` compact-label resolution as `status` and reuse
 its `ambiguous-plan` / `malformed-plan` / `state-error` failure reasons. A queue
 the process cannot create or append to — an unwritable or non-directory state
@@ -1710,8 +1720,115 @@ root — fails with `reason: os-error` and a `details.queue_path`, still as exac
 one JSON object under `--json` (a single stderr line otherwise), never a
 traceback. Any other command rejected by the durable queue fails with
 `reason: invalid-command`. The control-handler reason vocabulary is
-`invalid-command`, `invalid-harness`, `missing-model-control-operation`, and
-`os-error`.
+`abort-timeout`, `invalid-command`, `invalid-grace`, `invalid-harness`,
+`invalid-reason`, `invalid-timeout`, `missing-model-control-operation`,
+`no-runner`, `os-error`, and `receipt-timeout`.
+
+Every producer that appends to the queue — the `asl control` subcommands and
+the Workbench control endpoints alike — then sends a best-effort wakeup so the
+runner drains the queue immediately instead of waiting out its `5.0`-second
+control poll. The wakeup is a single byte written to the FIFO recorded as
+`wakeup_endpoint` in the plan's `lock.json`, and its outcome is reported as a
+`signal` object carrying `delivered` and a `reason`: `delivered` when the byte
+was written, `no-runner` when no readable lock exists, `remote-host` when the
+lock records a different hostname, `stale-lock` when the recorded PID is no
+longer running, `no-endpoint` when the lock names no FIFO at all,
+`endpoint-closed` when the FIFO has no reader behind it, plus `endpoint-failed`
+when the path is not a FIFO or the write was refused for any other reason.
+The field is named `signal` for the older transport it replaced and is kept for
+compatibility; nothing is signalled. The wakeup is a latency optimization
+layered on the durable queue, never a delivery guarantee: a command whose wakeup
+did not land is still applied at the next poll. Because a FIFO is a local
+filesystem object, the wakeup is **same-host only** — a runner whose lock
+records another hostname reports `remote-host` and picks the command up on its
+ordinary poll cadence instead. Nothing about the queue is host-bound; only the
+hurry-up is.
+
+The endpoint is *owned* rather than addressed, and that is the whole of its
+safety. The runner creates the FIFO and opens it for reading **before** it
+publishes the `lock.json` that names it, so which process receives a wakeup is
+decided by who holds the read end, not by a PID a producer looks up afterwards.
+There is no window in which the recorded address comes to mean a different
+process, because a PID is never the address. A producer therefore authenticates
+nothing: it reads the lock for the endpoint path and writes to it.
+
+Writing to a FIFO nobody reads cannot act on any process. The producer opens it
+`O_WRONLY | O_NONBLOCK`, which fails with `ENXIO` when there is no reader, so an
+endpoint left behind by a runner that died reports `endpoint-closed` and the
+command waits for the poll. The worst case is the opposite of a misdirected
+signal: a spurious drain by a process that legitimately holds the read end,
+which costs nothing because the byte carries no payload — the durable queue
+carries the command, the wakeup carries only the fact that one is waiting. A
+pipe already full of unread bytes is reported as `delivered` for the same
+reason: a wakeup is already queued there.
+
+On the receiving side, the runner installs no signal disposition at all, so
+there is none to shield and none to restore. A dedicated reader thread does
+nothing but set the event the poll thread is blocked on; the main thread is
+never interrupted. The endpoint is unlinked as the run exits — after the lock
+is released — so a producer that resolved the path while the lock existed and
+writes once it is gone finds nothing to open rather than a process to disturb.
+A lock written before this field existed, or by a runner whose filesystem
+cannot host a FIFO, simply carries no `wakeup_endpoint`: that run reports
+`no-endpoint` to producers and applies control commands at its ordinary poll.
+
+All four subcommands accept `--wait` and `--timeout SECONDS`, which turn the
+fire-and-forget append into a receipt. Without `--wait`, nothing changes: the
+command is appended, a best-effort wakeup is sent, and the handler returns 0
+whether or not a runner ever sees it. With `--wait` the handler tails
+`events.jsonl` every `0.5` seconds for the `control-command-observed`
+run-control record carrying the `command_id` it just enqueued. The runner
+appends that receipt for *every* command it accepts, including one that changes
+no state, so a duplicate or already-applied command is distinguishable from a
+lost one. On success the payload gains a `wait` object reporting `observed`,
+`terminal_action`, `timeout_seconds`, and `elapsed_seconds`. `asl control abort
+--wait` additionally waits past the receipt for the real outcome — the
+`abort-turn-honored` or `abort-turn-satisfied-by-worker` action recorded after
+it — and reports it as `wait.terminal_action`. Only `abort-turn-honored` means
+the run is stopping; `abort-turn-satisfied-by-worker` reports that the turn
+ended by itself inside the window, which leaves the run paused or still running,
+so read the run's own terminal state before calling it stopped.
+
+A wait that runs out exits 1 and names which observation failed, with the
+`command_id`, `queue_path`, `signal`, and `wait` evidence under `details`: no
+runner is listening (no active lock, or the wakeup reported `no-runner`) fails
+with `reason: no-runner`; a runner that holds the lock but did not drain in time
+fails with `reason: receipt-timeout`; and an abort whose receipt landed but
+whose outcome has not been recorded yet fails with `reason: abort-timeout`. The
+command remains durably queued in every case — the timeout is about the
+receipt, never the append. `--timeout` requires `--wait` and must be between 0
+and 1800 seconds; otherwise the command fails with `reason: invalid-timeout`
+before anything is enqueued. The default wait is `60` seconds, which is shorter
+than the default abort grace window, so `abort --wait` usually wants an explicit
+`--timeout` above the grace it requested.
+
+When a runner observes a queued abort while a turn is in flight, its poll thread
+records the `abort-turn-requested` action, stamps the resulting
+`control.abort_deadline`, and — when the mailbox protocol is active — appends a
+guidance record naming the reason, the grace window, and the deadline, so a
+worker can wind down and pause the run itself. From there an abort has three
+distinct outcomes, and only the first of them stops the run:
+
+- **Killed at the deadline.** The turn was still running when the window
+  expired, so the harness process group is killed, the session returns to
+  `pending` with a Handoff note explaining that it holds no completion,
+  `abort-turn-honored` is recorded, and the run exits with `reason: stopped`.
+  This outcome alone is the clean early stop: it never pauses the run and reuses
+  no pause reason.
+- **Self-paused inside the window.** The worker wound down and emitted
+  `RUNNER_PAUSE`, so `abort-turn-satisfied-by-worker` is recorded, nothing is
+  killed, and the worker's own pause owns the outcome — the run exits `paused`
+  with the worker's pause reason and `ok: false`, never `reason: stopped`, and
+  the session keeps whatever status the worker left it with and carries no abort
+  Handoff note.
+- **Completed inside the window.** The worker finished its session instead of
+  winding down, so `abort-turn-satisfied-by-worker` is recorded, the completion
+  stands, and the run continues to the next session. Recording that action
+  consumes the abort, so stopping the run afterwards needs a fresh
+  `asl control` request.
+
+An abort observed between turns has nothing to kill and degrades to
+stop-after-current instead.
 
 `status` reads durable plan files and prints session counts, the next pending
 session, content hashes, state paths, lock state, and any active harness turn.
@@ -2792,11 +2909,19 @@ artifacts do not make this power-loss durability guarantee.
 `commits`, `control`, `mailbox_enabled`, `mailbox_activation`, and, after
 successful auto-commit preflight,
 `commit_preflight`. The `control` object reports `stop_after_current`,
-`tail_enabled`, `next_harness`, process-local `implementation_overrides`,
-`consumed`, and `last_action`; `last_action` is one of
+`tail_enabled`, the pending-abort projection `abort_turn_requested` with its
+`abort_grace_seconds`, `abort_reason`, and `abort_deadline`, `next_harness`,
+process-local `implementation_overrides`, `consumed`, and `last_action`;
+`last_action` is one of
 `stop-after-current-requested`, `stop-after-current-canceled`,
-`stop-after-current-consumed`, `tail-enabled`, `tail-disabled`,
-`harness-selected`, `implementation-model-updated`, or `null`.
+`stop-after-current-consumed`, `abort-turn-requested`, `abort-turn-honored`,
+`abort-turn-satisfied-by-worker`, `tail-enabled`, `tail-disabled`,
+`harness-selected`, `implementation-model-updated`, or `null`. The three
+abort-pending fields are cleared the moment the abort resolves, so a terminal
+abort `last_action` sits beside `abort_turn_requested: false`.
+`control-command-observed` is a receipt for a drained command rather than a
+state transition, so it is recorded in `events.jsonl` and never becomes
+`last_action`.
 `mailbox_activation` records the once-per-run decision and its reason
 (`mailbox-present`, `fresh-lease`, `inactive`, or `disabled-by-flag`) plus the
 resolved paths and best-effort lease evidence. Failed-run artifacts remain in
@@ -2887,11 +3012,17 @@ cycle events inline alongside other events. Commit events include the commit ind
 scope, session ID for per-session commits, argv, cwd, artifact paths, status
 result, duration, and commit SHA when one was created. `run_control` events
 record `stop-after-current-requested`, `stop-after-current-canceled`,
-`stop-after-current-consumed`, `tail-enabled`, `tail-disabled`, and
+`stop-after-current-consumed`, `abort-turn-requested`, `abort-turn-honored`,
+`abort-turn-satisfied-by-worker`, `control-command-observed`, `tail-enabled`,
+`tail-disabled`, and
 `harness-selected`, and `implementation-model-updated` actions with
 `stop_after_current`, `tail_enabled`,
 `next_harness`, and, when available, session and turn context. Harness-selection
-events also include `current_harness` and `selected_harness`. `tail` renders
+events also include `current_harness` and `selected_harness`. Abort events also
+include `abort_requested`, `abort_grace_seconds`, `abort_reason`, and — on
+`abort-turn-requested` alone — the `abort_deadline` the terminal actions clear.
+`control-command-observed` is the receipt `asl control --wait` polls for and
+carries the `command_id` and `queue_command` it acknowledges. `tail` renders
 these as `run control:` lines.
 
 For normal text runs, live progress is printed to stderr with local compact
@@ -3592,9 +3723,15 @@ terminal verdict (`ok` is `true` only for a clean completion):
   with sessions still pending — an intentional clean early stop, not a pause or a
   failure. `completed` and `pending` counts are attached; re-running the same
   command continues from the remaining sessions.
-- `stopped` (`ok: true`): a stop-after-current request (the `p` key or
-  `asl control stop-after-current`) was honored with work still to do — the
-  structural twin of `max-sessions`, not a pause or a failure. `completed` and
+- `stopped` (`ok: true`): an out-of-band control request was honored with work
+  still to do — the structural twin of `max-sessions`, not a pause or a failure.
+  `stop_kind` names which request it was: `stop-after-current` for the `p` key or
+  `asl control stop-after-current`, honored at the session boundary, and `abort`
+  for `asl control abort`, which ended the turn in flight and returned its
+  session to `pending`, so that session is *not* in `completed`. An abort the
+  worker satisfied inside its grace window never reaches this verdict: it
+  surfaces as the worker's own pause, or as a run that simply kept going.
+  `completed` and
   `pending` counts are attached and the helper does not relaunch; re-running the
   same command continues from the remaining sessions, or runs the pending
   review when every session is already complete (`review_skipped_reason:
@@ -4217,6 +4354,17 @@ Mutating endpoints (bearer-token required):
 - `POST /api/control/stop-after-current` — enqueue a
   `request-stop-after-current` command on the per-plan control queue.
   The runner consumes it at the next checkpoint.
+- `POST /api/control/abort` — enqueue a `request-abort-turn` command.
+  Payload: `{"plan_dir": "...", "grace_seconds": 120, "reason": "..."}`;
+  both are optional and validated through the same `control_queue` path
+  `asl control abort` uses, so an out-of-range window returns
+  `invalid-grace` and an empty reason returns `invalid-reason`. The
+  response reports `run_active`, `turn_active`, the resolved
+  `grace_seconds`, `abort_reason`, and a `note` saying whether the abort
+  ends a turn or degrades to stop-after-current. Like the other control
+  endpoints it reports the best-effort `signal` wakeup it sent, but it has
+  no receipt equivalent of `asl control abort --wait`: the HTTP surface
+  confirms the append, never the runner's observation.
 - `POST /api/control/select-harness` — enqueue a
   `select-future-harness` command. Payload:
   `{"plan_dir": "...", "harness": "codex|claude|copilot"}`. The active

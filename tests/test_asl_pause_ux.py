@@ -1157,6 +1157,127 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 json.dumps(first_turn["argv"]),
             )
 
+    def test_worker_self_pause_inside_abort_grace_window_is_not_a_kill(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            write_plan(plan_dir, ("pending", "pending"))
+            # Creating the mailbox file is what activates the protocol, so seed
+            # it with an already-answered record rather than pending guidance.
+            seeded = mailbox.append_guidance(
+                plan_dir, "seeded", state_dir=state_dir
+            )
+            mailbox.append_acknowledgement(
+                plan_dir, seeded.seq, state_dir=state_dir
+            )
+            observed_guidance: list[str] = []
+
+            def fake_run_harness(name, **kwargs):
+                control_queue.append_command(
+                    plan_dir,
+                    control_queue.COMMAND_REQUEST_ABORT_TURN,
+                    state_dir=state_dir,
+                    grace_seconds=60,
+                    reason="operator needs the machine",
+                    command_id="abort-1",
+                )
+                abort = kwargs["abort"]
+                deadline = time.monotonic() + 10.0
+                while not observed_guidance and time.monotonic() < deadline:
+                    observed_guidance.extend(
+                        message.text
+                        for message in mailbox.pending_guidance(
+                            plan_dir, state_dir=state_dir
+                        )
+                        if "Supervisor abort requested" in message.text
+                    )
+                    if not observed_guidance:
+                        time.sleep(0.01)
+                self.assertTrue(observed_guidance, "abort guidance never arrived")
+                self.assertTrue(abort.armed)
+                # The worker complies: it winds down, leaves the session
+                # pending, and pauses the run itself well inside the window.
+                last_message = "RUNNER_PAUSE: supervisor requested abort\n"
+                last_message_path = kwargs.get("last_message_path")
+                if last_message_path is not None:
+                    Path(last_message_path).write_text(
+                        last_message, encoding="utf-8"
+                    )
+                return harnesses.HarnessResult(
+                    name=name,
+                    argv=[name, "--prompt", str(kwargs.get("prompt", ""))],
+                    returncode=0,
+                    stdout=last_message,
+                    stderr="",
+                    last_message=last_message,
+                )
+
+            args = argparse.Namespace(
+                plan_dir=str(plan_dir),
+                cwd=str(tmp_dir),
+                harness="codex",
+                review_harness=None,
+                state_dir=str(state_dir),
+                json=True,
+                dry_run=False,
+                unsafe_bypass=True,
+                timeout=None,
+                max_sessions=None,
+                commit_mode=None,
+                model=None,
+                effort=None,
+                note=None,
+                allow_not_loop_ready=True,
+                reply=None,
+            )
+
+            with (
+                mock.patch.object(
+                    runner, "LIVE_CONTROL_POLL_INTERVAL_SECONDS", 0.02
+                ),
+                mock.patch.object(
+                    runner.harnesses, "run_harness", side_effect=fake_run_harness
+                ),
+            ):
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    code = runner.run_from_args(args)
+
+            self.assertEqual(1, code, out.getvalue())
+            payload = json.loads(out.getvalue())
+            # The existing runner-pause path owns the outcome: no kill, no
+            # revert note, and no abort-specific pause reason.
+            self.assertTrue(payload["paused"])
+            self.assertEqual("runner-pause", payload["pause_reason"])
+            self.assertEqual(1, len(payload["turns"]))
+            self.assertEqual(0, payload["turns"][0]["returncode"])
+            self.assertFalse(payload["turns"][0].get("aborted", False))
+            self.assertEqual(1, payload["final_snapshot"]["next_pending"])
+            session_text = (plan_dir / "session-1.md").read_text(encoding="utf-8")
+            self.assertNotIn("turn aborted by supervisor request", session_text)
+
+            plan_state = state.plan_state_dir(plan_dir, state_dir)
+            actions = [
+                record["payload"]["action"]
+                for record in read_jsonl(plan_state / events.EVENTS_FILE_NAME)
+                if record["name"] == events.RUN_CONTROL_EVENT
+            ]
+            self.assertEqual(
+                [
+                    events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+                    events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
+                    events.RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER,
+                ],
+                actions,
+            )
+            self.assertFalse(payload["control"]["abort_turn_requested"])
+            self.assertIn(
+                "operator needs the machine", observed_guidance[0]
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

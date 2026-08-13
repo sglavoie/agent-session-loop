@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
@@ -191,10 +191,56 @@ def _run_started_message(payload: dict[str, Any]) -> str:
     return "; ".join(str(part) for part in parts)
 
 
+_ABORT_TERMINAL_ACTIONS = frozenset(
+    {
+        events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED,
+        events.RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER,
+    }
+)
+
+
+def _abort_grace_remaining(deadline: Any) -> str:
+    parsed = _parse_datetime(deadline)
+    if parsed is None:
+        return "grace not started" if deadline is None else "remaining unknown"
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    remaining = (parsed - datetime.now(timezone.utc)).total_seconds()
+    if remaining <= 0:
+        return "grace expired"
+    return f"{int(remaining)}s remaining"
+
+
+def _abort_details(payload: dict[str, Any]) -> list[str]:
+    """Render the abort state carried by a run-control event payload.
+
+    The emitter clears ``abort_deadline`` when the abort is consumed, so a
+    terminal action still describes the window it acted on but never counts
+    down to a deadline that no longer exists.
+    """
+    terminal = payload.get("action") in _ABORT_TERMINAL_ACTIONS
+    if terminal:
+        details = ["abort resolved"]
+    elif payload.get("abort_requested"):
+        details = ["abort pending"]
+    else:
+        return []
+    grace = payload.get("abort_grace_seconds")
+    if grace is not None:
+        details.append(f"abort grace {grace}s")
+    if not terminal:
+        details.append(_abort_grace_remaining(payload.get("abort_deadline")))
+    reason = payload.get("abort_reason")
+    if reason:
+        details.append(f"abort reason {reason}")
+    return details
+
+
 def _run_control_message(payload: dict[str, Any]) -> str:
     message = payload.get("message") or payload.get("action") or "unknown action"
     status = "on" if payload.get("stop_after_current") else "off"
     details = [f"stop-after-current {status}"]
+    details.extend(_abort_details(payload))
     if (
         payload.get("action")
         == events.RUN_CONTROL_ACTION_IMPLEMENTATION_MODEL_UPDATED

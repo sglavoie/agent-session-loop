@@ -27,6 +27,8 @@ _RETENTION_DEFAULT_MAX_AGE_DAYS = 30.0  # retention.DEFAULT_MAX_AGE_DAYS
 _PREPARE_DEFAULT_VALIDATOR_JOBS = 2  # prepare.DEFAULT_VALIDATOR_JOBS
 _PREPARE_DEFAULT_VALIDATOR_TIMEOUT_SECONDS = 900  # prepare.DEFAULT_VALIDATOR_TIMEOUT_SECONDS
 _PREPARE_DEFAULT_VALIDATOR_HEARTBEAT_SECONDS = 30  # prepare.DEFAULT_VALIDATOR_HEARTBEAT_SECONDS
+_CONTROL_DEFAULT_ABORT_GRACE_SECONDS = 120  # control_queue.DEFAULT_ABORT_GRACE_SECONDS
+_CONTROL_DEFAULT_WAIT_TIMEOUT_SECONDS = 60.0  # control_cli.DEFAULT_CONTROL_WAIT_TIMEOUT_SECONDS
 
 
 _WORKBENCH_SERVE_CHILD_DESTS = {
@@ -171,6 +173,28 @@ def _add_plan_reference_args(parser: argparse.ArgumentParser) -> None:
         "--json",
         action="store_true",
         help="Print machine-readable JSON output",
+    )
+
+
+def _add_control_wait_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--wait",
+        action="store_true",
+        help="Wait for the runner's receipt instead of firing and forgetting",
+    )
+    parser.add_argument(
+        "--timeout",
+        # Bound to the same dest the mailbox wait uses, so the value is never
+        # confused with an unrelated `timeout` on a shared namespace.
+        dest="wait_timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Receipt wait timeout in seconds; requires --wait "
+            f"(default: {_CONTROL_DEFAULT_WAIT_TIMEOUT_SECONDS:g}; "
+            "maximum: 1800)"
+        ),
     )
 
 
@@ -1206,8 +1230,38 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         ),
     )
     _add_plan_reference_args(control_stop_parser)
+    _add_control_wait_args(control_stop_parser)
     control_stop_parser.set_defaults(
         handler_ref="control_cli:control_stop_after_current_from_args",
+    )
+
+    control_abort_parser = control_sub.add_parser(
+        "abort",
+        help=(
+            "Abort the in-flight turn after a bounded grace window "
+            "(degrades to stop-after-current when no turn is running)."
+        ),
+    )
+    _add_plan_reference_args(control_abort_parser)
+    _add_control_wait_args(control_abort_parser)
+    control_abort_parser.add_argument(
+        "--grace",
+        type=int,
+        default=_CONTROL_DEFAULT_ABORT_GRACE_SECONDS,
+        metavar="SECONDS",
+        help=(
+            "Seconds the worker gets to wind down before the turn is killed "
+            f"(default: {_CONTROL_DEFAULT_ABORT_GRACE_SECONDS})"
+        ),
+    )
+    control_abort_parser.add_argument(
+        "--reason",
+        default=None,
+        metavar="TEXT",
+        help="Reason delivered to the worker with the abort",
+    )
+    control_abort_parser.set_defaults(
+        handler_ref="control_cli:control_abort_from_args",
     )
 
     control_select_harness_parser = control_sub.add_parser(
@@ -1215,6 +1269,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Choose the harness future sessions of a run should use.",
     )
     _add_plan_reference_args(control_select_harness_parser)
+    _add_control_wait_args(control_select_harness_parser)
     control_select_harness_parser.add_argument(
         "--harness",
         required=True,
@@ -1233,6 +1288,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         ),
     )
     _add_plan_reference_args(control_set_model_parser)
+    _add_control_wait_args(control_set_model_parser)
     control_set_model_parser.add_argument(
         "--harness",
         choices=harnesses.HARNESS_NAMES,

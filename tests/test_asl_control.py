@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+from collections.abc import Callable
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import dataclasses
 from datetime import datetime, timedelta, timezone
@@ -46,6 +47,7 @@ from agent_session_loop import (
     contracts,
     control_cli,
     control_queue,
+    control_signal,
     events,
     harnesses,
     install_verify,
@@ -55,6 +57,7 @@ from agent_session_loop import (
     plans,
     preflight,
     prepare,
+    process_tree,
     progress_cli,
     progress_repair,
     qna,
@@ -77,15 +80,23 @@ from tests.support import (
     FakeRunControlListener,
     REPO_ROOT,
     TTYText,
+    _write_live_lock_file,
     _write_lock_file,
     _write_state_payload,
     agent_mux_notify_enabled,
     init_git_repo,
     install_fake_harness,
+    live_wakeup_endpoint,
     patched_env,
     read_jsonl,
     write_plan,
 )
+
+
+# What a producer gets for a live runner that published a wakeup endpoint. No
+# platform conditional survives: the endpoint is a filesystem object rather
+# than a process handle, so every host that can host a FIFO delivers.
+LIVE_WAKEUP = control_signal.NotifyResult(True, "delivered")
 
 
 class ControlQueueTests(unittest.TestCase):
@@ -186,6 +197,195 @@ class ControlQueueTests(unittest.TestCase):
             "set",
             result.accepted[2].model_operation.operation,
         )
+
+    def test_abort_round_trip_preserves_grace_and_reason(self) -> None:
+        appended = control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_REQUEST_ABORT_TURN,
+            state_dir=self.state_dir,
+            grace_seconds=30,
+            reason="supervisor asked for a hard stop",
+            command_id="abort-1",
+        )
+        self.assertEqual(30, appended.grace_seconds)
+        self.assertEqual(
+            "supervisor asked for a hard stop", appended.reason
+        )
+        self.assertIsNone(appended.harness)
+
+        result = control_queue.drain_queue(
+            self.plan_dir, state_dir=self.state_dir
+        )
+
+        self.assertEqual((), result.rejected)
+        self.assertEqual(("abort-1",), result.consumed_ids)
+        command = result.accepted[0]
+        self.assertEqual(
+            control_queue.COMMAND_REQUEST_ABORT_TURN, command.command
+        )
+        self.assertEqual(30, command.grace_seconds)
+        self.assertEqual(
+            "supervisor asked for a hard stop", command.reason
+        )
+        self.assertEqual(30, command.to_payload()["grace_seconds"])
+
+    def test_abort_without_optional_fields_gets_the_default_grace(self) -> None:
+        appended = control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_REQUEST_ABORT_TURN,
+            state_dir=self.state_dir,
+            command_id="abort-default",
+        )
+        self.assertEqual(
+            control_queue.DEFAULT_ABORT_GRACE_SECONDS, appended.grace_seconds
+        )
+        self.assertIsNone(appended.reason)
+
+        # The written line is self-describing: the consumer never has to know
+        # the producer's default.
+        lines = read_jsonl(self.queue_path())
+        self.assertEqual(
+            control_queue.DEFAULT_ABORT_GRACE_SECONDS,
+            lines[0]["grace_seconds"],
+        )
+        self.assertNotIn("reason", lines[0])
+
+        result = control_queue.drain_queue(
+            self.plan_dir, state_dir=self.state_dir
+        )
+        self.assertEqual(
+            control_queue.DEFAULT_ABORT_GRACE_SECONDS,
+            result.accepted[0].grace_seconds,
+        )
+        self.assertIsNone(result.accepted[0].reason)
+
+    def test_drain_preserves_order_with_abort_interleaved(self) -> None:
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_SELECT_FUTURE_HARNESS,
+            state_dir=self.state_dir,
+            harness="claude",
+            command_id="harness",
+        )
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_REQUEST_ABORT_TURN,
+            state_dir=self.state_dir,
+            grace_seconds=5,
+            command_id="abort",
+        )
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+            state_dir=self.state_dir,
+            command_id="stop",
+        )
+
+        result = control_queue.drain_queue(
+            self.plan_dir, state_dir=self.state_dir
+        )
+
+        self.assertEqual(
+            ["harness", "abort", "stop"],
+            [cmd.id for cmd in result.accepted],
+        )
+        self.assertEqual(
+            [None, 5, None],
+            [cmd.grace_seconds for cmd in result.accepted],
+        )
+
+    def test_append_rejects_malformed_abort_grace_and_reason(self) -> None:
+        cases = (
+            ({"grace_seconds": 0}, control_queue.REJECT_INVALID_GRACE),
+            ({"grace_seconds": -1}, control_queue.REJECT_INVALID_GRACE),
+            (
+                {
+                    "grace_seconds": (
+                        control_queue.MAX_ABORT_GRACE_SECONDS + 1
+                    )
+                },
+                control_queue.REJECT_INVALID_GRACE,
+            ),
+            # bool is an int subclass; `True` must not read as 1 second.
+            ({"grace_seconds": True}, control_queue.REJECT_INVALID_GRACE),
+            ({"reason": ""}, control_queue.REJECT_INVALID_REASON),
+        )
+        for kwargs, expected in cases:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(
+                    control_queue.ControlQueueError
+                ) as raised:
+                    control_queue.append_command(
+                        self.plan_dir,
+                        control_queue.COMMAND_REQUEST_ABORT_TURN,
+                        state_dir=self.state_dir,
+                        **kwargs,
+                    )
+                self.assertEqual(expected, str(raised.exception))
+
+        # Nothing malformed reached the queue file.
+        self.assertFalse(self.queue_path().exists())
+
+    def test_drain_rejects_malformed_abort_grace_and_reason(self) -> None:
+        queue_path = self.queue_path()
+        queue_path.parent.mkdir(parents=True, exist_ok=True)
+        records = (
+            {"id": "zero", "command": "request-abort-turn", "grace_seconds": 0},
+            {
+                "id": "negative",
+                "command": "request-abort-turn",
+                "grace_seconds": -30,
+            },
+            {
+                "id": "absurd",
+                "command": "request-abort-turn",
+                "grace_seconds": control_queue.MAX_ABORT_GRACE_SECONDS + 1,
+            },
+            {
+                "id": "not-a-number",
+                "command": "request-abort-turn",
+                "grace_seconds": "120",
+            },
+            {
+                "id": "boolean",
+                "command": "request-abort-turn",
+                "grace_seconds": True,
+            },
+            {
+                "id": "empty-reason",
+                "command": "request-abort-turn",
+                "reason": "",
+            },
+            {
+                "id": "ok",
+                "command": "request-abort-turn",
+                "grace_seconds": 45,
+                "reason": "wind down",
+            },
+        )
+        queue_path.write_text(
+            "".join(json.dumps(record) + "\n" for record in records),
+            encoding="utf-8",
+        )
+
+        result = control_queue.drain_queue(
+            self.plan_dir, state_dir=self.state_dir
+        )
+
+        self.assertEqual(("ok",), result.consumed_ids)
+        self.assertEqual(
+            [
+                control_queue.REJECT_INVALID_GRACE,
+                control_queue.REJECT_INVALID_GRACE,
+                control_queue.REJECT_INVALID_GRACE,
+                control_queue.REJECT_INVALID_GRACE,
+                control_queue.REJECT_INVALID_GRACE,
+                control_queue.REJECT_INVALID_REASON,
+            ],
+            [command.reason for command in result.rejected],
+        )
+        self.assertEqual(45, result.accepted[0].grace_seconds)
+        self.assertEqual("wind down", result.accepted[0].reason)
 
     def test_model_control_round_trip_preserves_explicit_operations(self) -> None:
         appended = control_queue.append_command(
@@ -2239,6 +2439,9 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
         self,
         control_state: run_control.RunControlState,
         seen_ids: set[str] | None = None,
+        wakeup: threading.Event | None = None,
+        abort: harnesses.AbortSignal | None = None,
+        mailbox_enabled: bool = False,
     ) -> tuple[control_queue.DrainResult, set[str]]:
         seen = set() if seen_ids is None else seen_ids
         result = runner._drain_external_control_queue(
@@ -2252,8 +2455,40 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
             context=None,
             persistence=runner._RunPersistence(),
             run_control_lock=threading.Lock(),
+            wakeup=wakeup,
+            abort=abort,
+            mailbox_enabled=mailbox_enabled,
         )
         return result, seen
+
+    def run_control_actions(self) -> list[str]:
+        if not self.event_path.exists():
+            return []
+        return [
+            record["payload"]["action"]
+            for record in read_jsonl(self.event_path)
+            if record["name"] == events.RUN_CONTROL_EVENT
+        ]
+
+    def test_drain_clears_the_wakeup_before_reading_the_queue(self) -> None:
+        wakeup = threading.Event()
+        wakeup.set()
+        set_at_read: list[bool] = []
+        real_drain_queue = control_queue.drain_queue
+
+        def record(*args, **kwargs):
+            set_at_read.append(wakeup.is_set())
+            return real_drain_queue(*args, **kwargs)
+
+        with mock.patch.object(control_queue, "drain_queue", record):
+            self.drain(
+                run_control.RunControlState(current_harness="codex"),
+                wakeup=wakeup,
+            )
+
+        # Clearing after the read would swallow a signal for a command appended
+        # while the read was in flight.
+        self.assertEqual([False], set_at_read)
 
     def test_request_stop_after_current_updates_control_and_emits_event(self) -> None:
         control_queue.append_command(
@@ -2277,10 +2512,18 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
         run_control_events = [
             r["payload"] for r in records if r["name"] == events.RUN_CONTROL_EVENT
         ]
-        self.assertEqual(1, len(run_control_events))
+        # The receipt precedes the transition it acknowledges.
         self.assertEqual(
-            events.RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED,
-            run_control_events[0]["action"],
+            [
+                events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+                events.RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED,
+            ],
+            [event["action"] for event in run_control_events],
+        )
+        self.assertEqual("stop-1", run_control_events[0]["command_id"])
+        self.assertEqual(
+            control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+            run_control_events[0]["queue_command"],
         )
 
     def test_idempotent_request_when_already_stopping(self) -> None:
@@ -2296,14 +2539,11 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
         )
         result, _seen = self.drain(rc_state)
         self.assertEqual(("stop-dup",), result.consumed_ids)
-        records = read_jsonl(self.event_path) if self.event_path.exists() else []
-        run_control_events = [
-            r for r in records if r["name"] == events.RUN_CONTROL_EVENT
-        ]
+        # The receipt is the only trace a duplicate leaves: it changes no state,
+        # so it records no transition, but a supervisor still learns it landed.
         self.assertEqual(
-            0,
-            len(run_control_events),
-            "duplicate request must not emit an extra run_control event",
+            [events.RUN_CONTROL_ACTION_COMMAND_OBSERVED],
+            self.run_control_actions(),
         )
 
     def test_select_future_harness_updates_control_payload(self) -> None:
@@ -2337,10 +2577,9 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
         # next_harness stays None because select_harness returns None when
         # the requested harness matches the current one.
         self.assertIsNone(self.control_payload["next_harness"])
-        records = read_jsonl(self.event_path) if self.event_path.exists() else []
         self.assertEqual(
-            0,
-            len([r for r in records if r["name"] == events.RUN_CONTROL_EVENT]),
+            [events.RUN_CONTROL_ACTION_COMMAND_OBSERVED],
+            self.run_control_actions(),
         )
 
     def test_model_control_commands_follow_harness_selection_order(self) -> None:
@@ -2484,6 +2723,200 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
             result2.rejected[0].reason,
         )
         self.assertFalse(rc_state2.stop_after_current)
+
+    def queue_abort(
+        self,
+        *,
+        command_id: str = "abort-1",
+        grace_seconds: int | None = None,
+        reason: str | None = None,
+    ) -> None:
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_REQUEST_ABORT_TURN,
+            state_dir=self.state_dir,
+            grace_seconds=grace_seconds,
+            reason=reason,
+            command_id=command_id,
+        )
+
+    def test_abort_arms_the_turn_signal_and_records_the_request(self) -> None:
+        self.queue_abort(grace_seconds=30, reason="operator needs the machine")
+        abort = harnesses.AbortSignal()
+        rc_state = run_control.RunControlState(current_harness="codex")
+
+        before = time.monotonic()
+        self.drain(rc_state, abort=abort)
+        after = time.monotonic()
+
+        self.assertTrue(abort.armed)
+        self.assertEqual("operator needs the machine", abort.reason)
+        expiry = abort.expires_at(before)
+        self.assertIsNotNone(expiry)
+        assert expiry is not None
+        # The window starts when the poll thread observes the command, so the
+        # deadline sits one grace period past the drain, not past the run.
+        self.assertGreaterEqual(expiry, before + 30.0)
+        self.assertLessEqual(expiry, after + 30.0)
+
+        self.assertTrue(self.control_payload["abort_turn_requested"])
+        self.assertEqual(30, self.control_payload["abort_grace_seconds"])
+        self.assertEqual(
+            "operator needs the machine",
+            self.control_payload["abort_reason"],
+        )
+        self.assertIsNotNone(self.control_payload["abort_deadline"])
+        self.assertEqual(
+            [
+                events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
+            ],
+            self.run_control_actions(),
+        )
+
+    def test_abort_request_event_carries_the_deadline(self) -> None:
+        self.queue_abort(grace_seconds=45)
+        self.drain(
+            run_control.RunControlState(current_harness="codex"),
+            abort=harnesses.AbortSignal(),
+        )
+
+        event_payload = [
+            record["payload"]
+            for record in read_jsonl(self.event_path)
+            if record["name"] == events.RUN_CONTROL_EVENT
+            if record["payload"]["action"]
+            == events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED
+        ][0]
+        self.assertTrue(event_payload["abort_requested"])
+        self.assertEqual(45, event_payload["abort_grace_seconds"])
+        # Session 7 renders the remaining grace from the ledger, so the deadline
+        # has to be stamped before the request is recorded.
+        self.assertEqual(
+            self.control_payload["abort_deadline"],
+            event_payload["abort_deadline"],
+        )
+
+    def test_omitted_grace_uses_the_producer_default(self) -> None:
+        self.queue_abort()
+        abort = harnesses.AbortSignal()
+        self.drain(
+            run_control.RunControlState(current_harness="codex"),
+            abort=abort,
+        )
+
+        self.assertEqual(
+            control_queue.DEFAULT_ABORT_GRACE_SECONDS,
+            self.control_payload["abort_grace_seconds"],
+        )
+        self.assertEqual(runner.ABORT_TURN_DEFAULT_REASON, abort.reason)
+
+    def test_abort_appends_mailbox_guidance_naming_the_deadline(self) -> None:
+        self.queue_abort(grace_seconds=15, reason="rebooting the host")
+        self.drain(
+            run_control.RunControlState(current_harness="codex"),
+            abort=harnesses.AbortSignal(),
+            mailbox_enabled=True,
+        )
+
+        pending = mailbox.read_mailbox(
+            self.plan_dir, state_dir=self.state_dir
+        ).pending_guidance
+        self.assertEqual(1, len(pending))
+        text = pending[0].text
+        self.assertIn("rebooting the host", text)
+        self.assertIn("15s grace", text)
+        self.assertIn(str(self.control_payload["abort_deadline"]), text)
+        self.assertIn("RUNNER_PAUSE: supervisor requested abort", text)
+
+    def test_abort_without_mailbox_does_not_create_one(self) -> None:
+        self.queue_abort()
+        abort = harnesses.AbortSignal()
+        self.drain(
+            run_control.RunControlState(current_harness="codex"),
+            abort=abort,
+        )
+
+        # Appending would create the mailbox file and silently flip activation
+        # for every later turn, so a disabled mailbox stays absent.
+        self.assertEqual(
+            [],
+            list(mailbox.read_mailbox(
+                self.plan_dir, state_dir=self.state_dir
+            ).pending_guidance),
+        )
+        self.assertTrue(abort.armed)
+
+    def test_failed_guidance_append_still_arms_the_abort(self) -> None:
+        self.queue_abort(grace_seconds=5)
+        abort = harnesses.AbortSignal()
+        with mock.patch.object(
+            runner.mailbox,
+            "append_guidance",
+            side_effect=OSError("read-only mailbox"),
+        ):
+            self.drain(
+                run_control.RunControlState(current_harness="codex"),
+                abort=abort,
+                mailbox_enabled=True,
+            )
+
+        self.assertTrue(abort.armed)
+        self.assertEqual(
+            [
+                events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
+            ],
+            self.run_control_actions(),
+        )
+
+    def test_abort_with_no_turn_in_flight_degrades_to_stop(self) -> None:
+        self.queue_abort(reason="drain the queue")
+        rc_state = run_control.RunControlState(current_harness="codex")
+
+        self.drain(rc_state)
+
+        # Nothing to kill, but dropping the command would make `asl control
+        # abort` a silent no-op between turns.
+        self.assertTrue(rc_state.stop_after_current)
+        self.assertFalse(rc_state.snapshot()["abort_turn_requested"])
+        self.assertTrue(self.control_payload["stop_after_current"])
+        self.assertFalse(self.control_payload["abort_turn_requested"])
+        self.assertIsNone(self.control_payload["abort_deadline"])
+        self.assertEqual(
+            [
+                events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED,
+                events.RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED,
+            ],
+            self.run_control_actions(),
+        )
+
+    def test_repeated_abort_command_does_not_restart_the_window(self) -> None:
+        self.queue_abort(command_id="abort-a", grace_seconds=60)
+        abort = harnesses.AbortSignal()
+        self.drain(
+            run_control.RunControlState(current_harness="codex"),
+            abort=abort,
+        )
+        first_deadline = self.control_payload["abort_deadline"]
+        rc_state = run_control.RunControlState(current_harness="codex")
+        rc_state.request_abort_turn(grace_seconds=60)
+
+        self.queue_abort(command_id="abort-b", grace_seconds=1)
+        self.drain(rc_state, abort=abort)
+
+        # The second command's shorter grace must not shorten a running window.
+        self.assertEqual(first_deadline, self.control_payload["abort_deadline"])
+        self.assertEqual(
+            [
+                events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
+                events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+            ],
+            self.run_control_actions(),
+        )
 
 
 class PreTurnStopCheckpointTests(unittest.TestCase):
@@ -2708,6 +3141,566 @@ class PreTurnStopCheckpointTests(unittest.TestCase):
         self.assertEqual([], list(self.plan_dir.glob("session-2*.md")))
 
 
+class AbortTurnOrchestrationTests(unittest.TestCase):
+    """An aborted turn stops the run cleanly instead of pausing it."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.plan_dir = self.tmp / "plan"
+        self.state_dir = self.tmp / "state"
+        self.repo_root = self.tmp / "repo"
+        self.config_home = self.tmp / "config"
+        init_git_repo(self.repo_root)
+        harness_config = {
+            name: {"executable": str(install_fake_harness(self.tmp, name))}
+            for name in ("codex", "claude")
+        }
+        config_path = (
+            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        )
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(harness_config), encoding="utf-8")
+
+    def _queue_abort(
+        self,
+        command_id: str,
+        *,
+        grace_seconds: int | None = None,
+        reason: str | None = None,
+    ) -> None:
+        control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_REQUEST_ABORT_TURN,
+            state_dir=self.state_dir,
+            grace_seconds=grace_seconds,
+            reason=reason,
+            command_id=command_id,
+        )
+
+    def _activate_mailbox(self) -> None:
+        # Creating the file is what enables the mailbox, so seed it with an
+        # already-answered record rather than pending guidance.
+        seeded = mailbox.append_guidance(
+            self.plan_dir, "seeded", state_dir=self.state_dir
+        )
+        mailbox.append_acknowledgement(
+            self.plan_dir, seeded.seq, state_dir=self.state_dir
+        )
+
+    def _complete_next_pending(self) -> None:
+        for session_file in sorted(self.plan_dir.glob("session-*.md")):
+            text = session_file.read_text(encoding="utf-8")
+            if "- **Status**: pending" not in text:
+                continue
+            session_file.write_text(
+                text.replace(
+                    "- **Status**: pending", "- **Status**: complete", 1
+                ),
+                encoding="utf-8",
+            )
+            return
+
+    def _session_text(self, session_id: str) -> str:
+        return (
+            self.plan_dir / plans.session_id_to_filename(session_id)
+        ).read_text(encoding="utf-8")
+
+    def _session_status(self, session_id: str) -> str:
+        return plans.read_session_status(
+            plans.SessionFile(
+                plans.parse_session_id(session_id),
+                self.plan_dir / plans.session_id_to_filename(session_id),
+            )
+        ).status
+
+    def run_control_actions(self) -> list[str]:
+        event_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir)
+            / events.EVENTS_FILE_NAME
+        )
+        if not event_path.exists():
+            return []
+        return [
+            record["payload"]["action"]
+            for record in read_jsonl(event_path)
+            if record["name"] == events.RUN_CONTROL_EVENT
+        ]
+
+    def _run_loop(
+        self,
+        *,
+        statuses: tuple[str, ...],
+        review_harness: str | None = None,
+        pending_review: bool = False,
+        abort_during_turn_index: int | None = None,
+        abort_before_turn_index: int | None = None,
+        abort_before_run: bool = False,
+        worker_complies: bool = False,
+        worker_self_pauses: bool = False,
+        grace_seconds: int = 30,
+        reason: str = "operator needs the machine",
+        enable_mailbox: bool = False,
+        expected_exit_code: int = 0,
+    ) -> tuple[dict[str, object], list[str]]:
+        """Run the loop in-process with a harness that observes its own abort.
+
+        ``abort_during_turn_index`` queues the abort from inside that turn's
+        harness call and then blocks until the poll thread has armed the turn's
+        signal, so the observation is deterministic without a real process. The
+        harness then plays the non-compliant outcome (the wait loop's
+        ``aborted`` result, exactly what session 3 produces on expiry) or one of
+        the two compliant ones: a completion inside the window
+        (``worker_complies``) or a self-pause inside it
+        (``worker_self_pauses``).
+        """
+        write_plan(self.plan_dir, statuses)
+        if enable_mailbox:
+            self._activate_mailbox()
+        if pending_review:
+            runner.ensure_generated_review_session(
+                self.plan_dir, review_harness=str(review_harness)
+            )
+        if abort_before_run:
+            self._queue_abort(
+                "before-run", grace_seconds=grace_seconds, reason=reason
+            )
+        harness_calls: list[str] = []
+
+        def fake_run_harness(name: str, **kwargs: object) -> harnesses.HarnessResult:
+            if kwargs.get("plan_dir") is None:
+                return harnesses.HarnessResult(
+                    name=name,
+                    argv=[name],
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                )
+            harness_calls.append(name)
+            if len(harness_calls) == abort_during_turn_index:
+                self._queue_abort(
+                    f"during-turn-{len(harness_calls)}",
+                    grace_seconds=grace_seconds,
+                    reason=reason,
+                )
+                abort = kwargs["abort"]
+                assert isinstance(abort, harnesses.AbortSignal)
+                deadline = time.monotonic() + 10.0
+                while not abort.armed and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(
+                    abort.armed,
+                    "the poll thread never observed the queued abort",
+                )
+                if worker_self_pauses:
+                    # The wind-down the abort guidance actually asks for: the
+                    # worker leaves its session pending and pauses the run.
+                    return harnesses.HarnessResult(
+                        name=name,
+                        argv=[name, str(kwargs["prompt"])],
+                        returncode=0,
+                        stdout=(
+                            "RUNNER_PAUSE: blocked - supervisor abort "
+                            "acknowledged\n"
+                        ),
+                        stderr="",
+                    )
+                if not worker_complies:
+                    # What the session-3 wait loop returns once the grace
+                    # window expires and the process group is killed.
+                    return harnesses.HarnessResult(
+                        name=name,
+                        argv=[name, str(kwargs["prompt"])],
+                        returncode=137,
+                        stdout="",
+                        stderr="",
+                        aborted=True,
+                    )
+            self._complete_next_pending()
+            return harnesses.HarnessResult(
+                name=name,
+                argv=[name, str(kwargs["prompt"])],
+                returncode=0,
+                stdout=f"{name} completed\n",
+                stderr="",
+            )
+
+        real_turn_paths = runner._turn_paths
+        turn_paths_calls = 0
+
+        def fake_turn_paths(*args: object, **kwargs: object):
+            nonlocal turn_paths_calls
+            turn_paths_calls += 1
+            if turn_paths_calls == abort_before_turn_index:
+                self._queue_abort(
+                    f"before-turn-{turn_paths_calls}",
+                    grace_seconds=grace_seconds,
+                    reason=reason,
+                )
+            return real_turn_paths(*args, **kwargs)
+
+        listener = FakeRunControlListener(current_harness="codex")
+
+        def fake_for_run(*_args: object, **kwargs: object):
+            listener.on_action = kwargs.get("on_action")
+            listener.on_status = kwargs.get("on_status")
+            return listener
+
+        args = argparse.Namespace(
+            plan_dir=str(self.plan_dir),
+            cwd=str(self.repo_root),
+            harness="codex",
+            review_harness=review_harness,
+            state_dir=str(self.state_dir),
+            json=False,
+            dry_run=False,
+            unsafe_bypass=True,
+            timeout=None,
+            max_sessions=None,
+            commit_mode=None,
+            harness_model=None,
+            effort=None,
+            note=None,
+            allow_not_loop_ready=True,
+        )
+        with (
+            patched_env(
+                XDG_CONFIG_HOME=str(self.config_home),
+                PYTHONPATH=str(REPO_ROOT)
+                + os.pathsep
+                + os.environ.get("PYTHONPATH", ""),
+            ),
+            mock.patch.object(runner, "LIVE_CONTROL_POLL_INTERVAL_SECONDS", 0.02),
+            mock.patch.object(
+                runner.harnesses, "run_harness", side_effect=fake_run_harness
+            ),
+            mock.patch.object(runner, "_turn_paths", side_effect=fake_turn_paths),
+            mock.patch.object(
+                runner.run_control.RunControlListener,
+                "for_run",
+                side_effect=fake_for_run,
+            ),
+        ):
+            lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+            try:
+                exit_code, payload = runner._run_locked(
+                    args=args,
+                    cwd=self.repo_root,
+                    timeout=None,
+                    max_sessions=None,
+                    commit_mode=None,
+                    lock_info=lock_info,
+                    run_id="test-run",
+                )
+            finally:
+                state.release_lock(self.plan_dir, self.state_dir)
+        self.assertEqual(expected_exit_code, exit_code, payload)
+        return payload, harness_calls
+
+    def test_killed_turn_stops_the_run_and_returns_the_session_to_pending(
+        self,
+    ) -> None:
+        payload, harness_calls = self._run_loop(
+            statuses=("pending", "pending"),
+            abort_during_turn_index=1,
+        )
+
+        # A supervisor asked for this, so it is a clean stop and not a fault.
+        self.assertEqual("stopped", payload["reason"])
+        self.assertFalse(payload["paused"])
+        self.assertIsNone(payload.get("pause_reason"))
+        self.assertEqual(["codex"], harness_calls)
+        self.assertEqual([], payload["completed_sessions"])
+        self.assertEqual("pending", self._session_status("1"))
+        self.assertEqual(1, payload["final_snapshot"]["next_pending"])
+        self.assertEqual(
+            [
+                events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED,
+            ],
+            self.run_control_actions(),
+        )
+        self.assertFalse(payload["control"]["abort_turn_requested"])
+
+    def test_killed_turn_records_why_the_session_holds_no_completion(
+        self,
+    ) -> None:
+        self._run_loop(
+            statuses=("pending",),
+            abort_during_turn_index=1,
+            reason="host reboot",
+        )
+
+        note = self._session_text("1")
+        self.assertIn("turn aborted by supervisor request", note)
+        self.assertIn("host reboot", note)
+        self.assertIn("holds no completion", note)
+
+    def test_killed_turn_leaves_the_abort_guidance_readable(self) -> None:
+        self._run_loop(
+            statuses=("pending",),
+            abort_during_turn_index=1,
+            enable_mailbox=True,
+            reason="host reboot",
+        )
+
+        pending = mailbox.read_mailbox(
+            self.plan_dir, state_dir=self.state_dir
+        ).pending_guidance
+        self.assertEqual(1, len(pending))
+        self.assertIn("host reboot", pending[0].text)
+        self.assertIn("Supervisor abort requested", pending[0].text)
+
+    def test_compliant_turn_is_recorded_as_satisfied_without_a_kill(
+        self,
+    ) -> None:
+        payload, harness_calls = self._run_loop(
+            statuses=("pending",),
+            abort_during_turn_index=1,
+            worker_complies=True,
+        )
+
+        # The turn ended on its own inside the window, so nothing was killed
+        # and the completion path stays in charge of the outcome.
+        self.assertEqual([1], payload["completed_sessions"])
+        self.assertEqual("complete", self._session_status("1"))
+        self.assertEqual(["codex"], harness_calls)
+        self.assertFalse(payload["paused"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual(
+            [
+                events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER,
+            ],
+            self.run_control_actions(),
+        )
+        self.assertNotIn(
+            "turn aborted by supervisor request", self._session_text("1")
+        )
+        self.assertFalse(payload["control"]["abort_turn_requested"])
+
+    def test_compliant_completion_lets_the_run_continue_to_the_next_session(
+        self,
+    ) -> None:
+        payload, harness_calls = self._run_loop(
+            statuses=("pending", "pending"),
+            abort_during_turn_index=1,
+            worker_complies=True,
+        )
+
+        # Nothing was killed and nothing was reverted, so the abort buys the
+        # supervisor no stop at all: the loop moves on to session 2.
+        self.assertEqual([1, 2], payload["completed_sessions"])
+        self.assertEqual(["codex", "codex"], harness_calls)
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual(
+            [
+                events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER,
+            ],
+            self.run_control_actions(),
+        )
+
+    def test_worker_that_self_pauses_inside_the_window_pauses_the_run(
+        self,
+    ) -> None:
+        payload, harness_calls = self._run_loop(
+            statuses=("pending", "pending"),
+            abort_during_turn_index=1,
+            worker_self_pauses=True,
+            expected_exit_code=1,
+        )
+
+        # The worker wound down as asked, so its own pause owns the outcome:
+        # the run is paused, not stopped, and carries the worker's reason.
+        self.assertTrue(payload["paused"])
+        self.assertFalse(payload["ok"])
+        self.assertEqual("blocked", payload["reason"])
+        self.assertEqual("blocked", payload["pause_reason"])
+        self.assertEqual([], payload["completed_sessions"])
+        self.assertEqual(["codex"], harness_calls)
+        self.assertEqual("pending", self._session_status("1"))
+        self.assertNotIn(
+            "turn aborted by supervisor request", self._session_text("1")
+        )
+        self.assertEqual(
+            [
+                events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER,
+            ],
+            self.run_control_actions(),
+        )
+        self.assertFalse(payload["control"]["abort_turn_requested"])
+
+    def test_abort_between_turns_degrades_to_stop_after_current(self) -> None:
+        payload, harness_calls = self._run_loop(
+            statuses=("pending", "pending"),
+            abort_before_turn_index=2,
+        )
+
+        # Nothing was in flight, so the abort could only mean "start no more".
+        self.assertEqual("stopped", payload["reason"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual([1], payload["completed_sessions"])
+        self.assertEqual(["codex"], harness_calls)
+        self.assertEqual("pending", self._session_status("2"))
+        self.assertEqual(
+            [
+                events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED,
+                events.RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED,
+                events.RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CONSUMED,
+            ],
+            self.run_control_actions(),
+        )
+
+    def test_abort_queued_before_the_run_still_runs_the_first_session(
+        self,
+    ) -> None:
+        payload, harness_calls = self._run_loop(
+            statuses=("pending", "pending"),
+            abort_before_run=True,
+        )
+
+        # The pre-run drain has no turn to kill, so the command keeps the
+        # stop-after-current meaning rather than aborting the first turn.
+        self.assertEqual("stopped", payload["reason"])
+        self.assertEqual([1], payload["completed_sessions"])
+        self.assertEqual(["codex"], harness_calls)
+        self.assertEqual("pending", self._session_status("2"))
+
+    def test_expired_grace_kills_the_real_harness_process_group(self) -> None:
+        write_plan(self.plan_dir, ("pending",))
+        harness_pids: list[int] = []
+        real_run_harness = harnesses.run_harness
+
+        def spy_run_harness(name: str, **kwargs: object) -> harnesses.HarnessResult:
+            if kwargs.get("plan_dir") is None:
+                return real_run_harness(name, **kwargs)  # type: ignore[arg-type]
+            inner_on_spawn = kwargs.get("on_spawn")
+
+            def on_spawn(pid: int) -> None:
+                harness_pids.append(pid)
+                # Queued from the spawn callback so the grace window starts
+                # against a process that is provably alive.
+                self._queue_abort("during-real-turn", grace_seconds=1)
+                if callable(inner_on_spawn):
+                    inner_on_spawn(pid)
+
+            kwargs["on_spawn"] = on_spawn
+            return real_run_harness(name, **kwargs)  # type: ignore[arg-type]
+
+        listener = FakeRunControlListener(current_harness="codex")
+
+        def fake_for_run(*_args: object, **kwargs: object):
+            listener.on_action = kwargs.get("on_action")
+            listener.on_status = kwargs.get("on_status")
+            return listener
+
+        args = argparse.Namespace(
+            plan_dir=str(self.plan_dir),
+            cwd=str(self.repo_root),
+            harness="codex",
+            review_harness=None,
+            state_dir=str(self.state_dir),
+            json=False,
+            dry_run=False,
+            unsafe_bypass=True,
+            timeout=None,
+            max_sessions=None,
+            commit_mode=None,
+            harness_model=None,
+            effort=None,
+            note=None,
+            allow_not_loop_ready=True,
+        )
+        with (
+            patched_env(
+                XDG_CONFIG_HOME=str(self.config_home),
+                PYTHONPATH=str(REPO_ROOT)
+                + os.pathsep
+                + os.environ.get("PYTHONPATH", ""),
+                FAKE_CODEX_MODE="timeout",
+                FAKE_CODEX_SLEEP="60",
+            ),
+            mock.patch.object(runner, "LIVE_CONTROL_POLL_INTERVAL_SECONDS", 0.02),
+            mock.patch.object(
+                runner.harnesses, "run_harness", side_effect=spy_run_harness
+            ),
+            mock.patch.object(
+                runner.run_control.RunControlListener,
+                "for_run",
+                side_effect=fake_for_run,
+            ),
+        ):
+            lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+            try:
+                exit_code, payload = runner._run_locked(
+                    args=args,
+                    cwd=self.repo_root,
+                    timeout=None,
+                    max_sessions=None,
+                    commit_mode=None,
+                    lock_info=lock_info,
+                    run_id="test-run",
+                )
+            finally:
+                state.release_lock(self.plan_dir, self.state_dir)
+
+        self.assertEqual(0, exit_code, payload)
+        self.assertEqual(1, len(harness_pids))
+        self.assertEqual("stopped", payload["reason"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual(137, payload["turns"][0]["returncode"])
+        self.assertEqual("pending", self._session_status("1"))
+        with self.assertRaises(ProcessLookupError):
+            # The whole group is gone once the child is reaped, so nothing the
+            # turn spawned outlives the abort.
+            os.killpg(harness_pids[0], 0)
+        self.assertEqual(
+            [
+                events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED,
+            ],
+            self.run_control_actions(),
+        )
+
+    def test_aborted_review_turn_stops_the_run_with_the_review_pending(
+        self,
+    ) -> None:
+        payload, harness_calls = self._run_loop(
+            statuses=("pending",),
+            review_harness="claude",
+            pending_review=True,
+            abort_during_turn_index=2,
+        )
+
+        self.assertEqual("stopped", payload["reason"])
+        self.assertFalse(payload["paused"])
+        self.assertEqual(["codex", "claude"], harness_calls)
+        self.assertFalse(payload["review_completed"])
+        self.assertEqual("pending", self._session_status("2"))
+        self.assertIn(
+            "turn aborted by supervisor request", self._session_text("2")
+        )
+        self.assertEqual(
+            [
+                events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED,
+            ],
+            self.run_control_actions(),
+        )
+
+
 class MailboxPollTests(unittest.TestCase):
     """Validate live mailbox observation is metadata-only and fail-open."""
 
@@ -2905,7 +3898,13 @@ class MailboxPollTests(unittest.TestCase):
             for record in read_jsonl(self.event_path)
             if record["name"] == events.RUN_CONTROL_EVENT
         ]
-        self.assertEqual(1, len(run_control_events))
+        self.assertEqual(
+            [
+                events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+                events.RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED,
+            ],
+            [record["payload"]["action"] for record in run_control_events],
+        )
         self.assertEqual([], self.mailbox_events())
 
 
@@ -3078,6 +4077,760 @@ class LiveTurnSchedulerTests(unittest.TestCase):
             )
             self.assertEqual("complete", persisted["callback_state"])
             self.assertIsNone(persisted["active_turn"])
+
+
+class LiveTurnWakeupTests(unittest.TestCase):
+    """The poll thread drains on a wakeup and still keeps the 5s backstop."""
+
+    class Clock(LiveTurnSchedulerTests.Clock):
+        """Clock whose ``wait`` returns early while the wakeup is set."""
+
+        def __init__(self, wakeup: threading.Event, wake_after: float) -> None:
+            super().__init__()
+            self.wakeup = wakeup
+            self.wake_after = wake_after
+
+        def wait(self, delay: float) -> bool:
+            self.waits.append(delay)
+            if self.wakeup.is_set():
+                self.now += min(self.wake_after, delay)
+                return True
+            self.now += delay
+            return False
+
+    def test_wakeup_polls_immediately_and_clears_the_event(self) -> None:
+        wakeup = threading.Event()
+        wakeup.set()
+        clock = self.Clock(wakeup, wake_after=2.0)
+        poll_times: list[float] = []
+        set_at_poll: list[bool] = []
+        live_turn: runner._LiveTurn
+
+        def poll() -> None:
+            poll_times.append(clock.now)
+            set_at_poll.append(wakeup.is_set())
+            if len(poll_times) == 2:
+                live_turn._stop.set()
+
+        live_turn = runner._LiveTurn(
+            payload={},
+            event_path=Path("/tmp/events.jsonl"),
+            progress=mock.Mock(),
+            active_turn=LiveTurnSchedulerTests.active_turn(),
+            heartbeat_interval=30.0,
+            poll_callback=poll,
+            poll_interval=runner.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+            monotonic=clock.monotonic,
+            wait=clock.wait,
+            wakeup=wakeup,
+        )
+        live_turn._heartbeat_loop()
+
+        # First poll lands 2s in, on the wake, not at the 5s deadline; the
+        # backstop then reschedules from the wake.
+        self.assertEqual([2.0, 7.0], poll_times)
+        self.assertEqual([False, False], set_at_poll)
+        self.assertEqual([5.0, 5.0], clock.waits)
+
+    def test_unsignalled_turn_still_polls_on_the_backstop_deadline(self) -> None:
+        wakeup = threading.Event()
+        clock = LiveTurnSchedulerTests.Clock()
+        poll_times: list[float] = []
+        live_turn: runner._LiveTurn
+
+        def poll() -> None:
+            poll_times.append(clock.now)
+            if len(poll_times) == 2:
+                live_turn._stop.set()
+
+        live_turn = runner._LiveTurn(
+            payload={},
+            event_path=Path("/tmp/events.jsonl"),
+            progress=mock.Mock(),
+            active_turn=LiveTurnSchedulerTests.active_turn(),
+            heartbeat_interval=30.0,
+            poll_callback=poll,
+            poll_interval=runner.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+            monotonic=clock.monotonic,
+            wait=clock.wait,
+            wakeup=wakeup,
+        )
+        live_turn._heartbeat_loop()
+
+        self.assertEqual([5.0, 10.0], poll_times)
+
+    def test_real_wakeup_drains_well_inside_the_backstop_interval(self) -> None:
+        # End to end over the production transport: a producer's byte, the
+        # runner's endpoint reader, and the poll thread it has to wake.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            wakeup = threading.Event()
+            polled = threading.Event()
+            live_turn = runner._LiveTurn(
+                payload={"state_path": str(tmp_dir / "state.json")},
+                event_path=tmp_dir / "events.jsonl",
+                progress=mock.Mock(),
+                active_turn=LiveTurnSchedulerTests.active_turn(),
+                heartbeat_interval=60.0,
+                poll_callback=polled.set,
+                poll_interval=runner.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+                wakeup=wakeup,
+            )
+            with control_signal.open_wakeup_endpoint(tmp_dir, wakeup) as path:
+                if path is None:
+                    self.skipTest("this filesystem cannot host a wakeup FIFO")
+                live_turn.start()
+                self.addCleanup(live_turn.stop)
+                started = time.monotonic()
+                self.assertTrue(control_signal._deliver_wakeup(path).delivered)
+                self.assertTrue(polled.wait(timeout=2.0))
+            self.assertLess(
+                time.monotonic() - started,
+                runner.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+            )
+
+    def test_stop_wakes_the_poll_thread_without_a_wakeup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            wakeup = threading.Event()
+            live_turn = runner._LiveTurn(
+                payload={"state_path": str(tmp_dir / "state.json")},
+                event_path=tmp_dir / "events.jsonl",
+                progress=mock.Mock(),
+                active_turn=LiveTurnSchedulerTests.active_turn(),
+                heartbeat_interval=60.0,
+                poll_callback=lambda: None,
+                poll_interval=runner.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+                wakeup=wakeup,
+            )
+            live_turn.start()
+            started = time.monotonic()
+            live_turn.stop()
+
+            self.assertLess(time.monotonic() - started, 2.0)
+            self.assertFalse(live_turn._thread.is_alive())
+
+
+class ControlSignalTests(unittest.TestCase):
+    """`control_signal`: same-host wakeup, reported but never enforced."""
+
+    DEAD_PID = 2**30
+    # Sentinel for "record whatever birth time this pid really has", which is
+    # what a lock published by the runner itself carries.
+    REAL_BIRTH = object()
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.plan_dir = self.tmp / "plan"
+        self.state_dir = self.tmp / "state"
+        write_plan(self.plan_dir, ("pending",))
+        if process_tree.process_birth(os.getpid()) is None:
+            self.skipTest("this platform's ps reports no process start time")
+
+    def write_lock(
+        self,
+        *,
+        pid: int,
+        hostname: str | None,
+        process_start: object = REAL_BIRTH,
+        wakeup_endpoint: Path | str | None = None,
+    ) -> Path:
+        plan_state = state.plan_state_dir(self.plan_dir, self.state_dir)
+        plan_state.mkdir(parents=True, exist_ok=True)
+        lock_path = plan_state / state.LOCK_FILE_NAME
+        payload: dict[str, object] = {
+            "version": 3,
+            "owner": "agent-session-loop",
+            "pid": pid,
+            "plan_dir": str(plans.canonicalize_path(self.plan_dir)),
+            "created_at": "2026-08-13T00:00:00+00:00",
+        }
+        if hostname is not None:
+            payload["hostname"] = hostname
+        if process_start is self.REAL_BIRTH:
+            process_start = process_tree.process_birth(pid)
+        if process_start is not None:
+            payload["process_start"] = process_start
+        if wakeup_endpoint is not None:
+            payload["wakeup_endpoint"] = str(wakeup_endpoint)
+        lock_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        return lock_path
+
+    def notify(self) -> control_signal.NotifyResult:
+        return control_signal.notify_runner(
+            self.plan_dir, state_dir=self.state_dir
+        )
+
+    def serve_endpoint(self) -> tuple[Path, threading.Event]:
+        """Hold this plan's endpoint open for the rest of the test."""
+        return self.enterContext(
+            live_wakeup_endpoint(self.plan_dir, self.state_dir)
+        )
+
+    def abandoned_endpoint(self) -> Path:
+        """A FIFO whose creator is gone: the node survives, the reader does not.
+
+        This is what a runner killed hard leaves on disk, and the case every
+        pid-based scheme had to guess about.
+        """
+        path = self.tmp / f"abandoned-{uuid.uuid4().hex}.fifo"
+        os.mkfifo(path, 0o600)
+        return path
+
+    def test_no_lock_reports_no_runner(self) -> None:
+        result = self.notify()
+
+        self.assertEqual(
+            control_signal.NotifyResult(False, "no-runner"), result
+        )
+
+    def test_dead_pid_reports_stale_lock(self) -> None:
+        lock_path = self.write_lock(
+            pid=self.DEAD_PID,
+            hostname=socket.gethostname(),
+            wakeup_endpoint=self.abandoned_endpoint(),
+        )
+        before = lock_path.read_bytes()
+
+        result = self.notify()
+
+        self.assertEqual(
+            control_signal.NotifyResult(False, "stale-lock"), result
+        )
+        # A producer reads the lock through the non-reclaiming reader, so even
+        # a provably dead owner leaves the file untouched.
+        self.assertEqual(before, lock_path.read_bytes())
+
+    def test_other_host_reports_remote_host(self) -> None:
+        self.write_lock(
+            pid=os.getpid(),
+            hostname="some-other-host",
+            wakeup_endpoint=self.abandoned_endpoint(),
+        )
+
+        result = self.notify()
+
+        self.assertEqual(
+            control_signal.NotifyResult(False, "remote-host"), result
+        )
+
+    def test_lock_without_an_endpoint_reports_no_endpoint(self) -> None:
+        # Two runners publish this: one from before the endpoint existed, one
+        # whose filesystem could not host a FIFO. Both fall back to the poll.
+        self.write_lock(pid=os.getpid(), hostname=socket.gethostname())
+
+        self.assertEqual(
+            control_signal.NotifyResult(False, "no-endpoint"), self.notify()
+        )
+
+    def test_live_endpoint_receives_every_wakeup(self) -> None:
+        endpoint, woken = self.serve_endpoint()
+        self.write_lock(
+            pid=os.getpid(),
+            hostname=socket.gethostname(),
+            wakeup_endpoint=endpoint,
+        )
+
+        self.assertEqual(LIVE_WAKEUP, self.notify())
+        self.assertTrue(woken.wait(timeout=5.0))
+
+        # The reader keeps serving: a wakeup is not a one-shot arming.
+        woken.clear()
+        self.assertEqual(LIVE_WAKEUP, self.notify())
+        self.assertTrue(woken.wait(timeout=5.0))
+
+    def test_abandoned_endpoint_reports_endpoint_closed(self) -> None:
+        # The FIFO is real and the mode is right; nobody holds the read end, so
+        # the open fails with ENXIO instead of writing into nowhere.
+        self.write_lock(
+            pid=os.getpid(),
+            hostname=socket.gethostname(),
+            wakeup_endpoint=self.abandoned_endpoint(),
+        )
+
+        self.assertEqual(
+            control_signal.NotifyResult(False, "endpoint-closed"),
+            self.notify(),
+        )
+
+    def test_missing_endpoint_reports_endpoint_closed(self) -> None:
+        self.write_lock(
+            pid=os.getpid(),
+            hostname=socket.gethostname(),
+            wakeup_endpoint=self.tmp / "gone.fifo",
+        )
+
+        self.assertEqual(
+            control_signal.NotifyResult(False, "endpoint-closed"),
+            self.notify(),
+        )
+
+    def test_endpoint_that_is_not_a_fifo_reports_endpoint_failed(self) -> None:
+        # A path the runner never created, or one something else replaced. It
+        # is not the transport, so it is a failure rather than a closed reader.
+        regular = self.tmp / "not-a-fifo"
+        regular.write_text("", encoding="utf-8")
+        self.write_lock(
+            pid=os.getpid(),
+            hostname=socket.gethostname(),
+            wakeup_endpoint=regular,
+        )
+
+        self.assertEqual(
+            control_signal.NotifyResult(False, "endpoint-failed"),
+            self.notify(),
+        )
+
+    def test_a_full_pipe_still_counts_as_delivered(self) -> None:
+        """Unread bytes in the pipe are a wakeup already waiting to be seen."""
+        endpoint = self.tmp / "full.fifo"
+        os.mkfifo(endpoint, 0o600)
+        read_fd = os.open(endpoint, os.O_RDONLY | os.O_NONBLOCK)
+        self.addCleanup(os.close, read_fd)
+        write_fd = os.open(endpoint, os.O_WRONLY | os.O_NONBLOCK)
+        self.addCleanup(os.close, write_fd)
+        while True:
+            try:
+                os.write(write_fd, b"\0" * 4096)
+            except OSError as error:
+                self.assertIn(error.errno, (errno.EAGAIN, errno.EWOULDBLOCK))
+                break
+
+        self.assertEqual(LIVE_WAKEUP, control_signal._deliver_wakeup(endpoint))
+
+    def test_endpoint_stops_answering_once_the_runner_leaves(self) -> None:
+        event = threading.Event()
+        with control_signal.open_wakeup_endpoint(
+            self.state_dir, event
+        ) as endpoint:
+            if endpoint is None:
+                self.skipTest("this filesystem cannot host a wakeup FIFO")
+            self.assertEqual(
+                LIVE_WAKEUP, control_signal._deliver_wakeup(endpoint)
+            )
+            self.assertTrue(event.wait(timeout=5.0))
+
+        # The node is unlinked on the way out, so a producer that resolved the
+        # path earlier finds nothing rather than a pipe nobody drains.
+        self.assertFalse(endpoint.exists())
+        self.assertEqual(
+            control_signal.NotifyResult(False, "endpoint-closed"),
+            control_signal._deliver_wakeup(endpoint),
+        )
+
+    def test_a_filesystem_that_cannot_host_a_fifo_yields_no_endpoint(
+        self,
+    ) -> None:
+        # Losing the endpoint costs latency, never correctness, so the run has
+        # to start anyway — with a lock that names nothing to write to.
+        with mock.patch.object(
+            control_signal.os, "mkfifo", side_effect=OSError("nope")
+        ):
+            with control_signal.open_wakeup_endpoint(
+                self.state_dir, threading.Event()
+            ) as endpoint:
+                self.assertIsNone(endpoint)
+                state.acquire_lock(
+                    self.plan_dir, self.state_dir, wakeup_endpoint=endpoint
+                )
+                self.addCleanup(
+                    state.release_lock, self.plan_dir, self.state_dir
+                )
+
+                self.assertEqual(
+                    control_signal.NotifyResult(False, "no-endpoint"),
+                    self.notify(),
+                )
+
+    def test_the_production_publisher_records_the_endpoint_it_serves(
+        self,
+    ) -> None:
+        # No fixture: the lock `acquire_lock` writes is the one a producer has
+        # to be able to wake, and the endpoint in it is the one being read.
+        endpoint, woken = self.serve_endpoint()
+        state.acquire_lock(
+            self.plan_dir, self.state_dir, wakeup_endpoint=endpoint
+        )
+        self.addCleanup(state.release_lock, self.plan_dir, self.state_dir)
+
+        lock = state.inspect_lock_info(self.plan_dir, self.state_dir)
+
+        self.assertIsNotNone(lock)
+        assert lock is not None
+        self.assertEqual(str(endpoint), lock.wakeup_endpoint)
+        self.assertEqual(LIVE_WAKEUP, self.notify())
+        self.assertTrue(woken.wait(timeout=5.0))
+
+    ENDPOINT_CHILD_SCRIPT = """
+import os
+import pathlib
+import signal
+import sys
+import threading
+
+sys.path.insert(0, sys.argv[1])
+from agent_session_loop import control_signal
+
+# A signal is the only other channel that could reach this process, so exiting
+# on one turns "the producer fell back to acting on a pid" into a visible
+# failure instead of a silent success.
+signal.signal(signal.SIGUSR1, lambda *_: os._exit(70))
+
+ready = pathlib.Path(sys.argv[3])
+event = threading.Event()
+with control_signal.open_wakeup_endpoint(sys.argv[2], event) as path:
+    if path is None:
+        sys.exit(2)
+    ready.write_text(str(path), encoding="utf-8")
+    sys.exit(0 if event.wait(30) else 1)
+"""
+
+    def start_endpoint_child(self) -> tuple[subprocess.Popen[bytes], Path]:
+        """Spawn a process serving its own endpoint, exiting 0 on a wakeup.
+
+        A second process is the only way to observe a wakeup that was *not*
+        delivered: in-process every refusal looks the same from the outside,
+        while a child that outlives the attempt is proof nothing reached it.
+        """
+        child_state = self.tmp / f"child-state-{uuid.uuid4().hex}"
+        child_state.mkdir(parents=True)
+        ready = self.tmp / f"ready-{uuid.uuid4().hex}"
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                self.ENDPOINT_CHILD_SCRIPT,
+                str(REPO_ROOT),
+                str(child_state),
+                str(ready),
+            ],
+        )
+        # LIFO: the kill runs first, then the reap that keeps a child which was
+        # deliberately never woken from outliving the test as a zombie.
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        deadline = time.monotonic() + 30.0
+        while not ready.exists() and time.monotonic() < deadline:
+            self.assertIsNone(child.poll(), "child exited before serving")
+            time.sleep(0.05)
+        self.assertTrue(ready.exists())
+        return child, Path(ready.read_text(encoding="utf-8"))
+
+    def test_wakeup_round_trip_reaches_another_process(self) -> None:
+        child, endpoint = self.start_endpoint_child()
+        self.write_lock(
+            pid=child.pid,
+            hostname=socket.gethostname(),
+            wakeup_endpoint=endpoint,
+        )
+        started = time.monotonic()
+
+        self.assertEqual(LIVE_WAKEUP, self.notify())
+
+        self.assertEqual(0, child.wait(timeout=10))
+        self.assertLess(
+            time.monotonic() - started,
+            runner.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+        )
+
+    def test_a_process_wearing_the_recorded_identity_is_never_woken(
+        self,
+    ) -> None:
+        """Pid reuse, with an identity token that matches rather than differs.
+
+        The lock names a pid, a host, and a birth time that all describe this
+        live child exactly — the collision no pid-plus-birth-token check can
+        detect, because there is nothing left to compare. What the lock also
+        names is the dead runner's endpoint, and that is what delivery is
+        addressed to: no reader holds it, so the write is refused and the
+        process wearing the pid is untouched.
+        """
+        child, own_endpoint = self.start_endpoint_child()
+        self.write_lock(
+            pid=child.pid,
+            hostname=socket.gethostname(),
+            wakeup_endpoint=self.abandoned_endpoint(),
+        )
+
+        # Every field a producer used to authenticate on agrees with the live
+        # process, so this is the case that used to pass the check and signal.
+        lock = state.inspect_lock_info(self.plan_dir, self.state_dir)
+        self.assertIsNotNone(lock)
+        assert lock is not None
+        self.assertFalse(lock.stale)
+        self.assertEqual(child.pid, lock.pid)
+        self.assertEqual(socket.gethostname(), lock.owner_hostname)
+        self.assertEqual(
+            process_tree.process_birth(child.pid), lock.owner_process_start
+        )
+
+        self.assertEqual(
+            control_signal.NotifyResult(False, "endpoint-closed"),
+            self.notify(),
+        )
+
+        # The child exits on a wakeup and on SIGUSR1, so still running is proof
+        # that neither channel reached it.
+        time.sleep(0.25)
+        self.assertIsNone(child.poll(), "a recycled pid was woken anyway")
+
+        # Same process, same recorded identity: pointing the lock at the
+        # endpoint it really reads is what makes it reachable, and nothing else.
+        self.write_lock(
+            pid=child.pid,
+            hostname=socket.gethostname(),
+            wakeup_endpoint=own_endpoint,
+        )
+
+        self.assertEqual(LIVE_WAKEUP, self.notify())
+        self.assertEqual(0, child.wait(timeout=10))
+
+    def test_serving_an_endpoint_installs_no_signal_handler(self) -> None:
+        """The obligation the signal design created, removed at the source.
+
+        A runner that never changes a disposition has none to restore, so no
+        ordering between publishing the lock, running the loop, and releasing
+        can leave the process holding a handler it did not start with.
+        """
+        watched = (
+            signal.SIGUSR1,
+            signal.SIGUSR2,
+            signal.SIGINT,
+            signal.SIGTERM,
+        )
+        before = {number: signal.getsignal(number) for number in watched}
+        event = threading.Event()
+
+        with control_signal.open_wakeup_endpoint(
+            self.state_dir, event
+        ) as endpoint:
+            if endpoint is None:
+                self.skipTest("this filesystem cannot host a wakeup FIFO")
+            self.assertTrue(control_signal._deliver_wakeup(endpoint).delivered)
+            self.assertTrue(event.wait(timeout=5.0))
+            self.assertEqual(
+                before, {number: signal.getsignal(number) for number in watched}
+            )
+
+        self.assertEqual(
+            before, {number: signal.getsignal(number) for number in watched}
+        )
+
+    # Runs the production `asl run` entry point with two hooks, each widening a
+    # window a producer has to land a wakeup in: the lock publication is
+    # stretched, so a command can arrive between "a producer can find this
+    # endpoint" and "the run loop is reading it", and the terminal payload
+    # emission can be held open, which is the far side — the lock is released
+    # and the endpoint unlinked. Every signal disposition is captured before
+    # `cli.main` and compared after, so a run that installed a handler and left
+    # it behind reports itself as exit 97.
+    RUN_CHILD_SCRIPT = """
+import pathlib
+import signal
+import sys
+import time
+
+sys.path.insert(0, sys.argv[1])
+from agent_session_loop import cli, runner, state
+
+WATCHED = (signal.SIGUSR1, signal.SIGUSR2, signal.SIGINT, signal.SIGTERM)
+before = {number: signal.getsignal(number) for number in WATCHED}
+
+locked = pathlib.Path(sys.argv[2])
+window = float(sys.argv[3])
+emitting = pathlib.Path(sys.argv[4])
+emit_delay = float(sys.argv[5])
+real_acquire = state.acquire_lock
+real_emit = runner._emit_run_payload
+
+
+def widened_acquire(*args, **kwargs):
+    info = real_acquire(*args, **kwargs)
+    locked.write_text("locked", encoding="utf-8")
+    time.sleep(window)
+    return info
+
+
+def delayed_emit(*args, **kwargs):
+    emitting.write_text("emitting", encoding="utf-8")
+    time.sleep(emit_delay)
+    return real_emit(*args, **kwargs)
+
+
+state.acquire_lock = widened_acquire
+if emit_delay:
+    runner._emit_run_payload = delayed_emit
+code = cli.main(sys.argv[6:])
+if {number: signal.getsignal(number) for number in WATCHED} != before:
+    sys.exit(97)
+sys.exit(code)
+"""
+    # Wide enough that the parent's marker poll, queue append, and wakeup all
+    # land inside it even on a loaded machine.
+    LOCK_WINDOW_SECONDS = 5.0
+
+    def start_run_child(
+        self, *, emit_delay: float = 0.0
+    ) -> tuple[subprocess.Popen[str], Path, Path]:
+        """Spawn a real `asl run` whose lock publication is held open."""
+        # Two pending sessions, so honoring the queued stop is visible as a
+        # session the run declined to start rather than as the plan running out.
+        write_plan(self.plan_dir, ("pending", "pending"))
+        repo_root = self.tmp / "repo"
+        config_home = self.tmp / "config"
+        init_git_repo(repo_root)
+        config_path = (
+            config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        )
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps(
+                {
+                    "codex": {
+                        "executable": str(install_fake_harness(self.tmp, "codex"))
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        env = os.environ.copy()
+        env.update(
+            {
+                "XDG_CONFIG_HOME": str(config_home),
+                "FAKE_CODEX_MODE": "success",
+                "PYTHONPATH": str(REPO_ROOT)
+                + os.pathsep
+                + env.get("PYTHONPATH", ""),
+            }
+        )
+        locked = self.tmp / f"locked-{uuid.uuid4().hex}"
+        emitting = self.tmp / f"emitting-{uuid.uuid4().hex}"
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                self.RUN_CHILD_SCRIPT,
+                str(REPO_ROOT),
+                str(locked),
+                str(self.LOCK_WINDOW_SECONDS),
+                str(emitting),
+                str(emit_delay),
+                "run",
+                str(self.plan_dir),
+                "--cwd",
+                str(repo_root),
+                "--harness",
+                "codex",
+                "--state-dir",
+                str(self.state_dir),
+                "--json",
+                "--allow-not-loop-ready",
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(child.kill)
+        self.awaitMarker(child, locked, "the run never published its lock")
+        return child, locked, emitting
+
+    def awaitMarker(
+        self, child: subprocess.Popen[str], marker: Path, message: str
+    ) -> None:
+        deadline = time.monotonic() + 60.0
+        while not marker.exists() and time.monotonic() < deadline:
+            self.assertIsNone(child.poll(), message)
+            time.sleep(0.01)
+        self.assertTrue(marker.exists(), message)
+
+    def test_control_at_lock_publication_never_kills_the_run(self) -> None:
+        child, _locked, _emitting = self.start_run_child()
+
+        command = control_queue.append_command(
+            self.plan_dir,
+            control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+            state_dir=self.state_dir,
+        )
+        self.assertEqual(LIVE_WAKEUP, self.notify())
+
+        stdout, stderr = child.communicate(timeout=180)
+        # A negative return code is death by signal, which is what this
+        # ordering exists to prevent; 97 is the child reporting that the run
+        # left a signal disposition it did not start with.
+        self.assertEqual(0, child.returncode, stderr)
+        payload = json.loads(stdout)
+
+        # The wakeup was harmless *and* the command it announced was applied.
+        self.assertEqual("stopped", payload["reason"])
+        self.assertEqual([1], payload["completed_sessions"])
+        receipts = [
+            record["payload"]
+            for record in read_jsonl(
+                state.plan_state_dir(self.plan_dir, self.state_dir)
+                / events.EVENTS_FILE_NAME
+            )
+            if record["name"] == events.RUN_CONTROL_EVENT
+            and record["payload"]["action"]
+            == events.RUN_CONTROL_ACTION_COMMAND_OBSERVED
+        ]
+        self.assertEqual([command.id], [r["command_id"] for r in receipts])
+
+    # Long enough that the parent's lock read, marker poll and send all land
+    # before the run finishes reporting, even on a loaded machine.
+    EMIT_DELAY_SECONDS = 10.0
+
+    def test_a_wakeup_resolved_before_release_lands_on_nothing(self) -> None:
+        """A wakeup aimed while the lock existed and sent after it is gone.
+
+        Resolving the endpoint and writing to it are two steps, so a producer
+        can read the path while the run holds the lock and write once it no
+        longer does. The endpoint outlives the lock by design — it is unlinked
+        after the release — and the write is then refused rather than made
+        harmless, which is what removes the disposition question entirely: the
+        run reaches its terminal payload without anything having to absorb a
+        late delivery.
+        """
+        child, _locked, emitting = self.start_run_child(
+            emit_delay=self.EMIT_DELAY_SECONDS
+        )
+        lock_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir)
+            / state.LOCK_FILE_NAME
+        )
+
+        lock = state.inspect_lock_info(self.plan_dir, self.state_dir)
+        self.assertIsNotNone(lock)
+        assert lock is not None
+        self.assertEqual(child.pid, lock.pid)
+        # The whole of the producer's aim, taken while the lock is published.
+        endpoint = lock.wakeup_endpoint
+        self.assertIsNotNone(endpoint)
+        assert endpoint is not None
+
+        self.awaitMarker(
+            child, emitting, "the run never reached its terminal payload"
+        )
+        self.assertFalse(
+            lock_path.exists(), "the run was woken before releasing its lock"
+        )
+        self.assertFalse(
+            Path(endpoint).exists(), "the endpoint outlived its reader"
+        )
+
+        self.assertEqual(
+            control_signal.NotifyResult(False, "endpoint-closed"),
+            control_signal._deliver_wakeup(Path(endpoint)),
+        )
+
+        stdout, stderr = child.communicate(timeout=180)
+        self.assertEqual(0, child.returncode, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual([1, 2], payload["completed_sessions"])
 
 
 class _AfterEvaluateSentinel(runner._HangSentinel):
@@ -3937,7 +5690,10 @@ class ControlCliTests(unittest.TestCase):
     ) -> None:
         """Simulate a live runner: an active lock plus a mid-flight turn."""
         target = plan_dir if plan_dir is not None else self.plan_dir
-        _write_lock_file(target, self.state_dir, pid=os.getpid())
+        endpoint, _ = self.enterContext(
+            live_wakeup_endpoint(target, self.state_dir)
+        )
+        _write_live_lock_file(target, self.state_dir, wakeup_endpoint=endpoint)
         _write_state_payload(
             target,
             self.state_dir,
@@ -4000,6 +5756,31 @@ class ControlCliTests(unittest.TestCase):
         result = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
         self.assertEqual((), result.rejected)
         self.assertEqual((payload["command_id"],), result.consumed_ids)
+
+    def test_stop_after_current_reports_no_runner_to_signal(self) -> None:
+        write_plan(self.plan_dir, ("pending", "pending"))
+
+        _, payload = self.payload_from(
+            control_cli.control_stop_after_current_from_args,
+            self.args(),
+        )
+
+        self.assertEqual(
+            {"delivered": False, "reason": "no-runner"}, payload["signal"]
+        )
+
+    def test_stop_after_current_reports_the_wakeup_it_could_send(self) -> None:
+        write_plan(self.plan_dir, ("pending", "pending"))
+        # The lock names an endpoint this process is really reading, so the
+        # byte is genuinely delivered — into a pipe nothing acts on.
+        self.mark_run_active()
+
+        _, payload = self.payload_from(
+            control_cli.control_stop_after_current_from_args,
+            self.args(),
+        )
+
+        self.assertEqual(LIVE_WAKEUP.to_payload(), payload["signal"])
 
     def test_stop_after_current_active_run_with_following_session(self) -> None:
         write_plan(self.plan_dir, ("pending", "pending"))
@@ -4095,6 +5876,147 @@ class ControlCliTests(unittest.TestCase):
         self.assertEqual(1, len(output))
         self.assertIn("Queued stop-after-current for", output[0])
         self.assertIn("will stop after current session", output[0])
+
+    def mark_run_active_between_turns(self, plan_dir: Path | None = None) -> None:
+        """Simulate a live runner holding the lock with no turn in flight."""
+        target = plan_dir if plan_dir is not None else self.plan_dir
+        _write_live_lock_file(target, self.state_dir)
+        _write_state_payload(
+            target,
+            self.state_dir,
+            {
+                "ok": True,
+                "paused": False,
+                "run_id": "20260724T100000Z-1",
+                "harness": "codex",
+                "run_config": {"review_harness": None},
+                "reason": "",
+                "run_started_at": "2026-07-24T10:00:00+00:00",
+                "run_finished_at": None,
+                "duration_seconds": None,
+                "active_turn": None,
+                "active_verification": None,
+            },
+        )
+
+    def test_abort_enqueues_valid_drainable_line(self) -> None:
+        write_plan(self.plan_dir, ("pending", "pending"))
+        self.mark_run_active()
+
+        exit_code, payload = self.payload_from(
+            control_cli.control_abort_from_args,
+            self.args(grace=45, reason="supervisor stop"),
+        )
+
+        self.assertEqual(0, exit_code)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("control-abort", payload["command"])
+        self.assertTrue(payload["enqueued"])
+        self.assertTrue(payload["run_active"])
+        self.assertTrue(payload["turn_active"])
+        self.assertEqual(45, payload["grace_seconds"])
+        self.assertEqual("supervisor stop", payload["reason"])
+        self.assertEqual("a turn is active; abort will end it", payload["note"])
+
+        lines = read_jsonl(self.queue_path())
+        self.assertEqual(1, len(lines))
+        self.assertEqual(payload["command_id"], lines[0]["id"])
+        self.assertEqual(
+            control_queue.COMMAND_REQUEST_ABORT_TURN, lines[0]["command"]
+        )
+
+        result = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
+        self.assertEqual((), result.rejected)
+        self.assertEqual((payload["command_id"],), result.consumed_ids)
+        self.assertEqual(45, result.accepted[0].grace_seconds)
+
+    def test_abort_defaults_the_grace_window(self) -> None:
+        write_plan(self.plan_dir, ("pending", "pending"))
+        self.mark_run_active()
+
+        _, payload = self.payload_from(
+            control_cli.control_abort_from_args,
+            self.args(),
+        )
+
+        self.assertEqual(
+            control_queue.DEFAULT_ABORT_GRACE_SECONDS,
+            payload["grace_seconds"],
+        )
+        self.assertIsNone(payload["reason"])
+
+    def test_abort_without_active_turn_reports_degradation(self) -> None:
+        write_plan(self.plan_dir, ("pending", "pending"))
+        self.mark_run_active_between_turns()
+
+        _, payload = self.payload_from(
+            control_cli.control_abort_from_args,
+            self.args(grace=30),
+        )
+
+        self.assertTrue(payload["run_active"])
+        self.assertFalse(payload["turn_active"])
+        self.assertEqual(
+            "no turn active; abort degrades to stop-after-current",
+            payload["note"],
+        )
+
+    def test_abort_without_active_run_still_enqueues(self) -> None:
+        write_plan(self.plan_dir, ("pending", "pending"))
+
+        exit_code, payload = self.payload_from(
+            control_cli.control_abort_from_args,
+            self.args(),
+        )
+
+        self.assertEqual(0, exit_code)
+        self.assertFalse(payload["run_active"])
+        self.assertFalse(payload["turn_active"])
+        self.assertEqual(
+            "no active run; command applies when a runner next drains the queue",
+            payload["note"],
+        )
+        self.assertTrue(self.queue_path().exists())
+
+    def test_abort_rejects_malformed_grace_and_reason(self) -> None:
+        write_plan(self.plan_dir, ("pending", "pending"))
+        cases = (
+            ({"grace": 0}, control_queue.REJECT_INVALID_GRACE),
+            ({"grace": -5}, control_queue.REJECT_INVALID_GRACE),
+            (
+                {"grace": control_queue.MAX_ABORT_GRACE_SECONDS + 1},
+                control_queue.REJECT_INVALID_GRACE,
+            ),
+            ({"reason": ""}, control_queue.REJECT_INVALID_REASON),
+        )
+        for overrides, expected in cases:
+            with self.subTest(overrides=overrides):
+                exit_code, payload = self.payload_from(
+                    control_cli.control_abort_from_args,
+                    self.args(**overrides),
+                )
+                self.assertEqual(1, exit_code)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(expected, payload["reason"])
+
+        # A rejected command never reaches the queue.
+        self.assertFalse(self.queue_path().exists())
+
+    def test_abort_text_output_is_one_line(self) -> None:
+        write_plan(self.plan_dir, ("pending", "pending"))
+        self.mark_run_active()
+
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            exit_code = control_cli.control_abort_from_args(
+                self.args(json=False, grace=15)
+            )
+
+        self.assertEqual(0, exit_code)
+        output = buffer.getvalue().splitlines()
+        self.assertEqual(1, len(output))
+        self.assertIn("Queued abort for", output[0])
+        self.assertIn("a turn is active; abort will end it", output[0])
 
     def test_select_harness_enqueues_and_reports_future_harness(self) -> None:
         write_plan(self.plan_dir, ("pending", "pending"))
@@ -4449,6 +6371,30 @@ class ControlCliTests(unittest.TestCase):
             control_cli.control_stop_after_current_from_args,
         )
 
+        abort_args = parser.parse_args(
+            [
+                "control",
+                "abort",
+                "/tmp/plan",
+                "--grace",
+                "30",
+                "--reason",
+                "supervisor stop",
+            ]
+        )
+        self.assertEqual("abort", abort_args.control_command)
+        self.assertEqual("/tmp/plan", abort_args.plan_dir)
+        self.assertEqual(30, abort_args.grace)
+        self.assertEqual("supervisor stop", abort_args.reason)
+        self.assertEqual(
+            "control_cli:control_abort_from_args",
+            abort_args.handler_ref,
+        )
+        self.assertIs(
+            cli.resolve_handler(abort_args),
+            control_cli.control_abort_from_args,
+        )
+
         harness_args = parser.parse_args(
             ["control", "select-harness", "/tmp/plan", "--harness", "claude"]
         )
@@ -4532,6 +6478,402 @@ class ControlCliTests(unittest.TestCase):
                     ["control", "set-model", "/tmp/plan", *operations]
                 )
             self.assertEqual(2, raised.exception.code)
+
+
+class ControlCliWaitTests(unittest.TestCase):
+    """`asl control --wait`: receipts, terminal actions, and timeout reasons."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.plan_dir = self.tmp / "plan"
+        self.state_dir = self.tmp / "state"
+        write_plan(self.plan_dir, ("pending", "pending"))
+        self.event_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir)
+            / events.EVENTS_FILE_NAME
+        )
+
+    def args(self, **overrides) -> argparse.Namespace:
+        namespace = {
+            "plan_dir": str(self.plan_dir),
+            "state_dir": str(self.state_dir),
+            "json": True,
+            "wait": False,
+            "wait_timeout": None,
+        }
+        namespace.update(overrides)
+        return argparse.Namespace(**namespace)
+
+    def mark_run_active(self) -> None:
+        """A live lock owned by this process, with a turn in flight."""
+        endpoint, _ = self.enterContext(
+            live_wakeup_endpoint(self.plan_dir, self.state_dir)
+        )
+        _write_live_lock_file(
+            self.plan_dir, self.state_dir, wakeup_endpoint=endpoint
+        )
+        _write_state_payload(
+            self.plan_dir,
+            self.state_dir,
+            {
+                "ok": True,
+                "paused": False,
+                "run_id": "20260724T100000Z-1",
+                "harness": "codex",
+                "run_config": {"review_harness": None},
+                "reason": "",
+                "run_started_at": "2026-07-24T10:00:00+00:00",
+                "run_finished_at": None,
+                "duration_seconds": None,
+                "active_turn": {
+                    "run_id": "20260724T100000Z-1",
+                    "turn_index": 1,
+                    "session": 1,
+                    "session_id": "1",
+                    "started_at": "2026-07-24T10:00:00+00:00",
+                    "elapsed_seconds": 3.0,
+                    "idle_seconds": 1.0,
+                },
+                "active_verification": None,
+            },
+        )
+
+    def payload_from(self, handler, args) -> tuple[int, dict]:
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            exit_code = handler(args)
+        return exit_code, json.loads(buffer.getvalue())
+
+    def queued_command_ids(self) -> list[str]:
+        queue_path = control_queue.queue_path_for_plan(
+            self.plan_dir, self.state_dir
+        )
+        if not queue_path.exists():
+            return []
+        return [record["id"] for record in read_jsonl(queue_path)]
+
+    def run_control_actions(self) -> list[str]:
+        if not self.event_path.exists():
+            return []
+        return [
+            record["payload"]["action"]
+            for record in read_jsonl(self.event_path)
+            if record["name"] == events.RUN_CONTROL_EVENT
+        ]
+
+    @contextmanager
+    def background_runner(
+        self,
+        *,
+        control_state: run_control.RunControlState | None = None,
+        abort: harnesses.AbortSignal | None = None,
+        after_drain: Callable[[], None] | None = None,
+    ):
+        """Drain the queue from another thread, like a live runner's poll.
+
+        The real ``runner._drain_external_control_queue`` is used so the receipt
+        the CLI tails is the one production writes.
+        """
+        stop = threading.Event()
+        errors: list[BaseException] = []
+        rc_state = (
+            run_control.RunControlState(current_harness="codex")
+            if control_state is None
+            else control_state
+        )
+        payload: dict[str, object] = {
+            "run_id": "20260724T100000Z-1",
+            "control": runner._initial_control_payload(),
+            "harness": "codex",
+        }
+        control_payload = dict(payload["control"])  # type: ignore[arg-type]
+        seen_ids: set[str] = set()
+
+        def poll() -> None:
+            try:
+                while not stop.is_set():
+                    result = runner._drain_external_control_queue(
+                        plan_dir=self.plan_dir,
+                        state_dir_arg=str(self.state_dir),
+                        control_state=rc_state,
+                        seen_ids=seen_ids,
+                        payload=payload,
+                        event_path=self.event_path,
+                        control_payload=control_payload,
+                        context=None,
+                        persistence=runner._RunPersistence(write_state=False),
+                        run_control_lock=threading.Lock(),
+                        wakeup=None,
+                        abort=abort,
+                        mailbox_enabled=False,
+                    )
+                    if result.accepted and after_drain is not None:
+                        after_drain()
+                    stop.wait(0.02)
+            except BaseException as error:  # surfaced on the main thread
+                errors.append(error)
+
+        thread = threading.Thread(target=poll, daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(timeout=10)
+        if errors:
+            raise errors[0]
+
+    def test_wait_returns_the_receipt_from_a_live_runner(self) -> None:
+        self.mark_run_active()
+
+        with self.background_runner():
+            exit_code, payload = self.payload_from(
+                control_cli.control_stop_after_current_from_args,
+                self.args(wait=True, wait_timeout=10.0),
+            )
+
+        self.assertEqual(0, exit_code, payload)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["enqueued"])
+        self.assertEqual(LIVE_WAKEUP.to_payload(), payload["signal"])
+        self.assertTrue(payload["wait"]["observed"])
+        self.assertIsNone(payload["wait"]["terminal_action"])
+        self.assertEqual(10.0, payload["wait"]["timeout_seconds"])
+        self.assertLessEqual(payload["wait"]["elapsed_seconds"], 10.0)
+        # The receipt the CLI saw names the command it just enqueued.
+        receipts = [
+            record["payload"]
+            for record in read_jsonl(self.event_path)
+            if record["name"] == events.RUN_CONTROL_EVENT
+            and record["payload"]["action"]
+            == events.RUN_CONTROL_ACTION_COMMAND_OBSERVED
+        ]
+        self.assertEqual([payload["command_id"]], [r["command_id"] for r in receipts])
+
+    def test_wait_is_satisfied_by_a_command_that_changes_no_state(self) -> None:
+        self.mark_run_active()
+        already_stopping = run_control.RunControlState(current_harness="codex")
+        already_stopping.toggle_stop_after_current()
+
+        with self.background_runner(control_state=already_stopping):
+            exit_code, payload = self.payload_from(
+                control_cli.control_stop_after_current_from_args,
+                self.args(wait=True, wait_timeout=10.0),
+            )
+
+        self.assertEqual(0, exit_code, payload)
+        self.assertTrue(payload["wait"]["observed"])
+        # The command was already satisfied, so delivery is the only evidence
+        # the runner records — and it is enough to end the wait.
+        self.assertEqual(
+            [events.RUN_CONTROL_ACTION_COMMAND_OBSERVED],
+            self.run_control_actions(),
+        )
+
+    def test_wait_text_output_names_the_observation(self) -> None:
+        self.mark_run_active()
+
+        with self.background_runner():
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                exit_code = control_cli.control_stop_after_current_from_args(
+                    self.args(json=False, wait=True, wait_timeout=10.0)
+                )
+
+        self.assertEqual(0, exit_code)
+        output = buffer.getvalue().splitlines()
+        self.assertEqual(1, len(output))
+        self.assertIn("observed by the runner", output[0])
+
+    def test_wait_timeout_without_a_runner_reports_no_runner(self) -> None:
+        exit_code, payload = self.payload_from(
+            control_cli.control_stop_after_current_from_args,
+            self.args(wait=True, wait_timeout=0.0),
+        )
+
+        self.assertEqual(1, exit_code)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("no-runner", payload["reason"])
+        self.assertTrue(payload["details"]["enqueued"])
+        self.assertFalse(payload["details"]["wait"]["observed"])
+        self.assertEqual(
+            payload["details"]["command_id"], self.queued_command_ids()[0]
+        )
+        # The command outlives the failed observation.
+        self.assertEqual(1, len(self.queued_command_ids()))
+
+    def test_wait_timeout_with_a_wedged_runner_reports_receipt_timeout(self) -> None:
+        # The wakeup lands, but nothing drains the queue, so the wait still
+        # times out: a delivered byte promises a drain sooner, never one at all.
+        self.mark_run_active()
+
+        exit_code, payload = self.payload_from(
+            control_cli.control_stop_after_current_from_args,
+            self.args(wait=True, wait_timeout=0.0),
+        )
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual("receipt-timeout", payload["reason"])
+        self.assertEqual(
+            LIVE_WAKEUP.to_payload(), payload["details"]["signal"]
+        )
+        self.assertFalse(payload["details"]["wait"]["observed"])
+        self.assertEqual(1, len(self.queued_command_ids()))
+
+    def test_abort_wait_blocks_until_the_turn_is_honored(self) -> None:
+        # No abort signal is armed, so the drain degrades the abort and honors
+        # it immediately — the terminal action the CLI is waiting for.
+        self.mark_run_active()
+
+        with self.background_runner():
+            exit_code, payload = self.payload_from(
+                control_cli.control_abort_from_args,
+                self.args(
+                    wait=True,
+                    wait_timeout=10.0,
+                    grace_seconds=None,
+                    reason=None,
+                ),
+            )
+
+        self.assertEqual(0, exit_code, payload)
+        self.assertTrue(payload["wait"]["observed"])
+        self.assertEqual(
+            events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED,
+            payload["wait"]["terminal_action"],
+        )
+
+    def test_abort_wait_blocks_until_a_worker_satisfies_the_turn(self) -> None:
+        self.mark_run_active()
+        abort = harnesses.AbortSignal()
+
+        def satisfied_by_worker() -> None:
+            # Stands in for the worker that stopped on its own inside the grace
+            # window; only the runner records this action.
+            events.append_event(
+                self.event_path,
+                events.Event(
+                    events.RUN_CONTROL_EVENT,
+                    {
+                        "run_id": "20260724T100000Z-1",
+                        "action": (
+                            events.RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER
+                        ),
+                        "message": "abort satisfied by worker",
+                    },
+                ),
+            )
+
+        with self.background_runner(abort=abort, after_drain=satisfied_by_worker):
+            exit_code, payload = self.payload_from(
+                control_cli.control_abort_from_args,
+                self.args(
+                    wait=True,
+                    wait_timeout=10.0,
+                    grace_seconds=None,
+                    reason=None,
+                ),
+            )
+
+        self.assertEqual(0, exit_code, payload)
+        self.assertEqual(
+            events.RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER,
+            payload["wait"]["terminal_action"],
+        )
+
+    def test_abort_wait_timeout_after_delivery_reports_abort_timeout(self) -> None:
+        self.mark_run_active()
+        real_wait = control_cli._wait_for_receipt
+
+        def receipt_without_outcome(plan_dir, **kwargs):
+            # Emulate a runner that acknowledged the command but whose grace
+            # window outlasts the wait: append only the receipt, then let the
+            # real tail run against a zero-length deadline.
+            events.append_event(
+                self.event_path,
+                events.Event(
+                    events.RUN_CONTROL_EVENT,
+                    {
+                        "run_id": "20260724T100000Z-1",
+                        "action": events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+                        "command_id": kwargs["command_id"],
+                        "message": "control command observed",
+                    },
+                ),
+            )
+            return real_wait(plan_dir, **kwargs)
+
+        with mock.patch.object(
+            control_cli, "_wait_for_receipt", receipt_without_outcome
+        ):
+            exit_code, payload = self.payload_from(
+                control_cli.control_abort_from_args,
+                self.args(
+                    wait=True,
+                    wait_timeout=0.0,
+                    grace_seconds=None,
+                    reason=None,
+                ),
+            )
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual("abort-timeout", payload["reason"])
+        self.assertTrue(payload["details"]["wait"]["observed"])
+        self.assertIsNone(payload["details"]["wait"]["terminal_action"])
+
+    def test_default_enqueue_neither_waits_nor_reports_a_wait(self) -> None:
+        for handler, extra in (
+            (control_cli.control_stop_after_current_from_args, {}),
+            (
+                control_cli.control_abort_from_args,
+                {"grace_seconds": None, "reason": None},
+            ),
+            (
+                control_cli.control_select_harness_from_args,
+                {"harness": "claude"},
+            ),
+            (
+                control_cli.control_set_model_from_args,
+                {
+                    "harness": None,
+                    "harness_model": "gpt-5.4",
+                    "clear_harness_model": False,
+                    "effort": None,
+                    "clear_effort": False,
+                },
+            ),
+        ):
+            with self.subTest(handler=handler.__name__):
+                exit_code, payload = self.payload_from(
+                    handler, self.args(**extra)
+                )
+
+                self.assertEqual(0, exit_code, payload)
+                self.assertNotIn("wait", payload)
+
+    def test_timeout_without_wait_is_rejected_before_enqueue(self) -> None:
+        exit_code, payload = self.payload_from(
+            control_cli.control_stop_after_current_from_args,
+            self.args(wait_timeout=5.0),
+        )
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual("invalid-timeout", payload["reason"])
+        self.assertEqual([], self.queued_command_ids())
+
+    def test_unbounded_and_negative_timeouts_are_rejected(self) -> None:
+        for requested in (-1.0, float("inf"), float("nan"), 1801.0):
+            with self.subTest(timeout=requested):
+                exit_code, payload = self.payload_from(
+                    control_cli.control_stop_after_current_from_args,
+                    self.args(wait=True, wait_timeout=requested),
+                )
+
+                self.assertEqual(1, exit_code)
+                self.assertEqual("invalid-timeout", payload["reason"])
+                self.assertEqual([], self.queued_command_ids())
 
 
 class MailboxCliTests(unittest.TestCase):
@@ -8279,6 +10621,9 @@ class RunControlTests(unittest.TestCase):
         self.assertEqual(
             {
                 "stop_after_current": False,
+                "abort_turn_requested": False,
+                "abort_grace_seconds": None,
+                "abort_reason": None,
                 "tail_enabled": False,
                 "next_harness": None,
                 "implementation_overrides": {},
@@ -8303,6 +10648,85 @@ class RunControlTests(unittest.TestCase):
         self.assertEqual("consumed", consumed.action)
         self.assertFalse(consumed.stop_after_current)
         self.assertFalse(state.stop_after_current)
+
+    def test_run_control_state_abort_request_is_idempotent(self) -> None:
+        state = run_control.RunControlState()
+
+        self.assertFalse(state.abort_turn_requested)
+        self.assertIsNone(state.consume_abort_turn())
+
+        requested = state.request_abort_turn(
+            grace_seconds=45, reason="supervisor stop"
+        )
+        self.assertIsNotNone(requested)
+        assert requested is not None
+        self.assertEqual("abort-requested", requested.action)
+        self.assertTrue(requested.abort_requested)
+        self.assertEqual(45, requested.abort_grace_seconds)
+        self.assertEqual("supervisor stop", requested.abort_reason)
+        self.assertEqual(45, state.abort_grace_seconds)
+        self.assertEqual("supervisor stop", state.abort_reason)
+
+        # A repeat cannot restart the window or emit a duplicate request.
+        self.assertIsNone(
+            state.request_abort_turn(grace_seconds=1, reason="again")
+        )
+        self.assertEqual(45, state.abort_grace_seconds)
+        self.assertEqual("supervisor stop", state.abort_reason)
+
+        self.assertEqual(
+            {
+                "abort_turn_requested": True,
+                "abort_grace_seconds": 45,
+                "abort_reason": "supervisor stop",
+            },
+            {
+                key: value
+                for key, value in state.snapshot().items()
+                if key.startswith("abort")
+            },
+        )
+
+    def test_run_control_state_abort_is_consumed_exactly_once(self) -> None:
+        state = run_control.RunControlState()
+        state.request_abort_turn(grace_seconds=10, reason="hurry")
+
+        consumed = state.consume_abort_turn()
+        self.assertIsNotNone(consumed)
+        assert consumed is not None
+        self.assertEqual("abort-consumed", consumed.action)
+        # The consumer still learns what it has to act on.
+        self.assertEqual(10, consumed.abort_grace_seconds)
+        self.assertEqual("hurry", consumed.abort_reason)
+
+        self.assertIsNone(state.consume_abort_turn())
+        self.assertFalse(state.abort_turn_requested)
+        self.assertIsNone(state.abort_grace_seconds)
+        self.assertIsNone(state.abort_reason)
+
+        # Stop-after-current is independent state.
+        self.assertFalse(state.stop_after_current)
+
+    def test_run_control_listener_passes_abort_consumption_through(self) -> None:
+        state = run_control.RunControlState()
+        state.request_abort_turn(grace_seconds=7, reason="stop now")
+        actions: list[run_control.RunControlAction] = []
+        listener = run_control.RunControlListener(
+            enabled=False,
+            state=state,
+            on_action=actions.append,
+        )
+
+        consumed = listener.consume_abort_turn()
+
+        self.assertIsNotNone(consumed)
+        assert consumed is not None
+        self.assertEqual("abort-consumed", consumed.action)
+        self.assertEqual(7, consumed.abort_grace_seconds)
+        self.assertEqual([consumed], actions)
+
+        self.assertIsNone(listener.consume_abort_turn())
+        self.assertEqual([consumed], actions)
 
     def test_run_control_state_tracks_tail_and_next_harness(self) -> None:
         state = run_control.RunControlState(current_harness="codex")
@@ -8612,6 +11036,12 @@ class RunControlTests(unittest.TestCase):
         self.assertIn("harness-selected", events.RUN_CONTROL_ACTIONS)
         self.assertIn(
             "implementation-model-updated",
+            events.RUN_CONTROL_ACTIONS,
+        )
+        self.assertIn("abort-turn-requested", events.RUN_CONTROL_ACTIONS)
+        self.assertIn("abort-turn-honored", events.RUN_CONTROL_ACTIONS)
+        self.assertIn(
+            "abort-turn-satisfied-by-worker",
             events.RUN_CONTROL_ACTIONS,
         )
         self.assertEqual("control", config.MODEL_SOURCE_CONTROL)

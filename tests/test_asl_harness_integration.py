@@ -1358,7 +1358,11 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual(
             {
                 "stop_after_current": False,
-                "tail_enabled": False,
+                "abort_turn_requested": False,
+                "abort_grace_seconds": None,
+                "abort_reason": None,
+                "abort_deadline": None,
+                "tail_enabled":False,
                 "next_harness": None,
                 "target_harness": None,
                 "changed_fields": [],
@@ -1437,7 +1441,11 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual(
             {
                 "stop_after_current": False,
-                "tail_enabled": False,
+                "abort_turn_requested": False,
+                "abort_grace_seconds": None,
+                "abort_reason": None,
+                "abort_deadline": None,
+                "tail_enabled":False,
                 "next_harness": None,
                 "target_harness": None,
                 "changed_fields": [],
@@ -1465,13 +1473,21 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             statuses=("pending",)
         )
         note = "operator reference ABC-123"
+        gate_dir = state_dir / "ctrl-c-stream-gates"
+        # The turn must still be in flight when SIGINT lands: hold the harness at
+        # the stream gate instead of racing a step sleep, which a loaded machine
+        # can outlast.
         process, master_fd = self.start_run_pty(
             plan_dir=plan_dir,
             state_dir=state_dir,
             config_home=config_home,
             mode="streaming-success",
             note=note,
-            fake_step_sleep="5.0",
+            fake_step_sleep="0",
+            extra_env={
+                "FAKE_CODEX_STREAM_GATE_DIR": str(gate_dir),
+                "FAKE_CODEX_STREAM_GATE_TIMEOUT": "20",
+            },
         )
 
         output = self.read_run_pty_until(
@@ -1482,6 +1498,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         )
 
         def harness_started():
+            if not (gate_dir / "session-1.ready").exists():
+                return None
             payload = self.read_run_payload(plan_dir=plan_dir, state_dir=state_dir)
             active_turn = payload.get("active_turn")
             if not isinstance(active_turn, dict):
@@ -1493,7 +1511,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 return active_turn
             return None
 
-        wait_until(harness_started, timeout=3)
+        wait_until(harness_started, timeout=10)
         process.send_signal(signal.SIGINT)
         output = self.finish_run_pty(
             process=process,
@@ -1659,7 +1677,11 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual(
             {
                 "stop_after_current": False,
-                "tail_enabled": False,
+                "abort_turn_requested": False,
+                "abort_grace_seconds": None,
+                "abort_reason": None,
+                "abort_deadline": None,
+                "tail_enabled":False,
                 "next_harness": "copilot",
                 "target_harness": None,
                 "changed_fields": [],
@@ -1844,7 +1866,11 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual(
             {
                 "stop_after_current": False,
-                "tail_enabled": False,
+                "abort_turn_requested": False,
+                "abort_grace_seconds": None,
+                "abort_reason": None,
+                "abort_deadline": None,
+                "tail_enabled":False,
                 "next_harness": None,
                 "target_harness": None,
                 "changed_fields": [],
@@ -1984,7 +2010,11 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual(
             {
                 "stop_after_current": False,
-                "tail_enabled": False,
+                "abort_turn_requested": False,
+                "abort_grace_seconds": None,
+                "abort_reason": None,
+                "abort_deadline": None,
+                "tail_enabled":False,
                 "next_harness": None,
                 "target_harness": None,
                 "changed_fields": [],
@@ -2454,7 +2484,11 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual(
             {
                 "stop_after_current": False,
-                "tail_enabled": False,
+                "abort_turn_requested": False,
+                "abort_grace_seconds": None,
+                "abort_reason": None,
+                "abort_deadline": None,
+                "tail_enabled":False,
                 "next_harness": "claude",
                 "target_harness": None,
                 "changed_fields": [],
@@ -2626,14 +2660,17 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         ]
         self.assertEqual(
             [
+                events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
                 events.RUN_CONTROL_ACTION_HARNESS_SELECTED,
+                events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
                 events.RUN_CONTROL_ACTION_IMPLEMENTATION_MODEL_UPDATED,
+                events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
                 events.RUN_CONTROL_ACTION_IMPLEMENTATION_MODEL_UPDATED,
             ],
             [event["action"] for event in control_events],
         )
         self.assertEqual(
-            "claude", control_events[1]["target_harness"]
+            "claude", control_events[3]["target_harness"]
         )
 
     def test_model_control_expires_when_a_new_runner_process_starts(self) -> None:
@@ -2887,7 +2924,11 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual(
             {
                 "stop_after_current": False,
-                "tail_enabled": False,
+                "abort_turn_requested": False,
+                "abort_grace_seconds": None,
+                "abort_reason": None,
+                "abort_deadline": None,
+                "tail_enabled":False,
                 "next_harness": None,
                 "target_harness": None,
                 "changed_fields": [],
@@ -6277,6 +6318,292 @@ class HarnessProcessGroupSweepTests(unittest.TestCase):
         assert_marked_pids_exited(
             self.root / "grandchildren", label="in-group grandchild"
         )
+
+
+class _StubWaitProcess:
+    """A process that never exits and whose wait always expires after a sleep.
+
+    Lets the two deadlines be compared at a tick that both have already passed,
+    which no real timing can be relied on to produce.
+    """
+
+    def __init__(self, wait_seconds: float) -> None:
+        self.wait_seconds = wait_seconds
+        self.pid = os.getpid()
+
+    def poll(self) -> None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> int:
+        time.sleep(self.wait_seconds)
+        raise subprocess.TimeoutExpired(cmd="stub", timeout=timeout)
+
+
+class HarnessAbortDeadlineTests(unittest.TestCase):
+    """The wait loop's deadline arithmetic, with no real harness involved."""
+
+    def test_unarmed_signal_has_no_expiry(self) -> None:
+        signal_ = harnesses.AbortSignal()
+        self.assertFalse(signal_.armed)
+        self.assertIsNone(signal_.expires_at(time.monotonic()))
+
+    def test_armed_signal_carries_its_grace_window_and_reason(self) -> None:
+        signal_ = harnesses.AbortSignal()
+        before = time.monotonic()
+        signal_.arm("supervisor stop", grace_seconds=5.0)
+
+        self.assertTrue(signal_.armed)
+        self.assertEqual("supervisor stop", signal_.reason)
+        self.assertGreaterEqual(signal_.expires_at(before), before + 5.0)
+
+    def test_armed_without_a_deadline_is_due_at_once(self) -> None:
+        signal_ = harnesses.AbortSignal()
+        signal_.event.set()
+
+        now = time.monotonic()
+        self.assertEqual(now, signal_.expires_at(now))
+
+    def test_earlier_timeout_wins_when_both_deadlines_have_passed(self) -> None:
+        abort = harnesses.AbortSignal()
+        abort.arm("supervisor stop", grace_seconds=0.1)
+
+        expired = harnesses._wait_for_turn_exit(
+            _StubWaitProcess(0.2), timeout=0.05, abort=abort
+        )
+
+        self.assertEqual("timeout", expired)
+
+    def test_earlier_abort_wins_when_both_deadlines_have_passed(self) -> None:
+        abort = harnesses.AbortSignal()
+        abort.arm("supervisor stop", grace_seconds=0.05)
+
+        expired = harnesses._wait_for_turn_exit(
+            _StubWaitProcess(0.2), timeout=0.1, abort=abort
+        )
+
+        self.assertEqual("abort", expired)
+
+
+class HarnessAbortSignalTests(unittest.TestCase):
+    """An armed abort kills the turn's whole tree and is told from a timeout."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp_dir = Path(tmp.name)
+        self.root = self.tmp_dir / "trees"
+        _parent_script, self.grandchild_script = write_process_tree_scripts(
+            self.root
+        )
+        self.addCleanup(kill_marked_pids, self.root / "grandchildren")
+        self.started = self.tmp_dir / "harness-started"
+
+    def _fake_harness(self, *, spawns: bool, detached: bool, tail: str) -> Path:
+        """A harness that optionally fans out, publishes liveness, then waits."""
+        spawn_lines = (
+            [
+                "subprocess.Popen(",
+                "    [",
+                "        sys.executable,",
+                f"        {str(self.grandchild_script)!r},",
+                "        'turn',",
+                "        str(root),",
+                "    ],",
+                f"    start_new_session={detached!r},",
+                ")",
+                "while not (root / 'grandchildren' / 'turn').exists():",
+                "    time.sleep(0.01)",
+            ]
+            if spawns
+            else []
+        )
+        path = self.tmp_dir / "fake-copilot"
+        path.write_text(
+            "\n".join(
+                [
+                    "#!/usr/bin/env python3",
+                    "import pathlib, subprocess, sys, time",
+                    f"root = pathlib.Path({str(self.root)!r})",
+                    *spawn_lines,
+                    f"pathlib.Path({str(self.started)!r}).write_text('go')",
+                    tail,
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        path.chmod(path.stat().st_mode | stat.S_IXUSR)
+        return path
+
+    def _arm_once_live(self, abort: harnesses.AbortSignal, *, grace: float):
+        """Start the grace window only once the turn's tree is up.
+
+        Mirrors the timeout tests: process startup under a heavily parallel
+        suite run can otherwise eat the whole window.
+        """
+
+        def on_spawn(_pid: int) -> None:
+            wait_until(self.started.exists, timeout=30)
+            abort.arm("supervisor abort", grace_seconds=grace)
+
+        return on_spawn
+
+    def _grandchild_pid(self) -> int:
+        return int(
+            (self.root / "grandchildren" / "turn").read_text(encoding="utf-8")
+        )
+
+    def test_abort_deadline_kills_the_turn_and_empties_its_group(self) -> None:
+        fake_harness = self._fake_harness(
+            spawns=False, detached=False, tail="time.sleep(60)"
+        )
+        abort = harnesses.AbortSignal()
+        spawn_pids: list[int] = []
+        arm = self._arm_once_live(abort, grace=0.5)
+
+        def on_spawn(pid: int) -> None:
+            spawn_pids.append(pid)
+            arm(pid)
+
+        result = _PythonScriptCopilotAdapter(fake_harness).run(
+            cwd=self.tmp_dir,
+            plan_dir=self.tmp_dir,
+            prompt="noop",
+            on_spawn=on_spawn,
+            abort=abort,
+        )
+
+        self.assertTrue(result.aborted)
+        self.assertFalse(result.timed_out)
+        # 137, not the timeout path's 124: readable without the flags.
+        self.assertEqual(137, result.returncode)
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(spawn_pids[0], 0)
+
+    def test_turn_that_exits_inside_the_window_is_never_signalled(self) -> None:
+        fake_harness = self._fake_harness(
+            spawns=False, detached=False, tail="print('turn done', flush=True)"
+        )
+        abort = harnesses.AbortSignal()
+        abort.arm("supervisor abort", grace_seconds=60.0)
+
+        result = _PythonScriptCopilotAdapter(fake_harness).run(
+            cwd=self.tmp_dir,
+            plan_dir=self.tmp_dir,
+            prompt="noop",
+            abort=abort,
+        )
+
+        self.assertFalse(result.aborted)
+        self.assertFalse(result.timed_out)
+        # A killed turn reports -SIGKILL, so a clean 0 is the proof that the
+        # armed-but-unexpired signal never reached the process.
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("turn done", result.stdout)
+
+    def test_abort_kills_the_whole_process_group_and_reports_the_sweep(
+        self,
+    ) -> None:
+        fake_harness = self._fake_harness(
+            spawns=True, detached=False, tail="time.sleep(60)"
+        )
+        abort = harnesses.AbortSignal()
+        spawn_pids: list[int] = []
+        arm = self._arm_once_live(abort, grace=0.5)
+
+        def on_spawn(pid: int) -> None:
+            spawn_pids.append(pid)
+            arm(pid)
+
+        result = _PythonScriptCopilotAdapter(fake_harness).run(
+            cwd=self.tmp_dir,
+            plan_dir=self.tmp_dir,
+            prompt="noop",
+            on_spawn=on_spawn,
+            abort=abort,
+        )
+
+        self.assertTrue(result.aborted)
+        assert_marked_pids_exited(
+            self.root / "grandchildren", label="in-group grandchild"
+        )
+        # The group died as one: a grandchild that merely outlived its parent
+        # would have seen itself orphaned and written its late marker first.
+        self.assertEqual([], list((self.root / "late").iterdir()))
+        self.assertEqual(
+            spawn_pids, [result.process_sweep["enumeration"]["expected_pgid"]]
+        )
+        self.assertEqual([], result.process_sweep["enumeration"]["pgid_members"])
+        self.assertEqual([], result.process_sweep["survivors_after"])
+
+    def test_abort_sweeps_a_setsid_escapee_through_the_pre_kill_snapshot(
+        self,
+    ) -> None:
+        """The abort path takes the same pre-kill snapshot the timeout path does."""
+        fake_harness = self._fake_harness(
+            spawns=True, detached=True, tail="time.sleep(60)"
+        )
+        abort = harnesses.AbortSignal()
+
+        result = _PythonScriptCopilotAdapter(fake_harness).run(
+            cwd=self.tmp_dir,
+            plan_dir=self.tmp_dir,
+            prompt="noop",
+            on_spawn=self._arm_once_live(abort, grace=0.5),
+            abort=abort,
+        )
+
+        self.assertTrue(result.aborted)
+        escapee = self._grandchild_pid()
+        # killpg emptied the group, so only a snapshot taken while the turn was
+        # still alive could name the escapee.
+        self.assertEqual([], result.process_sweep["enumeration"]["pgid_members"])
+        self.assertEqual(
+            [escapee], result.process_sweep["enumeration"]["snapshot_verified"]
+        )
+        self.assertEqual([escapee], result.process_sweep["killed"])
+        self.assertEqual([], result.process_sweep["survivors_after"])
+        assert_marked_pids_exited(
+            self.root / "grandchildren", label="detached grandchild"
+        )
+
+    def test_timeout_first_sets_only_timed_out(self) -> None:
+        fake_harness = self._fake_harness(
+            spawns=False, detached=False, tail="time.sleep(60)"
+        )
+        abort = harnesses.AbortSignal()
+
+        result = _PythonScriptCopilotAdapter(fake_harness).run(
+            cwd=self.tmp_dir,
+            plan_dir=self.tmp_dir,
+            prompt="noop",
+            timeout=2,
+            on_spawn=self._arm_once_live(abort, grace=60.0),
+            abort=abort,
+        )
+
+        self.assertTrue(result.timed_out)
+        self.assertFalse(result.aborted)
+        self.assertEqual(124, result.returncode)
+
+    def test_abort_first_sets_only_aborted(self) -> None:
+        fake_harness = self._fake_harness(
+            spawns=False, detached=False, tail="time.sleep(60)"
+        )
+        abort = harnesses.AbortSignal()
+
+        result = _PythonScriptCopilotAdapter(fake_harness).run(
+            cwd=self.tmp_dir,
+            plan_dir=self.tmp_dir,
+            prompt="noop",
+            timeout=60,
+            on_spawn=self._arm_once_live(abort, grace=0.5),
+            abort=abort,
+        )
+
+        self.assertTrue(result.aborted)
+        self.assertFalse(result.timed_out)
+        self.assertEqual(137, result.returncode)
 
 
 class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):

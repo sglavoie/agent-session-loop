@@ -5771,7 +5771,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
 
         self.assertEqual(os.getpid(), lock_info.pid)
         self.assertEqual(socket.gethostname(), lock_info.raw["hostname"])
-        self.assertEqual(2, lock_info.raw["version"])
+        self.assertEqual(3, lock_info.raw["version"])
 
         persisted = self.persisted_state()
         self.assertEqual(state.ABANDONED_REASON, persisted["reason"])
@@ -5977,7 +5977,9 @@ class LockRepositoryClaimTests(unittest.TestCase):
     def read_payload(self) -> dict[str, object]:
         return json.loads(self.lock_path.read_text(encoding="utf-8"))
 
-    def test_lock_publishes_a_version_two_sorted_repository_claim(self) -> None:
+    def test_lock_publishes_a_current_version_sorted_repository_claim(
+        self,
+    ) -> None:
         lock_info = state.acquire_lock(
             self.plan_dir,
             self.state_dir,
@@ -5986,7 +5988,10 @@ class LockRepositoryClaimTests(unittest.TestCase):
         self.addCleanup(state.release_lock, self.plan_dir, self.state_dir)
 
         payload = self.read_payload()
-        self.assertEqual(2, payload["version"])
+        # 3 adds `wakeup_endpoint` to 2's repository claim. The field is
+        # informational — readers never validate it — so the bump documents the
+        # shape rather than gating anything.
+        self.assertEqual(3, payload["version"])
         self.assertEqual(["/w/apple", "/w/zebra"], payload["repositories"])
         self.assertEqual(("/w/apple", "/w/zebra"), lock_info.repository_roots)
 

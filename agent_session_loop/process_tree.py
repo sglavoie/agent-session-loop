@@ -32,6 +32,7 @@ PS_COMMAND: tuple[str, ...] = (
 PS_TABLE_COMMAND: tuple[str, ...] = (
     "ps", "-axo", "pid=,ppid=,pgid=,lstart=,command="
 )
+PS_BIRTH_COMMAND: tuple[str, ...] = ("ps", "-o", "lstart=", "-p")
 COMMAND_MAX_CHARS = 160
 SAMPLE_TIMEOUT_SECONDS = 5.0
 
@@ -57,10 +58,11 @@ _CPU_TIME_RE = re.compile(
 # command column rather than split positionally so that a ps whose lstart is
 # missing or shaped differently yields an entry with no birth identity instead
 # of an unparsable row.
+_BIRTH_PATTERN = r"\S+\s+\S+\s+\d{1,2}\s+\d{1,2}:\d{2}:\d{2}\s+\d{4}"
 _BIRTH_RE = re.compile(
-    r"^(?P<birth>\S+\s+\S+\s+\d{1,2}\s+\d{1,2}:\d{2}:\d{2}\s+\d{4})"
-    r"\s+(?P<command>\S.*)$"
+    rf"^(?P<birth>{_BIRTH_PATTERN})\s+(?P<command>\S.*)$"
 )
+_LSTART_RE = re.compile(rf"^{_BIRTH_PATTERN}$")
 
 
 def _split_birth(column: str) -> tuple[str | None, str]:
@@ -168,6 +170,43 @@ def sample_process_tree(
 
     walk = [root_pid, *descendant_pids(root_pid, processes)]
     return [processes[pid] for pid in walk]
+
+
+def process_birth(
+    pid: int,
+    *,
+    run_command: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    timeout: float = SAMPLE_TIMEOUT_SECONDS,
+) -> str | None:
+    """Return ``pid``'s start time as ``ps`` reports it, or ``None``.
+
+    A start time is fixed for the life of a process, so a ``(pid, birth)`` pair
+    is an identity a reused pid cannot forge. ``None`` means the identity could
+    not be established at all — no such process, a ``ps`` that reports no
+    parsable ``lstart``, a spawn failure or a timeout — never "this is a
+    different process", so callers that authenticate an owner must treat it as
+    unverified rather than as a mismatch.
+    """
+    if pid <= 0:
+        return None
+    try:
+        completed = run_command(
+            [*PS_BIRTH_COMMAND, str(pid)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001 - an unknown identity is the failure mode
+        return None
+    if completed.returncode != 0:
+        return None
+    for line in (completed.stdout or "").splitlines():
+        birth = " ".join(line.split())
+        if _LSTART_RE.match(birth):
+            return birth
+    return None
 
 
 #: A process identity that survives pid reuse: its pid plus its start time, or

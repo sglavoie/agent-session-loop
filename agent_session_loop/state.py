@@ -30,6 +30,7 @@ from . import (
     harnesses,
     pause_policy,
     plans,
+    process_tree,
     responses,
     workspaces,
 )
@@ -149,6 +150,31 @@ class LockInfo:
     def owner_hostname(self) -> str | None:
         """Host that recorded ``pid``, or ``None`` for legacy locks."""
         return _nonempty_str(self.raw.get("hostname"))
+
+    @property
+    def owner_process_start(self) -> str | None:
+        """Birth time recorded for ``pid``, or ``None`` if the lock names none.
+
+        Distinguishes the process that published the lock from a later one that
+        reused its pid, for readers that report on the owner. It is deliberately
+        not an authentication token for acting *on* that process: ``ps`` reports
+        a start time to one-second resolution, so two processes can present the
+        same value, and any check of it is separated from whatever it authorizes
+        by a window in which the pid can be recycled.
+        """
+        return _nonempty_str(self.raw.get("process_start"))
+
+    @property
+    def wakeup_endpoint(self) -> str | None:
+        """FIFO this run reads control wakeups from, or ``None`` if it has none.
+
+        Written by the owner before the lock became visible, so the path names
+        an endpoint whose read end that owner already holds. ``None`` covers a
+        version 2 lock, which predates the endpoint, and a runner whose state
+        directory could not host a FIFO; both mean the durable queue poll is the
+        only transport for that run.
+        """
+        return _nonempty_str(self.raw.get("wakeup_endpoint"))
 
     @property
     def foreign_host(self) -> bool:
@@ -692,6 +718,7 @@ def acquire_lock(
     *,
     owner: str = "agent-session-loop",
     repository_roots: Sequence[str] = (),
+    wakeup_endpoint: str | Path | None = None,
 ) -> LockInfo:
     """Create a lock for a plan, removing stale locks this host can judge.
 
@@ -705,17 +732,32 @@ def acquire_lock(
     with the lock rather than with the run's first ``state.json``, because
     everything between those two writes is time in which another starter can
     see a live run and no claim at all.
+
+    ``wakeup_endpoint`` is the FIFO this run already reads control wakeups
+    from. It is recorded rather than derived so that a producer writes only to
+    an endpoint the owner had open before this lock existed; ``None`` records
+    no endpoint and leaves that run on its poll interval.
     """
     snapshot = plans.inspect_plan(plan_dir)
     lock_path = lock_path_for_plan(snapshot.plan_dir, state_dir)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "version": 2,
+        "version": 3,
         "owner": owner,
         "pid": os.getpid(),
         # A pid only identifies a process on the host that recorded it, so
         # readers that reason about liveness need to know which host that was.
         "hostname": socket.gethostname(),
+        # Birth time of that pid, for readers describing the owner: liveness
+        # alone cannot tell this runner from a later process that reused its
+        # pid. `None` where `ps` reports no start time.
+        "process_start": process_tree.process_birth(os.getpid()),
+        # Endpoint this run is already reading wakeups from, so a producer
+        # writes to a descriptor this process holds rather than addressing it
+        # by pid. `None` leaves that run on its durable queue poll.
+        "wakeup_endpoint": (
+            str(wakeup_endpoint) if wakeup_endpoint is not None else None
+        ),
         "plan_dir": str(snapshot.plan_dir),
         "plan_path_hash": snapshot.path_hash,
         "plan_hash": snapshot.plan_hash,

@@ -273,6 +273,8 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
             'id="wb-controls"',
             'id="wb-control-launch"',
             'id="wb-control-stop"',
+            'id="wb-control-abort"',
+            'id="wb-control-abort-grace"',
             'id="wb-control-unlock"',
             'id="wb-control-archive"',
             'id="wb-profile-form"',
@@ -381,6 +383,13 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # Confirmation prompts for dangerous actions.
         self.assertIn("--unsafe-bypass", decoded)
         self.assertIn("Force-unlock this plan?", decoded)
+        self.assertIn("Abort the in-flight turn?", decoded)
+        self.assertIn('apiRequest("/api/control/abort"', decoded)
+        # The confirmation must gate the POST, not follow it.
+        self.assertLess(
+            decoded.find("Abort the in-flight turn?"),
+            decoded.find('apiRequest("/api/control/abort"'),
+        )
         self.assertIn("Archive this plan?", decoded)
         self.assertIn("Type the full plan path to confirm", decoded)
         self.assertIn("Submit this reply", decoded)
@@ -1532,6 +1541,37 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
                 _re.search(pattern, decoded),
                 msg=f"reply text persisted via {pattern!r}",
             )
+
+    def test_app_js_abort_grace_bounds_mirror_python_constants(self) -> None:
+        # The abort button pre-validates the grace window client-side; if its
+        # bounds drift from control_queue the UI either rejects a window the
+        # runner would honor or posts one the server rejects.
+        server = self._start_server()
+        _, body, _ = _http_request_raw(
+            self._base_url(server) + "/static/app.js"
+        )
+        decoded = body.decode("utf-8")
+        expected = {
+            "ABORT_DEFAULT_GRACE_SECONDS": (
+                control_queue.DEFAULT_ABORT_GRACE_SECONDS
+            ),
+            "ABORT_MIN_GRACE_SECONDS": control_queue.MIN_ABORT_GRACE_SECONDS,
+            "ABORT_MAX_GRACE_SECONDS": control_queue.MAX_ABORT_GRACE_SECONDS,
+        }
+        for name, value in expected.items():
+            self.assertIn(f"const {name} = {value};", decoded)
+
+        _, html, _ = _http_request_raw(self._base_url(server) + "/")
+        markup = html.decode("utf-8")
+        self.assertIn(
+            f'min="{control_queue.MIN_ABORT_GRACE_SECONDS}"', markup
+        )
+        self.assertIn(
+            f'max="{control_queue.MAX_ABORT_GRACE_SECONDS}"', markup
+        )
+        self.assertIn(
+            f'value="{control_queue.DEFAULT_ABORT_GRACE_SECONDS}"', markup
+        )
 
     def test_app_js_vocabulary_mirrors_python_constants(self) -> None:
         # Session 8 regression: the JS frontend hard-codes string

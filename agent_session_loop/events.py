@@ -69,6 +69,15 @@ EVENTS_FILE_NAME = "events.jsonl"
 RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED = "stop-after-current-requested"
 RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CANCELED = "stop-after-current-canceled"
 RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CONSUMED = "stop-after-current-consumed"
+RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED = "abort-turn-requested"
+RUN_CONTROL_ACTION_ABORT_TURN_HONORED = "abort-turn-honored"
+RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER = (
+    "abort-turn-satisfied-by-worker"
+)
+# Delivery receipt for one accepted external control command, appended for every
+# command the runner drains — including the ones that change no state — so a
+# supervisor can tell a duplicate or already-applied command from a lost one.
+RUN_CONTROL_ACTION_COMMAND_OBSERVED = "control-command-observed"
 RUN_CONTROL_ACTION_TAIL_ENABLED = "tail-enabled"
 RUN_CONTROL_ACTION_TAIL_DISABLED = "tail-disabled"
 RUN_CONTROL_ACTION_HARNESS_SELECTED = "harness-selected"
@@ -77,6 +86,10 @@ RUN_CONTROL_ACTIONS: tuple[str, ...] = (
     RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED,
     RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CANCELED,
     RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CONSUMED,
+    RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
+    RUN_CONTROL_ACTION_ABORT_TURN_HONORED,
+    RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER,
+    RUN_CONTROL_ACTION_COMMAND_OBSERVED,
     RUN_CONTROL_ACTION_TAIL_ENABLED,
     RUN_CONTROL_ACTION_TAIL_DISABLED,
     RUN_CONTROL_ACTION_HARNESS_SELECTED,

@@ -10,20 +10,39 @@ stays machine-readable.
 Handlers never touch ``state.json``: they enqueue and let the runner own the
 transition. Reporting reuses ``state.status_payload`` so the "will this take
 effect?" answer is derived from the same lock/pending view ``asl status`` shows.
+
+``--wait`` turns the fire-and-forget append into a receipt: the handler tails
+``events.jsonl`` for the ``control-command-observed`` record carrying the ID it
+just enqueued, the same way ``asl outbox wait`` tails the mailbox. Without it
+the surface behaves exactly as it always has.
 """
 
 from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
+from dataclasses import dataclass
+import json
+import math
+from pathlib import Path
+import time
 from typing import Any
 
-from . import cli_common, control_queue, harnesses, responses
+from . import (
+    cli_common,
+    control_queue,
+    control_signal,
+    events,
+    harnesses,
+    responses,
+    state,
+)
 
 
 # Command names used in both success and error payloads, so a supervisor can
 # branch on `command` without inspecting argv.
 COMMAND_STOP_AFTER_CURRENT = "control-stop-after-current"
+COMMAND_ABORT = "control-abort"
 COMMAND_SELECT_HARNESS = "control-select-harness"
 COMMAND_SET_MODEL = "control-set-model"
 
@@ -37,12 +56,292 @@ STOP_BEFORE_REVIEW_NOTE = (
     "current session is the last; stop also prevents the pending review"
 )
 STOP_NOOP_NOTE = "current session is the last; stop is a no-op"
+ABORT_WILL_APPLY_NOTE = "a turn is active; abort will end it"
+ABORT_DEGRADES_NOTE = (
+    "no turn active; abort degrades to stop-after-current"
+)
 MODEL_APPLIES_TO = "next-implementation-turn"
+
+# A wakeup usually makes the runner drain within milliseconds, so the receipt
+# tail polls far more often than the mailbox waits do.
+CONTROL_WAIT_POLL_INTERVAL_SECONDS = 0.5
+DEFAULT_CONTROL_WAIT_TIMEOUT_SECONDS = 60.0
+MAX_CONTROL_WAIT_TIMEOUT_SECONDS = 30.0 * 60.0
+
+_EVENTS_TOKEN_UNSEEN = object()
+_EVENTS_TOKEN_UNAVAILABLE = object()
+
+
+@dataclass(frozen=True)
+class _ReceiptWait:
+    """Outcome of one bounded wait for a queued command's receipt."""
+
+    observed: bool
+    terminal_action: str | None
+    satisfied: bool
+    timeout_seconds: float
+    elapsed_seconds: float
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "observed": self.observed,
+            "terminal_action": self.terminal_action,
+            "timeout_seconds": self.timeout_seconds,
+            "elapsed_seconds": round(self.elapsed_seconds, 3),
+        }
+
+
+def _events_change_token(events_path: Path) -> object:
+    """Return cheap append-log metadata used to skip unchanged full reads."""
+    try:
+        stat_result = events_path.stat()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        # The probe is only an optimization; an unreadable stat must still lead
+        # to a full read attempt rather than a silent "nothing changed".
+        return _EVENTS_TOKEN_UNAVAILABLE
+    return (
+        stat_result.st_dev,
+        stat_result.st_ino,
+        stat_result.st_size,
+        stat_result.st_mtime_ns,
+    )
+
+
+def _read_run_control_records(events_path: Path) -> list[dict[str, Any]]:
+    """Read the run-control records of an event log, tolerating a torn tail."""
+    try:
+        text = events_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    records: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            # A line being appended right now is read whole on the next poll.
+            continue
+        if (
+            isinstance(record, dict)
+            and record.get("name") == events.RUN_CONTROL_EVENT
+        ):
+            records.append(record)
+    return records
+
+
+def _scan_for_receipt(
+    events_path: Path,
+    *,
+    command_id: str,
+    terminal_actions: tuple[str, ...],
+) -> tuple[bool, str | None]:
+    observed = False
+    terminal_action: str | None = None
+    for record in _read_run_control_records(events_path):
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        action = payload.get("action")
+        if not observed:
+            if (
+                action == events.RUN_CONTROL_ACTION_COMMAND_OBSERVED
+                and payload.get("command_id") == command_id
+            ):
+                observed = True
+            continue
+        # A terminal action carries no command ID, so only one recorded after
+        # this command's receipt can be its outcome.
+        if action in terminal_actions:
+            terminal_action = action
+            break
+    return observed, terminal_action
+
+
+def _wait_for_receipt(
+    plan_dir: Path,
+    *,
+    state_dir: str | None,
+    command_id: str,
+    timeout: float,
+    terminal_actions: tuple[str, ...],
+) -> _ReceiptWait:
+    """Tail ``events.jsonl`` until the command is observed, or the deadline.
+
+    ``terminal_actions`` extends the wait past delivery: for an abort the
+    supervisor wants the real outcome, so the wait continues until the runner
+    records one of them after the receipt.
+    """
+    started = time.monotonic()
+    deadline = started + timeout
+    events_path = (
+        state.plan_state_dir(plan_dir, state_dir) / events.EVENTS_FILE_NAME
+    )
+    last_read_token: object = _EVENTS_TOKEN_UNSEEN
+    observed = False
+    terminal_action: str | None = None
+    while True:
+        current_token = _events_change_token(events_path)
+        if (
+            last_read_token is _EVENTS_TOKEN_UNSEEN
+            or current_token is _EVENTS_TOKEN_UNAVAILABLE
+            or current_token != last_read_token
+        ):
+            observed, terminal_action = _scan_for_receipt(
+                events_path,
+                command_id=command_id,
+                terminal_actions=terminal_actions,
+            )
+            last_read_token = current_token
+            if observed and (not terminal_actions or terminal_action is not None):
+                return _ReceiptWait(
+                    observed=True,
+                    terminal_action=terminal_action,
+                    satisfied=True,
+                    timeout_seconds=timeout,
+                    elapsed_seconds=time.monotonic() - started,
+                )
+
+        now = time.monotonic()
+        if now >= deadline:
+            return _ReceiptWait(
+                observed=observed,
+                terminal_action=terminal_action,
+                satisfied=False,
+                timeout_seconds=timeout,
+                elapsed_seconds=now - started,
+            )
+        time.sleep(min(CONTROL_WAIT_POLL_INTERVAL_SECONDS, deadline - now))
+
+
+def _validated_wait_timeout(
+    args: argparse.Namespace,
+    *,
+    command_name: str,
+    text_label: str,
+) -> float | None:
+    """Resolve ``--timeout``, reporting a rejection in place.
+
+    Returns ``None`` when the value is unusable, which the caller turns into
+    exit 1 before anything is enqueued.
+    """
+    requested = getattr(args, "wait_timeout", None)
+    if not getattr(args, "wait", False):
+        if requested is not None:
+            cli_common.print_error(
+                args,
+                command_name=command_name,
+                text_label=text_label,
+                reason="invalid-timeout",
+                error="--timeout requires --wait",
+            )
+            return None
+        return DEFAULT_CONTROL_WAIT_TIMEOUT_SECONDS
+    try:
+        timeout = (
+            DEFAULT_CONTROL_WAIT_TIMEOUT_SECONDS
+            if requested is None
+            else float(requested)
+        )
+    except (TypeError, ValueError):
+        timeout = math.nan
+    if (
+        not math.isfinite(timeout)
+        or timeout < 0
+        or timeout > MAX_CONTROL_WAIT_TIMEOUT_SECONDS
+    ):
+        cli_common.print_error(
+            args,
+            command_name=command_name,
+            text_label=text_label,
+            reason="invalid-timeout",
+            error=(
+                "--timeout must be between 0 and "
+                f"{int(MAX_CONTROL_WAIT_TIMEOUT_SECONDS)} seconds"
+            ),
+        )
+        return None
+    return timeout
+
+
+def _report_wait_timeout(
+    args: argparse.Namespace,
+    *,
+    command_name: str,
+    text_label: str,
+    command_id: str,
+    queue_path: Path,
+    signal: control_signal.NotifyResult,
+    run_active: bool,
+    wait: _ReceiptWait,
+) -> None:
+    """Explain a receipt wait that ran out, distinguishing why.
+
+    The command is durable either way, so the failure is about observation: no
+    runner was listening, a listening runner did not drain in time, or it
+    drained but the abort it started has not resolved yet.
+    """
+    details = {
+        "queue_path": str(queue_path),
+        "command_id": command_id,
+        "enqueued": True,
+        "signal": signal.to_payload(),
+        "wait": wait.to_payload(),
+    }
+    window = f"{wait.timeout_seconds:g}s"
+    if not wait.observed and (
+        not run_active or signal.reason == control_signal.REASON_NO_RUNNER
+    ):
+        cli_common.print_error(
+            args,
+            command_name=command_name,
+            text_label=text_label,
+            reason="no-runner",
+            error=(
+                f"no runner is listening, so command {command_id} was not "
+                f"observed within {window}"
+            ),
+            details=details,
+            hint="the command stays queued for the next runner that drains it",
+        )
+        return
+    if not wait.observed:
+        cli_common.print_error(
+            args,
+            command_name=command_name,
+            text_label=text_label,
+            reason="receipt-timeout",
+            error=(
+                f"the runner holding the plan lock did not drain command "
+                f"{command_id} within {window}"
+            ),
+            details=details,
+            hint="the command stays queued; retry with a longer --timeout",
+        )
+        return
+    cli_common.print_error(
+        args,
+        command_name=command_name,
+        text_label=text_label,
+        reason="abort-timeout",
+        error=(
+            f"the runner observed command {command_id} but recorded no abort "
+            f"outcome within {window}"
+        ),
+        details=details,
+        hint="the grace window may outlast --timeout; the abort is still armed",
+    )
 
 
 def _run_active(status: dict[str, Any]) -> bool:
     lock = status["lock"]
     return bool(lock["present"] and lock["active"])
+
+
+def _turn_active(status: dict[str, Any]) -> bool:
+    return status.get("active_turn") is not None
 
 
 def _pending_after_current(status: dict[str, Any]) -> int:
@@ -89,6 +388,9 @@ def _enqueue_and_report(
     clear_harness_model: bool = False,
     effort: str | None = None,
     clear_effort: bool = False,
+    grace_seconds: int | None = None,
+    reason: str | None = None,
+    terminal_actions: tuple[str, ...] = (),
     report: Callable[
         [dict[str, Any], control_queue.ControlCommand],
         tuple[dict[str, Any], str],
@@ -99,7 +401,18 @@ def _enqueue_and_report(
     ``report`` receives the pre-enqueue ``status_payload`` and the queued
     command and returns the subcommand-specific payload fields plus the one-line
     human summary.
+
+    Under ``--wait`` the report is delayed until the runner's receipt lands;
+    ``terminal_actions`` names the run-control actions whose arrival, rather
+    than mere delivery, the caller is actually waiting for.
     """
+    wait_timeout = _validated_wait_timeout(
+        args,
+        command_name=command_name,
+        text_label=text_label,
+    )
+    if wait_timeout is None:
+        return 1
     context = cli_common.resolve_plan_context(
         args,
         command_name=command_name,
@@ -125,6 +438,8 @@ def _enqueue_and_report(
             clear_harness_model=clear_harness_model,
             effort=effort,
             clear_effort=clear_effort,
+            grace_seconds=grace_seconds,
+            reason=reason,
         )
     except control_queue.ControlQueueError as error:
         cli_common.print_error(
@@ -151,6 +466,35 @@ def _enqueue_and_report(
         )
         return 1
 
+    # Best-effort wakeup after the durable append: the runner would drain
+    # within its poll interval anyway, so the reported outcome is latency
+    # information, never a delivery guarantee for the command itself.
+    notified = control_signal.notify_runner(
+        snapshot.plan_dir, state_dir=args.state_dir
+    )
+
+    wait: _ReceiptWait | None = None
+    if getattr(args, "wait", False):
+        wait = _wait_for_receipt(
+            snapshot.plan_dir,
+            state_dir=args.state_dir,
+            command_id=queued.id,
+            timeout=wait_timeout,
+            terminal_actions=terminal_actions,
+        )
+        if not wait.satisfied:
+            _report_wait_timeout(
+                args,
+                command_name=command_name,
+                text_label=text_label,
+                command_id=queued.id,
+                queue_path=queue_path,
+                signal=notified,
+                run_active=_run_active(status),
+                wait=wait,
+            )
+            return 1
+
     fields, summary = report(status, queued)
     payload = responses.success_payload(
         command_name,
@@ -158,8 +502,16 @@ def _enqueue_and_report(
         queue_path=str(queue_path),
         enqueued=True,
         command_id=queued.id,
+        signal=notified.to_payload(),
         **fields,
     )
+    if wait is not None:
+        payload["wait"] = wait.to_payload()
+        summary = (
+            f"{summary}; observed by the runner"
+            if wait.terminal_action is None
+            else f"{summary}; observed by the runner, {wait.terminal_action}"
+        )
     if args.json:
         responses.print_json(payload)
     else:
@@ -203,6 +555,88 @@ def control_stop_after_current_from_args(args: argparse.Namespace) -> int:
         command_name=COMMAND_STOP_AFTER_CURRENT,
         text_label="control stop-after-current",
         queue_command=control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
+        report=report,
+    )
+
+
+def control_abort_from_args(args: argparse.Namespace) -> int:
+    """Abort the in-flight turn after a bounded grace window."""
+    grace_seconds = getattr(args, "grace", None)
+    reason = getattr(args, "reason", None)
+    if grace_seconds is None:
+        grace_seconds = control_queue.DEFAULT_ABORT_GRACE_SECONDS
+
+    # Defense in depth: `control_queue.append_command` rejects the same values,
+    # but a direct handler caller gets the stable reason instead of the generic
+    # `invalid-command` the enqueue failure path reports.
+    if (
+        isinstance(grace_seconds, bool)
+        or not isinstance(grace_seconds, int)
+        or not (
+            control_queue.MIN_ABORT_GRACE_SECONDS
+            <= grace_seconds
+            <= control_queue.MAX_ABORT_GRACE_SECONDS
+        )
+    ):
+        cli_common.print_error(
+            args,
+            command_name=COMMAND_ABORT,
+            text_label="control abort",
+            reason=control_queue.REJECT_INVALID_GRACE,
+            error=(
+                "--grace must be a whole number of seconds between "
+                f"{control_queue.MIN_ABORT_GRACE_SECONDS} and "
+                f"{control_queue.MAX_ABORT_GRACE_SECONDS}"
+            ),
+            details={"grace_seconds": repr(grace_seconds)},
+        )
+        return 1
+    if reason is not None and (not isinstance(reason, str) or reason == ""):
+        cli_common.print_error(
+            args,
+            command_name=COMMAND_ABORT,
+            text_label="control abort",
+            reason=control_queue.REJECT_INVALID_REASON,
+            error="--reason must be non-empty text when provided",
+            details={"reason": repr(reason)},
+        )
+        return 1
+
+    def report(
+        status: dict[str, Any], queued: control_queue.ControlCommand
+    ) -> tuple[dict[str, Any], str]:
+        run_active = _run_active(status)
+        turn_active = run_active and _turn_active(status)
+        if not run_active:
+            note = NO_ACTIVE_RUN_NOTE
+        elif turn_active:
+            note = ABORT_WILL_APPLY_NOTE
+        else:
+            note = ABORT_DEGRADES_NOTE
+        fields = {
+            "run_active": run_active,
+            "turn_active": turn_active,
+            "grace_seconds": queued.grace_seconds,
+            "reason": queued.reason,
+            "note": note,
+        }
+        summary = (
+            f"Queued abort for {status['plan_dir']} "
+            f"(command {queued.id}); {note}"
+        )
+        return fields, summary
+
+    return _enqueue_and_report(
+        args,
+        command_name=COMMAND_ABORT,
+        text_label="control abort",
+        queue_command=control_queue.COMMAND_REQUEST_ABORT_TURN,
+        grace_seconds=grace_seconds,
+        reason=reason,
+        terminal_actions=(
+            events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED,
+            events.RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER,
+        ),
         report=report,
     )
 

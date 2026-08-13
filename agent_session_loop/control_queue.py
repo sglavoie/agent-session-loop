@@ -36,17 +36,27 @@ CONTROL_QUEUE_FILE_NAME = "control-queue.jsonl"
 
 CommandName = Literal[
     "request-stop-after-current",
+    "request-abort-turn",
     "select-future-harness",
     "set-implementation-model",
 ]
 COMMAND_REQUEST_STOP_AFTER_CURRENT: CommandName = "request-stop-after-current"
+COMMAND_REQUEST_ABORT_TURN: CommandName = "request-abort-turn"
 COMMAND_SELECT_FUTURE_HARNESS: CommandName = "select-future-harness"
 COMMAND_SET_IMPLEMENTATION_MODEL: CommandName = "set-implementation-model"
 COMMAND_NAMES: tuple[CommandName, ...] = (
     COMMAND_REQUEST_STOP_AFTER_CURRENT,
+    COMMAND_REQUEST_ABORT_TURN,
     COMMAND_SELECT_FUTURE_HARNESS,
     COMMAND_SET_IMPLEMENTATION_MODEL,
 )
+
+# Grace window an abort gives the worker before the turn is killed. Bounded on
+# both ends: a non-positive window is a kill with no chance to wind down, and a
+# window longer than a day cannot express "abort" in any useful sense.
+DEFAULT_ABORT_GRACE_SECONDS = 120
+MIN_ABORT_GRACE_SECONDS = 1
+MAX_ABORT_GRACE_SECONDS = 86_400
 
 # Reject reasons surfaced verbatim in the drain result so JSON consumers
 # can branch on stable strings.
@@ -63,6 +73,8 @@ REJECT_INVALID_CLEAR_OPERATION = "invalid-clear-operation"
 REJECT_CONFLICTING_MODEL_OPERATION = "conflicting-model-operation"
 REJECT_CONFLICTING_EFFORT_OPERATION = "conflicting-effort-operation"
 REJECT_MISSING_MODEL_CONTROL_OPERATION = "missing-model-control-operation"
+REJECT_INVALID_GRACE = "invalid-grace"
+REJECT_INVALID_REASON = "invalid-reason"
 
 
 class ControlQueueError(Exception):
@@ -84,6 +96,8 @@ class ControlCommand:
     effort_operation: run_control.OverrideOperation = field(
         default_factory=run_control.OverrideOperation.unchanged
     )
+    grace_seconds: int | None = None
+    reason: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -94,6 +108,8 @@ class ControlCommand:
             "line_number": self.line_number,
             "model_operation": self.model_operation.to_payload(),
             "effort_operation": self.effort_operation.to_payload(),
+            "grace_seconds": self.grace_seconds,
+            "reason": self.reason,
         }
 
 
@@ -197,6 +213,32 @@ def _model_control_operations(
     return model, effort
 
 
+def _abort_fields(payload: dict[str, Any]) -> tuple[int, str | None]:
+    """Validate an abort command's optional grace/reason fields.
+
+    An omitted grace resolves to :data:`DEFAULT_ABORT_GRACE_SECONDS` so every
+    accepted abort carries a usable window. An out-of-range grace is rejected
+    rather than clamped: silently shortening a supervisor's stated window would
+    kill a turn earlier than asked.
+    """
+    raw_grace = payload.get("grace_seconds")
+    if raw_grace is None:
+        grace = DEFAULT_ABORT_GRACE_SECONDS
+    elif isinstance(raw_grace, bool) or not isinstance(raw_grace, int):
+        raise ValueError(REJECT_INVALID_GRACE)
+    elif not MIN_ABORT_GRACE_SECONDS <= raw_grace <= MAX_ABORT_GRACE_SECONDS:
+        raise ValueError(REJECT_INVALID_GRACE)
+    else:
+        grace = raw_grace
+
+    raw_reason = payload.get("reason")
+    if raw_reason is None:
+        return grace, None
+    if not isinstance(raw_reason, str) or raw_reason == "":
+        raise ValueError(REJECT_INVALID_REASON)
+    return grace, raw_reason
+
+
 def append_command(
     plan_dir: str | Path,
     command: CommandName,
@@ -207,6 +249,8 @@ def append_command(
     clear_harness_model: bool = False,
     effort: str | None = None,
     clear_effort: bool = False,
+    grace_seconds: int | None = None,
+    reason: str | None = None,
     command_id: str | None = None,
     created_at: str | None = None,
 ) -> ControlCommand:
@@ -225,6 +269,9 @@ def append_command(
     model_operation = run_control.OverrideOperation.unchanged()
     effort_operation = run_control.OverrideOperation.unchanged()
     model_control_record: dict[str, Any] = {}
+    abort_record: dict[str, Any] = {}
+    resolved_grace: int | None = None
+    resolved_reason: str | None = None
     if command == COMMAND_SELECT_FUTURE_HARNESS:
         if harness is None or harness == "":
             raise ControlQueueError(
@@ -257,6 +304,19 @@ def append_command(
             )
         except ValueError as error:
             raise ControlQueueError(str(error)) from error
+    elif command == COMMAND_REQUEST_ABORT_TURN:
+        harness = None
+        if grace_seconds is not None:
+            abort_record["grace_seconds"] = grace_seconds
+        if reason is not None:
+            abort_record["reason"] = reason
+        try:
+            resolved_grace, resolved_reason = _abort_fields(abort_record)
+        except ValueError as error:
+            raise ControlQueueError(str(error)) from error
+        # The resolved grace is written back so the queue line is
+        # self-describing for every later reader.
+        abort_record["grace_seconds"] = resolved_grace
     else:
         # Other commands ignore harness; normalize to None for parity.
         harness = None
@@ -267,6 +327,7 @@ def append_command(
         "harness": harness,
         "created_at": created_at or _utc_now_iso(),
         **model_control_record,
+        **abort_record,
     }
     line = json.dumps(record, sort_keys=True) + "\n"
 
@@ -291,6 +352,8 @@ def append_command(
         line_number=0,
         model_operation=model_operation,
         effort_operation=effort_operation,
+        grace_seconds=resolved_grace,
+        reason=resolved_reason,
     )
 
 
@@ -405,6 +468,8 @@ def drain_queue(
         harness_value = payload.get("harness")
         model_operation = run_control.OverrideOperation.unchanged()
         effort_operation = run_control.OverrideOperation.unchanged()
+        grace_value: int | None = None
+        reason_value: str | None = None
         if command_value == COMMAND_SELECT_FUTURE_HARNESS:
             if harness_value is None or harness_value == "":
                 rejected.append(
@@ -459,6 +524,19 @@ def drain_queue(
                     )
                 )
                 continue
+        elif command_value == COMMAND_REQUEST_ABORT_TURN:
+            harness_value = None
+            try:
+                grace_value, reason_value = _abort_fields(payload)
+            except ValueError as error:
+                rejected.append(
+                    RejectedCommand(
+                        line_number=line_number,
+                        reason=str(error),
+                        raw=raw_line,
+                    )
+                )
+                continue
         else:
             harness_value = None
 
@@ -475,6 +553,8 @@ def drain_queue(
                 line_number=line_number,
                 model_operation=model_operation,
                 effort_operation=effort_operation,
+                grace_seconds=grace_value,
+                reason=reason_value,
             )
         )
         seen.add(cmd_id)

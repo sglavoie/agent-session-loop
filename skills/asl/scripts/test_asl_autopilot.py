@@ -650,6 +650,39 @@ class RunAutopilotPauseReplyTest(unittest.TestCase):
         self.assertNotIn("questions_error", result)
         self.assertNotIn("review", result)
 
+    def test_aborted_run_is_terminal_and_skips_question_context(self) -> None:
+        # An `asl control abort` stop takes the same terminal pass-through: it is
+        # a clean early stop, not a pause, so nothing fetches questions or a
+        # review verdict, and `stop_kind` survives to the caller.
+        def aborted_supervisor(parsed):
+            return {
+                "ok": True,
+                "stage": autopilot.RUN_STAGE,
+                "reason": "stopped",
+                "stop_kind": autopilot.STOP_KIND_ABORT,
+                "chunks": 1,
+                "completed": 2,
+                "pending": 5,
+            }
+
+        def fail_questioner(parsed):  # pragma: no cover - must not run
+            raise AssertionError("asl questions must not be fetched for an abort")
+
+        def fail_review_reader(parsed):  # pragma: no cover - must not run
+            raise AssertionError("no review verdict exists for an early stop")
+
+        result = autopilot.run_autopilot(
+            self._args(command="asl run /tmp/plan --review-harness codex"),
+            supervisor=aborted_supervisor,
+            questioner=fail_questioner,
+            review_reader=fail_review_reader,
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "stopped")
+        self.assertEqual(result["stop_kind"], autopilot.STOP_KIND_ABORT)
+        self.assertNotIn("questions", result)
+        self.assertNotIn("review", result)
+
     def test_reply_stdin_streams_reply_into_supervisor(self) -> None:
         captured = {}
 
@@ -826,6 +859,7 @@ def _finished_run_status(
     finished=True,
     paused=False,
     run_started_at=RUN_STARTED_AT,
+    last_action=None,
 ):
     """Unlocked status whose persisted runner_state describes a finished run."""
     status = _status_payload(pending)
@@ -841,7 +875,24 @@ def _finished_run_status(
         "active_turn": None,
         "stale_unfinished": not finished,
     }
+    if last_action is not None:
+        status["runner_state"]["control"] = _control_block(last_action)
     return status
+
+
+def _control_block(last_action):
+    """The `control` projection a runner persists after a run-control action."""
+    return {
+        "stop_after_current": False,
+        "tail_enabled": False,
+        "abort_turn_requested": False,
+        "abort_grace_seconds": None,
+        "abort_reason": None,
+        "abort_deadline": None,
+        "next_harness": None,
+        "consumed": True,
+        "last_action": last_action,
+    }
 
 
 def _leftover_state_attach_status(
@@ -1730,8 +1781,60 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         self.assertEqual(result["chunks"], 1)
         self.assertEqual(result["completed"], 1)
         self.assertEqual(result["pending"], 2)
+        self.assertEqual(result["stop_kind"], autopilot.STOP_KIND_AFTER_CURRENT)
         # No further chunk relaunched.
         self.assertEqual(run.chunks, [1])
+
+    def test_honored_abort_stops_cleanly_as_an_abort(self) -> None:
+        # `asl control abort` ends the turn in flight and reverts its session to
+        # pending, so the run exits with the same clean `reason: "stopped"` but
+        # *no* session completed (pending stays 3). That is a clean early stop,
+        # not an anomaly: same `ok: true`, no relaunch, and `stop_kind` names the
+        # abort so the zero progress is not read as a stall.
+        status = _StatusScript([_status_payload(3), _status_payload(3)])
+        run = _RunScript([
+            {
+                "ok": True,
+                "paused": False,
+                "reason": "stopped",
+                "control": _control_block("abort-turn-honored"),
+            }
+        ])
+        result = self._supervise(status, run)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "stopped")
+        self.assertEqual(result["stop_kind"], autopilot.STOP_KIND_ABORT)
+        self.assertEqual(result["chunks"], 1)
+        self.assertEqual(result["completed"], 0)
+        self.assertEqual(result["pending"], 3)
+        self.assertEqual(run.chunks, [1])
+
+    def test_abort_satisfied_by_the_worker_is_also_an_abort_stop(self) -> None:
+        # The worker wound the turn down inside the grace window, so nothing was
+        # killed — but the request that ended the run was still the abort.
+        status = _StatusScript([_status_payload(3), _status_payload(3)])
+        run = _RunScript([
+            {
+                "ok": True,
+                "paused": False,
+                "reason": "stopped",
+                "control": _control_block("abort-turn-satisfied-by-worker"),
+            }
+        ])
+        result = self._supervise(status, run)
+        self.assertEqual(result["reason"], "stopped")
+        self.assertEqual(result["stop_kind"], autopilot.STOP_KIND_ABORT)
+
+    def test_stop_without_a_control_block_reads_as_a_boundary_stop(self) -> None:
+        # An older runner (or a torn payload) exposes no control block. The safe
+        # reading is the session-boundary stop, the outcome that leaves finished
+        # work behind, so nothing claims a session was reverted.
+        status = _StatusScript([_status_payload(3), _status_payload(2)])
+        run = _RunScript([
+            {"ok": True, "paused": False, "reason": "stopped", "control": None}
+        ])
+        result = self._supervise(status, run)
+        self.assertEqual(result["stop_kind"], autopilot.STOP_KIND_AFTER_CURRENT)
 
     def test_stop_reported_with_nothing_pending_completes(self) -> None:
         # A stop that lands exactly as pending reaches 0 must not pre-empt the
@@ -1797,6 +1900,25 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # One session finished while attached (pending 3 -> 2).
         self.assertEqual(result["completed"], 1)
         self.assertEqual(result["pending"], 2)
+        self.assertEqual(result["stop_kind"], autopilot.STOP_KIND_AFTER_CURRENT)
+
+    def test_attached_run_that_was_aborted_is_terminal(self) -> None:
+        # Same attach path, but the foreign run was ended by `asl control abort`:
+        # the persisted control block's terminal action is what distinguishes it,
+        # and the reverted session keeps pending at 3.
+        status = _StatusScript([
+            _attached_run_status(3),
+            _finished_run_status(
+                3, reason="stopped", last_action="abort-turn-honored"
+            ),
+        ])
+        result = self._supervise(status, _never_run)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "stopped")
+        self.assertEqual(result["stop_kind"], autopilot.STOP_KIND_ABORT)
+        self.assertEqual(result["chunks"], 0)
+        self.assertEqual(result["completed"], 0)
+        self.assertEqual(result["pending"], 3)
 
     def test_attached_stop_is_terminal_before_any_run_id_is_observable(self) -> None:
         # The runner takes the plan lock before it persists the state carrying
@@ -6970,6 +7092,39 @@ class HumanSummaryWorkerHungTest(unittest.TestCase):
         self.assertIn("idle unknown", summary)
         self.assertNotIn("deepest descendant", summary)
 
+    def test_abort_summary_names_the_reverted_session(self) -> None:
+        # An aborted run reports zero completed sessions on purpose; the line has
+        # to say the session went back to pending or the counts read as a stall.
+        summary = autopilot._human_summary({
+            "ok": True,
+            "reason": "stopped",
+            "stop_kind": autopilot.STOP_KIND_ABORT,
+            "completed": 2,
+            "pending": 3,
+        })
+        self.assertTrue(summary.startswith("ok: stopped - "), summary)
+        self.assertIn("supervisor abort ended the in-flight turn", summary)
+        self.assertIn("returned its session to pending", summary)
+        self.assertIn("completed 2 session(s), 3 still pending", summary)
+        self.assertIn("re-run the same command to continue", summary)
+
+    def test_boundary_stop_summary_is_unchanged_by_the_abort_branch(self) -> None:
+        for stop_kind in (autopilot.STOP_KIND_AFTER_CURRENT, None):
+            with self.subTest(stop_kind=stop_kind):
+                result = {
+                    "ok": True,
+                    "reason": "stopped",
+                    "completed": 2,
+                    "pending": 3,
+                }
+                if stop_kind is not None:
+                    result["stop_kind"] = stop_kind
+                summary = autopilot._human_summary(result)
+                self.assertIn(
+                    "graceful stop after the current session", summary
+                )
+                self.assertNotIn("abort", summary)
+
 
 _FAKE_ASL = textwrap.dedent(
     '''\
@@ -7016,12 +7171,26 @@ _FAKE_ASL = textwrap.dedent(
         if stop_after_current:
             took = min(took, 1)
             state["stop_after_current"] = False
+        # A queued `abort` request kills the turn in flight and reverts its
+        # session to pending, so the chunk completes nothing at all and exits
+        # `stopped` with the terminal abort action in its control block.
+        abort_turn = bool(state.get("abort_turn"))
+        if abort_turn:
+            took = 0
+            state["abort_turn"] = False
         state["pending"] -= took
         state["complete"] += took
         state["chunks_run"] = state.get("chunks_run", 0) + 1
         with open(state_path, "w") as fh:
             json.dump(state, fh)
-        if state["pending"] == 0:
+        if abort_turn:
+            payload = {
+                "ok": True,
+                "paused": False,
+                "reason": "stopped",
+                "control": {"last_action": "abort-turn-honored"},
+            }
+        elif state["pending"] == 0:
             payload = {"ok": True, "paused": False, "reason": "all-complete"}
         elif stop_after_current:
             payload = {"ok": True, "paused": False, "reason": "stopped"}
@@ -7145,6 +7314,27 @@ class SuperviseRunFakeAslTest(unittest.TestCase):
         state = self._read_state()
         self.assertEqual(state["complete"], 1)
         self.assertEqual(state["chunks_run"], 1)
+
+        second = self._supervise()
+        self.assertTrue(second["ok"], second)
+        self.assertEqual(second["reason"], "complete")
+        self.assertEqual(self._read_state()["pending"], 0)
+
+    def test_honored_abort_is_a_resumable_checkpoint(self) -> None:
+        # End-to-end: a queued `asl control abort` makes the child end its turn
+        # without completing anything and exit ok with `reason: "stopped"`. Zero
+        # progress is the expected shape of an abort, so the supervisor must stop
+        # there rather than relaunching, and re-running the same command picks
+        # every session back up.
+        self._write_state(pending=4, complete=0, chunks_run=0, abort_turn=True)
+        first = self._supervise()
+        self.assertTrue(first["ok"], first)
+        self.assertEqual(first["reason"], "stopped")
+        self.assertEqual(first["stop_kind"], autopilot.STOP_KIND_ABORT)
+        self.assertEqual(first["chunks"], 1)
+        self.assertEqual(first["completed"], 0)
+        self.assertEqual(first["pending"], 4)
+        self.assertEqual(self._read_state()["chunks_run"], 1)
 
         second = self._supervise()
         self.assertTrue(second["ok"], second)

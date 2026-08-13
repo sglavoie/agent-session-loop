@@ -226,13 +226,21 @@ runner-owned mutation rules. It remains pending until the worker runs
 cadence but affect only the next implementation invocation in the current
 runner process; they never modify the active subprocess or a review turn.
 
+Guidance is advice, never enforcement. Telling a worker to make no further
+changes and exit does **not** stop the session: the record sits unread until the
+worker chooses to run `asl inbox read`, and a worker that ignores it keeps
+working. Only `asl control` stops a run — `stop-after-current` at the next
+session boundary, `abort` inside the turn now in flight. Never report a run as
+stopped because guidance asking it to stop was sent.
+
 #### Request a graceful stop mid-run
 
 To stop a supervised run early without waiting for it to finish, request the
-graceful stop **out of band**:
+stop **out of band**:
 
 ```text
-asl control stop-after-current <plan-dir> [--state-dir DIR] --json
+asl control stop-after-current <plan-dir> [--state-dir DIR] [--wait] [--timeout SECONDS] --json
+asl control abort <plan-dir> [--grace SECONDS] [--reason TEXT] [--state-dir DIR] [--wait] [--timeout SECONDS] --json
 ```
 
 Pass the same `plan-dir` and `--state-dir` the helper was given. Because the
@@ -241,8 +249,8 @@ the helper in the background — whenever a mid-run stop may be needed. The requ
 is queued durably, so it is also safe to send when no run is active yet: the next
 runner to drain the queue applies it.
 
-The stop takes effect **after the current session finishes** and prevents
-everything the run would start next — remaining sessions, the generated
+`stop-after-current` takes effect **after the current session finishes** and
+prevents everything the run would start next — remaining sessions, the generated
 `--review-harness` review, and review repair children — surfacing as
 `reason: stopped` with `ok: true` plus `completed` and `pending` counts — an
 intentional clean early stop, not a pause and not a failure. This holds whether
@@ -251,6 +259,61 @@ in the attach case it reads the stop back from the finished run's persisted
 state, so it never relaunches over an honored request. Do **not** auto-resume
 it; re-running the same command later continues from the remaining sessions, or
 runs the pending review when every session is already complete. See Step 4.
+
+`abort` is the enforcing mechanism when the session running *right now* must not
+finish — a worker heading somewhere wrong, or a workspace that has to be
+rebound. The runner delivers the abort to the worker as guidance naming
+`--reason`, gives it `--grace` seconds (default 120) to wind down, and kills the
+harness process group at the deadline if it has not. **An abort has three
+outcomes and only one of them stops the run**, so read the run's own terminal
+state before reporting any of them:
+
+- **The turn was killed** (the worker did not wind down in time). The session
+  goes back to `pending` with a Handoff note saying it holds no completion, and
+  the run exits `reason: stopped` with `stop_kind: abort` — a clean early stop,
+  never a pause and never a failure. Because that session is reverted rather
+  than completed, the progress counts show one fewer completed session than the
+  worker appeared to have done.
+- **The worker wound down and paused itself** inside the grace window. Nothing
+  was killed, so the worker's own pause owns the outcome: the run comes back
+  `paused` with the worker's pause reason and `ok: false`, *not* `reason:
+  stopped`. Handle it as an ordinary pause (Step 3) and never report it as a
+  stop.
+- **The worker completed its session** inside the grace window. Nothing was
+  killed and nothing was reverted: the session stays `complete` and **the run
+  continues to the next session**. The abort is spent, so re-issue
+  `asl control abort` or `stop-after-current` if the run still must stop, and
+  never report the run as stopped on the strength of the abort alone.
+
+An abort that arrives between turns has nothing to kill and degrades to
+`stop-after-current`.
+
+Use `--wait` whenever the stop actually matters. Without it the command only
+proves the request was appended to the durable queue — it exits 0 whether or not
+any runner ever saw it, which is exactly how a stop can look sent and still be
+ignored. With `--wait` the command exits 0 only after the runner records its
+receipt, and `asl control abort --wait` waits further, for the
+`abort-turn-honored` or `abort-turn-satisfied-by-worker` outcome. Give
+`--timeout` a value above the `--grace` you requested, since the default wait is
+60 seconds and the default grace is 120. Only `abort-turn-honored` proves the
+run is stopping; `wait.terminal_action: abort-turn-satisfied-by-worker` says
+just that the turn ended by itself, which is the paused or still-running outcome
+above — check the run's terminal state before reporting a stop.
+
+A `--wait` that times out is a **failure to report, never an assumed success**.
+Report the reason verbatim and what it means, and do not claim the run stopped:
+
+- `no-runner` — nothing is listening. The command is still queued and applies
+  whenever a runner next drains it.
+- `receipt-timeout` — a runner holds the lock but did not acknowledge in time.
+  The command is still queued; the runner may be mid-turn or wedged.
+- `abort-timeout` — the runner acknowledged the abort but its outcome has not
+  been recorded yet. The abort is armed and the grace window may simply be
+  longer than the wait.
+
+In every case the request remains durably queued — the timeout is about the
+receipt, not the append — so re-sending is rarely the answer. Report the state
+and hand the decision to the user.
 
 ### Step 2: Handle notices, live questions, and pauses
 
@@ -461,13 +524,25 @@ M sessions; K pending") and do **not** auto-resume, reply, or run `asl questions
 re-running the same command later continues from the remaining sessions.
 
 The same holds for `reason: stopped`, which the helper returns when the runner
-honored an out-of-band `asl control stop-after-current` request (see *Request a
-graceful stop mid-run* under Step 1). It too carries `ok: true` with `completed`
-and `pending` counts and is an **intentional, clean early stop** — never report
-it as a pause,
+honored an out-of-band `asl control` request (see *Request a graceful stop
+mid-run* under Step 1). It too carries `ok: true` with `completed` and `pending`
+counts and is an **intentional, clean early stop** — never report it as a pause,
 a failure, or `blocked`, and never auto-resume it. Report the progress and say
 that re-running the same command continues from the remaining sessions, or runs
 the pending review when the stop landed after the last session.
+
+`stop_kind` names which request produced that stop. `stop-after-current` means
+the run finished its session and stopped at the boundary. `abort` means
+`asl control abort` ended the turn that was in flight: the aborted session was
+reverted to `pending` with a Handoff note saying it holds no completion, so it
+is *not* counted in `completed` and its work is not on disk as a finished
+session. Say so when reporting an abort — an operator who reads only the counts
+will otherwise assume the aborted session landed. It is still a clean early
+stop: same `ok: true`, still never a pause or a failure, still never
+auto-resumed. An abort the worker satisfied inside its grace window never
+reaches this verdict — it comes back as that worker's pause, or as a run that
+kept going — so never infer `stopped` or a reverted session from having sent an
+abort.
 
 #### Report the supervisor audit
 

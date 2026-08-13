@@ -74,6 +74,25 @@ HELPER_DESCRIPTION = (
 # pause or a failure.
 RUN_STAGE = "run"
 
+# `stopped` covers both out-of-band control requests, so the result carries a
+# `stop_kind` naming which one ended the run. `abort` (`asl control abort`)
+# killed the turn that was in flight and reverted its session to `pending`, so
+# its work is *not* in `completed`; `stop-after-current` let the session finish
+# and stopped at the boundary. Neither is an anomaly: both stay `ok: true` and
+# are reported exactly like a spent `--max-sessions` budget.
+STOP_KIND_ABORT = "abort"
+STOP_KIND_AFTER_CURRENT = "stop-after-current"
+# Terminal run-control actions an abort resolves to, as recorded in the run's
+# `control.last_action`. Anything else beside `reason: "stopped"` is the
+# session-boundary stop. `abort-turn-satisfied-by-worker` is listed for
+# completeness only: a worker that ends its turn inside the grace window leaves
+# its own pause or completion in charge, so that outcome normally surfaces as a
+# pause or as a run that kept going rather than as `reason: "stopped"`.
+ABORT_STOP_ACTIONS = (
+    "abort-turn-honored",
+    "abort-turn-satisfied-by-worker",
+)
+
 # Stage tag for the safe command parser. Callers
 # key off `stage` to distinguish a parse-time failure from a later start/poll
 # failure, and off `reason` for the specific parse verdict.
@@ -2725,7 +2744,11 @@ def _attached_stop_honored(
     attached_run_id: Optional[str],
     attached_lock_created_at: Optional[str],
 ) -> bool:
-    """Did the attached run exit by honoring a ``stop-after-current`` request?
+    """Did the attached run exit by honoring an out-of-band control request?
+
+    Both `asl control stop-after-current` and `asl control abort` end the run
+    with the same clean ``reason: "stopped"``; :func:`_stop_kind` reads the
+    persisted control block afterwards to tell them apart.
 
     Only the run the supervisor was actually attached to can answer for the
     lock it just released, so the persisted state must be attributable to that
@@ -2755,6 +2778,31 @@ def _attached_stop_honored(
     )
 
 
+def _stop_kind(payload: Optional[dict]) -> str:
+    """Classify a clean ``stopped`` outcome from the payload's control block.
+
+    Both control requests exit the run `ok` with `reason: "stopped"`, so the
+    only thing separating them is the last run-control transition the runner
+    recorded. An abort resolves as `abort-turn-honored` (the grace window
+    expired and the harness process group was killed) or
+    `abort-turn-satisfied-by-worker` (the worker wound the turn down itself,
+    which leaves the ordinary pause or completion path in charge and so rarely
+    reaches a `stopped` run at all); anything else — including a plain
+    `stop-after-current-consumed` and a
+    control block that is missing, unreadable, or from an older runner — is the
+    session-boundary stop, which is the safe reading because it is the outcome
+    that leaves finished work behind.
+
+    Accepts either a runner JSON payload or the ``runner_state`` block of an
+    `asl status` payload: both expose the same `control` object.
+    """
+    control = payload.get("control") if isinstance(payload, dict) else None
+    last_action = control.get("last_action") if isinstance(control, dict) else None
+    if last_action in ABORT_STOP_ACTIONS:
+        return STOP_KIND_ABORT
+    return STOP_KIND_AFTER_CURRENT
+
+
 def _run_result(
     ok: bool,
     reason: str,
@@ -2769,9 +2817,12 @@ def _run_result(
     outbox: Optional[dict] = None,
     hang: Optional[dict] = None,
     quota_wait: Optional[dict] = None,
+    stop_kind: Optional[str] = None,
 ) -> dict:
     """Build a stable ``stage: run`` supervision result payload."""
     result: dict = {"ok": ok, "stage": RUN_STAGE, "reason": reason, "chunks": chunks}
+    if stop_kind is not None:
+        result["stop_kind"] = stop_kind
     if completed is not None:
         result["completed"] = completed
     if pending is not None:
@@ -3200,8 +3251,9 @@ def supervise_run(
       ``pending``). A budget spent exactly as pending reaches 0 falls through to
       the normal complete/review path rather than pre-empting it;
     - a runner that honored an out-of-band ``asl control stop-after-current``
-      request stops the supervision the same way with ``stopped``
-      (``ok: true``, reporting ``completed`` and ``pending``) instead of
+      or ``asl control abort`` request stops the supervision the same way with
+      ``stopped`` (``ok: true``, reporting ``completed``, ``pending``, and a
+      ``stop_kind`` of ``stop-after-current`` or ``abort``) instead of
       relaunching the remaining sessions and undoing the request. Both routes
       to the plan are covered: a chunk this supervisor launched exiting cleanly
       with ``reason: "stopped"``, and an *attached* run releasing its lock
@@ -3319,11 +3371,13 @@ def supervise_run(
     launched_pending: Optional[int] = None
     # Set when the run that last held this plan stopped cleanly with
     # `reason: "stopped"`, i.e. an out-of-band `asl control stop-after-current`
-    # was honored after the current session — either a chunk we launched
-    # (from its exit payload) or a run we attached to (from the state it
-    # persisted). Recorded here so it survives into the next iteration, where
-    # the guard below stops instead of relaunching.
+    # or `asl control abort` was honored — either a chunk we launched (from its
+    # exit payload) or a run we attached to (from the state it persisted).
+    # Recorded here so it survives into the next iteration, where the guard
+    # below stops instead of relaunching; `stop_kind` carries which of the two
+    # requests it was into the result.
     stop_requested = False
+    stop_kind: Optional[str] = None
     # Identity and pending baseline of the run currently being attached to (a
     # foreign `asl run` driving this plan). `attached_pending` doubles as the
     # "we are attached" flag: it is the pending count at the first attach poll,
@@ -3505,14 +3559,14 @@ def supervise_run(
         # state it persisted: `asl status` already exposes the finished run's
         # `run_id`/`run_started_at`/`ok`/`reason`/`run_finished_at`, and a clean
         # `stopped` from *that same run* means the runner honored an out-of-band
-        # `asl control stop-after-current`. Feeding it into `stop_requested`
-        # routes both the self-launched and attached cases through the single
-        # guard below, so we never launch a chunk that would silently undo the
-        # operator's request.
+        # `asl control` request. Feeding it into `stop_requested` routes both the
+        # self-launched and attached cases through the single guard below, so we
+        # never launch a chunk that would silently undo the operator's request.
         if attached_pending is not None:
             completed_total += max(0, attached_pending - pending)
             if _attached_stop_honored(status, attached_run_id, attached_lock_created_at):
                 stop_requested = True
+                stop_kind = _stop_kind(_runner_state(status))
             attached_pending = None
             attached_run_id = None
             attached_lock_created_at = None
@@ -3532,14 +3586,16 @@ def supervise_run(
                 pending=pending,
             )
 
-        # A graceful stop the runner honored (`asl control stop-after-current`,
-        # sent out of band) is the same kind of clean, intentional early stop as
-        # a spent budget: the run — ours or the one we attached to — exited `ok`
-        # after finishing its session, so relaunching here would silently undo
-        # the operator's request. The stop covers everything the loop would do
-        # next, review continuations included, so the guard is exactly "would we
-        # otherwise launch": a stop landing on a genuinely finished plan still
-        # falls through to the normal complete path.
+        # A stop the runner honored (`asl control stop-after-current` or
+        # `asl control abort`, sent out of band) is the same kind of clean,
+        # intentional early stop as a spent budget: the run — ours or the one we
+        # attached to — exited `ok`, so relaunching here would silently undo the
+        # operator's request. An abort is no more an anomaly than a boundary
+        # stop; it just reverted the session it killed, which `stop_kind` tells
+        # the caller so the counts are not misread. The stop covers everything
+        # the loop would do next, review continuations included, so the guard is
+        # exactly "would we otherwise launch": a stop landing on a genuinely
+        # finished plan still falls through to the normal complete path.
         if stop_requested and _should_launch_for_status(parsed, status, pending):
             return run_result(
                 True,
@@ -3548,6 +3604,7 @@ def supervise_run(
                 chunks=chunks,
                 completed=completed_total,
                 pending=pending,
+                stop_kind=stop_kind or STOP_KIND_AFTER_CURRENT,
             )
 
         if not _should_launch_for_status(parsed, status, pending):
@@ -3753,10 +3810,12 @@ def supervise_run(
             )
         # Clean stop; loop re-polls. Pending 0 -> complete/review continuation;
         # a spent `--max-sessions` budget -> clean `max-sessions` stop; a runner
-        # that honored a `stop-after-current` request -> clean `stopped` stop;
-        # otherwise relaunch (the runner drives all pending sessions in one
-        # chunk, so this normally only recurs for review continuations).
+        # that honored a `stop-after-current` or `abort` request -> clean
+        # `stopped` stop; otherwise relaunch (the runner drives all pending
+        # sessions in one chunk, so this normally only recurs for review
+        # continuations).
         stop_requested = run_payload.get("reason") == "stopped"
+        stop_kind = _stop_kind(run_payload) if stop_requested else None
 
 
 def _supervision_id_argument(value: str) -> str:
@@ -3888,8 +3947,9 @@ def run_autopilot(
     Command parsing runs first: an unparseable or unsupported command returns
     the structured parse-failure payload immediately. When the command parses
     cleanly, the supervisor starts/attaches/polls the run and drives it until the
-    plan completes, the ``--max-sessions`` global budget is spent, a graceful
-    ``asl control stop-after-current`` request is honored (``stopped``), or the
+    plan completes, the ``--max-sessions`` global budget is spent, an
+    ``asl control stop-after-current`` or ``asl control abort`` request is
+    honored (``stopped``, with ``stop_kind`` naming which), or the
     run pauses. The parsed ``command`` model is attached to the result so callers
     (and reply handling) can see exactly what was executed.
 
@@ -4078,11 +4138,20 @@ def _run_human_summary(result: dict) -> str:
             f"{pending} still pending; re-run the same command to continue"
         )
     if reason == "stopped":
-        # A honored `stop-after-current` request: report it exactly like the
-        # budget stop — a clean early stop with progress counts, never a pause,
-        # a failure, or `blocked`.
+        # A honored control request: report it exactly like the budget stop — a
+        # clean early stop with progress counts, never a pause, a failure, or
+        # `blocked`. An abort additionally reverted the session it ended, so the
+        # line says so; a reader who sees only the counts would otherwise assume
+        # that session landed.
         completed = result.get("completed")
         pending = result.get("pending")
+        if result.get("stop_kind") == STOP_KIND_ABORT:
+            return (
+                f"ok: stopped - supervisor abort ended the in-flight turn and "
+                f"returned its session to pending; completed {completed} "
+                f"session(s), {pending} still pending; re-run the same command "
+                "to continue"
+            )
         return (
             f"ok: stopped - graceful stop after the current session; completed "
             f"{completed} session(s), {pending} still pending; re-run the same "

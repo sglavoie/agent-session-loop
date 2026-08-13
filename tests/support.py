@@ -22,6 +22,7 @@ import select
 import shlex
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -42,12 +43,14 @@ from agent_session_loop import (
     config,
     contracts,
     control_queue,
+    control_signal,
     events,
     harnesses,
     install_verify,
     plans,
     preflight,
     prepare,
+    process_tree,
     progress_cli,
     progress_repair,
     qna,
@@ -593,6 +596,7 @@ class FakeRunControlListener:
         self.start_calls = 0
         self.stop_calls = 0
         self.consume_calls = 0
+        self.abort_consume_calls = 0
         self.state_exists_at_start = False
         self.events_exists_at_start = False
         self.state = run_control.RunControlState(current_harness=current_harness)
@@ -624,6 +628,10 @@ class FakeRunControlListener:
         # through the real state rather than faking the consume side.
         self.consume_calls += 1
         return self.state.consume_stop_after_current()
+
+    def consume_abort_turn(self) -> run_control.RunControlAction | None:
+        self.abort_consume_calls += 1
+        return self.state.consume_abort_turn()
 
 
 def _contract_block(
@@ -855,22 +863,78 @@ def _write_lock_file(
     state_root: Path,
     *,
     pid: int,
+    hostname: str | None = None,
+    process_start: str | None = None,
+    wakeup_endpoint: Path | str | None = None,
 ) -> Path:
+    """Write a lock naming ``pid``, legacy-shaped unless a field is given.
+
+    The default omits every optional field, which is what makes the lock
+    unwakeable: with no ``wakeup_endpoint`` a producer has nothing to write to
+    and reports ``no-endpoint``. Tests that need a lock a producer really wakes
+    pass an endpoint served by :func:`live_wakeup_endpoint`.
+    """
     plan_state = state.plan_state_dir(plan_dir, state_root)
     plan_state.mkdir(parents=True, exist_ok=True)
     lock_path = plan_state / state.LOCK_FILE_NAME
+    payload: dict[str, object] = {
+        "pid": pid,
+        "plan_dir": str(plan_dir),
+        "created_at": "2026-06-19T00:00:00+00:00",
+    }
+    if hostname is not None:
+        payload["hostname"] = hostname
+    if process_start is not None:
+        payload["process_start"] = process_start
+    if wakeup_endpoint is not None:
+        payload["wakeup_endpoint"] = str(wakeup_endpoint)
     lock_path.write_text(
-        json.dumps(
-            {
-                "pid": pid,
-                "plan_dir": str(plan_dir),
-                "created_at": "2026-06-19T00:00:00+00:00",
-            },
-            sort_keys=True,
-        ),
+        json.dumps(payload, sort_keys=True),
         encoding="utf-8",
     )
     return lock_path
+
+
+def _write_live_lock_file(
+    plan_dir: Path,
+    state_root: Path,
+    *,
+    wakeup_endpoint: Path | str | None = None,
+) -> Path:
+    """Write a lock describing this process as the live owner.
+
+    Records the current host and this pid's real birth time. Those fields are
+    what the staleness check reads; delivery itself needs ``wakeup_endpoint``,
+    so a caller that wants a producer's wakeup to land passes one from
+    :func:`live_wakeup_endpoint`.
+    """
+    return _write_lock_file(
+        plan_dir,
+        state_root,
+        pid=os.getpid(),
+        hostname=socket.gethostname(),
+        process_start=process_tree.process_birth(os.getpid()),
+        wakeup_endpoint=wakeup_endpoint,
+    )
+
+
+@contextmanager
+def live_wakeup_endpoint(plan_dir: Path, state_root: Path):
+    """Serve a plan's wakeup FIFO from this process for the block's duration.
+
+    Yields the endpoint path to record in a lock and the event a delivered
+    wakeup sets. This is the production reader, so a test that writes to the
+    yielded path exercises exactly what a runner would receive.
+    """
+    event = threading.Event()
+    with control_signal.open_wakeup_endpoint(
+        state.plan_state_dir(plan_dir, state_root), event
+    ) as path:
+        if path is None:
+            raise unittest.SkipTest(
+                "this filesystem cannot host a wakeup FIFO"
+            )
+        yield path, event
 
 
 def _discovered(plan_dir: Path, **overrides) -> workbench.DiscoveredPlan:

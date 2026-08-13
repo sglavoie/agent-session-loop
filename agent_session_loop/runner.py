@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Mapping, Sequence
+import contextlib
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -37,6 +38,7 @@ from . import (
     config,
     contracts,
     control_queue,
+    control_signal,
     durability,
     events,
     harnesses,
@@ -136,6 +138,10 @@ RUN_CONTROL_EVENT_ACTIONS: dict[str, str] = {
     "request": events.RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED,
     "cancel": events.RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CANCELED,
     "consumed": events.RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CONSUMED,
+    "abort-requested": events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
+    # Consumption has two outcomes with one state transition behind them, so
+    # the satisfied-by-worker case overrides this default at its call site.
+    "abort-consumed": events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED,
     "tail-enabled": events.RUN_CONTROL_ACTION_TAIL_ENABLED,
     "tail-disabled": events.RUN_CONTROL_ACTION_TAIL_DISABLED,
     "harness-selected": events.RUN_CONTROL_ACTION_HARNESS_SELECTED,
@@ -147,11 +153,17 @@ RUN_CONTROL_EVENT_MESSAGES: dict[str, str] = {
     "request": "stop-after-current requested",
     "cancel": "stop-after-current canceled",
     "consumed": "stop-after-current consumed",
+    "abort-requested": "turn abort requested",
+    "abort-consumed": "turn abort honored",
     "tail-enabled": "live tail enabled",
     "tail-disabled": "live tail disabled",
     "harness-selected": "next harness selected",
     "implementation-model-updated": "implementation model controls updated",
 }
+# Reason recorded for an abort command that carried none. The value reaches the
+# worker's guidance record and the aborted session's Handoff note, so it has to
+# read as an explanation on its own.
+ABORT_TURN_DEFAULT_REASON = "supervisor requested abort"
 AGENT_MUX_START_EVENT = agent_mux_delivery.START_EVENT
 AGENT_MUX_TURN_START_EVENT = agent_mux_delivery.TURN_START_EVENT
 AGENT_MUX_TURN_HEARTBEAT_EVENT = agent_mux_delivery.TURN_HEARTBEAT_EVENT
@@ -5744,6 +5756,10 @@ def _initial_control_payload() -> dict[str, Any]:
     return {
         "stop_after_current": False,
         "tail_enabled": False,
+        "abort_turn_requested": False,
+        "abort_grace_seconds": None,
+        "abort_reason": None,
+        "abort_deadline": None,
         "next_harness": None,
         "target_harness": None,
         "changed_fields": [],
@@ -5756,10 +5772,25 @@ def _initial_control_payload() -> dict[str, Any]:
 def _apply_run_control_action(
     control_payload: dict[str, Any],
     action: run_control.RunControlAction,
+    *,
+    event_action: str | None = None,
 ) -> str:
-    event_action = RUN_CONTROL_EVENT_ACTIONS[action.action]
+    if event_action is None:
+        event_action = RUN_CONTROL_EVENT_ACTIONS[action.action]
     control_payload["stop_after_current"] = action.stop_after_current
     control_payload["tail_enabled"] = action.tail_enabled
+    # A consumed abort still carries the grace and reason it was acted on so
+    # the event stays legible, but the payload mirrors the cleared state.
+    abort_pending = action.abort_requested and action.action != "abort-consumed"
+    control_payload["abort_turn_requested"] = abort_pending
+    control_payload["abort_grace_seconds"] = (
+        action.abort_grace_seconds if abort_pending else None
+    )
+    control_payload["abort_reason"] = action.abort_reason if abort_pending else None
+    if not abort_pending:
+        # The deadline is stamped beside the request; nothing pending, nothing
+        # left for a status surface to count down to.
+        control_payload["abort_deadline"] = None
     control_payload["next_harness"] = action.next_harness
     control_payload["target_harness"] = action.target_harness
     control_payload["changed_fields"] = list(action.changed_fields)
@@ -5782,17 +5813,25 @@ def _record_run_control_action(
     action: run_control.RunControlAction,
     context: dict[str, Any] | None = None,
     persistence: _RunPersistence | None = None,
+    event_action: str | None = None,
+    message: str | None = None,
 ) -> None:
     persistence = _run_persistence(persistence)
     with persistence.lock:
         previous_harness = control_payload.get("next_harness") or payload.get("harness")
-        event_action = _apply_run_control_action(control_payload, action)
+        event_action = _apply_run_control_action(
+            control_payload, action, event_action=event_action
+        )
         payload["control"] = dict(control_payload)
         event_payload = {
             "run_id": payload.get("run_id"),
             "action": event_action,
             "stop_after_current": action.stop_after_current,
             "tail_enabled": action.tail_enabled,
+            "abort_requested": action.abort_requested,
+            "abort_grace_seconds": action.abort_grace_seconds,
+            "abort_reason": action.abort_reason,
+            "abort_deadline": control_payload.get("abort_deadline"),
             "next_harness": action.next_harness,
             "target_harness": action.target_harness,
             "changed_fields": list(action.changed_fields),
@@ -5802,7 +5841,11 @@ def _record_run_control_action(
                     "implementation_overrides", {}
                 ).items()
             },
-            "message": RUN_CONTROL_EVENT_MESSAGES[action.action],
+            "message": (
+                RUN_CONTROL_EVENT_MESSAGES[action.action]
+                if message is None
+                else message
+            ),
         }
         if context is not None:
             for key in ("session", "turn_index", "total_sessions"):
@@ -6802,6 +6845,7 @@ class _LiveTurn:
         monotonic: Callable[[], float] = time.monotonic,
         wait: Callable[[float], bool] | None = None,
         hang_sentinel: _HangSentinel | None = None,
+        wakeup: threading.Event | None = None,
     ) -> None:
         self._payload = payload
         self._event_path = event_path
@@ -6819,7 +6863,12 @@ class _LiveTurn:
         )
         self._lock = threading.Lock()
         self._stop = threading.Event()
-        self._wait = self._stop.wait if wait is None else wait
+        self._wakeup = wakeup
+        # Two Events cannot be waited on together, so the wakeup is the one
+        # this loop blocks on and ``stop()`` sets it as well. Without a wakeup
+        # the seam keeps its original ``_stop.wait`` behavior.
+        default_wait = self._stop.wait if wakeup is None else wakeup.wait
+        self._wait = default_wait if wait is None else wait
         self._thread: threading.Thread | None = None
         self._started_at = _parse_datetime(active_turn["started_at"]) or _utc_now()
         self._last_activity_at = self._started_at
@@ -6902,6 +6951,10 @@ class _LiveTurn:
 
     def stop(self) -> None:
         self._stop.set()
+        if self._wakeup is not None:
+            # The poll thread blocks on the wakeup, so shutdown has to wake it
+            # for the join below to return promptly.
+            self._wakeup.set()
         if self._thread is not None and self._thread is not threading.current_thread():
             # A poll callback deliberately runs without ``self._lock``. Wait
             # for it to finish before the caller clears ``active_turn`` so it
@@ -6947,8 +7000,18 @@ class _LiveTurn:
                 else min(next_heartbeat, next_poll)
             )
             delay = max(0.0, deadline - self._monotonic())
-            if self._wait(delay) or self._stop.is_set():
+            woken = self._wait(delay)
+            if self._stop.is_set() or (woken and self._wakeup is None):
                 return
+            if woken:
+                # A wakeup landed: a producer just queued a control command, so
+                # poll now instead of waiting out the backstop interval. The
+                # clear happens before the poll so a wakeup racing it is not
+                # swallowed, and the interval reschedules from this wake.
+                assert self._wakeup is not None
+                self._wakeup.clear()
+                if next_poll is not None:
+                    next_poll = self._monotonic()
 
             now = self._monotonic()
             if now >= next_heartbeat:
@@ -8230,7 +8293,146 @@ def _apply_external_control_command(
             model=command.model_operation,
             effort=command.effort_operation,
         )
+    if command.command == control_queue.COMMAND_REQUEST_ABORT_TURN:
+        return control_state.request_abort_turn(
+            grace_seconds=command.grace_seconds,
+            reason=command.reason,
+        )
     return None
+
+
+def _record_control_command_observed(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    control_payload: dict[str, Any],
+    command: control_queue.ControlCommand,
+    context: dict[str, Any] | None,
+    persistence: _RunPersistence,
+) -> None:
+    """Append the delivery receipt for one accepted external control command.
+
+    Recorded before the command is translated, and for every accepted command
+    rather than only the ones that change state: a duplicate, an
+    already-applied request, and a command this runner has no branch for all
+    leave no other trace, which is what makes them indistinguishable from a
+    command that never arrived. No state transition happened, so this appends
+    an event and writes no state.
+    """
+    event_payload: dict[str, Any] = {
+        "run_id": payload.get("run_id"),
+        "action": events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+        "command_id": command.id,
+        "queue_command": command.command,
+        "stop_after_current": bool(control_payload.get("stop_after_current")),
+        "message": "control command observed",
+    }
+    if context is not None:
+        for key in ("session", "turn_index", "total_sessions"):
+            value = context.get(key)
+            if value is not None:
+                event_payload[key] = value
+    persistence.append_event(event_path, events.RUN_CONTROL_EVENT, event_payload)
+
+
+def _abort_turn_guidance_text(
+    *,
+    reason: str,
+    grace_seconds: int,
+    deadline: str,
+) -> str:
+    return (
+        "Supervisor abort requested for the turn now in flight "
+        f"(reason: {reason}). Wind down immediately: make no further "
+        "changes, leave this session pending, and emit `RUNNER_PAUSE: "
+        f"supervisor requested abort - {reason}`. The harness process group "
+        f"is killed at {deadline} ({grace_seconds}s grace) if the turn is "
+        "still running then."
+    )
+
+
+def _arm_requested_abort(
+    action: run_control.RunControlAction,
+    *,
+    abort: harnesses.AbortSignal,
+    plan_dir: Path,
+    state_dir_arg: str | None,
+    control_payload: dict[str, Any],
+    mailbox_enabled: bool,
+) -> None:
+    """Start the grace window for an observed abort and warn the worker.
+
+    Called from the poll thread while the turn it aborts is still running.
+    ``abort`` is the only state shared with the turn's wait loop, which owns
+    expiry from here; the guidance record is what lets a compliant worker end
+    the turn itself before the kill lands.
+    """
+    grace_seconds = (
+        control_queue.DEFAULT_ABORT_GRACE_SECONDS
+        if action.abort_grace_seconds is None
+        else action.abort_grace_seconds
+    )
+    reason = action.abort_reason or ABORT_TURN_DEFAULT_REASON
+    deadline = _isoformat(_utc_now() + timedelta(seconds=grace_seconds))
+    abort.arm(reason, grace_seconds=float(grace_seconds))
+    control_payload["abort_deadline"] = deadline
+    if not mailbox_enabled:
+        return
+    try:
+        mailbox.append_guidance(
+            plan_dir,
+            _abort_turn_guidance_text(
+                reason=reason,
+                grace_seconds=grace_seconds,
+                deadline=deadline,
+            ),
+            state_dir=state_dir_arg,
+        )
+    except (OSError, mailbox.MailboxError):
+        # The kill is already armed; failing to warn the worker must not
+        # terminate the turn or lose the abort.
+        pass
+
+
+def _degrade_abort_to_stop_after_current(
+    action: run_control.RunControlAction,
+    *,
+    control_state: run_control.RunControlState,
+    payload: dict[str, Any],
+    event_path: Path,
+    control_payload: dict[str, Any],
+    context: dict[str, Any] | None,
+    persistence: _RunPersistence,
+) -> None:
+    """Turn an abort observed with no turn in flight into a clean early stop.
+
+    There is nothing to kill, and dropping the command would make
+    ``asl control abort`` a silent no-op between turns, so the request becomes
+    the strongest thing it can still mean: no further session starts.
+    """
+    consumed = control_state.consume_abort_turn()
+    if consumed is not None:
+        _record_run_control_action(
+            event_path=event_path,
+            payload=payload,
+            control_payload=control_payload,
+            action=consumed,
+            context=context,
+            persistence=persistence,
+            message=(
+                "turn abort degraded to stop-after-current: no turn in flight"
+            ),
+        )
+    requested = control_state.request_stop_after_current()
+    if requested is not None:
+        _record_run_control_action(
+            event_path=event_path,
+            payload=payload,
+            control_payload=control_payload,
+            action=requested,
+            context=context,
+            persistence=persistence,
+        )
 
 
 def _drain_external_control_queue(
@@ -8245,6 +8447,9 @@ def _drain_external_control_queue(
     context: dict[str, Any] | None,
     persistence: _RunPersistence,
     run_control_lock: threading.Lock,
+    wakeup: threading.Event | None = None,
+    abort: harnesses.AbortSignal | None = None,
+    mailbox_enabled: bool = False,
 ) -> control_queue.DrainResult:
     """Drain queued external control commands and record any state changes.
 
@@ -8255,7 +8460,23 @@ def _drain_external_control_queue(
     in ``seen_ids`` are rejected by the drain function itself. Accepted
     IDs are added to ``seen_ids`` so even a queue file rewritten by an
     external producer cannot replay the same command in this process.
+
+    Every accepted command first gets a ``control-command-observed`` receipt
+    carrying its ID, which is what ``asl control --wait`` tails; the state
+    transition, if there is one, is recorded after it.
+
+    ``wakeup`` is cleared *before* the read, not after: a wakeup that arrives
+    while this drain runs may name a command appended after the read, so
+    clearing afterwards would swallow it. Clearing first costs at most one
+    redundant drain.
+
+    ``abort`` is the in-flight turn's signal, supplied only by the poll thread
+    that runs alongside a turn. Its presence is what tells an observed abort
+    command there is something to kill: without it the request degrades to
+    stop-after-current instead of dying quietly.
     """
+    if wakeup is not None:
+        wakeup.clear()
     try:
         result = control_queue.drain_queue(
             plan_dir,
@@ -8270,9 +8491,29 @@ def _drain_external_control_queue(
     for command in result.accepted:
         seen_ids.add(command.id)
         with run_control_lock:
+            _record_control_command_observed(
+                event_path=event_path,
+                payload=payload,
+                control_payload=control_payload,
+                command=command,
+                context=context,
+                persistence=persistence,
+            )
             action = _apply_external_control_command(command, control_state)
             if action is None:
                 continue
+            if action.action == "abort-requested" and abort is not None:
+                # Armed before the action is recorded so the requested event and
+                # the `control` payload already carry the deadline the turn is
+                # counting down to.
+                _arm_requested_abort(
+                    action,
+                    abort=abort,
+                    plan_dir=plan_dir,
+                    state_dir_arg=state_dir_arg,
+                    control_payload=control_payload,
+                    mailbox_enabled=mailbox_enabled,
+                )
             _record_run_control_action(
                 event_path=event_path,
                 payload=payload,
@@ -8281,6 +8522,16 @@ def _drain_external_control_queue(
                 context=context,
                 persistence=persistence,
             )
+            if action.action == "abort-requested" and abort is None:
+                _degrade_abort_to_stop_after_current(
+                    action,
+                    control_state=control_state,
+                    payload=payload,
+                    event_path=event_path,
+                    control_payload=control_payload,
+                    context=context,
+                    persistence=persistence,
+                )
     return result
 
 
@@ -8300,6 +8551,7 @@ class _MailboxPoll:
         persistence: _RunPersistence,
         run_control_lock: threading.Lock,
         enabled: bool = True,
+        wakeup: threading.Event | None = None,
     ) -> None:
         self._plan_dir = plan_dir
         self._state_dir_arg = state_dir_arg
@@ -8311,7 +8563,9 @@ class _MailboxPoll:
         self._persistence = persistence
         self._run_control_lock = run_control_lock
         self._enabled = enabled
+        self._wakeup = wakeup
         self._context: dict[str, Any] | None = None
+        self._abort: harnesses.AbortSignal | None = None
         self._evented_guidance_ids: set[str] = set()
         self._mailbox_path = mailbox.mailbox_path_for_plan(
             plan_dir,
@@ -8322,6 +8576,15 @@ class _MailboxPoll:
     def set_context(self, context: Mapping[str, Any] | None) -> None:
         """Set the active turn metadata attached to subsequent poll events."""
         self._context = None if context is None else dict(context)
+
+    def set_abort(self, abort: harnesses.AbortSignal | None) -> None:
+        """Attach the signal an observed abort should arm, or detach it.
+
+        Set while a turn is in flight and cleared once it has finished, so an
+        abort observed between turns (during a mailbox reply wait, for example)
+        cannot arm a signal no running turn is watching.
+        """
+        self._abort = abort
 
     def __call__(self) -> None:
         """Drain controls, then emit once-only metadata for pending guidance."""
@@ -8336,6 +8599,9 @@ class _MailboxPoll:
             context=self._context,
             persistence=self._persistence,
             run_control_lock=self._run_control_lock,
+            wakeup=self._wakeup,
+            abort=self._abort,
+            mailbox_enabled=self._enabled,
         )
 
         if not self._enabled:
@@ -8390,6 +8656,84 @@ class _MailboxPoll:
                 event_payload,
             )
             self._evented_guidance_ids.add(message.id)
+
+
+def _record_abort_satisfied_by_worker(
+    listener: run_control.RunControlListener,
+    *,
+    payload: dict[str, Any],
+    event_path: Path,
+    control_payload: dict[str, Any],
+    context: dict[str, Any] | None = None,
+    persistence: _RunPersistence | None = None,
+) -> None:
+    """Clear a pending abort whose turn ended on its own inside the window."""
+    action = listener.consume_abort_turn()
+    if action is None:
+        return
+    _record_run_control_action(
+        event_path=event_path,
+        payload=payload,
+        control_payload=control_payload,
+        action=action,
+        context=context,
+        persistence=persistence,
+        event_action=events.RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER,
+        message="turn abort satisfied by the worker inside the grace window",
+    )
+
+
+def _honor_abort_turn(
+    listener: run_control.RunControlListener,
+    *,
+    snapshot: plans.PlanSnapshot,
+    session_id: str,
+    payload: dict[str, Any],
+    event_path: Path,
+    control_payload: dict[str, Any],
+    plan_cache: plans.PlanSnapshotCache,
+    context: dict[str, Any] | None = None,
+    persistence: _RunPersistence | None = None,
+) -> None:
+    """Record the clean early stop that follows a killed turn.
+
+    A supervisor-requested abort is not a fault, so this is deliberately not a
+    pause: the killed session goes back to ``pending`` with a Handoff note
+    explaining why it holds no completion, and the run exits ``stopped``.
+    """
+    persistence = _run_persistence(persistence)
+    action = listener.consume_abort_turn()
+    reason = ABORT_TURN_DEFAULT_REASON
+    if action is not None:
+        reason = action.abort_reason or ABORT_TURN_DEFAULT_REASON
+        _record_run_control_action(
+            event_path=event_path,
+            payload=payload,
+            control_payload=control_payload,
+            action=action,
+            context=context,
+            persistence=persistence,
+        )
+    reverted = _revert_session_status_to_pending(
+        snapshot,
+        session_id,
+        failure_note=(
+            "turn aborted by supervisor request before it completed "
+            f"({reason}); the session holds no completion from it"
+        ),
+    )
+    snapshot_after = _reinspect_after_revert(
+        snapshot.plan_dir, snapshot, reverted, plan_cache
+    )
+    _honor_stop_after_current(
+        listener,
+        snapshot=snapshot_after,
+        payload=payload,
+        event_path=event_path,
+        control_payload=control_payload,
+        context=context,
+        persistence=persistence,
+    )
 
 
 def _honor_stop_after_current(
@@ -11824,7 +12168,12 @@ def _run_locked(
     reply_text: str | None = None,
     reply_origin: str = REPLY_ORIGIN_ARGV,
     verification_context: verification.VerificationContext | None = None,
+    wakeup: threading.Event | None = None,
 ) -> tuple[int, dict[str, Any]]:
+    # The caller holds this run's lock and opened the wakeup endpoint before
+    # publishing it, so `wakeup` is already being set by producers from here
+    # on. A wakeup that lands outside the poll loop below only leaves the
+    # event set for the next waiter to observe.
     if verification_context is None:
         verification_context = verification.VerificationContext.legacy(cwd)
     plan_cache = plans.PlanSnapshotCache()
@@ -12444,7 +12793,10 @@ def _run_locked(
     control_payload = dict(payload["control"])
 
     def handle_run_control_action(action: run_control.RunControlAction) -> None:
-        if action.action == "consumed":
+        if action.action in ("consumed", "abort-consumed"):
+            # Both consumptions are recorded by the site that acts on them, and
+            # an abort's consumption has three distinct outcomes this callback
+            # cannot tell apart.
             return
         if action.action == "tail-disabled":
             inline_tail.disable()
@@ -12515,6 +12867,14 @@ def _run_locked(
     )
     run_controls.start()
 
+    # Served unconditionally, unlike the keyboard listener: a `--json`
+    # supervised run is precisely the case with no interactive control surface,
+    # so it is the one that most needs an `asl control` command observed now
+    # rather than at the end of the poll interval. The caller owns the endpoint
+    # feeding this event; a run reached without one still polls.
+    if wakeup is None:
+        wakeup = threading.Event()
+
     completed_count = 0
     previous_turn_finished_at: datetime | None = None
     commit_at_end_attempted = False
@@ -12532,6 +12892,7 @@ def _run_locked(
         persistence=persistence,
         run_control_lock=run_control_lock,
         enabled=mailbox_enabled,
+        wakeup=wakeup,
     )
 
     # Drain any commands that were queued before the run started so the
@@ -12547,6 +12908,7 @@ def _run_locked(
         context=None,
         persistence=persistence,
         run_control_lock=run_control_lock,
+        wakeup=wakeup,
     )
     pending_exception_guard: dict[str, Any] | None = None
     try:
@@ -12629,6 +12991,7 @@ def _run_locked(
                         context=None,
                         persistence=persistence,
                         run_control_lock=run_control_lock,
+                        wakeup=wakeup,
                     )
                     with run_control_lock:
                         stop_before_review = (
@@ -13264,6 +13627,7 @@ def _run_locked(
                 context=pre_turn_control_context,
                 persistence=persistence,
                 run_control_lock=run_control_lock,
+                wakeup=wakeup,
             )
             with run_control_lock:
                 # A stop observed here must never let another turn start. Only
@@ -13600,6 +13964,11 @@ def _run_locked(
                 active_turn["resolution_source"] = resolution_source_meta
             log_stream_callback = _prepare_stream_logs(paths)
             mailbox_poll.set_context(active_turn)
+            # Handed to the turn before it starts even though nothing has
+            # requested an abort yet: the wait loop can only be cancellable if
+            # the signal object already exists when the harness is launched.
+            abort_signal = harnesses.AbortSignal()
+            mailbox_poll.set_abort(abort_signal)
 
             live_turn = _LiveTurn(
                 payload=payload,
@@ -13609,6 +13978,7 @@ def _run_locked(
                 persistence=persistence,
                 poll_callback=mailbox_poll,
                 poll_interval=LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+                wakeup=wakeup,
             )
 
             def stream_callback(stream_name: harnesses.StreamName, text: str) -> None:
@@ -13925,6 +14295,7 @@ def _run_locked(
                     effort=requested_effort,
                     on_spawn=live_turn.note_harness_pid,
                     on_final_result=live_turn.note_final_result,
+                    abort=abort_signal,
                 )
             except KeyboardInterrupt:
                 invocation = build_harness_invocation(
@@ -13951,6 +14322,9 @@ def _run_locked(
                 inline_tail.stop()
                 raise
             live_turn.stop()
+            # The poll thread is joined by now, so no later tick can arm a
+            # signal this finished turn would never read.
+            mailbox_poll.set_abort(None)
             turn_finished_at = _utc_now()
             live_turn_payload = live_turn.finish(turn_finished_at)
             run_started_at = _parse_datetime(payload.get("run_started_at"))
@@ -14019,6 +14393,20 @@ def _run_locked(
             _notify_agent_mux_loop_turn_finished(
                 payload, live_turn_payload, persistence
             )
+
+            if abort_signal.armed and not result.aborted:
+                # The worker ended the turn inside the grace window, so nothing
+                # was killed and whatever it recorded stands: the pause or
+                # completion path below owns the outcome from here.
+                with run_control_lock:
+                    _record_abort_satisfied_by_worker(
+                        run_controls,
+                        payload=payload,
+                        event_path=event_path,
+                        control_payload=control_payload,
+                        context=turn_payload,
+                        persistence=persistence,
+                    )
 
             # Ahead of every result branch: a retryable pause (timeout,
             # transport failure) would otherwise relaunch against the turn's
@@ -14122,6 +14510,23 @@ def _run_locked(
                     details=session_details,
                     persistence=persistence,
                 )
+                break
+
+            if result.aborted:
+                # Beside the timeout branch, but not a pause: the operator asked
+                # for this stop, so it is recorded as one.
+                with run_control_lock:
+                    _honor_abort_turn(
+                        run_controls,
+                        snapshot=after if after is not None else before,
+                        session_id=session_id,
+                        payload=payload,
+                        event_path=event_path,
+                        control_payload=control_payload,
+                        plan_cache=plan_cache,
+                        context=turn_payload,
+                        persistence=persistence,
+                    )
                 break
             if after is None:
                 with persistence.lock:
@@ -14553,6 +14958,7 @@ def _run_locked(
                     context=turn_payload,
                     persistence=persistence,
                     run_control_lock=run_control_lock,
+                    wakeup=wakeup,
                 )
                 with run_control_lock:
                     stop_after_current_pending = (
@@ -14768,6 +15174,7 @@ def _run_locked(
                 context=turn_payload,
                 persistence=persistence,
                 run_control_lock=run_control_lock,
+                wakeup=wakeup,
             )
             with run_control_lock:
                 # An unpending request is left set on purpose: the all-complete
@@ -15600,100 +16007,114 @@ def run_from_args(
 
     run_id = _utc_run_id()
     claimed_repository_roots = _claimed_repository_roots(verification_context)
-    try:
-        lock_info = state.acquire_lock(
-            initial_snapshot.plan_dir,
-            args.state_dir,
-            repository_roots=claimed_repository_roots,
-        )
-    except state.StateError as error:
-        reason, paused = _state_error_reason(error)
-        payload = _error_payload(
-            args,
-            reason=reason,
-            message=str(error),
-            paused=paused,
-            cwd=cwd,
-            snapshot=initial_snapshot,
-        )
-        _emit_run_payload(args, payload)
-        return 1
-
-    try:
+    # The endpoint opens before the lock that names it and closes after that
+    # lock is gone, so every producer that can find the path finds this
+    # process holding the read end. Ordering it this way is what lets the
+    # producer skip authenticating an owner: it writes to a descriptor rather
+    # than acting on a pid, and an endpoint outliving its reader refuses the
+    # write instead of reaching whatever took the pid over.
+    wakeup = threading.Event()
+    with control_signal.open_wakeup_endpoint(
+        state.plan_state_dir(initial_snapshot.plan_dir, args.state_dir),
+        wakeup,
+    ) as wakeup_endpoint:
         try:
-            # Checked after acquiring, not before: a check-before-acquire leaves
-            # two racing starters blind to each other and both proceed, whereas
-            # checking under our own published claim means the worst case is
-            # both refusing, which only happens on a genuine overlap.
-            if verification_context.workspace is not None:
-                conflicts = run_contention.detect_conflicts(
-                    plan_dir=initial_snapshot.plan_dir,
-                    repository_roots=claimed_repository_roots,
-                    state_dir=args.state_dir,
-                )
-                if conflicts:
-                    payload = _error_payload(
-                        args,
-                        reason=(
-                            events.PAUSE_REASON_WORKSPACE_REPOSITORY_CONTENTION
-                        ),
-                        message=run_contention.conflict_message(
-                            initial_snapshot.plan_dir, conflicts
-                        ),
-                        paused=True,
-                        cwd=verification_context.root,
-                        snapshot=initial_snapshot,
-                    )
-                    contention_details = run_contention.conflict_details(
-                        conflicts
-                    )
-                    payload["details"] = contention_details
-                    payload["pause_details"] = dict(contention_details)
-                    _emit_run_payload(args, payload)
-                    return 1
-            exit_code, payload = _run_locked(
-                args=args,
-                cwd=verification_context.root,
-                verification_context=verification_context,
-                timeout=timeout,
-                max_sessions=max_sessions,
-                commit_mode=commit_mode,
-                lock_info=lock_info,
-                run_id=run_id,
-                reply_text=reply_text,
-                reply_origin=reply_origin,
+            lock_info = state.acquire_lock(
+                initial_snapshot.plan_dir,
+                args.state_dir,
+                repository_roots=claimed_repository_roots,
+                wakeup_endpoint=wakeup_endpoint,
             )
-        finally:
-            state.release_lock(initial_snapshot.plan_dir, args.state_dir)
-    except KeyboardInterrupt:
-        payload = _error_payload(
-            args,
-            reason="interrupted",
-            message="run interrupted by user",
-            paused=True,
-            cwd=cwd,
-            snapshot=initial_snapshot,
-        )
-        _emit_run_payload(args, payload)
-        return INTERRUPTED_EXIT
-    except (
-        config.ConfigError,
-        harnesses.HarnessError,
-        plans.PlanError,
-        RunError,
-        state.StateError,
-        OSError,
-    ) as error:
-        payload = _error_payload(
-            args,
-            reason="run-error",
-            message=str(error),
-            paused=False,
-            cwd=cwd,
-            snapshot=initial_snapshot,
-        )
-        _emit_run_payload(args, payload)
-        return 1
+        except state.StateError as error:
+            reason, paused = _state_error_reason(error)
+            payload = _error_payload(
+                args,
+                reason=reason,
+                message=str(error),
+                paused=paused,
+                cwd=cwd,
+                snapshot=initial_snapshot,
+            )
+            _emit_run_payload(args, payload)
+            return 1
+
+        try:
+            try:
+                # Checked after acquiring, not before: a check-before-acquire
+                # leaves two racing starters blind to each other and both
+                # proceed, whereas checking under our own published claim means
+                # the worst case is both refusing, which only happens on a
+                # genuine overlap.
+                if verification_context.workspace is not None:
+                    conflicts = run_contention.detect_conflicts(
+                        plan_dir=initial_snapshot.plan_dir,
+                        repository_roots=claimed_repository_roots,
+                        state_dir=args.state_dir,
+                    )
+                    if conflicts:
+                        payload = _error_payload(
+                            args,
+                            reason=(
+                                events.PAUSE_REASON_WORKSPACE_REPOSITORY_CONTENTION
+                            ),
+                            message=run_contention.conflict_message(
+                                initial_snapshot.plan_dir, conflicts
+                            ),
+                            paused=True,
+                            cwd=verification_context.root,
+                            snapshot=initial_snapshot,
+                        )
+                        contention_details = run_contention.conflict_details(
+                            conflicts
+                        )
+                        payload["details"] = contention_details
+                        payload["pause_details"] = dict(contention_details)
+                        _emit_run_payload(args, payload)
+                        return 1
+                exit_code, payload = _run_locked(
+                    args=args,
+                    cwd=verification_context.root,
+                    verification_context=verification_context,
+                    timeout=timeout,
+                    max_sessions=max_sessions,
+                    commit_mode=commit_mode,
+                    lock_info=lock_info,
+                    run_id=run_id,
+                    reply_text=reply_text,
+                    reply_origin=reply_origin,
+                    wakeup=wakeup,
+                )
+            finally:
+                state.release_lock(initial_snapshot.plan_dir, args.state_dir)
+        except KeyboardInterrupt:
+            payload = _error_payload(
+                args,
+                reason="interrupted",
+                message="run interrupted by user",
+                paused=True,
+                cwd=cwd,
+                snapshot=initial_snapshot,
+            )
+            _emit_run_payload(args, payload)
+            return INTERRUPTED_EXIT
+        except (
+            config.ConfigError,
+            harnesses.HarnessError,
+            plans.PlanError,
+            RunError,
+            state.StateError,
+            OSError,
+        ) as error:
+            payload = _error_payload(
+                args,
+                reason="run-error",
+                message=str(error),
+                paused=False,
+                cwd=cwd,
+                snapshot=initial_snapshot,
+            )
+            _emit_run_payload(args, payload)
+            return 1
 
     _emit_run_payload(args, payload)
     return exit_code

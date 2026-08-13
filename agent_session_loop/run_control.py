@@ -21,6 +21,8 @@ RunControlActionName = Literal[
     "request",
     "cancel",
     "consumed",
+    "abort-requested",
+    "abort-consumed",
     "status",
     "tail-enabled",
     "tail-disabled",
@@ -114,6 +116,9 @@ class RunControlAction:
     action: RunControlActionName
     stop_after_current: bool
     tail_enabled: bool = False
+    abort_requested: bool = False
+    abort_grace_seconds: int | None = None
+    abort_reason: str | None = None
     next_harness: HarnessName | None = None
     target_harness: HarnessName | None = None
     changed_fields: tuple[ImplementationOverrideField, ...] = ()
@@ -136,6 +141,9 @@ class RunControlAction:
             "action": self.action,
             "stop_after_current": self.stop_after_current,
             "tail_enabled": self.tail_enabled,
+            "abort_requested": self.abort_requested,
+            "abort_grace_seconds": self.abort_grace_seconds,
+            "abort_reason": self.abort_reason,
             "next_harness": self.next_harness,
             "target_harness": self.target_harness,
             "changed_fields": list(self.changed_fields),
@@ -164,6 +172,9 @@ class RunControlState:
     ) -> None:
         self._lock = threading.Lock()
         self._stop_after_current = False
+        self._abort_turn_requested = False
+        self._abort_grace_seconds: int | None = None
+        self._abort_reason: str | None = None
         self._tail_enabled = tail_enabled
         self._current_harness = current_harness
         self._next_harness = next_harness
@@ -175,6 +186,21 @@ class RunControlState:
     def stop_after_current(self) -> bool:
         with self._lock:
             return self._stop_after_current
+
+    @property
+    def abort_turn_requested(self) -> bool:
+        with self._lock:
+            return self._abort_turn_requested
+
+    @property
+    def abort_grace_seconds(self) -> int | None:
+        with self._lock:
+            return self._abort_grace_seconds
+
+    @property
+    def abort_reason(self) -> str | None:
+        with self._lock:
+            return self._abort_reason
 
     @property
     def tail_enabled(self) -> bool:
@@ -206,6 +232,9 @@ class RunControlState:
             action=action,
             stop_after_current=self._stop_after_current,
             tail_enabled=self._tail_enabled,
+            abort_requested=self._abort_turn_requested,
+            abort_grace_seconds=self._abort_grace_seconds,
+            abort_reason=self._abort_reason,
             next_harness=self._next_harness,
             target_harness=target_harness,
             changed_fields=changed_fields,
@@ -218,6 +247,9 @@ class RunControlState:
         with self._lock:
             return {
                 "stop_after_current": self._stop_after_current,
+                "abort_turn_requested": self._abort_turn_requested,
+                "abort_grace_seconds": self._abort_grace_seconds,
+                "abort_reason": self._abort_reason,
                 "tail_enabled": self._tail_enabled,
                 "next_harness": self._next_harness,
                 "implementation_overrides": _copy_implementation_overrides(
@@ -252,6 +284,38 @@ class RunControlState:
                 return None
             self._stop_after_current = False
             return self._action("consumed")
+
+    def request_abort_turn(
+        self,
+        *,
+        grace_seconds: int | None = None,
+        reason: str | None = None,
+    ) -> RunControlAction | None:
+        """Idempotently mark the in-flight turn as abort-requested.
+
+        Returns ``None`` when an abort is already pending, so a repeated
+        command cannot restart the grace window or emit a duplicate
+        "requested" event.
+        """
+        with self._lock:
+            if self._abort_turn_requested:
+                return None
+            self._abort_turn_requested = True
+            self._abort_grace_seconds = grace_seconds
+            self._abort_reason = reason
+            return self._action("abort-requested")
+
+    def consume_abort_turn(self) -> RunControlAction | None:
+        with self._lock:
+            if not self._abort_turn_requested:
+                return None
+            # Built before the reset so the consumer still sees the grace and
+            # reason it has to act on.
+            action = self._action("abort-consumed")
+            self._abort_turn_requested = False
+            self._abort_grace_seconds = None
+            self._abort_reason = None
+            return action
 
     def request_status_snapshot(self) -> RunControlAction:
         with self._lock:
@@ -529,6 +593,12 @@ class RunControlListener:
 
     def consume_stop_after_current(self) -> RunControlAction | None:
         action = self.state.consume_stop_after_current()
+        if action is not None:
+            self._notify_action(action)
+        return action
+
+    def consume_abort_turn(self) -> RunControlAction | None:
+        action = self.state.consume_abort_turn()
         if action is not None:
             self._notify_action(action)
         return action

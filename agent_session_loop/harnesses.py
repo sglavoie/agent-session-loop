@@ -6,7 +6,7 @@ Adapters construct argv lists and run harnesses without shell interpolation.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
@@ -61,6 +61,97 @@ COPILOT_AUDIT_DENIED_TOOLS = ("write", "shell", "url")
 # that started a session of its own outlives both, so this caps what a turn
 # pays to walk away from it (mirrors verification._ABANDONED_READER_JOIN_SECONDS).
 _ABANDONED_READER_JOIN_SECONDS = 5.0
+
+#: How often a turn with an abort signal attached re-checks its deadlines. The
+#: wait is otherwise a single blocking call, so this is the whole cost of being
+#: cancellable and the upper bound on how late a kill lands.
+_ABORT_POLL_INTERVAL_SECONDS = 0.1
+
+
+@dataclass
+class AbortSignal:
+    """A request to kill one in-flight harness turn at a monotonic deadline.
+
+    Armed from another thread; read by the turn's wait loop. It lives in this
+    module because the kill has to happen where the turn's ``process`` is in
+    scope: signalling a bare PID from outside would bypass the pre-kill
+    descendant snapshot and the post-turn sweep, which is how a descendant that
+    left the process group is reached at all.
+    """
+
+    event: threading.Event = field(default_factory=threading.Event)
+    deadline: float | None = None
+    reason: str = ""
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def arm(self, reason: str, *, grace_seconds: float = 0.0) -> None:
+        """Request the kill, giving the harness ``grace_seconds`` to wind down."""
+        with self._lock:
+            self.deadline = time.monotonic() + max(0.0, grace_seconds)
+            self.reason = reason
+        self.event.set()
+
+    @property
+    def armed(self) -> bool:
+        return self.event.is_set()
+
+    def expires_at(self, now: float) -> float | None:
+        """When the kill is due, or ``None`` while this signal is unarmed.
+
+        An armed signal carrying no deadline is due immediately, so a caller
+        that only sets the event still gets a kill.
+        """
+        if not self.event.is_set():
+            return None
+        with self._lock:
+            deadline = self.deadline
+        return now if deadline is None else deadline
+
+
+def _wait_for_turn_exit(
+    process: subprocess.Popen,
+    *,
+    timeout: float | None,
+    abort: AbortSignal | None,
+) -> Literal["timeout", "abort"] | None:
+    """Wait for ``process``; name the deadline that fired, or ``None`` if it exited.
+
+    The two deadlines are mutually exclusive: the earlier one is reported and
+    the other is never looked at again. Without an abort signal this is the
+    single blocking wait it replaced, so an uncancellable turn wakes no more
+    often than it used to.
+    """
+    if abort is None:
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return "timeout"
+        return None
+
+    timeout_deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        if process.poll() is not None:
+            return None
+        now = time.monotonic()
+        abort_deadline = abort.expires_at(now)
+        abort_due = abort_deadline is not None and now >= abort_deadline
+        timeout_due = timeout_deadline is not None and now >= timeout_deadline
+        if abort_due and timeout_due:
+            return "timeout" if timeout_deadline <= abort_deadline else "abort"
+        if abort_due:
+            return "abort"
+        if timeout_due:
+            return "timeout"
+        interval = _ABORT_POLL_INTERVAL_SECONDS
+        if abort_deadline is not None:
+            interval = min(interval, abort_deadline - now)
+        if timeout_deadline is not None:
+            interval = min(interval, timeout_deadline - now)
+        try:
+            process.wait(timeout=max(interval, 0.0))
+        except subprocess.TimeoutExpired:
+            continue
+        return None
 
 
 def _sweep_process_table() -> dict[int, dict[str, Any]] | None:
@@ -224,6 +315,7 @@ class HarnessResult:
     last_message: str = ""
     name: HarnessName | None = None
     timed_out: bool = False
+    aborted: bool = False
     interrupted: bool = False
     process_sweep: dict[str, Any] | None = None
 
@@ -556,6 +648,7 @@ class HarnessAdapter:
         on_spawn: Callable[[int], None] | None = None,
         on_final_result: Callable[[], None] | None = None,
         access: AccessProfile = WORKER_ACCESS,
+        abort: AbortSignal | None = None,
     ) -> HarnessResult:
         invocation = self.build_invocation(
             cwd=cwd,
@@ -672,13 +765,14 @@ class HarnessAdapter:
         stderr_thread.start()
 
         timed_out = False
+        aborted = False
         prior_snapshot: tuple[Mapping[str, Any], ...] = ()
         process_sweep: dict[str, Any] | None = None
         try:
-            try:
-                process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                timed_out = True
+            expired = _wait_for_turn_exit(process, timeout=timeout, abort=abort)
+            if expired is not None:
+                timed_out = expired == "timeout"
+                aborted = expired == "abort"
                 prior_snapshot = _snapshot_descendants(
                     process.pid, _sweep_process_table()
                 )
@@ -728,6 +822,23 @@ class HarnessAdapter:
 
         stdout = "".join(stdout_chunks)
         stderr = "".join(stderr_chunks)
+        if aborted:
+            return HarnessResult(
+                name=self.name,
+                argv=invocation.argv,
+                # 128 + SIGKILL, not the timeout path's 124: a caller reading
+                # only the returncode still has to tell the two apart.
+                returncode=137,
+                stdout=stdout,
+                stderr=stderr,
+                last_message=output_processor.last_message(
+                    stdout=stdout,
+                    stderr=stderr,
+                    last_message_path=invocation.last_message_path,
+                ),
+                aborted=True,
+                process_sweep=process_sweep,
+            )
         if timed_out:
             return HarnessResult(
                 name=self.name,
@@ -969,6 +1080,7 @@ def run_harness(
     on_spawn: Callable[[int], None] | None = None,
     on_final_result: Callable[[], None] | None = None,
     access: AccessProfile = WORKER_ACCESS,
+    abort: AbortSignal | None = None,
 ) -> HarnessResult:
     """Run one harness turn through the selected adapter."""
     return get_adapter(name).run(
@@ -984,6 +1096,7 @@ def run_harness(
         on_spawn=on_spawn,
         on_final_result=on_final_result,
         access=access,
+        abort=abort,
     )
 
 

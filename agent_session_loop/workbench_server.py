@@ -46,6 +46,7 @@ POST ``/api/archive/settings``           - update archive retention days.
 POST ``/api/launch``                     - spawn ``asl run`` for a plan.
 POST ``/api/reply``                      - resume a paused run with reply.
 POST ``/api/control/stop-after-current`` - enqueue stop-after-current.
+POST ``/api/control/abort``              - enqueue abort of the in-flight turn.
 POST ``/api/control/select-harness``     - enqueue harness selection.
 POST ``/api/unlock``                     - remove a stale operational lock.
 """
@@ -67,7 +68,9 @@ from typing import Any, Callable
 
 from . import (
     artifacts,
+    control_cli,
     control_queue,
+    control_signal,
     events as events_module,
     harnesses,
     plans,
@@ -266,6 +269,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             ("POST", "/api/control/stop-after-current"): (
                 self._handle_control_stop_after_current
             ),
+            ("POST", "/api/control/abort"): self._handle_control_abort,
             ("POST", "/api/control/select-harness"): (
                 self._handle_control_select_harness
             ),
@@ -1418,6 +1422,11 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         except control_queue.ControlQueueError as error:
             self._send_error(400, "invalid-command", str(error))
             return
+        # Same best-effort wakeup the CLI producer sends, so the HTTP surface
+        # is not the slower way to reach a live runner.
+        notified = control_signal.notify_runner(
+            plan_dir, state_dir=config.state_dir
+        )
         self._send_json(
             202,
             responses.success_payload(
@@ -1425,8 +1434,104 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
                 reason="accepted",
                 accepted=True,
                 queued_command=queued.to_payload(),
+                signal=notified.to_payload(),
             ),
         )
+
+    def _handle_control_abort(self, *, query: Mapping[str, list[str]]) -> None:
+        del query
+        body = self._read_json_body()
+        plan_dir = _require_string(body, "plan_dir")
+        command_id = _optional_string(body, "command_id")
+        # Passed through untouched: ``append_command`` is the only validator of
+        # grace and reason, so the HTTP surface cannot accept a window the CLI
+        # would reject or reject one it would accept.
+        raw_grace: Any = body.get("grace_seconds")
+        raw_reason: Any = body.get("reason")
+        config = self._server().config
+        run_active, turn_active = self._abort_run_activity(plan_dir, config)
+        try:
+            queued = control_queue.append_command(
+                plan_dir,
+                control_queue.COMMAND_REQUEST_ABORT_TURN,
+                state_dir=config.state_dir,
+                grace_seconds=raw_grace,
+                reason=raw_reason,
+                command_id=command_id,
+            )
+        except control_queue.ControlQueueError as error:
+            code = str(error)
+            if code == control_queue.REJECT_INVALID_GRACE:
+                message = (
+                    "grace_seconds must be a whole number of seconds between "
+                    f"{control_queue.MIN_ABORT_GRACE_SECONDS} and "
+                    f"{control_queue.MAX_ABORT_GRACE_SECONDS}"
+                )
+            elif code == control_queue.REJECT_INVALID_REASON:
+                message = "reason must be non-empty text when provided"
+            else:
+                code = "invalid-command"
+                message = str(error)
+            self._send_error(
+                400,
+                code,
+                message,
+                details={
+                    "grace_seconds": repr(raw_grace),
+                    "reason": repr(raw_reason),
+                },
+            )
+            return
+        if not run_active:
+            note = control_cli.NO_ACTIVE_RUN_NOTE
+        elif turn_active:
+            note = control_cli.ABORT_WILL_APPLY_NOTE
+        else:
+            note = control_cli.ABORT_DEGRADES_NOTE
+        notified = control_signal.notify_runner(
+            plan_dir, state_dir=config.state_dir
+        )
+        self._send_json(
+            202,
+            responses.success_payload(
+                COMMAND_NAME,
+                reason="accepted",
+                accepted=True,
+                run_active=run_active,
+                turn_active=turn_active,
+                grace_seconds=queued.grace_seconds,
+                # The CLI calls this field `reason`; here the top-level
+                # `reason` is the HTTP response status, so the abort's own
+                # reason keeps a distinct name.
+                abort_reason=queued.reason,
+                note=note,
+                queued_command=queued.to_payload(),
+                signal=notified.to_payload(),
+            ),
+        )
+
+    def _abort_run_activity(
+        self, plan_dir: str, config: ServerConfig
+    ) -> tuple[bool, bool]:
+        """Whether a runner holds the plan and whether a turn is in flight."""
+        try:
+            # The lock records the canonical plan directory, so comparing
+            # against the raw request path would call every lock stale on a
+            # host where the plan sits behind a symlink.
+            canonical = plans.canonicalize_path(plan_dir)
+            plan_state = state.plan_state_dir(canonical, config.state_dir)
+        except (OSError, ValueError):
+            return False, False
+        lock_info = state._read_lock_path(
+            plan_state / state.LOCK_FILE_NAME, canonical
+        )
+        run_active = lock_info is not None and lock_info.active
+        if not run_active:
+            return False, False
+        runtime = state._runner_state_payload(
+            plan_state / events_module.STATE_FILE_NAME, lock_info=lock_info
+        )
+        return True, runtime.get("active_turn") is not None
 
     def _handle_control_select_harness(
         self, *, query: Mapping[str, list[str]]
@@ -1456,6 +1561,9 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         except control_queue.ControlQueueError as error:
             self._send_error(400, "invalid-command", str(error))
             return
+        notified = control_signal.notify_runner(
+            plan_dir, state_dir=config.state_dir
+        )
         self._send_json(
             202,
             responses.success_payload(
@@ -1463,6 +1571,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
                 reason="accepted",
                 accepted=True,
                 queued_command=queued.to_payload(),
+                signal=notified.to_payload(),
             ),
         )
 

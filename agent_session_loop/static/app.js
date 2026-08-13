@@ -30,6 +30,11 @@
   const CLEANUP_DEFAULT_THRESHOLD_DAYS = 30;
   const DAY_MS = 24 * 60 * 60 * 1000;
   const HARNESS_NAMES = ["codex", "claude", "copilot"];
+  // Mirrors control_queue.{DEFAULT,MIN,MAX}_ABORT_GRACE_SECONDS so the button
+  // rejects a window the server would reject anyway.
+  const ABORT_DEFAULT_GRACE_SECONDS = 120;
+  const ABORT_MIN_GRACE_SECONDS = 1;
+  const ABORT_MAX_GRACE_SECONDS = 86400;
   const COMMIT_MODES = ["per-session", "end"];
   const PRIMARY_STATES = [
     "invalid",
@@ -3834,6 +3839,10 @@
     if (stop) {
       stop.addEventListener("click", handleStopClick);
     }
+    const abort = document.getElementById("wb-control-abort");
+    if (abort) {
+      abort.addEventListener("click", handleAbortClick);
+    }
     const harnessApply = document.getElementById("wb-control-harness-apply");
     if (harnessApply) {
       harnessApply.addEventListener("click", handleHarnessSelectClick);
@@ -3915,6 +3924,57 @@
         showControlsFeedback(
           "error",
           (body && body.error) || "failed to enqueue stop"
+        );
+      }
+    } catch (err) {
+      showControlsFeedback("error", describeError(err));
+    }
+  }
+
+  async function handleAbortClick() {
+    const planDir = state.route.planDir;
+    if (!planDir) return;
+    const graceInput = document.getElementById("wb-control-abort-grace");
+    const raw = graceInput ? String(graceInput.value).trim() : "";
+    const grace = raw === "" ? ABORT_DEFAULT_GRACE_SECONDS : Number(raw);
+    if (
+      !Number.isInteger(grace) ||
+      grace < ABORT_MIN_GRACE_SECONDS ||
+      grace > ABORT_MAX_GRACE_SECONDS
+    ) {
+      showControlsFeedback(
+        "error",
+        "grace must be a whole number of seconds between " +
+          ABORT_MIN_GRACE_SECONDS +
+          " and " +
+          ABORT_MAX_GRACE_SECONDS
+      );
+      return;
+    }
+    const confirmed = window.confirm(
+      "Abort the in-flight turn? The worker gets " +
+        grace +
+        "s to wind down, then the harness is killed and the session is left pending."
+    );
+    if (!confirmed) return;
+    showControlsFeedback("", "");
+    try {
+      const body = await apiRequest("/api/control/abort", {
+        method: "POST",
+        body: { plan_dir: planDir, grace_seconds: grace },
+      });
+      if (body && body.ok) {
+        showControlsFeedback(
+          "info",
+          "abort queued with " +
+            grace +
+            "s grace; " +
+            ((body && body.note) || "applies at the next drain")
+        );
+      } else {
+        showControlsFeedback(
+          "error",
+          (body && body.error) || "failed to enqueue abort"
         );
       }
     } catch (err) {

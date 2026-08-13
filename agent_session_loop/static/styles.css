@@ -1029,7 +1029,8 @@ a:hover {
   color: var(--wb-accent);
 }
 
-.wb-control__harness {
+.wb-control__harness,
+.wb-control__abort {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -1037,13 +1038,18 @@ a:hover {
   color: var(--wb-text-dim);
 }
 
-.wb-control__harness select {
+.wb-control__harness select,
+.wb-control__abort input {
   font: inherit;
   background: var(--wb-bg-row);
   color: var(--wb-text);
   border: 1px solid var(--wb-border);
   border-radius: 3px;
   padding: 3px 6px;
+}
+
+.wb-control__abort input {
+  width: 72px;
 }
 
 .wb-button--danger {

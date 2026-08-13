@@ -380,6 +380,26 @@
           >
             stop after current
           </button>
+          <label class="wb-control__abort">
+            abort grace (s)
+            <input
+              id="wb-control-abort-grace"
+              type="number"
+              min="1"
+              max="86400"
+              step="1"
+              value="120"
+            />
+            <button
+              class="wb-button wb-button--danger"
+              id="wb-control-abort"
+              type="button"
+              data-action="abort"
+              title="Ends the in-flight turn after the grace window, then leaves the session pending. Confirms first."
+            >
+              abort turn
+            </button>
+          </label>
           <label class="wb-control__harness">
             future harness
             <select id="wb-control-harness" data-action="harness-select">
