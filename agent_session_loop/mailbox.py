@@ -24,11 +24,17 @@ from pathlib import Path
 from typing import Any, Literal
 import uuid
 
-from . import durability, state
+from . import artifacts, durability, state
 
 
 MAILBOX_FILE_NAME = "mailbox.jsonl"
 MAILBOX_LEASE_FILE_NAME = "mailbox-lease.json"
+MAILBOX_SUPERVISION_CURSOR_FILE_TEMPLATE = (
+    "mailbox-supervision-{supervision_id}.json"
+)
+MAILBOX_SUPERVISION_CURSOR_GLOB = "mailbox-supervision-*.json"
+MAILBOX_SUPERVISION_CURSOR_VERSION = 1
+MAILBOX_SUPERVISION_CURSOR_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 MAILBOX_LEGACY_SCHEMA_VERSION = 1
 MAILBOX_PREVIOUS_SCHEMA_VERSION = 2
 MAILBOX_SCHEMA_VERSION = 3
@@ -732,6 +738,135 @@ def lease_path_for_plan(
 ) -> Path:
     """Return the canonical supervisor lease path for ``plan_dir``."""
     return state.plan_state_dir(plan_dir, state_dir) / MAILBOX_LEASE_FILE_NAME
+
+
+def supervision_cursor_path_for_plan(
+    plan_dir: str | Path,
+    supervision_id: str,
+    state_dir: str | Path | None = None,
+) -> Path:
+    """Return the cursor path one supervising launch owns for ``plan_dir``.
+
+    One file per launch identity makes cross-supervisor clobbering structurally
+    impossible, so the cursor needs no lock of its own.
+    """
+    if not _is_uuid(supervision_id):
+        raise ValueError("supervision_id must be a UUID")
+    return state.plan_state_dir(plan_dir, state_dir) / (
+        MAILBOX_SUPERVISION_CURSOR_FILE_TEMPLATE.format(
+            supervision_id=supervision_id
+        )
+    )
+
+
+def read_supervision_cursor(
+    plan_dir: str | Path,
+    supervision_id: str,
+    *,
+    state_dir: str | Path | None = None,
+) -> int:
+    """Return one launch's stored cursor, or 0 when it is unusable.
+
+    Every failure mode — missing, unreadable, unparseable, wrong version,
+    mismatched launch, or an out-of-range sequence — yields 0 because replaying
+    bounded history is safe while skipping records is not.
+    """
+    try:
+        cursor_path = supervision_cursor_path_for_plan(
+            plan_dir,
+            supervision_id,
+            state_dir,
+        )
+        payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    if payload.get("version") != MAILBOX_SUPERVISION_CURSOR_VERSION:
+        return 0
+    if payload.get("supervision_id") != supervision_id:
+        return 0
+    next_since = payload.get("next_since")
+    if (
+        isinstance(next_since, bool)
+        or not isinstance(next_since, int)
+        or next_since < 0
+        or next_since > MAILBOX_MAX_INTEGER
+    ):
+        return 0
+    return next_since
+
+
+def write_supervision_cursor(
+    plan_dir: str | Path,
+    supervision_id: str,
+    next_since: int,
+    *,
+    state_dir: str | Path | None = None,
+) -> None:
+    """Persist a never-regressing cursor for one supervising launch.
+
+    A failed write is swallowed: the worst outcome is one replayed batch.
+    """
+    _validate_sequence(next_since, field_name="next_since")
+    payload = {
+        "next_since": max(
+            next_since,
+            read_supervision_cursor(
+                plan_dir,
+                supervision_id,
+                state_dir=state_dir,
+            ),
+        ),
+        "supervision_id": supervision_id,
+        "updated_at": _utc_now_iso(),
+        "version": MAILBOX_SUPERVISION_CURSOR_VERSION,
+    }
+    cursor_path = supervision_cursor_path_for_plan(
+        plan_dir,
+        supervision_id,
+        state_dir,
+    )
+    try:
+        cursor_path.parent.mkdir(parents=True, exist_ok=True)
+        artifacts.atomic_write_bytes(
+            cursor_path,
+            json.dumps(payload, separators=(",", ":"), sort_keys=True).encode(
+                "utf-8"
+            )
+            + b"\n",
+        )
+    except (OSError, artifacts.ArtifactError):
+        pass
+
+
+def prune_supervision_cursors(
+    plan_dir: str | Path,
+    *,
+    state_dir: str | Path | None = None,
+    max_age_seconds: float = MAILBOX_SUPERVISION_CURSOR_MAX_AGE_SECONDS,
+    now: float | None = None,
+) -> int:
+    """Best-effort removal of cursors left behind by long-finished launches."""
+    cutoff = (_utc_now().timestamp() if now is None else now) - max_age_seconds
+    removed = 0
+    try:
+        candidates = sorted(
+            state.plan_state_dir(plan_dir, state_dir).glob(
+                MAILBOX_SUPERVISION_CURSOR_GLOB
+            )
+        )
+    except OSError:
+        return 0
+    for candidate in candidates:
+        try:
+            if candidate.stat().st_mtime >= cutoff:
+                continue
+            candidate.unlink()
+        except OSError:
+            continue
+        removed += 1
+    return removed
 
 
 def _new_id() -> str:

@@ -431,6 +431,7 @@ asl inbox read PLAN_DIR_OR_ID [--peek] [--state-dir DIR] [--json]
 asl ask PLAN_DIR_OR_ID (TEXT | --question-id QUESTION_ID) [--wait] [--wait-timeout SECONDS] [--state-dir DIR] [--json]
 asl notify PLAN_DIR_OR_ID (TEXT | --text-stdin) [--state-dir DIR] [--json]
 asl outbox wait PLAN_DIR_OR_ID [--include questions|notices|all] [--supervision-id UUID] [--since SEQ] [--timeout SECONDS] [--state-dir DIR] [--json]
+asl outbox supervise PLAN_DIR_OR_ID --supervision-id UUID [--timeout SECONDS] [--state-dir DIR] [--json]
 asl assurance list [--limit ROWS|--all] [--state open|resolved|dismissed|accepted-risk] [--severity low|medium|high|critical] [--state-dir DIR] [--json]
 asl assurance show ISSUE [--state-dir DIR] [--json]
 asl assurance resolve ISSUE [--note TEXT] [--state-dir DIR] [--json]
@@ -491,8 +492,13 @@ pause. It adds exactly two files below the canonical per-plan state directory:
   lease. It is fresh for 90 seconds after its UTC `updated_at`. Supervisor
   long-polls and the Autopilot renew it every 30 seconds; stopping supervision
   leaves the file in place to expire naturally.
+- `mailbox-supervision-<supervision-id>.json` is one small resumable cursor per
+  supervising launch, written only by `asl outbox supervise`. It holds that
+  launch's `next_since`, never regresses, restarts at 0 whenever it is
+  unreadable or belongs to another launch, and is pruned after seven days
+  without an update. Losing it costs a replay, never correctness.
 
-Both files are created and repaired to mode `0600`. They live under
+All three files are created and repaired to mode `0600`. They live under
 `<state-root>/<plan-path-sha256>/`; they are not stored in the plan directory
 or repository.
 
@@ -609,7 +615,7 @@ snapshot.
 
 ### Mailbox commands
 
-The seven mailbox commands share normal plan-reference, `--state-dir`, and
+The eight mailbox commands share normal plan-reference, `--state-dir`, and
 `--json` behavior:
 
 - `asl inbox guidance` appends supervisor guidance from exactly one of `--text`
@@ -710,6 +716,24 @@ The seven mailbox commands share normal plan-reference, `--state-dir`, and
   sequence and message ID, while JSON remains complete. Under `--include all` an
   empty timeout reports `No questions, notices, or supervision ends after seq
   N; timed out.`
+- `asl outbox supervise` is the supervision-loop reader. It wakes only on
+  questions and `supervision-end` records, requires `--supervision-id UUID`,
+  and keeps no `--since` or `--include` option: the cursor is persisted per
+  launch in `mailbox-supervision-<supervision-id>.json` beside the mailbox, so
+  the identical command is reissued every iteration. A missing, corrupt,
+  mismatched, or out-of-range cursor file is repaired by restarting at 0, and
+  a never-regressing write keeps a concurrent reader from rewinding it.
+  Cursor files untouched for seven days are pruned on each call. `--timeout`
+  defaults to 550 seconds with the same 1800-second maximum. Non-actionable
+  wakes — another launch's terminal record, or a batch whose questions have
+  all been closed — are absorbed internally against a single deadline and
+  never reach stdout, so the cursor still advances past them. Text output is
+  exactly one token, always with exit code 0: `IDLE` when the deadline passed
+  with nothing actionable, `ACTION questions=<n>` with the framed open
+  questions, or `DONE outcome=<outcome> seq=<n>` with this launch's own
+  terminal record framed below it. `--json` returns the ordinary wait payload
+  plus `state`, `cursor_path`, and `since`. `asl outbox wait` is unchanged and
+  remains the general-purpose reader.
 
 In text mode, `asl inbox read`, `asl ask`, and `asl outbox wait` retain their
 human-readable record headers and command trailers but render each message as
@@ -939,7 +963,7 @@ process exits, and never affect generated review turns.
 
 ### Surface and observability accounting
 
-The current net surface is two mailbox state files, seven mailbox commands, one
+The current net surface is three mailbox state files, eight mailbox commands, one
 model-control command, and one `mailbox` event name with
 `guidance-observed`, `notice-published`, `wait-preparation-failed`,
 `wait-started`, and `wait-cleared` action variants.
@@ -1843,9 +1867,9 @@ triggers a state-root lookup honoring `--state-dir`. Matching is exact and
 case-sensitive against existing plan directories: zero matches keep the current
 `malformed-plan` error, while multiple matches fail with `reason:
 ambiguous-plan`. Bare-label resolution is available to `status`, `asl control`,
-and all seven mailbox commands. They are `asl inbox guidance`,
+and all eight mailbox commands. They are `asl inbox guidance`,
 `asl inbox reply`, `asl inbox resolve`, `asl inbox read`, `asl ask`,
-`asl notify`, and `asl outbox wait`. `run`,
+`asl notify`, `asl outbox wait`, and `asl outbox supervise`. `run`,
 `tail`, `unlock`, and other plan-taking commands remain path-only. Successful
 text and JSON output continue to report the canonical resolved `plan_dir`.
 
@@ -2860,6 +2884,8 @@ Runtime files include:
   sequences and the file is never truncated in v1.
 - `mailbox-lease.json`: optional fixed-size supervisor activity lease, fresh for
   90 seconds.
+- `mailbox-supervision-<supervision-id>.json`: optional resumable supervision
+  cursor, one per supervising launch, pruned after seven days.
 - `runs/<run_id>/`: immutable artifacts for one runner invocation.
 - `runs/<run_id>/turn-0001-session-<id>/stdout.log`: stdout from the harness
   turn.

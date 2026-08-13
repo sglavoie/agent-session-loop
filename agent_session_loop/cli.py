@@ -1539,6 +1539,34 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         handler_ref="mailbox_cli:outbox_wait_from_args",
     )
 
+    outbox_supervise_parser = outbox_sub.add_parser(
+        "supervise",
+        help=(
+            "Wait on a resumable per-launch cursor and print one supervision "
+            "token."
+        ),
+    )
+    _add_plan_reference_args(outbox_supervise_parser)
+    outbox_supervise_parser.add_argument(
+        "--supervision-id",
+        metavar="UUID",
+        required=True,
+        help=(
+            "Launch identity: scopes the terminal record to this supervising "
+            "launch and keys the persisted cursor"
+        ),
+    )
+    outbox_supervise_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=550.0,
+        metavar="SECONDS",
+        help="Long-poll timeout in seconds (default: 550; maximum: 1800)",
+    )
+    outbox_supervise_parser.set_defaults(
+        handler_ref="mailbox_cli:outbox_supervise_from_args",
+    )
+
     assurance_parser = subparsers.add_parser(
         "assurance",
         help="Browse the assurance inbox of audited runs and open issues.",

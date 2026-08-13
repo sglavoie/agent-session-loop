@@ -96,24 +96,53 @@ Then run the helper with the user's exact command, passing the identity:
 <skill-dir>/scripts/asl-autopilot.py --command '<exact asl run command>' --supervision-id <launch-identity> --json
 ```
 
+#### Output contract (binding)
+
+A healthy run is silent. Between launching the helper and the final report you
+may emit text in exactly three cases: (1) a `QUESTION` record needs the user's
+answer — relay it and ask; (2) supervision is blocked and cannot continue
+without the user; (3) Step 4's final report.
+
+Everything else is forbidden output: acknowledging the launch, announcing a
+poll, restating a command you are about to run or just ran, summarizing an
+`IDLE` line, reporting elapsed time, quoting the payload, describing what the
+run "seems" to be doing, or reassuring the user that supervision continues.
+When `asl outbox supervise` prints `IDLE`, print nothing and reissue the
+identical command immediately. Hours of silence is the correct output.
+
+Poll exactly one thing: `asl outbox supervise`. Never also tail the helper's
+background output — that is the fallback for a dead or disabled mailbox
+(`--no-mailbox`, SIGKILL, crash), and reading both doubles the noise for no
+added signal.
+
+Notices are informational. They never wake supervision, are never relayed, and
+stay readable afterwards with
+`asl outbox wait <plan-dir> --include notices --since 0 --timeout 0`.
+
 Supervision is a strict turn-lifetime invariant: **never end the agent turn
 while the helper is active**, even if the harness backgrounds the helper or
-returns a session/cell identifier. Supervise by blocking on `asl outbox wait`,
-which long-polls the mailbox and returns the moment a record lands:
+returns a session/cell identifier. Supervise by blocking on
+`asl outbox supervise`, which long-polls the mailbox and returns the moment
+something actionable lands:
 
 ```text
-asl outbox wait <plan-dir> --include all --supervision-id <launch-identity> --since <next_since> --timeout 550 [--state-dir DIR] --json
+asl outbox supervise <plan-dir> --supervision-id <launch-identity> [--state-dir DIR]
 ```
 
-- Pass the same `--supervision-id` on every call. It scopes `supervision_ended`
-  to this launch and changes nothing else about the wait.
-- Start at `--since 0` so questions that were already open before the launch
-  stay visible, then feed each response's `next_since` into the next call.
-- `supervision_ended: true` means the batch carries this launch's own terminal
-  record: stop the wait loop and do not reissue. Read that record's `outcome`
-  before trusting stdout. Every outcome except `error` means the helper wrote
-  and flushed its complete `--json` result before appending the record, so it
-  is already parseable when the wait returns.
+- Pass the same `--supervision-id` on every call. It scopes the terminal record
+  to this launch and keys the persisted cursor, so the command is reissued
+  verbatim and no `--since` is ever threaded by hand. The cursor starts at 0, so
+  questions that were already open before the launch stay visible.
+- Exactly one of three tokens is printed, always with exit code 0.
+- `IDLE` means nothing actionable happened: print nothing and reissue the
+  identical command.
+- `ACTION questions=<n>` carries `<n>` question records that no closure has
+  answered yet, framed below the token. Surface them.
+- `DONE outcome=<outcome> seq=<n>` carries this launch's own terminal record:
+  stop the loop and do not reissue. Read that `outcome` before trusting stdout.
+  Every outcome except `error` means the helper wrote and flushed its complete
+  `--json` result before appending the record, so it is already parseable when
+  the token returns.
 - `outcome: error` means the helper died abnormally — a raised exception or a
   termination signal — so its stdout may be missing, truncated mid-write, or
   complete but unproven. Never require parseable JSON there: take the
@@ -123,34 +152,32 @@ asl outbox wait <plan-dir> --include all --supervision-id <launch-identity> --si
 - The record ends this supervision, not necessarily the run. It proves the
   helper exited, not that the `asl run` child is quiescent: a `worker_hung` stop
   leaves that child alive holding the plan lock (see "reason: worker_hung" in
-  Step 2), so worker questions and notices can still land after the terminal
-  record. Check `asl status <plan-dir> --json` before treating the plan as idle.
-- A `supervision-end` record in `supervision_ends` while `supervision_ended` is
-  `false` belongs to another helper on this plan — an earlier invocation or one
-  whose lifetime overlapped this launch. Handle nothing, let `next_since`
-  advance past it, and keep waiting.
-- The record is durable log content read through a sequence cursor, not a live
-  notification, so a helper that already exited before the first wait was issued
-  returns it on that first call instead of after the full timeout.
-- Absence of the record is **not** proof that the helper is alive: `--no-mailbox`,
+  Step 2), so worker questions and notices can still land after `DONE`. Check
+  `asl status <plan-dir> --json` before treating the plan as idle.
+- Another helper's terminal record — an earlier invocation, or one whose
+  lifetime overlapped this launch — never ends this loop. It is absorbed
+  internally: the cursor advances past it and the wait continues on the
+  remaining budget. So is a batch whose questions have all already closed.
+  Neither ever reaches stdout.
+- The terminal record is durable log content read through a sequence cursor, not
+  a live notification, so a helper that already exited before the first call
+  returns `DONE` on that call instead of after the full timeout.
+- Absence of `DONE` is **not** proof that the helper is alive: `--no-mailbox`,
   SIGKILL, and a machine crash leave nothing behind. Keep both fallbacks — the
-  bounded stdout tail below, and the `--timeout 550` loop as the backstop.
-- Anything else means supervision continues. `timed_out: true` with empty
-  `questions`, `notices`, and `supervision_ends` means nothing happened — reissue
-  immediately. `timed_out: false` with `supervision_ended: false` means some
-  other producer woke the wait; handle those records and reissue as before.
+  bounded stdout tail below, and the loop itself as the backstop.
 - The wait returns on a five-second internal cadence, so a question surfaces
   within seconds rather than at the next poll boundary.
 - A returned question that is still open also refreshes the body-free
   supervisor lease projection and makes a best-effort
   `AgentSessionLoopMailboxQuestion` handoff to AgentMux. This applies to the
-  explicit `asl outbox wait` command, not the helper's internal watcher;
-  notification failure never changes the wait result or its JSON schema.
-- Cap `--timeout` below the supervising harness's own tool-call ceiling (550 is
-  safe for a 600-second cap) and loop, rather than spending the 1800-second
-  maximum in a single call.
+  explicit supervisor command, not the helper's internal watcher; notification
+  failure never changes the result.
+- `--timeout` defaults to 550 seconds, which sits below the supervising
+  harness's own tool-call ceiling (safe for a 600-second cap). Loop rather than
+  spending the 1800-second maximum in a single call.
 - Running this against a live helper heartbeats its lease; it does not take over
   supervision.
+- An error keeps the ordinary contract: a `reason:` payload and a nonzero exit.
 
 Cadence matters because the runner's first wait is five minutes: any polling
 interval near or above 300 seconds can let a question open and expire entirely
@@ -159,12 +186,12 @@ for when the mailbox is unavailable, or when no terminal record can ever arrive
 (`--no-mailbox`, SIGKILL, machine crash) — not the primary path; when relying on
 it, poll at least every 30 seconds until the helper reaches a terminal result.
 
-`outbox wait` selects on sequence and kind only, with no answer-state filter, so
-it re-returns a question whose seq is past the cursor even when that question was
-already replied to, resolved, or expired. Before replying to any returned
-question, confirm it is still open: a `WAIT_ENDED` or `CLOSURE_CONSUMED` record
-for that id, or an `asl inbox reply` rejected with `question-not-waiting`, means
-it is already finished and must not be answered again.
+`outbox supervise` filters its batch to questions no closure has answered, but a
+question can still finish between the wake and the reply. Before replying to any
+returned question, confirm it is still open: a `WAIT_ENDED` or
+`CLOSURE_CONSUMED` record for that id, or an `asl inbox reply` rejected with
+`question-not-waiting`, means it is already finished and must not be answered
+again.
 
 Surface every `QUESTION` record immediately. After queuing a reply or resolution,
 continue supervising until a `CLOSURE_CONSUMED` record, an equivalent consumed
@@ -202,7 +229,8 @@ actually observed an accepted closure.
 
 One-shot supervisor commands do not displace a live helper. When the on-disk
 lease is fresh and carries a question projection, `asl inbox guidance`,
-`asl inbox reply`, and `asl outbox wait` heartbeat it — the helper's supervisor
+`asl inbox reply`, `asl outbox wait`, and `asl outbox supervise` heartbeat it —
+the helper's supervisor
 identity and projection survive with only the lease timestamp refreshed during
 that initial heartbeat. A wait that returns an actionable open set then
 refreshes that same identity with its exact latest projection. Only a missing,
@@ -590,8 +618,10 @@ could be configured, launched, retried, or disposed of.
   combined review, and recovery: use the bound workspace root, retain ordered
   repository aliases and qualified paths, never rebind automatically, and
   preserve partial commit SHAs.
-- `asl outbox wait` is the supervision loop; tailing the helper's background
-  output is the fallback for when the mailbox is unavailable.
+- `asl outbox supervise` is the supervision loop and the only thing polled;
+  tailing the helper's background output is the fallback for when the mailbox is
+  unavailable. `asl outbox wait` remains the general-purpose reader, including
+  for notices after the fact.
 - Keep the mailbox discipline: continue only plainly nonblocking messages,
   reply only from clearly defensible plan/repository/artifact facts, relay
   user-owned ambiguity, and use pause only to enter ordinary paused recovery.

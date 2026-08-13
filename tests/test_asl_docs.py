@@ -1070,11 +1070,18 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "at launch cannot tell a still-alive older helper's later exit "
             "from this one's",
             "Pass the same `--supervision-id` on every call",
-            "Start at `--since 0` so questions that were already open before "
-            "the launch stay visible",
-            "`supervision_ended: true` means the batch carries this launch's "
-            "own terminal record: stop the wait loop and do not reissue. Read "
-            "that record's `outcome` before trusting stdout",
+            "keys the persisted cursor, so the command is reissued verbatim "
+            "and no `--since` is ever threaded by hand",
+            "The cursor starts at 0, so questions that were already open "
+            "before the launch stay visible",
+            "Exactly one of three tokens is printed, always with exit code 0",
+            "`IDLE` means nothing actionable happened: print nothing and "
+            "reissue the identical command",
+            "`ACTION questions=<n>` carries `<n>` question records that no "
+            "closure has answered yet",
+            "`DONE outcome=<outcome> seq=<n>` carries this launch's own "
+            "terminal record: stop the loop and do not reissue. Read that "
+            "`outcome` before trusting stdout",
             "Every outcome except `error` means the helper wrote and flushed "
             "its complete `--json` result before appending the record",
             "`outcome: error` means the helper died abnormally",
@@ -1083,14 +1090,15 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "Never require parseable JSON there: take the termination detail "
             "from the record's `text`, recover run state with "
             "`asl status <plan-dir> --json`",
-            "while `supervision_ended` is `false` belongs to another helper "
-            "on this plan",
-            "let `next_since` advance past it, and keep waiting",
-            "Absence of the record is **not** proof that the helper is alive",
+            "Another helper's terminal record — an earlier invocation, or one "
+            "whose lifetime overlapped this launch — never ends this loop",
+            "It is absorbed internally: the cursor advances past it and the "
+            "wait continues on the remaining budget",
+            "So is a batch whose questions have all already closed. Neither "
+            "ever reaches stdout",
+            "Absence of `DONE` is **not** proof that the helper is alive",
             "Keep both fallbacks — the bounded stdout tail below, and the "
-            "`--timeout 550` loop as the backstop",
-            "`timed_out: false` with `supervision_ended: false` means some "
-            "other producer woke the wait",
+            "loop itself as the backstop",
             "when no terminal record can ever arrive (`--no-mailbox`, "
             "SIGKILL, machine crash)",
         ):
@@ -1098,6 +1106,38 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
                 marker,
                 normalized,
                 msg=f"asl skill omits supervision-end marker: {marker!r}",
+            )
+
+    def test_asl_skill_binds_a_silent_supervision_output_contract(self) -> None:
+        skill = self._read("skills/asl/SKILL.md")
+        normalized = " ".join(skill.split())
+
+        for marker in (
+            "#### Output contract (binding)",
+            "A healthy run is silent.",
+            "you may emit text in exactly three cases: (1) a `QUESTION` record "
+            "needs the user's answer — relay it and ask; (2) supervision is "
+            "blocked and cannot continue without the user; (3) Step 4's final "
+            "report",
+            "Everything else is forbidden output: acknowledging the launch, "
+            "announcing a poll, restating a command you are about to run or "
+            "just ran, summarizing an `IDLE` line, reporting elapsed time, "
+            "quoting the payload, describing what the run \"seems\" to be "
+            "doing, or reassuring the user that supervision continues",
+            "When `asl outbox supervise` prints `IDLE`, print nothing and "
+            "reissue the identical command immediately. Hours of silence is "
+            "the correct output",
+            "Poll exactly one thing: `asl outbox supervise`. Never also tail "
+            "the helper's background output",
+            "reading both doubles the noise for no added signal",
+            "Notices are informational. They never wake supervision, are "
+            "never relayed, and stay readable afterwards with `asl outbox "
+            "wait <plan-dir> --include notices --since 0 --timeout 0`",
+        ):
+            self.assertIn(
+                marker,
+                normalized,
+                msg=f"asl skill omits output-contract marker: {marker!r}",
             )
 
     def test_docs_describe_terminal_supervision_record(self) -> None:
@@ -1878,8 +1918,8 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         )[0]
 
         for marker in (
-            "two mailbox state files",
-            "seven mailbox commands",
+            "three mailbox state files",
+            "eight mailbox commands",
             "one\nmodel-control command",
             "one `mailbox` event name",
             "adds no runner or\nsupervisor threads",
@@ -1943,7 +1983,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         for marker in (
             "### Live ASL supervision",
             "`asl run --no-mailbox`",
-            "The seven mailbox commands",
+            "The eight mailbox commands",
             "Lease freshness is checked only at an active\ndeadline",
             "30-minute ceiling bounds unsupervised time rather\nthan wall clock",
             "`asl control set-model",

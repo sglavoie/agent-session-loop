@@ -33,6 +33,7 @@ COMMAND_INBOX_READ = "inbox-read"
 COMMAND_ASK = "ask"
 COMMAND_NOTIFY = "notify"
 COMMAND_OUTBOX_WAIT = "outbox-wait"
+COMMAND_OUTBOX_SUPERVISE = "outbox-supervise"
 
 OUTBOX_INCLUDE_QUESTIONS = "questions"
 OUTBOX_INCLUDE_NOTICES = "notices"
@@ -42,9 +43,17 @@ OUTBOX_INCLUDE_MODES = (
     OUTBOX_INCLUDE_NOTICES,
     OUTBOX_INCLUDE_ALL,
 )
+# Deliberately outside OUTBOX_INCLUDE_MODES: that tuple is the `wait` option
+# surface, and `wait` must not gain a fourth mode.
+OUTBOX_INCLUDE_SUPERVISION = "supervision"
+
+SUPERVISE_TOKEN_IDLE = "IDLE"
+SUPERVISE_TOKEN_ACTION = "ACTION"
+SUPERVISE_TOKEN_DONE = "DONE"
 
 DEFAULT_ASK_WAIT_TIMEOUT_SECONDS = 90.0
 DEFAULT_OUTBOX_WAIT_TIMEOUT_SECONDS = 300.0
+DEFAULT_OUTBOX_SUPERVISE_TIMEOUT_SECONDS = 550.0
 MAX_WAIT_TIMEOUT_SECONDS = 30.0 * 60.0
 LEASE_RENEW_INTERVAL_SECONDS = 30.0
 ASK_WAIT_POLL_INTERVAL_SECONDS = 2.0
@@ -2134,6 +2143,10 @@ def _wait_for_questions(
             mailbox.KIND_NOTICE,
             mailbox.KIND_SUPERVISION_END,
         ),
+        OUTBOX_INCLUDE_SUPERVISION: (
+            mailbox.KIND_QUESTION,
+            mailbox.KIND_SUPERVISION_END,
+        ),
     }[include]
 
     # Initial establishment remains fail-closed: without it the caller has no
@@ -2396,4 +2409,186 @@ def outbox_wait_from_args(args: argparse.Namespace) -> int:
                         f"{supervision_id}; supervision continues."
                     )
             print(f"Next cursor: {wait_result.next_since}")
+    return 0
+
+
+def _open_questions_in(
+    wait_result: _OutboxWaitResult,
+) -> tuple[mailbox.MailboxMessage, ...]:
+    """Return the woken questions no closure has already answered."""
+    view = wait_result.mailbox_view
+    if view is None:
+        return wait_result.questions
+    unanswered = {question.id for question in view.unanswered_questions}
+    return tuple(
+        question
+        for question in wait_result.questions
+        if question.id in unanswered
+    )
+
+
+def outbox_supervise_from_args(args: argparse.Namespace) -> int:
+    """Long-poll one launch's supervision cursor and print a single token.
+
+    Every wakeup that a supervisor cannot act on — another launch's terminal
+    record, or a question batch that already closed — advances the persisted
+    cursor and re-enters the wait on the remaining budget instead of returning.
+    Absorbing them here is what keeps a healthy run silent.
+    """
+    supervision_id, supervision_id_ok = _validated_supervision_id(
+        args,
+        command_name=COMMAND_OUTBOX_SUPERVISE,
+        text_label="outbox supervise",
+    )
+    if not supervision_id_ok:
+        return 1
+    if supervision_id is None:
+        _print_input_error(
+            args,
+            command_name=COMMAND_OUTBOX_SUPERVISE,
+            text_label="outbox supervise",
+            reason="invalid-supervision-id",
+            error="--supervision-id is required",
+        )
+        return 1
+    timeout = _validated_timeout(
+        args,
+        value=args.timeout,
+        option="--timeout",
+        command_name=COMMAND_OUTBOX_SUPERVISE,
+        text_label="outbox supervise",
+    )
+    if timeout is None:
+        return 1
+    context = _resolve(
+        args,
+        command_name=COMMAND_OUTBOX_SUPERVISE,
+        text_label="outbox supervise",
+    )
+    if context is None:
+        return 1
+
+    plan_dir = context.snapshot.plan_dir
+    mailbox.prune_supervision_cursors(plan_dir, state_dir=args.state_dir)
+    since = mailbox.read_supervision_cursor(
+        plan_dir,
+        supervision_id,
+        state_dir=args.state_dir,
+    )
+    supervisor_id = str(uuid.uuid4())
+    cursor = since
+    deadline = time.monotonic() + timeout
+    renewal_failures = 0
+    renewal_recoveries = 0
+    lease_degraded = False
+    while True:
+        try:
+            wait_result = _wait_for_questions(
+                plan_dir,
+                state_dir=args.state_dir,
+                since=cursor,
+                timeout=max(0.0, deadline - time.monotonic()),
+                supervisor_id=supervisor_id,
+                include=OUTBOX_INCLUDE_SUPERVISION,
+            )
+        except mailbox.MailboxError as error:
+            _print_mailbox_error(
+                args,
+                command_name=COMMAND_OUTBOX_SUPERVISE,
+                text_label="outbox supervise",
+                error=error,
+            )
+            return 1
+        renewal_failures += wait_result.lease_supervision.renewal_failures
+        renewal_recoveries += wait_result.lease_supervision.renewal_recoveries
+        lease_degraded = wait_result.lease_supervision.degraded
+        cursor = wait_result.next_since
+        mailbox.write_supervision_cursor(
+            plan_dir,
+            supervision_id,
+            cursor,
+            state_dir=args.state_dir,
+        )
+        _notify_agent_mux_mailbox_question(
+            context,
+            _outbox_question_projection(context, args, wait_result),
+        )
+        own_supervision_ends = tuple(
+            supervision_end
+            for supervision_end in wait_result.supervision_ends
+            if supervision_end.supervision_id == supervision_id
+        )
+        open_questions = _open_questions_in(wait_result)
+        if own_supervision_ends or open_questions:
+            break
+        if time.monotonic() >= deadline:
+            break
+
+    if own_supervision_ends:
+        terminal = own_supervision_ends[-1]
+        state_token = SUPERVISE_TOKEN_DONE
+        token = (
+            f"{SUPERVISE_TOKEN_DONE} outcome="
+            f"{terminal.supervision_outcome} seq={terminal.seq}"
+        )
+        text_lines = _outbox_supervision_end_text_lines(own_supervision_ends)
+    elif open_questions:
+        state_token = SUPERVISE_TOKEN_ACTION
+        token = f"{SUPERVISE_TOKEN_ACTION} questions={len(open_questions)}"
+        text_lines = _outbox_question_text_lines(open_questions)
+    else:
+        state_token = SUPERVISE_TOKEN_IDLE
+        token = SUPERVISE_TOKEN_IDLE
+        text_lines = []
+
+    payload = responses.success_payload(
+        COMMAND_OUTBOX_SUPERVISE,
+        plan_dir=str(plan_dir),
+        mailbox_path=str(_mailbox_path(context, args)),
+        lease_path=str(mailbox.lease_path_for_plan(plan_dir, args.state_dir)),
+        cursor_path=str(
+            mailbox.supervision_cursor_path_for_plan(
+                plan_dir,
+                supervision_id,
+                args.state_dir,
+            )
+        ),
+        supervisor_id=wait_result.supervisor_id,
+        since=since,
+        next_since=cursor,
+        timeout=timeout,
+        timed_out=state_token == SUPERVISE_TOKEN_IDLE,
+        include=OUTBOX_INCLUDE_SUPERVISION,
+        state=state_token,
+        questions=[_message_payload(question) for question in open_questions],
+        notices=[],
+        supervision_ends=[
+            _message_payload(supervision_end)
+            for supervision_end in own_supervision_ends
+        ],
+        supervision_ended=bool(own_supervision_ends),
+        supervision_id=supervision_id,
+        lease_supervision=_LeaseSupervision(
+            degraded=lease_degraded,
+            renewal_failures=renewal_failures,
+            renewal_recoveries=renewal_recoveries,
+        ).to_payload(),
+    )
+    if args.json:
+        responses.print_json(payload)
+        return 0
+    if renewal_failures:
+        health = (
+            "the latest renewal remains degraded"
+            if lease_degraded
+            else "a later renewal recovered"
+        )
+        print(
+            "Warning: supervisor lease renewal failed "
+            f"{renewal_failures} time(s); {health}.",
+            file=sys.stderr,
+        )
+    print(token)
+    if text_lines:
+        print("\n".join(text_lines))
     return 0

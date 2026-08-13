@@ -717,6 +717,38 @@ class CommandAndConfigTests(unittest.TestCase):
                 )
                 self.assertEqual(include, wait_args.include)
 
+    def test_outbox_supervise_parser_contract(self) -> None:
+        parser = cli.build_parser()
+        launch = "3d483756-71fb-4eed-8d10-a1f929dcf623"
+
+        supervise_args = parser.parse_args(
+            ["outbox", "supervise", "/tmp/plan", "--supervision-id", launch]
+        )
+        self.assertEqual(launch, supervise_args.supervision_id)
+        self.assertEqual(550.0, supervise_args.timeout)
+        self.assertEqual(
+            "mailbox_cli:outbox_supervise_from_args",
+            supervise_args.handler_ref,
+        )
+        self.assertIs(
+            mailbox_cli.outbox_supervise_from_args,
+            cli.resolve_handler(supervise_args),
+        )
+        # The cursor is persisted and the mode is fixed, so neither knob exists.
+        self.assertFalse(hasattr(supervise_args, "since"))
+        self.assertFalse(hasattr(supervise_args, "include"))
+
+        for argv in (
+            ["outbox", "supervise", "/tmp/plan"],
+            ["outbox", "supervise", "/tmp/plan", "--since", "2"],
+            ["outbox", "supervise", "/tmp/plan", "--include", "all"],
+        ):
+            with self.subTest(argv=argv), redirect_stderr(
+                io.StringIO()
+            ), self.assertRaises(SystemExit) as raised:
+                parser.parse_args(argv)
+            self.assertEqual(2, raised.exception.code)
+
     def test_mailbox_activation_accepts_fresh_lease_and_honors_opt_out(
         self,
     ) -> None:
