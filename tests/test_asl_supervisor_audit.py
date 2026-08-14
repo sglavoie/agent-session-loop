@@ -13,6 +13,7 @@ from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from agent_session_loop import (
     assurance_ledger,
@@ -31,6 +32,7 @@ from agent_session_loop.assurance_models import (
     RUBRIC_LANES,
     AssuranceError,
     AuditRole,
+    DeterministicResult,
 )
 from tests.support import init_git_repo, write_plan
 
@@ -42,7 +44,7 @@ def _parse(tokens: list[str]) -> argparse.Namespace:
 
 
 def _namespace(**overrides: object) -> argparse.Namespace:
-    values: dict[str, object] = {
+    values: dict[str, Any] = {
         "harness": "codex",
         "review_harness": None,
         "review_harness_model": None,
@@ -814,7 +816,7 @@ class _RecordingHarness:
         self.writes = writes
         self.action = action
         self.returncode = returncode
-        self.calls: list[dict[str, object]] = []
+        self.calls: list[dict[str, Any]] = []
 
     def __call__(self, name: str, **kwargs: object) -> harnesses.HarnessResult:
         self.calls.append({"name": name, **kwargs})
@@ -1595,7 +1597,7 @@ class _RunHistoryFixture:
         )
         return workspace, plan_dir, state_dir, run_dir
 
-    def _clean_result(self, workspace: Path, turn_dir: Path) -> dict[str, object]:
+    def _clean_result(self, workspace: Path, turn_dir: Path) -> dict[str, Any]:
         return {
             "ok": True,
             "returncode": 0,
@@ -1622,7 +1624,7 @@ class _RunHistoryFixture:
             },
         }
 
-    def _clean_state(self, workspace: Path) -> dict[str, object]:
+    def _clean_state(self, workspace: Path) -> dict[str, Any]:
         return {
             "harness": "codex",
             "model": "gpt-5",
@@ -1642,31 +1644,31 @@ class _RunHistoryFixture:
             "run_config": {"cwd": str(workspace)},
         }
 
-    def _read_state(self, state_dir: Path) -> dict[str, object]:
+    def _read_state(self, state_dir: Path) -> dict[str, Any]:
         return json.loads(
             (state_dir / events.STATE_FILE_NAME).read_text(encoding="utf-8")
         )
 
-    def _write_state(self, state_dir: Path, payload: dict[str, object]) -> None:
+    def _write_state(self, state_dir: Path, payload: dict[str, Any]) -> None:
         state_dir.mkdir(parents=True, exist_ok=True)
         (state_dir / events.STATE_FILE_NAME).write_text(
             json.dumps(payload), encoding="utf-8"
         )
 
-    def _read_result(self, run_dir: Path) -> dict[str, object]:
+    def _read_result(self, run_dir: Path) -> dict[str, Any]:
         return json.loads(
             (run_dir / "turn-0001-01" / state.RESULT_FILE_NAME).read_text(
                 encoding="utf-8"
             )
         )
 
-    def _write_result(self, turn_dir: Path, payload: dict[str, object]) -> None:
+    def _write_result(self, turn_dir: Path, payload: dict[str, Any]) -> None:
         (turn_dir / state.RESULT_FILE_NAME).write_text(
             json.dumps(payload), encoding="utf-8"
         )
 
     def _write_events(
-        self, state_dir: Path, records: list[tuple[str, dict[str, object]]]
+        self, state_dir: Path, records: list[tuple[str, dict[str, Any]]]
     ) -> None:
         state_dir.mkdir(parents=True, exist_ok=True)
         lines = [
@@ -1702,7 +1704,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
 
     def _audit(
         self, history: tuple[Path, Path, Path, Path], *, workspace_root: object = ...
-    ) -> tuple[supervisor_audit.AuditInput, dict[str, object]]:
+    ) -> tuple[supervisor_audit.AuditInput, dict[str, DeterministicResult]]:
         workspace, plan_dir, state_dir, run_dir = history
         bundle = supervisor_audit.collect_audit_input(
             run_id=RUN_ID,
@@ -1714,7 +1716,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
         results = supervisor_audit.run_deterministic_checks(bundle)
         return bundle, {result.check: result for result in results}
 
-    def _statuses(self, results: dict[str, object]) -> dict[str, str]:
+    def _statuses(self, results: dict[str, DeterministicResult]) -> dict[str, str]:
         return {check: result.status for check, result in results.items()}
 
     def test_a_clean_run_passes_every_lane(self) -> None:
@@ -2027,7 +2029,7 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
 
     def _lanes(
         self, locator: str, statuses: dict[str, str] | None = None
-    ) -> list[dict[str, object]]:
+    ) -> list[dict[str, Any]]:
         claimed = statuses or {}
         return [
             {
@@ -2039,8 +2041,8 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             for lane in RUBRIC_LANES
         ]
 
-    def _finding(self, locator: str, **overrides: object) -> dict[str, object]:
-        finding: dict[str, object] = {
+    def _finding(self, locator: str, **overrides: object) -> dict[str, Any]:
+        finding: dict[str, Any] = {
             "lane": "identity-authority",
             "severity": "medium",
             "category": "identity",
@@ -2055,8 +2057,8 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
 
     def _reply(
         self,
-        lanes: list[dict[str, object]],
-        findings: list[dict[str, object]] | None = None,
+        lanes: list[dict[str, Any]],
+        findings: list[dict[str, Any]] | None = None,
         *,
         prose: str = "",
     ) -> str:
@@ -2069,7 +2071,7 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
         )
         return f"{prose}```json\n{body}\n```\n"
 
-    def _reports(self, run_dir: Path, audit: object) -> tuple[dict[str, object], str]:
+    def _reports(self, run_dir: Path, audit: object) -> tuple[dict[str, Any], str]:
         report, markdown = supervisor_audit.write_audit_reports(
             run_dir, audit, durable=False
         )

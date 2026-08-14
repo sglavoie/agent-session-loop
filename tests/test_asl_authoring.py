@@ -16,6 +16,7 @@ import unittest
 from contextlib import redirect_stdout
 from datetime import UTC, datetime
 from pathlib import Path
+from types import ModuleType
 from unittest import mock
 
 from agent_session_loop import (
@@ -1947,6 +1948,8 @@ class SplitRepositoryFootprintTests(unittest.TestCase):
 
 class PlanAuthoringResplitTests(unittest.TestCase):
     """Split/resplit migration onto `agent_session_loop.authoring` (Session 12)."""
+
+    resplit: ModuleType
 
     @classmethod
     def setUpClass(cls) -> None:

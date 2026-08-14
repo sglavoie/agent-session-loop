@@ -79,19 +79,20 @@ class CommitGroupCoordinatorTests(unittest.TestCase):
         group["status"] = "failed"
         calls: list[str] = []
 
+        def record_commit(row, _group_id):
+            calls.append(str(row["key"]))
+            return {
+                "success": True,
+                "status_result": "success",
+                "commit_sha": "m1",
+                "commit_index": 2,
+            }
+
         result, failed = commit_groups.coordinate_group(
             group,
             is_clean=lambda row: row["key"] == "OAK",
             read_head=lambda row: "o0" if row["key"] == "OAK" else "m0",
-            run_commit=lambda row, _group_id: (
-                calls.append(str(row["key"]))
-                or {
-                    "success": True,
-                    "status_result": "success",
-                    "commit_sha": "m1",
-                    "commit_index": 2,
-                }
-            ),
+            run_commit=record_commit,
             persist=lambda _group, _phase: None,
         )
 

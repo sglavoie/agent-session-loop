@@ -335,7 +335,7 @@ def _write_source_file(
 
 def capture_inline_plan(
     raw_input: str, base_dir: str | os.PathLike[str] | None = None
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Persist pasted plan markdown as a durable source file.
 
     Canonical implementation behind ``asl split --inline-stdin`` (formerly the

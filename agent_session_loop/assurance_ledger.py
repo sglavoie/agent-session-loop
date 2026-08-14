@@ -158,7 +158,7 @@ _PAYLOAD_PARSERS: Mapping[str, Callable[[Any], Any]] = {
     KIND_IMPROVEMENT_PLAN_DRAFTED: parse_improvement_plan_draft,
 }
 
-_PAYLOAD_TYPES: Mapping[str, type] = {
+_PAYLOAD_TYPES: Mapping[str, type[Any]] = {
     KIND_AUDIT_PENDING: AssuranceSummary,
     KIND_AUDIT_COMPLETED: AssuranceSummary,
     KIND_AUDIT_SKIPPED: AssuranceSummary,
@@ -289,7 +289,10 @@ class LedgerView:
     def last_seq(self) -> int:
         """The highest physical line number present, rejected lines included."""
         return max(
-            (item.seq for item in (*self.records, *self.rejected)),
+            (
+                *(record.seq for record in self.records),
+                *(rejected.seq for rejected in self.rejected),
+            ),
             default=0,
         )
 

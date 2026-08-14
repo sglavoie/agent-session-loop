@@ -22,6 +22,7 @@ import time
 import unittest
 from contextlib import contextmanager, suppress
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
@@ -368,7 +369,7 @@ def git_stdout(repo_dir: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
-def read_jsonl(path: Path) -> list[dict[str, object]]:
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
@@ -667,9 +668,9 @@ def _structured_review_finding(
     finding_id: str = "F1",
     severity: str = "high",
     **overrides: object,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Return a schema-complete structured review finding for tests."""
-    finding: dict[str, object] = {
+    finding: dict[str, Any] = {
         "id": finding_id,
         "severity": severity,
         "title": f"Finding {finding_id} title",
@@ -691,7 +692,7 @@ def _structured_review_finding(
 
 def write_completed_review_plan(
     plan_dir: Path,
-    findings: list[dict[str, object]],
+    findings: list[dict[str, Any]],
     *,
     contracts_by_id: dict[str, str] | None = None,
 ) -> Path:
@@ -731,7 +732,7 @@ def write_completed_review_plan(
 def write_review_cycle_event(
     plan_dir: Path,
     state_root: Path,
-    payload: dict[str, object],
+    payload: dict[str, Any],
 ) -> Path:
     """Append one review-cycle fixture event and return its event path."""
     event_path = state.plan_state_dir(plan_dir, state_root) / events.EVENTS_FILE_NAME
@@ -792,7 +793,7 @@ def _make_workbench_plan(tmp_path: Path, name: str = "plan-alpha") -> Path:
 def _write_state_payload(
     plan_dir: Path,
     state_root: Path,
-    payload: dict[str, object],
+    payload: dict[str, Any],
 ) -> Path:
     plan_state = state.plan_state_dir(plan_dir, state_root)
     plan_state.mkdir(parents=True, exist_ok=True)
@@ -832,7 +833,7 @@ def _write_lock_file(
     plan_state = state.plan_state_dir(plan_dir, state_root)
     plan_state.mkdir(parents=True, exist_ok=True)
     lock_path = plan_state / state.LOCK_FILE_NAME
-    payload: dict[str, object] = {
+    payload: dict[str, Any] = {
         "pid": pid,
         "plan_dir": str(plan_dir),
         "created_at": "2026-06-19T00:00:00+00:00",
@@ -1107,7 +1108,7 @@ def _write_prepare_plan(plan_dir: Path, session_ids: tuple[str, ...] = ("1",)) -
 
 def _validator_payload(**session_overrides: object) -> dict:
     """A minimal valid validator payload for one session, with overrides."""
-    session: dict[str, object] = {
+    session: dict[str, Any] = {
         "session_id": "1",
         "title": "Test",
         "claims": [

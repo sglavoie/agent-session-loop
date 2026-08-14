@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
@@ -570,7 +571,7 @@ def _parse_regex_in_file_check(
     )
 
 
-CHECK_PARSERS = {
+CHECK_PARSERS: dict[str, Callable[..., VerificationCheck]] = {
     "command": _parse_command_check,
     "file_exists": _parse_file_exists_check,
     "regex_in_file": _parse_regex_in_file_check,

@@ -1506,10 +1506,10 @@ def _print_text_verify_success(
                 )
                 if snippet:
                     print(f"      stderr: {snippet}", file=sys.stderr)
-    for check in result.skipped_checks:
-        dependencies = ", ".join(check.on_failure_of)
+    for skipped in result.skipped_checks:
+        dependencies = ", ".join(skipped.on_failure_of)
         print(
-            f"  [SKIP] {check.kind} {check.name}: {check.reason} "
+            f"  [SKIP] {skipped.kind} {skipped.name}: {skipped.reason} "
             f"(on failure of: {dependencies})"
         )
     if result.passed:

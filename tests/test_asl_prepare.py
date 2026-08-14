@@ -15,6 +15,7 @@ import time
 import unittest
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
@@ -78,14 +79,14 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
 
     @staticmethod
     def _removal_overrides(*, repo: str | None = None) -> dict:
-        claim: dict[str, object] = {
+        claim: dict[str, Any] = {
             "claim": "retry backoff branch",
             "claim_type": "R",
             "location": "foo/bar.py — added in a1b2c3d, covered by test_retry.py:40",
             "line": 12,
             "to_be_created": False,
         }
-        issue: dict[str, object] = {
+        issue: dict[str, Any] = {
             "issue_type": "removal-unjustified",
             "summary": "no rationale for dropping the backoff",
             "session_ref": "delete the backoff branch",
@@ -1470,6 +1471,7 @@ class PrepareCliTests(unittest.TestCase):
             self.assertFalse(kwargs["unsafe_bypass"])
             self.assertIsNone(kwargs["plan_dir"])
             access = kwargs["access"]
+            assert isinstance(access, harnesses.AccessProfile)
             self.assertEqual("audit-read-only", access.name)
             return harnesses.HarnessResult(
                 argv=["claude"],
@@ -1969,7 +1971,7 @@ class PrepareEndToEndTests(unittest.TestCase):
         validator,
         **kwargs: object,
     ) -> prepare.PrepareResult:
-        options: dict[str, object] = {
+        options: dict[str, Any] = {
             "cwd": self.repo,
             "harness": "codex",
             "harness_model": "gpt-5",

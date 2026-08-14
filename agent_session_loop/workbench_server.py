@@ -65,7 +65,7 @@ import webbrowser
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from . import (
     artifacts,
@@ -151,7 +151,9 @@ class WorkbenchHTTPServer(http.server.ThreadingHTTPServer):
 
     @property
     def bound_host(self) -> str:
-        return self.server_address[0]
+        # AF_INET keeps server_address a (str, int) pair; the stdlib annotation
+        # widens it to cover the Unix-socket case this server never uses.
+        return cast(str, self.server_address[0])
 
     @property
     def bound_port(self) -> int:

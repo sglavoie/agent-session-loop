@@ -38,7 +38,7 @@ import subprocess
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from .contracts import (
     CommandCheck,
@@ -601,7 +601,7 @@ def footprint_payload(
     footprint: RepositoryFootprint,
     *,
     registry_present: bool,
-) -> dict[str, object] | None:
+) -> dict[str, Any] | None:
     """Serialize the footprint verdict, or ``None`` when there is nothing to say.
 
     This is the shared machine-readable contract behind ``asl split --check``

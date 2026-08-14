@@ -468,13 +468,13 @@ def resolve_workspace(
             )
         )
 
-    for index, repository in enumerate(resolved):
+    for index, entry in enumerate(resolved):
         for other in resolved[index + 1 :]:
-            if is_descendant(
-                repository.root, other.root, allow_equal=True
-            ) or is_descendant(other.root, repository.root, allow_equal=True):
+            if is_descendant(entry.root, other.root, allow_equal=True) or is_descendant(
+                other.root, entry.root, allow_equal=True
+            ):
                 raise WorkspaceError(
                     "resolved repository roots must not overlap: "
-                    f"{repository.alias} and {other.alias}"
+                    f"{entry.alias} and {other.alias}"
                 )
     return ResolvedWorkspace(root=root, repositories=tuple(resolved))

@@ -16,6 +16,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
@@ -55,8 +56,8 @@ from tests.support import (
 class StructuredReviewArtifactTests(unittest.TestCase):
     """Shared review module: verdict grammar, final-review.json, consistency."""
 
-    def _artifact(self, **overrides: object) -> dict[str, object]:
-        payload: dict[str, object] = {
+    def _artifact(self, **overrides: object) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "version": review.REVIEW_ARTIFACT_VERSION,
             "outcome": "findings",
             "findings": [_structured_review_finding()],
@@ -688,8 +689,8 @@ class StructuredReviewArtifactTests(unittest.TestCase):
 class ReviewVerdictCommandTests(unittest.TestCase):
     """`asl review-verdict` authoritative, untruncated verdict surface."""
 
-    def _artifact(self, **overrides: object) -> dict[str, object]:
-        payload: dict[str, object] = {
+    def _artifact(self, **overrides: object) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "version": review.REVIEW_ARTIFACT_VERSION,
             "outcome": "findings",
             "findings": [_structured_review_finding()],
@@ -1032,8 +1033,8 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
         *,
         severity: str = "high",
         **overrides: object,
-    ) -> dict[str, object]:
-        defaults: dict[str, object] = {
+    ) -> dict[str, Any]:
+        defaults: dict[str, Any] = {
             "repair_group": repair_group,
             "title": f"Fix {finding_id}",
             "evidence": [{"path": f"pkg/{finding_id}.py", "symbol": "target"}],
@@ -1052,7 +1053,7 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
             finding_id=finding_id, severity=severity, **defaults
         )
 
-    def _status_line(self, findings: list[dict[str, object]]) -> str:
+    def _status_line(self, findings: list[dict[str, Any]]) -> str:
         if not findings:
             return review.REVIEW_STATUS_ALL_CLEAR
         high = sum(1 for f in findings if f["severity"] == "high")
@@ -1062,7 +1063,7 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
 
     def _write_plan(
         self,
-        findings: list[dict[str, object]],
+        findings: list[dict[str, Any]],
         *,
         with_manifest_table: bool = True,
         review_status: str = "complete",
@@ -1149,7 +1150,7 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
         finding_id: str,
         repair_group: str,
         repo: str,
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         finding = self._finding(
             finding_id,
             repair_group,
@@ -1168,7 +1169,7 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
 
     def _register_plan(
         self,
-        findings: list[dict[str, object]],
+        findings: list[dict[str, Any]],
         *,
         artifact_version: int = review.REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION,
     ) -> None:
@@ -1220,7 +1221,7 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
             if path.is_file()
         }
 
-    def _write_review_events(self, *payloads: dict[str, object]) -> Path:
+    def _write_review_events(self, *payloads: dict[str, Any]) -> Path:
         event_path = (
             state.plan_state_dir(self.plan_dir, self.state_dir)
             / events.EVENTS_FILE_NAME
@@ -2546,7 +2547,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def _run_args(self, **overrides: object) -> argparse.Namespace:
-        defaults: dict[str, object] = {
+        defaults: dict[str, Any] = {
             "cwd": str(self.repo_root),
             "timeout": None,
             "max_sessions": None,
@@ -2727,7 +2728,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             reopen_cycle: int | None,
         ) -> Path:
             event_path = self.tmp_path / f"lineage-less-{name}.jsonl"
-            reopen_payload: dict[str, object] = {
+            reopen_payload: dict[str, Any] = {
                 "materialized": True,
                 "current_fingerprints": [f"finding:{name}"],
             }
@@ -2987,7 +2988,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         self.assertEqual(1, projected_before.historical_materializations)
         self.assertEqual(2, projected_before.minimum_required_cap)
 
-        payload: dict[str, object] = {
+        payload: dict[str, Any] = {
             "run_id": "run-1",
             "run_dir": str(self.tmp_path / "run"),
             "review_cycles": [],
@@ -3061,7 +3062,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         )
         self.state_dir.mkdir(parents=True, exist_ok=True)
         event_path = self.state_dir / "events.jsonl"
-        payload: dict[str, object] = {
+        payload: dict[str, Any] = {
             "run_id": "run-1",
             "run_dir": str(self.tmp_path / "run"),
             "review_cycles": [],
@@ -3137,7 +3138,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         *,
         review_outcomes: str,
         extra_args: list[str] | None = None,
-    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
         argv = [
             sys.executable,
             "-m",
@@ -3181,14 +3182,14 @@ class ReviewRepairCycleTests(unittest.TestCase):
         )
         return plan_state / events.EVENTS_FILE_NAME
 
-    def _review_cycle_events(self) -> list[dict[str, object]]:
+    def _review_cycle_events(self) -> list[dict[str, Any]]:
         return [
             record["payload"]
             for record in read_jsonl(self._events_path())
             if record["name"] == events.REVIEW_CYCLE_EVENT
         ]
 
-    def _review_reopen_events(self) -> list[dict[str, object]]:
+    def _review_reopen_events(self) -> list[dict[str, Any]]:
         return [
             record["payload"]
             for record in read_jsonl(self._events_path())

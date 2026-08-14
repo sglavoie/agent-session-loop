@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from agent_session_loop import (
     config,
@@ -103,7 +104,7 @@ class EndToEndQATests(unittest.TestCase):
         mark_loop_ready: bool = False,
         commit_mode: str | None = None,
         path_value: str | None = None,
-    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
         argv = [
             sys.executable,
             "-m",
@@ -148,7 +149,7 @@ class EndToEndQATests(unittest.TestCase):
         max_review_fix_cycles: int | None = None,
         mode: str = "success",
         review_outcomes: str | None = None,
-    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
         argv = [
             sys.executable,
             "-m",
@@ -191,7 +192,7 @@ class EndToEndQATests(unittest.TestCase):
         *,
         max_review_fix_cycles: int,
         review_outcomes: str,
-    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
         """Supervise the real CLI through the standalone Autopilot helper."""
 
         asl_wrapper = self.tmp_path / "asl"
@@ -810,7 +811,7 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
         *args: str,
         env_updates: dict[str, str] | None = None,
         timeout: int = 60,
-    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
         completed = subprocess.run(
             [sys.executable, "-m", "agent_session_loop", *args],
             cwd=REPO_ROOT,
@@ -849,8 +850,8 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
         )
 
     @staticmethod
-    def _contracts() -> dict[str, object]:
-        first_checks: list[dict[str, object]] = []
+    def _contracts() -> dict[str, Any]:
+        first_checks: list[dict[str, Any]] = []
         for number, (alias, relative_path, _origin) in enumerate(
             DEFAULT_MULTI_REPO_SPECS, start=1
         ):
@@ -1029,7 +1030,7 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
         state_dir: Path,
         *extra: str,
         env_updates: dict[str, str] | None = None,
-    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
         return self._cli(
             "run",
             str(plan_dir),
@@ -1060,7 +1061,7 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
         state_dir: Path,
         *,
         env_updates: dict[str, str] | None = None,
-    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
         return self._cli(
             "prepare",
             str(plan_dir),
@@ -1630,7 +1631,7 @@ class KilnTwinCloneRegressionTests(unittest.TestCase):
         cwd: Path,
         *extra: str,
         env_updates: dict[str, str] | None = None,
-    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
         env = os.environ.copy()
         env.update(
             {
@@ -1952,7 +1953,7 @@ class VerificationRepairLoopTests(unittest.TestCase):
 
     def _run(
         self, *, worker_mode: str | None = None
-    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
         argv = [
             sys.executable,
             "-m",

@@ -19,6 +19,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
@@ -644,7 +645,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 runner.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
                 runner.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
             }
-            notified: list[tuple[str, dict[str, object] | None]] = []
+            notified: list[tuple[str, dict[str, Any] | None]] = []
 
             def record_notification(event_name, _payload, **kwargs):
                 notified.append((event_name, kwargs.get("extra")))
@@ -3432,7 +3433,7 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
         )
 
     @staticmethod
-    def _wait_payload(tmp_dir: Path) -> dict[str, object]:
+    def _wait_payload(tmp_dir: Path) -> dict[str, Any]:
         return {
             "run_id": "run-wait",
             "plan_dir": str(tmp_dir / "plan"),
@@ -3612,7 +3613,7 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
         )
 
     @staticmethod
-    def _hang_payload(tmp_dir: Path) -> dict[str, object]:
+    def _hang_payload(tmp_dir: Path) -> dict[str, Any]:
         return {
             "run_id": "run-hang",
             "plan_dir": str(tmp_dir / "plan"),
@@ -3623,7 +3624,7 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
         }
 
     @staticmethod
-    def _active_turn() -> dict[str, object]:
+    def _active_turn() -> dict[str, Any]:
         return {
             "turn_index": 3,
             "session": "2",
@@ -4427,7 +4428,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         dry_run: bool = False,
         json_output: bool = True,
         allow_not_loop_ready: bool = True,
-    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
         argv = [
             sys.executable,
             "-m",
@@ -4465,7 +4466,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         self,
         *,
         json_output: bool = True,
-    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object] | str]:
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any] | str]:
         argv = [
             sys.executable,
             "-m",
@@ -4560,7 +4561,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         *,
         action: str,
         note: str,
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         completed = subprocess.run(
             [
                 sys.executable,
@@ -4595,8 +4596,8 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
 
     def _assert_resolution_wait_cleared_promptly(
         self,
-        resolution_payload: dict[str, object],
-        records: list[dict[str, object]],
+        resolution_payload: dict[str, Any],
+        records: list[dict[str, Any]],
         *,
         action: str,
     ) -> None:
@@ -4931,7 +4932,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         plan_state = state.plan_state_dir(self.plan_dir, self.state_dir)
         state_path = plan_state / events.STATE_FILE_NAME
         deadline = time.monotonic() + 10
-        waiting: dict[str, object] | None = None
+        waiting: dict[str, Any] | None = None
         while time.monotonic() < deadline:
             if state_path.exists():
                 try:

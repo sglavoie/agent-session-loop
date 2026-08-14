@@ -21,6 +21,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -28,6 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # multi-second subprocess orchestration. Ordered longest-first.
 FAST_MODULES = (
     "tests.test_daily_remind",
+    "tests.test_claude_lint_hook",
     "tests.test_asl_cli",
     "tests.test_asl_preflight",
     "tests.test_asl_verification",
@@ -115,7 +117,7 @@ def _shard_commands(fast_only: bool) -> list[tuple[str, list[str]]]:
     return shards
 
 
-def _run_shard(name: str, command: list[str]) -> dict[str, object]:
+def _run_shard(name: str, command: list[str]) -> dict[str, Any]:
     started = time.monotonic()
     completed = subprocess.run(
         command,

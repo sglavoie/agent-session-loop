@@ -23,10 +23,13 @@ from contextlib import (
     redirect_stdout,
 )
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 MODULE_PATH = os.path.join(os.path.dirname(__file__), "asl_autopilot.py")
 SPEC = importlib.util.spec_from_file_location("asl_autopilot", MODULE_PATH)
-autopilot = importlib.util.module_from_spec(SPEC)
+# Typed as Any because the tests monkeypatch module attributes, which ModuleType
+# does not model, and every attribute here is resolved at load time anyway.
+autopilot: Any = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(autopilot)
 

@@ -54,7 +54,7 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _normalized_check(check: object) -> dict:
+def _normalized_check(check: contracts.VerificationCheck) -> dict:
     """Return a name-independent projection of a single verification check.
 
     ``name`` is deliberately excluded so that two sessions running the same

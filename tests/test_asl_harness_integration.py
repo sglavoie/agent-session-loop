@@ -23,6 +23,7 @@ from collections.abc import Callable
 from contextlib import redirect_stderr, suppress
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
@@ -166,7 +167,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
 
     def event_index(
         self,
-        records: list[dict[str, object]],
+        records: list[dict[str, Any]],
         name: str,
         **payload_values: object,
     ) -> int:
@@ -194,7 +195,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         extra_env: dict[str, str] | None = None,
         harness_config_overrides: dict[str, str] | None = None,
         before_run: Callable[[Path, Path], None] | None = None,
-    ) -> tuple[int, dict[str, object], Path, Path, Path]:
+    ) -> tuple[int, dict[str, Any], Path, Path, Path]:
         plan_dir, state_dir, config_home, fake_codex = self.setup_loop(
             statuses=statuses,
             harness_config_overrides=harness_config_overrides,
@@ -268,9 +269,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         harness_model: str | None = None,
         effort: str | None = None,
         extra_env: dict[str, str] | None = None,
-    ) -> tuple[int, dict[str, object], list[dict[str, object]], Path, Path]:
+    ) -> tuple[int, dict[str, Any], list[dict[str, Any]], Path, Path]:
         listener = FakeRunControlListener()
-        calls: list[dict[str, object]] = []
+        calls: list[dict[str, Any]] = []
 
         def complete_next_pending(plan_dir: Path) -> None:
             for session_file in sorted(plan_dir.glob("session-*.md")):
@@ -337,7 +338,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         effort: str | None = None,
         note: str | None = None,
         extra_env: dict[str, str] | None = None,
-    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
         run_cwd = REPO_ROOT if cwd is None else cwd
         command = [
             sys.executable,
@@ -407,7 +408,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         effort: str | None = None,
         note: str | None = None,
         extra_env: dict[str, str] | None = None,
-    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object], Path, Path, Path]:
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any], Path, Path, Path]:
         plan_dir, state_dir, config_home, fake_codex = self.setup_loop(
             statuses=statuses
         )
@@ -431,13 +432,13 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         listener = FakeRunControlListener()
         observed: list[tuple[str, object]] = []
 
-        def read_state_payload(payload: dict[str, object]) -> dict[str, object]:
+        def read_state_payload(payload: dict[str, Any]) -> dict[str, Any]:
             return json.loads(
                 Path(str(payload["state_path"])).read_text(encoding="utf-8")
             )
 
         def notify_started(
-            payload: dict[str, object],
+            payload: dict[str, Any],
             persistence: object = None,
         ) -> None:
             state_payload = read_state_payload(payload)
@@ -447,8 +448,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertIsNone(state_payload["active_turn"])
 
         def notify_turn_started(
-            payload: dict[str, object],
-            active_turn: dict[str, object],
+            payload: dict[str, Any],
+            active_turn: dict[str, Any],
             persistence: object = None,
         ) -> None:
             state_payload = read_state_payload(payload)
@@ -460,7 +461,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertEqual("codex", state_turn["harness"])
 
         def notify_finished(
-            payload: dict[str, object],
+            payload: dict[str, Any],
             persistence: object = None,
         ) -> None:
             state_payload = read_state_payload(payload)
@@ -645,12 +646,12 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertEqual(4, final_state["agent_mux_sequence"])
 
     def test_harness_switch_updates_agent_mux_turn_notification_harness(self) -> None:
-        hook_payloads: list[dict[str, object]] = []
-        finish_payloads: list[dict[str, object]] = []
+        hook_payloads: list[dict[str, Any]] = []
+        finish_payloads: list[dict[str, Any]] = []
 
         def notify_turn_started(
-            payload: dict[str, object],
-            active_turn: dict[str, object],
+            payload: dict[str, Any],
+            active_turn: dict[str, Any],
             persistence: object = None,
         ) -> None:
             hook_payloads.append(
@@ -662,7 +663,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             )
 
         def notify_finished(
-            payload: dict[str, object],
+            payload: dict[str, Any],
             persistence: object = None,
         ) -> None:
             finish_payloads.append(
@@ -885,7 +886,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         *,
         plan_dir: Path,
         state_dir: Path,
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         state_path = state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
         return json.loads(state_path.read_text(encoding="utf-8"))
 
@@ -2028,7 +2029,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self,
     ) -> None:
         listener = FakeRunControlListener(current_harness="codex")
-        calls: list[dict[str, object]] = []
+        calls: list[dict[str, Any]] = []
         plan_dir_box: list[Path] = []
         state_dir_box: list[Path] = []
 
@@ -2167,7 +2168,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
 
     def test_external_queue_select_future_harness_switches_next_turn(self) -> None:
         listener = FakeRunControlListener(current_harness="codex")
-        calls: list[dict[str, object]] = []
+        calls: list[dict[str, Any]] = []
         plan_dir_box: list[Path] = []
         state_dir_box: list[Path] = []
 
@@ -2291,7 +2292,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         """A queue command written mid-turn is applied by periodic polling."""
 
         listener = FakeRunControlListener(current_harness="codex")
-        calls: list[dict[str, object]] = []
+        calls: list[dict[str, Any]] = []
         plan_dir_box: list[Path] = []
         state_dir_box: list[Path] = []
         stop_state_during_call: list[bool] = []
@@ -2511,7 +2512,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self,
     ) -> None:
         listener = FakeRunControlListener()
-        calls: list[dict[str, object]] = []
+        calls: list[dict[str, Any]] = []
         paths: dict[str, Path] = {}
 
         def remember_paths(plan_dir: Path, state_dir: Path) -> None:
@@ -2724,7 +2725,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
 
     def test_missing_switched_harness_pauses_before_next_turn(self) -> None:
         listener = FakeRunControlListener()
-        calls: list[dict[str, object]] = []
+        calls: list[dict[str, Any]] = []
 
         with tempfile.TemporaryDirectory() as tmp:
             missing_claude = Path(tmp) / "missing-claude"
@@ -4768,7 +4769,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             release = threading.Event()
             emit_heartbeat = progress.verification_heartbeat
 
-            def parked_heartbeat(heartbeat: dict[str, object]) -> None:
+            def parked_heartbeat(heartbeat: dict[str, Any]) -> None:
                 parked.set()
                 release.wait(timeout=30)
                 emit_heartbeat(heartbeat)
@@ -4873,7 +4874,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             release = threading.Event()
             emit_check_finished = progress.verification_check_finished
 
-            def parked_check_finished(check: dict[str, object]) -> None:
+            def parked_check_finished(check: dict[str, Any]) -> None:
                 parked.set()
                 release.wait(timeout=30)
                 emit_check_finished(check)
@@ -5229,7 +5230,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
 
             def delayed_write_json(
                 path: Path,
-                payload_arg: dict[str, object],
+                payload_arg: dict[str, Any],
                 *,
                 durable: bool = False,
             ) -> None:
@@ -5896,10 +5897,10 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
         event_path = self.tmp_dir / "events.jsonl"
         stdout_log = self.tmp_dir / "stdout.log"
         stderr_log = self.tmp_dir / "stderr.log"
-        payload: dict[str, object] = {"state_path": str(state_path)}
+        payload: dict[str, Any] = {"state_path": str(state_path)}
         started_at = runner._isoformat(runner._utc_now())
 
-        def make_active_turn(session: int) -> dict[str, object]:
+        def make_active_turn(session: int) -> dict[str, Any]:
             return {
                 "run_id": "run-late-writer",
                 "turn_index": session,
@@ -6553,7 +6554,7 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
         self.event_path = self.tmp_dir / "events.jsonl"
 
     @staticmethod
-    def tree(cpu_seconds: float) -> list[dict[str, object]]:
+    def tree(cpu_seconds: float) -> list[dict[str, Any]]:
         return [
             {
                 "pid": 4242,
@@ -6579,7 +6580,7 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
             result_grace_seconds=45.0,
         )
         started_at = runner._isoformat(runner._utc_now() - timedelta(seconds=600))
-        active_turn: dict[str, object] = {
+        active_turn: dict[str, Any] = {
             "run_id": "run-hang",
             "turn_index": 1,
             "session": 3,
@@ -6675,7 +6676,7 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
             result_grace_seconds=45.0,
         )
         started_at = runner._isoformat(runner._utc_now() - timedelta(seconds=600))
-        active_turn: dict[str, object] = {
+        active_turn: dict[str, Any] = {
             "run_id": "run-hang",
             "turn_index": 1,
             "session": 3,
@@ -6747,7 +6748,7 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
     def test_churning_tree_persists_a_non_decreasing_cpu_total(self) -> None:
         """ASI-58 end to end: worker churn must not persist a hang suspicion."""
 
-        def proc(pid: int, cpu_seconds: float, birth: str) -> dict[str, object]:
+        def proc(pid: int, cpu_seconds: float, birth: str) -> dict[str, Any]:
             return {
                 "pid": pid,
                 "ppid": 1 if pid == 4242 else 4242,

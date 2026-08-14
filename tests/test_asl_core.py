@@ -19,6 +19,7 @@ import unittest
 from contextlib import contextmanager, redirect_stdout
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
@@ -4331,8 +4332,11 @@ class ParserAndStateTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
+            # Bound dynamically because the assertion is about runtime argument
+            # binding, which a static signature check rejects before it runs.
+            payload_builder: Any = state._runner_state_payload
             with self.assertRaisesRegex(TypeError, "lock_info"):
-                state._runner_state_payload(state_path)
+                payload_builder(state_path)
 
             payload = state._runner_state_payload(
                 state_path,

@@ -19,6 +19,7 @@ from contextlib import (
     ExitStack,
 )
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
@@ -178,7 +179,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         review_guard_exclude: tuple[str, ...] = (),
         review_guard_include_ignored: bool = False,
         extra_env: dict[str, str] | None = None,
-    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object] | None]:
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any] | None]:
         argv = [
             sys.executable,
             "-m",
@@ -386,7 +387,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         )
         return plan_state / events.EVENTS_FILE_NAME
 
-    def _read_events(self) -> list[dict[str, object]]:
+    def _read_events(self) -> list[dict[str, Any]]:
         return read_jsonl(self._events_path())
 
     def test_fresh_run_appends_and_completes_review_session(self) -> None:
@@ -1639,7 +1640,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertIn("- **Status**: pending", review_text)
         self.assertIn("review verdict validation failed", review_text)
 
-    def _review_verdict_retries(self) -> list[dict[str, object]]:
+    def _review_verdict_retries(self) -> list[dict[str, Any]]:
         return [
             record["payload"]
             for record in self._read_events()
@@ -1788,7 +1789,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual([], self._review_verdict_retries())
         self.assertEqual(1, len(payload["turns"]))
 
-    def _write_reviewed_plan(self, findings: list[dict[str, object]]) -> None:
+    def _write_reviewed_plan(self, findings: list[dict[str, Any]]) -> None:
         """Author a finished plan whose completed review carries ``findings``."""
         write_completed_review_plan(
             self.plan_dir,
@@ -2302,7 +2303,7 @@ class RevertSnapshotCacheIntegrationTests(unittest.TestCase):
 
     def _run_locked_counting_inspections(
         self,
-    ) -> tuple[dict[str, object], list[Path], list[int]]:
+    ) -> tuple[dict[str, Any], list[Path], list[int]]:
         """Drive one `_run_locked` turn, counting every `inspect_plan` call.
 
         Returns the run payload, the plan directories inspected in order, and
@@ -2477,8 +2478,8 @@ class ReviewGuardUnavailableRunTests(unittest.TestCase):
     }
 
     def _run_locked(
-        self, fingerprints: list[dict[str, object]]
-    ) -> tuple[dict[str, object], list[str]]:
+        self, fingerprints: list[dict[str, Any]]
+    ) -> tuple[dict[str, Any], list[str]]:
         """Drive one run with `fingerprints` returned by successive captures."""
         harness_calls: list[str] = []
 
@@ -2662,7 +2663,7 @@ class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
         mutate: bool = True,
         unreadable_plan: bool = False,
         forbid_mailbox_wait: bool = False,
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         """Drive one review turn whose harness fails the way `kwargs` describe."""
 
         def fake_run_harness(name: str, **kwargs: object) -> harnesses.HarnessResult:
@@ -2751,7 +2752,7 @@ class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
                 state.release_lock(self.plan_dir, self.state_dir)
         return payload
 
-    def _assert_guard_pause(self, payload: dict[str, object]) -> dict[str, object]:
+    def _assert_guard_pause(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Assert the run stopped on the guard and returned the durable record."""
         self.assertTrue(payload["paused"])
         self.assertEqual("review-mutated-worktree", payload["pause_reason"])
@@ -2773,7 +2774,7 @@ class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
         return turn
 
     def _assert_supervisor_will_not_relaunch(
-        self, payload: dict[str, object], *, suppressed_reason: str
+        self, payload: dict[str, Any], *, suppressed_reason: str
     ) -> None:
         """Assert the pause the supervisor sees is not the retryable one."""
         policy = payload["pause_policy"]
@@ -2848,7 +2849,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
 
     def _fingerprint(
         self, *exclude: str, include_ignored: bool = False
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         return runner._capture_review_repo_fingerprint(
             self.repo_root,
             self.plan_dir,
@@ -3199,7 +3200,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
 
-    def _ignore_config(self, fingerprint: dict[str, object]) -> dict[str, list[str]]:
+    def _ignore_config(self, fingerprint: dict[str, Any]) -> dict[str, list[str]]:
         entries = fingerprint["ignore_config"]
         assert isinstance(entries, list)
         return {str(rel): [str(kind), str(sha)] for _role, rel, kind, sha in entries}
@@ -4146,7 +4147,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         return self._git("rev-parse", "HEAD")
 
     def _record_repair_cycle(self, **overrides: object) -> None:
-        record: dict[str, object] = {
+        record: dict[str, Any] = {
             "cycle": 1,
             "disposition": runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
             "review_session_id": "2",
@@ -4173,7 +4174,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
 
     def _compute(
         self, cwd: Path | None = None
-    ) -> tuple[dict[str, object] | None, str | None]:
+    ) -> tuple[dict[str, Any] | None, str | None]:
         return runner._compute_review_delta_context(
             event_path=self.event_path,
             plan_dir=self.plan_dir,
@@ -4184,7 +4185,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         """Return the `git` commands the rendered scope tells a reviewer to run."""
         return [span for span in scope.split("`")[1::2] if span.startswith("git ")]
 
-    def _scope_section(self, delta: dict[str, object]) -> str:
+    def _scope_section(self, delta: dict[str, Any]) -> str:
         """Return the `### Scope` text the reviewer is actually told to read."""
         body = runner.build_generated_review_session_body(
             plans.parse_session_id("3"),
@@ -4620,7 +4621,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
                 self.assertEqual(runner.REVIEW_SCOPE_FULL, delta["mode"])
                 self.assertNotIn("src/", self._scope_section(delta))
 
-    def _repo_state(self) -> dict[str, object] | None:
+    def _repo_state(self) -> dict[str, Any] | None:
         return runner._review_repo_state(
             runner._capture_review_repo_fingerprint(
                 self.repo_root, self.plan_dir, exclude=()
@@ -4629,11 +4630,11 @@ class ReviewDeltaScopeTests(unittest.TestCase):
 
     def _advance_cycle(
         self, repo_state: object
-    ) -> tuple[dict[str, object], dict[str, object]]:
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Run one all-clear cycle and return its state and event records."""
         write_completed_review_plan(self.plan_dir, [])
         snapshot = plans.inspect_plan(self.plan_dir)
-        payload: dict[str, object] = {
+        payload: dict[str, Any] = {
             "run_id": "run-1",
             "run_dir": str(self.tmp_path / "run"),
             "review_cycles": [],
@@ -4831,7 +4832,7 @@ class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
         self.event_path = self.tmp_path / events.EVENTS_FILE_NAME
 
     def _write_repair_children(
-        self, findings: list[dict[str, object]]
+        self, findings: list[dict[str, Any]]
     ) -> plans.PlanSnapshot:
         write_completed_review_plan(self.plan_dir, findings)
         repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
@@ -4995,7 +4996,7 @@ class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
             ),
         )
         snapshot = plans.inspect_plan(self.plan_dir)
-        payload: dict[str, object] = {
+        payload: dict[str, Any] = {
             "run_id": "run-1",
             "run_dir": str(self.tmp_path / "run"),
             "review_cycles": [],

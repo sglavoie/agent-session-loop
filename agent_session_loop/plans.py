@@ -1199,8 +1199,10 @@ def parse_status_value(raw_value: str) -> StatusValue:
     normalized = raw_value.strip().lower()
     if normalized == "":
         return "empty"
-    if normalized in {"pending", "complete"}:
-        return normalized
+    if normalized == "pending":
+        return "pending"
+    if normalized == "complete":
+        return "complete"
     return "unknown"
 
 

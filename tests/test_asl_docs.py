@@ -2530,6 +2530,10 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
     """Regression-test contract, review, state-schema, and CLI examples in the
     long-form docs against the authoritative package definitions."""
 
+    docs: str
+    readme: str
+    justfile: str
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.docs = (REPO_ROOT / "docs" / "agent-session-loop.md").read_text(
@@ -3064,6 +3068,11 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
 
 class AssuranceDocsRegressionTests(unittest.TestCase):
     """The assurance vocabulary, surface, and storage as documented."""
+
+    docs: str
+    readme: str
+    package_readme: str
+    asl_skill: str
 
     @classmethod
     def setUpClass(cls) -> None:

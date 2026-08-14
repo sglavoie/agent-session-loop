@@ -1229,8 +1229,8 @@ def _workspace_prompt_lines(
         ]
     )
     for alias in scope.reads:
-        repository = workspace.get(alias)
-        lines.append(f"- {alias}: {repository.root}")
+        resolved = workspace.get(alias)
+        lines.append(f"- {alias}: {resolved.root}")
     lines.extend(
         [
             "",

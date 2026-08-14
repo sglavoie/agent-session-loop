@@ -19,6 +19,7 @@ import tracemalloc
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
@@ -740,8 +741,8 @@ class VerificationExecutorTests(unittest.TestCase):
 
     def _record_observer(
         self,
-    ) -> tuple[verification.VerificationObserver, list[tuple[str, object]]]:
-        events: list[tuple[str, object]] = []
+    ) -> tuple[verification.VerificationObserver, list[tuple[str, Any]]]:
+        events: list[tuple[str, Any]] = []
         observer = verification.VerificationObserver(
             on_check_started=lambda event: events.append(("started", event)),
             on_check_finished=lambda event: events.append(("finished", event)),

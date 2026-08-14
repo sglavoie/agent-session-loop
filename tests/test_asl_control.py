@@ -27,6 +27,7 @@ from collections.abc import Callable
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
@@ -5551,7 +5552,7 @@ class ControlCliTests(unittest.TestCase):
             },
         )
 
-    def payload_from(self, handler, args) -> dict:
+    def payload_from(self, handler, args) -> tuple[int, Any]:
         buffer = io.StringIO()
         with redirect_stdout(buffer):
             exit_code = handler(args)

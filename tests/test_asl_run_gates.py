@@ -16,6 +16,8 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import ModuleType
+from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
@@ -50,6 +52,8 @@ from tests.support import (
 
 
 class RunFlagValidationTests(unittest.TestCase):
+    autopilot: ModuleType
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.autopilot = _load_script_module(
@@ -179,7 +183,7 @@ class RunReadinessGateTests(unittest.TestCase):
         max_sessions: int | None = None,
         max_pending_sessions: int | None = None,
         allow_not_loop_ready: bool = False,
-    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
         argv = [
             sys.executable,
             "-m",
@@ -376,7 +380,7 @@ class RunReadinessGateTests(unittest.TestCase):
             metadata.readiness_sha256,
         )
 
-    def _preflight_skipped_events(self) -> list[dict[str, object]]:
+    def _preflight_skipped_events(self) -> list[dict[str, Any]]:
         event_path = (
             state.plan_state_dir(self.plan_dir, self.state_dir)
             / events.EVENTS_FILE_NAME
@@ -442,8 +446,8 @@ class RunReadinessGateTests(unittest.TestCase):
         )
 
     def _command_runnability_findings(
-        self, payload: dict[str, object]
-    ) -> list[dict[str, object]]:
+        self, payload: dict[str, Any]
+    ) -> list[dict[str, Any]]:
         return [
             finding
             for finding in payload["readiness_gate"]["findings"]
@@ -1176,7 +1180,7 @@ class RunVerificationEnforcementTests(unittest.TestCase):
         self,
         *,
         allow_not_loop_ready: bool = True,
-    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
         argv = [
             sys.executable,
             "-m",
@@ -1563,7 +1567,7 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
             allow_not_loop_ready=True,
         )
 
-    def _invoke(self, run_id: str) -> tuple[int, dict[str, object]]:
+    def _invoke(self, run_id: str) -> tuple[int, dict[str, Any]]:
         lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
         try:
             return runner._run_locked(
@@ -2019,7 +2023,7 @@ class RunRepositoryContentionGateTests(unittest.TestCase):
             stderr="",
         )
 
-    def _run(self, harness_side_effect: object) -> tuple[int, dict[str, object]]:
+    def _run(self, harness_side_effect: object) -> tuple[int, dict[str, Any]]:
         argv = [
             "run",
             str(self.plan_dir),
@@ -2167,7 +2171,7 @@ class RunVerificationInterruptTests(unittest.TestCase):
 
     def _invoke_run_locked(
         self,
-    ) -> tuple[int, dict[str, object]]:
+    ) -> tuple[int, dict[str, Any]]:
         env_updates = {
             "XDG_CONFIG_HOME": str(self.config_home),
             "FAKE_CODEX_MODE": "success",
@@ -2360,7 +2364,7 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
             allow_not_loop_ready=True,
         )
 
-    def _invoke_run_locked(self) -> tuple[int, dict[str, object]]:
+    def _invoke_run_locked(self) -> tuple[int, dict[str, Any]]:
         env_updates = {
             "XDG_CONFIG_HOME": str(self.config_home),
             "FAKE_CODEX_MODE": "success",
@@ -2734,7 +2738,7 @@ class RunProgressJournalIntegrationTests(unittest.TestCase):
             ),
         )
 
-    def _run(self) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    def _run(self) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
         argv = [
             sys.executable,
             "-m",
