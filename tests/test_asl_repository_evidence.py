@@ -67,6 +67,79 @@ class RepositoryEvidenceParityTests(unittest.TestCase):
             runner._review_guard_changed_paths(extracted, compatibility),
         )
 
+    def test_fingerprint_records_ref_mutation_and_classifies_rewritten_head(
+        self,
+    ) -> None:
+        base = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.repository,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        readme = self.repository / "README.md"
+        readme.write_text("first child\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "commit", "-am", "first child"],
+            cwd=self.repository,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        old_tip = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.repository,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        before = repository_evidence.capture_repository_fingerprint(
+            self.repository, self.plan_dir
+        )
+
+        subprocess.run(
+            ["git", "branch", "backup/pre-rewrite", old_tip],
+            cwd=self.repository,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "reset", "--hard", base],
+            cwd=self.repository,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        readme.write_text("replacement child\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "commit", "-am", "replacement child"],
+            cwd=self.repository,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        after = repository_evidence.capture_repository_fingerprint(
+            self.repository, self.plan_dir
+        )
+
+        changes = repository_evidence.compare_repository_fingerprints(before, after)
+        transition = repository_evidence.classify_head_transition(
+            self.repository, before["head"], after["head"]
+        )
+
+        self.assertTrue(changes["head_changed"])
+        self.assertEqual(old_tip, changes["head_before"])
+        self.assertEqual(after["head"], changes["head_after"])
+        self.assertEqual(
+            ["refs/heads/backup/pre-rewrite"],
+            [entry["ref"] for entry in changes["refs_added"]],
+        )
+        self.assertEqual("rewrite", transition["relation"])
+        self.assertEqual(1, transition["commits_added"])
+        self.assertEqual(1, transition["commits_removed"])
+        self.assertTrue(transition["history_rewrite"])
+
 
 class WorkspaceInventoryTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -404,7 +477,10 @@ class RegisteredSnapshotTests(unittest.TestCase):
         twin_snapshot = repository_evidence.capture_registered_snapshot(
             self.root, self.plan_dir, ["twin"]
         )
-        self.assertEqual(before["alpha"], twin_snapshot["twin"])
+        self.assertEqual(before["alpha"]["head"], twin_snapshot["twin"]["head"])
+        self.assertEqual(
+            before["alpha"]["diff_sha256"], twin_snapshot["twin"]["diff_sha256"]
+        )
 
         shutil.rmtree(alpha)
         alpha.symlink_to(twin)

@@ -57,6 +57,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         statuses: tuple[str, ...] = ("pending", "pending"),
         paused_session_id: str = "1",
     ) -> tuple[Path, Path, Path]:
+        init_git_repo(tmp_dir)
         plan_dir = tmp_dir / "plan"
         state_dir = tmp_dir / "state"
         write_plan(plan_dir, statuses)
@@ -446,6 +447,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
+            init_git_repo(tmp_dir)
             plan_dir = tmp_dir / "plan"
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending",))
@@ -562,6 +564,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
+            init_git_repo(tmp_dir)
             plan_dir = tmp_dir / "plan"
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending",))
@@ -709,6 +712,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
     def test_runner_owned_continue_resolution_runs_once_before_stop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
+            init_git_repo(tmp_dir)
             plan_dir = tmp_dir / "plan"
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending", "pending"))
@@ -888,6 +892,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
     def test_runner_owned_pause_resolution_preserves_terminal_pause(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
+            init_git_repo(tmp_dir)
             plan_dir = tmp_dir / "plan"
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending",))
@@ -1020,6 +1025,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
     def test_worker_pause_resolution_bypasses_duplicate_runner_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
+            init_git_repo(tmp_dir)
             plan_dir = tmp_dir / "plan"
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending",))
@@ -1227,6 +1233,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
+            init_git_repo(tmp_dir)
             plan_dir = tmp_dir / "plan"
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending",))
@@ -3342,6 +3349,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
     def test_full_malformed_mailbox_falls_back_without_a_live_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
+            init_git_repo(tmp_dir)
             plan_dir = tmp_dir / "plan"
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending",))

@@ -3620,6 +3620,11 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
                 "worktree_ignore": [],
                 "ignore_config": [],
                 "head_changed": False,
+                "head_before": before["head"],
+                "head_after": after["head"],
+                "refs_added": [],
+                "refs_removed": [],
+                "refs_changed": [],
             },
             changed,
         )

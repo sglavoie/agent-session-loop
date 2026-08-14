@@ -519,7 +519,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             caller_dir = tmp_dir / "caller"
             project_dir = tmp_dir / "project"
             caller_dir.mkdir()
-            project_dir.mkdir()
+            init_git_repo(project_dir)
             write_plan(plan_dir, ("pending",))
             config_path.write_text(
                 json.dumps(
@@ -5560,7 +5560,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         tmp_dir = Path(tmp.name)
         run_cwd = tmp_dir / "repo"
-        run_cwd.mkdir()
+        init_git_repo(run_cwd)
         marker_dir = tmp_dir / "leftovers"
         marker_dir.mkdir()
         self.addCleanup(kill_marked_pids, marker_dir)
@@ -5627,7 +5627,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         tmp_dir = Path(tmp.name)
         run_cwd = tmp_dir / "repo"
-        run_cwd.mkdir()
+        init_git_repo(run_cwd)
         marker_dir = tmp_dir / "leftovers"
         marker_dir.mkdir()
         self.addCleanup(kill_marked_pids, marker_dir)

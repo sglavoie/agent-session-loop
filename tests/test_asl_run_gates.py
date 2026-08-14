@@ -1542,6 +1542,188 @@ class RunVerificationEnforcementTests(unittest.TestCase):
         self.assertIn("malformed-contract", events.PAUSE_REASONS)
 
 
+class LegacyImplementationGuardTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.repo_root = self.tmp_path / "repo"
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+        init_git_repo(self.repo_root)
+        write_plan(
+            self.plan_dir,
+            ("pending",),
+            contracts_by_id={
+                "1": _contract_block(
+                    '{"type": "file_exists", "path": "README.md", "name": "readme"}',
+                    session="1",
+                )
+            },
+        )
+        self.context = verification.VerificationContext.legacy(self.repo_root)
+
+    def _args(self) -> argparse.Namespace:
+        return argparse.Namespace(
+            plan_dir=str(self.plan_dir),
+            cwd=str(self.repo_root),
+            harness="codex",
+            state_dir=str(self.state_dir),
+            json=True,
+            dry_run=False,
+            unsafe_bypass=True,
+            timeout=None,
+            max_sessions=None,
+            commit_mode=None,
+            model=None,
+            effort=None,
+            note=None,
+            allow_not_loop_ready=True,
+        )
+
+    def _invoke(self, run_id: str) -> tuple[int, dict[str, Any]]:
+        lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+        try:
+            return runner._run_locked(
+                args=self._args(),
+                cwd=self.repo_root,
+                timeout=None,
+                max_sessions=None,
+                commit_mode=None,
+                lock_info=lock_info,
+                run_id=run_id,
+                verification_context=self.context,
+            )
+        finally:
+            state.release_lock(self.plan_dir, self.state_dir)
+
+    def _mark_complete(self) -> harnesses.HarnessResult:
+        session_path = self.plan_dir / "session-1.md"
+        session_path.write_text(
+            session_path.read_text(encoding="utf-8").replace(
+                "- **Status**: pending", "- **Status**: complete", 1
+            ),
+            encoding="utf-8",
+        )
+        return harnesses.HarnessResult(
+            name="codex",
+            argv=["fake"],
+            returncode=0,
+            stdout="ok\n",
+            stderr="",
+        )
+
+    def test_commit_mode_none_records_worker_created_commit(self) -> None:
+        def commit_then_complete(*_args: object, **_kwargs: object) -> Any:
+            (self.repo_root / "README.md").write_text(
+                "worker commit\n", encoding="utf-8"
+            )
+            subprocess.run(
+                ["git", "commit", "-am", "worker commit"],
+                cwd=self.repo_root,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            return self._mark_complete()
+
+        with mock.patch.object(
+            runner.harnesses, "run_harness", side_effect=commit_then_complete
+        ):
+            exit_code, payload = self._invoke("legacy-worker-commit")
+
+        self.assertEqual(0, exit_code)
+        self.assertIsNone(payload["commit_mode"])
+        self.assertEqual([], payload["commit_groups"])
+        guard = payload["turns"][0]["workspace_write_guard"]
+        self.assertTrue(guard["passed"])
+        self.assertEqual("legacy-single-repository", guard["scope_mode"])
+        transition = guard["changed"]["."]["head_transition"]
+        self.assertEqual("fast-forward", transition["relation"])
+        self.assertEqual(1, transition["commits_added"])
+        self.assertFalse(transition["history_rewrite"])
+
+    def test_commit_mode_none_records_worker_history_rewrite(self) -> None:
+        readme = self.repo_root / "README.md"
+        readme.write_text("old branch tip\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "commit", "-am", "old branch tip"],
+            cwd=self.repo_root,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        old_tip = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.repo_root,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+
+        def rewrite_then_complete(*_args: object, **_kwargs: object) -> Any:
+            subprocess.run(
+                ["git", "branch", "backup/pre-rewrite", old_tip],
+                cwd=self.repo_root,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "reset", "--hard", "HEAD~1"],
+                cwd=self.repo_root,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            readme.write_text("rewritten branch tip\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "commit", "-am", "rewritten branch tip"],
+                cwd=self.repo_root,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            return self._mark_complete()
+
+        with mock.patch.object(
+            runner.harnesses, "run_harness", side_effect=rewrite_then_complete
+        ):
+            exit_code, payload = self._invoke("legacy-history-rewrite")
+
+        self.assertEqual(0, exit_code)
+        changes = payload["turns"][0]["workspace_write_guard"]["changed"]["."]
+        transition = changes["head_transition"]
+        self.assertEqual("rewrite", transition["relation"])
+        self.assertEqual(1, transition["commits_added"])
+        self.assertEqual(1, transition["commits_removed"])
+        self.assertTrue(transition["history_rewrite"])
+        self.assertIn(
+            "refs/heads/backup/pre-rewrite",
+            [entry["ref"] for entry in changes["refs_added"]],
+        )
+
+    def test_non_git_legacy_scope_refuses_before_harness(self) -> None:
+        shutil.rmtree(self.repo_root / ".git")
+
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=AssertionError("harness must not start without Git scope"),
+        ):
+            exit_code, payload = self._invoke("legacy-scope-unavailable")
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual(
+            events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+            payload["pause_reason"],
+        )
+        self.assertEqual([], payload["turns"])
+        guard = payload["pause_details"]["workspace_write_guard"]
+        self.assertEqual("legacy-single-repository", guard["scope_mode"])
+        self.assertEqual("repository-unavailable", guard["unavailable"]["."]["reason"])
+
+
 class WorkspaceGuardExceptionTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()

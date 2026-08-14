@@ -27,6 +27,7 @@ __all__ = [
     "capture_registered_snapshot",
     "capture_repository_fingerprint",
     "capture_workspace_snapshot",
+    "classify_head_transition",
     "compare_repository_fingerprints",
     "compare_workspace_snapshots",
     "discover_git_worktree_inventory",
@@ -248,6 +249,22 @@ def _review_guard_diff_base(cwd: Path) -> tuple[str, str]:
     if not empty_tree:
         raise _ReviewGuardUnavailable("empty-tree-unresolved", empty_tree_argv)
     return "", empty_tree
+
+
+def _fingerprint_refs(cwd: Path) -> list[list[str]]:
+    """Capture every durable Git ref tip in a deterministic representation."""
+    argv = ["for-each-ref", "--format=%(refname)%00%(objectname)"]
+    text = _review_guard_git(cwd, argv).stdout
+    refs: list[list[str]] = []
+    for raw_line in text.splitlines():
+        try:
+            name, object_name = raw_line.split("\0", 1)
+        except ValueError as error:
+            raise _ReviewGuardUnavailable("git-ref-output-malformed", argv) from error
+        if not name.startswith("refs/") or not object_name:
+            raise _ReviewGuardUnavailable("git-ref-output-malformed", argv)
+        refs.append([name, object_name])
+    return sorted(refs)
 
 
 def _literal_exclude_pathspec(rel_posix: str) -> str:
@@ -700,7 +717,8 @@ def _capture_review_repo_fingerprint(
     evidence depends on failed; :func:`_review_guard_unavailable_detail`
     recognizes that shape so the runner can fail closed instead of comparing
     fingerprints that cannot see a mutation. Otherwise returns
-    ``{"git": True, "head": <sha or "">, "diff_sha256": <sha>,
+    ``{"git": True, "head": <sha or "">, "refs": [[name, sha], ...],
+    "diff_sha256": <sha>,
     "tracked_changed": [rel, ...], "tracked_patches": [[rel, patch_sha256], ...],
     "index_diff_sha256": <sha>, "index_changed": [rel, ...],
     "index_patches": [[rel, patch_sha256], ...],
@@ -795,6 +813,7 @@ def _capture_review_repo_fingerprint(
             ) from error
 
         head_sha, diff_base = _review_guard_diff_base(cwd_path)
+        refs_payload = _fingerprint_refs(cwd_path)
 
         # ``:(top)`` anchors the positive pathspec at the repository root, so a
         # nested ``cwd`` still fingerprints the whole repository instead of one
@@ -920,6 +939,7 @@ def _capture_review_repo_fingerprint(
     return {
         "git": True,
         "head": head_sha,
+        "refs": refs_payload,
         "diff_sha256": hashlib.sha256(diff_text.encode("utf-8")).hexdigest(),
         "tracked_changed": sorted(tracked_changed),
         "tracked_patches": tracked_patches,
@@ -1044,11 +1064,19 @@ def _review_guard_changed_paths(
             for role, rel, kind, sha in (fingerprint.get("ignore_config") or ())
         }
 
+    def refs_map(fingerprint: Mapping[str, Any]) -> dict[str, str]:
+        return {
+            str(name): str(object_name)
+            for name, object_name in (fingerprint.get("refs") or ())
+        }
+
     untracked_before = node_map(before, "untracked")
     untracked_after = node_map(after, "untracked")
     ignore_before = ignore_map(before)
     ignore_after = ignore_map(after)
 
+    refs_before = refs_map(before)
+    refs_after = refs_map(after)
     return {
         "tracked": sorted(
             moved(
@@ -1085,6 +1113,25 @@ def _review_guard_changed_paths(
             }
         ),
         "head_changed": before.get("head") != after.get("head"),
+        "head_before": before.get("head"),
+        "head_after": after.get("head"),
+        "refs_added": [
+            {"ref": name, "after": refs_after[name]}
+            for name in sorted(set(refs_after) - set(refs_before))
+        ],
+        "refs_removed": [
+            {"ref": name, "before": refs_before[name]}
+            for name in sorted(set(refs_before) - set(refs_after))
+        ],
+        "refs_changed": [
+            {
+                "ref": name,
+                "before": refs_before[name],
+                "after": refs_after[name],
+            }
+            for name in sorted(set(refs_before) & set(refs_after))
+            if refs_before[name] != refs_after[name]
+        ],
     }
 
 
@@ -1187,6 +1234,116 @@ def compare_repository_fingerprints(
 ) -> dict[str, Any]:
     """Compare two single-repository evidence payloads."""
     return _review_guard_changed_paths(before, after)
+
+
+def classify_head_transition(
+    cwd: str | Path,
+    before_head: str,
+    after_head: str,
+    *,
+    _run_git_fn: GitRunner | None = None,
+) -> dict[str, Any]:
+    """Classify one observed HEAD move and retain bounded commit counts.
+
+    The comparison fingerprint proves that the tips moved. These ancestry
+    probes distinguish ordinary worker-created commits from rewinds and
+    rewritten/diverged history while the pre-turn objects are still present.
+    Any indeterminate probe fails closed rather than labelling a rewrite as an
+    ordinary commit.
+    """
+    token = _GIT_RUNNER.set(_run_git_fn)
+    root = Path(cwd)
+    try:
+
+        def count_range(revision_range: str) -> int:
+            argv = ["rev-list", "--count", revision_range]
+            try:
+                result = _run_git(root, argv)
+            except Exception as error:
+                raise RepositoryEvidenceError(
+                    f"could not count repository history: {error}"
+                ) from error
+            if result.returncode != 0:
+                detail = result.stderr.strip() or result.stdout.strip()
+                raise RepositoryEvidenceError(
+                    "could not count repository history: "
+                    f"{detail or 'git rev-list failed'}"
+                )
+            try:
+                return int(result.stdout.strip())
+            except ValueError as error:
+                raise RepositoryEvidenceError(
+                    "could not count repository history: malformed git output"
+                ) from error
+
+        if before_head == after_head:
+            return {
+                "before": before_head,
+                "after": after_head,
+                "relation": "unchanged",
+                "commits_added": 0,
+                "commits_removed": 0,
+                "history_rewrite": False,
+            }
+        if not before_head:
+            return {
+                "before": before_head,
+                "after": after_head,
+                "relation": "created",
+                "commits_added": count_range(after_head),
+                "commits_removed": 0,
+                "history_rewrite": False,
+            }
+        if not after_head:
+            return {
+                "before": before_head,
+                "after": after_head,
+                "relation": "deleted",
+                "commits_added": 0,
+                "commits_removed": count_range(before_head),
+                "history_rewrite": True,
+            }
+
+        def is_ancestor(ancestor: str, descendant: str) -> bool:
+            argv = ["merge-base", "--is-ancestor", ancestor, descendant]
+            try:
+                result = _run_git(root, argv)
+            except Exception as error:
+                raise RepositoryEvidenceError(
+                    f"could not classify repository history: {error}"
+                ) from error
+            if result.returncode in (0, 1):
+                return result.returncode == 0
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise RepositoryEvidenceError(
+                "could not classify repository history: "
+                f"{detail or 'git merge-base failed'}"
+            )
+
+        forward = is_ancestor(before_head, after_head)
+        backward = False if forward else is_ancestor(after_head, before_head)
+        if forward:
+            relation = "fast-forward"
+            commits_added = count_range(f"{before_head}..{after_head}")
+            commits_removed = 0
+        elif backward:
+            relation = "rewind"
+            commits_added = 0
+            commits_removed = count_range(f"{after_head}..{before_head}")
+        else:
+            relation = "rewrite"
+            commits_added = count_range(f"{before_head}..{after_head}")
+            commits_removed = count_range(f"{after_head}..{before_head}")
+        return {
+            "before": before_head,
+            "after": after_head,
+            "relation": relation,
+            "commits_added": commits_added,
+            "commits_removed": commits_removed,
+            "history_rewrite": relation in {"rewind", "rewrite"},
+        }
+    finally:
+        _GIT_RUNNER.reset(token)
 
 
 def format_repository_changes(changed_paths: Mapping[str, Any]) -> str:

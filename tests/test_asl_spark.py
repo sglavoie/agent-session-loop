@@ -26,6 +26,7 @@ from agent_session_loop import (
 )
 from tests.support import (
     _validator_payload,
+    init_git_repo,
     install_fake_codex,
     patched_env,
     write_plan,
@@ -307,6 +308,7 @@ class SparkFallbackIntegrationTests(unittest.TestCase):
     def test_quota_failure_retries_same_pending_session_on_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            init_git_repo(root)
             plan_dir = root / "plan"
             state_root = root / "state"
             write_plan(plan_dir, ("pending",))

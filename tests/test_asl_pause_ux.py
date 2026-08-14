@@ -29,6 +29,7 @@ from agent_session_loop import (
     state,
 )
 from tests.support import (
+    init_git_repo,
     read_jsonl,
     write_plan,
 )
@@ -43,6 +44,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         statuses: tuple[str, ...] = ("pending", "pending"),
         paused_session_id: str = "1",
     ) -> tuple[Path, Path, Path]:
+        init_git_repo(tmp_dir)
         plan_dir = tmp_dir / "plan"
         state_dir = tmp_dir / "state"
         write_plan(plan_dir, statuses)
@@ -1026,6 +1028,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
     def test_non_reply_turn_argv_is_not_redacted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
+            init_git_repo(tmp_dir)
             plan_dir = tmp_dir / "plan"
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending",))
@@ -1099,6 +1102,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
+            init_git_repo(tmp_dir)
             plan_dir = tmp_dir / "plan"
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending", "pending"))

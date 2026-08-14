@@ -1876,6 +1876,82 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertIn("write-guard", results["mutation-commit-guards"].detail)
             self.assertEqual("unavailable", results["scope-escape"].status)
 
+    def test_a_legacy_implementation_turn_without_a_guard_is_a_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            repository = history[0] / "app"
+            (history[1] / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
+            (history[1] / "session-01.md").write_text("# Session 1\n", encoding="utf-8")
+            (history[1] / plans.PLAN_METADATA_FILE_NAME).write_text(
+                json.dumps({"version": 1, "cwd": str(repository)}),
+                encoding="utf-8",
+            )
+            state_payload = self._read_state(history[2])
+            state_payload.pop("repositories")
+            state_payload.pop("workspace_root")
+            state_payload["commit_mode"] = None
+            state_payload["run_config"]["cwd"] = str(repository)
+            self._write_state(history[2], state_payload)
+            result_payload = self._read_result(history[3])
+            del result_payload["workspace_write_guard"]
+            self._write_result(history[3] / "turn-0001-01", result_payload)
+
+            _, results = self._audit(history, workspace_root=repository)
+
+            self.assertEqual("fail", results["mutation-commit-guards"].status)
+            self.assertIn(
+                "implementation work without a write-guard",
+                results["mutation-commit-guards"].detail,
+            )
+
+    def test_a_worker_head_move_without_transition_evidence_is_a_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            payload = self._read_result(history[3])
+            payload["workspace_write_guard"]["changed"] = {
+                "app": {
+                    "head_changed": True,
+                    "head_before": "a" * 40,
+                    "head_after": "b" * 40,
+                }
+            }
+            self._write_result(history[3] / "turn-0001-01", payload)
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["mutation-commit-guards"].status)
+            self.assertIn(
+                "history transition", results["mutation-commit-guards"].detail
+            )
+
+    def test_a_recorded_worker_history_rewrite_is_auditable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            payload = self._read_result(history[3])
+            payload["workspace_write_guard"]["changed"] = {
+                "app": {
+                    "head_changed": True,
+                    "head_before": "a" * 40,
+                    "head_after": "b" * 40,
+                    "head_transition": {
+                        "before": "a" * 40,
+                        "after": "b" * 40,
+                        "relation": "rewrite",
+                        "commits_added": 3,
+                        "commits_removed": 3,
+                        "history_rewrite": True,
+                    },
+                }
+            }
+            self._write_result(history[3] / "turn-0001-01", payload)
+
+            _, results = self._audit(history)
+
+            verdict = results["mutation-commit-guards"]
+            self.assertEqual("pass", verdict.status)
+            self.assertIn("1 worker HEAD move(s)", verdict.detail)
+            self.assertIn("1 history rewrite(s)", verdict.detail)
+
     def test_a_widened_write_scope_with_a_passing_repair_is_contained(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))

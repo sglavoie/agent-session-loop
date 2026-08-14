@@ -2699,21 +2699,57 @@ def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
             )
 
     guarded = 0
+    head_moves = 0
+    history_rewrites = 0
     unguarded: list[str] = []
-    if registry.get("registered"):
-        for turn in context.turns:
-            result = _mapping(turn.get("result"))
-            if result.get("available") is False or turn.get("anomalous") is True:
+    for turn in context.turns:
+        result = _mapping(turn.get("result"))
+        if result.get("available") is False or turn.get("anomalous") is True:
+            continue
+        # Registered workspaces guard review turns as well. Legacy runs have a
+        # separate read-only review guard, but every implementation turn must
+        # carry repository evidence even when commit mode is disabled.
+        requires_guard = registry.get("registered") or (
+            result.get("session_kind") == "implementation"
+        )
+        if not requires_guard:
+            continue
+        if isinstance(turn.get("directory"), str):
+            references.append(turn["directory"])
+        guard = _mapping(result.get("workspace_write_guard"))
+        if not guard:
+            unguarded.append(str(turn.get("name")))
+            continue
+        guarded += 1
+        for raw_changes in _mapping(guard.get("changed")).values():
+            changes = _mapping(raw_changes)
+            if changes.get("head_changed") is not True:
                 continue
-            if isinstance(turn.get("directory"), str):
-                references.append(turn["directory"])
-            if _mapping(result.get("workspace_write_guard")):
-                guarded += 1
-            else:
-                unguarded.append(str(turn.get("name")))
+            head_moves += 1
+            transition = _mapping(changes.get("head_transition"))
+            if not transition:
+                contradictions.append(
+                    f"{turn.get('name')} changed HEAD without recording its "
+                    "history transition"
+                )
+                continue
+            relation = transition.get("relation")
+            if relation not in {
+                "created",
+                "deleted",
+                "fast-forward",
+                "rewind",
+                "rewrite",
+            }:
+                contradictions.append(
+                    f"{turn.get('name')} recorded an invalid HEAD transition"
+                )
+                continue
+            if relation in {"deleted", "rewind", "rewrite"}:
+                history_rewrites += 1
     if unguarded:
         contradictions.append(
-            f"{_names(unguarded)} completed on a registered workspace without a "
+            f"{_names(unguarded)} completed implementation work without a "
             "write-guard result"
         )
 
@@ -2734,8 +2770,9 @@ def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
         )
     return _Verdict(
         "pass",
-        f"{guarded} guarded turn(s) and {len(attempts)} commit attempt(s) stayed "
-        "inside the run's declared write scope",
+        f"{guarded} guarded turn(s), {len(attempts)} commit attempt(s), "
+        f"{head_moves} worker HEAD move(s), and {history_rewrites} history "
+        "rewrite(s) stayed inside the run's declared write scope",
         evidence,
     )
 
@@ -2959,9 +2996,10 @@ _CHECKS: tuple[tuple[CheckSpec, Callable[[_CheckContext], _Verdict]], ...] = (
             invariant_key="guards.mutation-and-commit",
             severity="critical",
             recommendation=(
-                "Record a write-guard result for every completed turn on a "
-                "registered workspace, and commit only to repositories a session "
-                "declares as writable."
+                "Capture and record repository fingerprints around every "
+                "implementation turn, including legacy and commit-mode-none runs; "
+                "classify worker HEAD moves and commit only inside established "
+                "repository write scope."
             ),
         ),
         _check_mutation_commit_guards,

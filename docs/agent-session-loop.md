@@ -1117,6 +1117,19 @@ all declared aliases readable and an empty write set, so any mutation of a
 registered repository is retained, qualified, and rejected before the turn
 outcome can take precedence.
 
+Legacy implementation turns use the same before/after evidence lifecycle even
+without an auto-commit mode. The bound root must resolve to one Git repository;
+otherwise `workspace-write-guard-unavailable` pauses before the harness starts.
+The guard fingerprints that whole repository, including every durable ref, and
+records exact HEAD tips plus added, removed, or changed refs. A moved HEAD is
+classified by ancestry as a creation, fast-forward, rewind, deletion, or
+rewrite with bounded added/removed commit counts. Thus a worker-created commit
+or history rewrite is visible in `workspace_write_guard` when `commit_mode` is
+null instead of disappearing between ASL's own commit-attempt records. If the
+post-turn repository or ancestry evidence cannot be established, the runner
+retains content, restores the handoff to pending, and fails closed before any
+verification or commit step.
+
 Registered repository paths may not traverse symlinks, even when the target is
 another directory beneath the workspace; resolution rejects such a binding
 before preparation can make it runnable. Preflight captures every declared
@@ -3542,13 +3555,14 @@ Common pause reasons:
   bounded, credential-redacted intent report; its `git_roots` names the
   conflicting repositories. The fix is to declare the registry and per-session
   scopes, never to widen `--cwd` to their common parent.
-- `workspace-write-guard-unavailable`: the runner could not capture complete
-  Git evidence for a registered repository before or after a registered
-  implementation turn. A before-turn failure spends no harness turn. An
+- `workspace-write-guard-unavailable`: the runner could not establish a legacy
+  run's single Git repository or capture complete Git/ref/history evidence for
+  a legacy or registered repository before or after an implementation turn. A
+  before-turn failure spends no harness turn. An
   after-turn failure retains content, returns the handoff to pending, and
   outranks every harness-result branch because the runner cannot prove scope.
-  Every such failure names a registered repository and stays fail-closed;
-  repair that repository's evidence rather than excluding anything.
+  Every such failure names the unavailable repository evidence and stays
+  fail-closed; repair that evidence rather than excluding anything.
 - `review-mutated-worktree`: the review harness changed repo content outside
   the plan directory. The pre/post fingerprint covers the working tree's
   `HEAD`, tracked diff, the separate `--cached` (index) diff — so staging a

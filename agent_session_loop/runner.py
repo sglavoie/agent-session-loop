@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -10754,6 +10755,73 @@ def _capture_workspace_write_guard_snapshot(
     )
 
 
+def _capture_legacy_implementation_snapshot(
+    *,
+    cwd: Path,
+    plan_dir: Path,
+    exclude: tuple[str, ...],
+    include_ignored: bool,
+) -> repository_evidence.WorkspaceSnapshot:
+    """Capture the one Git repository that grants a legacy run authority."""
+    return OrderedDict(
+        (
+            (
+                ".",
+                _capture_review_repo_fingerprint(
+                    cwd,
+                    plan_dir,
+                    exclude=exclude,
+                    include_ignored=include_ignored,
+                ),
+            ),
+        )
+    )
+
+
+def _annotate_history_transitions(
+    comparison: dict[str, Any],
+    *,
+    repository_roots: Mapping[str, Path],
+) -> None:
+    """Attach ancestry-backed HEAD telemetry or mark the guard unavailable."""
+    raw_changed = comparison.get("changed")
+    if not isinstance(raw_changed, Mapping):
+        return
+    unavailable = comparison.setdefault("unavailable", OrderedDict())
+    for repository, raw_changes in raw_changed.items():
+        if not isinstance(raw_changes, dict):
+            continue
+        before_head = raw_changes.get("head_before")
+        after_head = raw_changes.get("head_after")
+        if not isinstance(before_head, str) or not isinstance(after_head, str):
+            unavailable[str(repository)] = {
+                "after": {"reason": "history-transition-evidence-missing"}
+            }
+            continue
+        root = repository_roots.get(str(repository))
+        if root is None:
+            unavailable[str(repository)] = {
+                "after": {"reason": "repository-scope-unresolved"}
+            }
+            continue
+        try:
+            raw_changes["head_transition"] = (
+                repository_evidence.classify_head_transition(
+                    root,
+                    before_head,
+                    after_head,
+                    _run_git_fn=_run_git,
+                )
+            )
+        except repository_evidence.RepositoryEvidenceError as error:
+            unavailable[str(repository)] = {
+                "after": {
+                    "reason": "history-transition-unavailable",
+                    "error": str(error),
+                }
+            }
+
+
 def _workspace_review_bases(
     workspace: workspaces.ResolvedWorkspace,
     snapshot: Mapping[str, Mapping[str, Any]],
@@ -10934,6 +11002,56 @@ def _workspace_write_guard_evidence(
         ],
         "added": list(comparison.get("added") or ()),
         "removed": list(comparison.get("removed") or ()),
+        "unavailable": unavailable_payload,
+        "violations": violations,
+        "excluded": list(exclude),
+        "include_ignored": include_ignored,
+    }
+
+
+def _legacy_implementation_write_guard_evidence(
+    *,
+    cwd: Path,
+    comparison: Mapping[str, Any],
+    exclude: tuple[str, ...],
+    include_ignored: bool,
+) -> dict[str, Any]:
+    """Project a legacy single-repository comparison into the guard schema."""
+    raw_changed = comparison.get("changed")
+    changed = (
+        {str(key): dict(value) for key, value in raw_changed.items()}
+        if isinstance(raw_changed, Mapping)
+        else {}
+    )
+    unavailable = comparison.get("unavailable")
+    unavailable_payload = (
+        {str(key): value for key, value in unavailable.items()}
+        if isinstance(unavailable, Mapping)
+        else {}
+    )
+    added = list(comparison.get("added") or ())
+    removed = list(comparison.get("removed") or ())
+    violations = [
+        {
+            "kind": f"repository-{kind}",
+            "repository": str(repository),
+            "alias": "legacy",
+            "qualified_paths": [],
+        }
+        for kind, repositories in (("added", added), ("removed", removed))
+        for repository in repositories
+    ]
+    return {
+        "passed": not unavailable_payload and not violations,
+        "scope_mode": "legacy-single-repository",
+        "repository_root": str(cwd),
+        "read_aliases": ["legacy"],
+        "write_aliases": ["legacy"],
+        "registered_repositories": [],
+        "changed": changed,
+        "authorized_aliases": ["legacy"] if changed else [],
+        "added": added,
+        "removed": removed,
         "unavailable": unavailable_payload,
         "violations": violations,
         "excluded": list(exclude),
@@ -11129,6 +11247,13 @@ def _enforce_workspace_write_guard(
         comparison = repository_evidence.compare_workspace_snapshots(
             snapshot_before, snapshot_after
         )
+        _annotate_history_transitions(
+            comparison,
+            repository_roots={
+                repository.repository.path: repository.root
+                for repository in workspace.repositories
+            },
+        )
 
     evidence = _workspace_write_guard_evidence(
         workspace=workspace,
@@ -11205,6 +11330,90 @@ def _enforce_workspace_write_guard(
         payload,
         reason=reason,
         message=message,
+        details={
+            **session_details,
+            "workspace_write_guard": guard_record,
+        },
+        persistence=persistence,
+    )
+    return True
+
+
+def _enforce_legacy_implementation_write_guard(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    persistence: _RunPersistence,
+    cwd: Path,
+    before: plans.PlanSnapshot,
+    after: plans.PlanSnapshot | None,
+    snapshot_before: repository_evidence.WorkspaceSnapshot,
+    exclude: tuple[str, ...],
+    include_ignored: bool,
+    session_id: str,
+    session_label: str,
+    session_details: dict[str, Any],
+    turn_payload: dict[str, Any],
+    paths: dict[str, Path],
+    plan_cache: plans.PlanSnapshotCache,
+) -> bool:
+    """Fail closed around every legacy implementation turn, in every mode."""
+    snapshot_after = _capture_legacy_implementation_snapshot(
+        cwd=cwd,
+        plan_dir=before.plan_dir,
+        exclude=exclude,
+        include_ignored=include_ignored,
+    )
+    comparison = repository_evidence.compare_workspace_snapshots(
+        snapshot_before, snapshot_after
+    )
+    _annotate_history_transitions(
+        comparison,
+        repository_roots={".": cwd},
+    )
+    evidence = _legacy_implementation_write_guard_evidence(
+        cwd=cwd,
+        comparison=comparison,
+        exclude=exclude,
+        include_ignored=include_ignored,
+    )
+    if evidence["passed"]:
+        with persistence.lock:
+            turn_payload["workspace_write_guard"] = evidence
+            _write_json_file(paths["result"], turn_payload)
+        return False
+
+    reason = events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE
+    failure_note = (
+        "implementation write guard unavailable; legacy repository scope or "
+        "history evidence could not be captured safely"
+    )
+    revert_target = after if after is not None else before
+    reverted = _revert_session_status_to_pending(
+        revert_target, session_id, failure_note=failure_note
+    )
+    inspected = _reinspect_after_revert(
+        before.plan_dir, revert_target, reverted, plan_cache
+    )
+    guard_record = {
+        **evidence,
+        "session_id": session_id,
+        "reason": reason,
+        "phase": "after",
+        "reverted_to_pending": reverted is not None,
+    }
+    with persistence.lock:
+        payload["final_snapshot"] = _snapshot_payload(inspected)
+        turn_payload["workspace_write_guard"] = guard_record
+        _write_json_file(paths["result"], turn_payload)
+    _pause_run(
+        event_path,
+        payload,
+        reason=reason,
+        message=(
+            f"implementation write guard unavailable after {session_label}; "
+            "legacy repository scope or history evidence could not be captured safely"
+        ),
         details={
             **session_details,
             "workspace_write_guard": guard_record,
@@ -13802,6 +14011,7 @@ def _run_locked(
             workspace_snapshot_before: repository_evidence.WorkspaceSnapshot | None = (
                 None
             )
+            legacy_snapshot_before: repository_evidence.WorkspaceSnapshot | None = None
             if workspace is not None:
                 assert session_scope is not None
                 if is_review_session and prepared_review_workspace_snapshot is not None:
@@ -13964,15 +14174,75 @@ def _run_locked(
                             },
                         },
                     )
+            elif not is_review_session:
+                legacy_snapshot_before = _capture_legacy_implementation_snapshot(
+                    cwd=cwd,
+                    plan_dir=before.plan_dir,
+                    exclude=review_guard_excludes,
+                    include_ignored=review_guard_include_ignored,
+                )
+                unavailable = _workspace_snapshot_unavailable(
+                    legacy_snapshot_before,
+                    required_repository_paths=(".",),
+                )
+                if unavailable:
+                    guard_record = {
+                        "passed": False,
+                        "scope_mode": "legacy-single-repository",
+                        "reason": (
+                            events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE
+                        ),
+                        "phase": "before",
+                        "repository_root": str(cwd),
+                        "unavailable": unavailable,
+                        "read_aliases": ["legacy"],
+                        "write_aliases": ["legacy"],
+                        "excluded": list(review_guard_excludes),
+                        "include_ignored": review_guard_include_ignored,
+                    }
+                    with persistence.lock:
+                        payload["final_snapshot"] = _snapshot_payload(before)
+                    _pause_run(
+                        event_path,
+                        payload,
+                        reason=(events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE),
+                        message=(
+                            "implementation write guard unavailable before "
+                            f"{session_label}; the legacy Git repository scope "
+                            "could not be established safely"
+                        ),
+                        details={
+                            **session_details,
+                            "workspace_write_guard": guard_record,
+                        },
+                        persistence=persistence,
+                    )
+                    break
             if workspace is not None:
                 assert session_scope is not None
                 assert workspace_snapshot_before is not None
                 pending_exception_guard = {
+                    "mode": "workspace",
                     "workspace": workspace,
                     "scope": session_scope,
                     "before": before,
                     "after": None,
                     "snapshot_before": workspace_snapshot_before,
+                    "session_id": session_id,
+                    "session_label": session_label,
+                    "session_details": session_details,
+                    "turn_payload": None,
+                    "active_turn": active_turn,
+                    "live_turn": live_turn,
+                    "paths": paths,
+                }
+            elif legacy_snapshot_before is not None:
+                pending_exception_guard = {
+                    "mode": "legacy",
+                    "cwd": cwd,
+                    "before": before,
+                    "after": None,
+                    "snapshot_before": legacy_snapshot_before,
                     "session_id": session_id,
                     "session_label": session_label,
                     "session_details": session_details,
@@ -14248,6 +14518,26 @@ def _run_locked(
                     with persistence.lock:
                         turn_payload["review_repository_bases"] = review_bases
                         _write_json_file(paths["result"], turn_payload)
+            elif legacy_snapshot_before is not None:
+                pending_exception_guard = None
+                if _enforce_legacy_implementation_write_guard(
+                    event_path=event_path,
+                    payload=payload,
+                    persistence=persistence,
+                    cwd=cwd,
+                    before=before,
+                    after=after,
+                    snapshot_before=legacy_snapshot_before,
+                    exclude=review_guard_excludes,
+                    include_ignored=review_guard_include_ignored,
+                    session_id=session_id,
+                    session_label=session_label,
+                    session_details=session_details,
+                    turn_payload=turn_payload,
+                    paths=paths,
+                    plan_cache=plan_cache,
+                ):
+                    break
             if (
                 is_review_session
                 and review_fingerprint_before is not None
@@ -15087,24 +15377,43 @@ def _run_locked(
                     "after": (_snapshot_payload(after) if after is not None else None),
                 }
             try:
-                _enforce_workspace_write_guard(
-                    event_path=event_path,
-                    payload=payload,
-                    persistence=persistence,
-                    workspace=guard_context["workspace"],
-                    scope=guard_context["scope"],
-                    before=guard_context["before"],
-                    after=after,
-                    snapshot_before=guard_context["snapshot_before"],
-                    exclude=review_guard_excludes,
-                    include_ignored=review_guard_include_ignored,
-                    session_id=str(guard_context["session_id"]),
-                    session_label=str(guard_context["session_label"]),
-                    session_details=guard_context["session_details"],
-                    turn_payload=turn_payload,
-                    paths=guard_context["paths"],
-                    plan_cache=plan_cache,
-                )
+                if guard_context.get("mode") == "legacy":
+                    _enforce_legacy_implementation_write_guard(
+                        event_path=event_path,
+                        payload=payload,
+                        persistence=persistence,
+                        cwd=guard_context["cwd"],
+                        before=guard_context["before"],
+                        after=after,
+                        snapshot_before=guard_context["snapshot_before"],
+                        exclude=review_guard_excludes,
+                        include_ignored=review_guard_include_ignored,
+                        session_id=str(guard_context["session_id"]),
+                        session_label=str(guard_context["session_label"]),
+                        session_details=guard_context["session_details"],
+                        turn_payload=turn_payload,
+                        paths=guard_context["paths"],
+                        plan_cache=plan_cache,
+                    )
+                else:
+                    _enforce_workspace_write_guard(
+                        event_path=event_path,
+                        payload=payload,
+                        persistence=persistence,
+                        workspace=guard_context["workspace"],
+                        scope=guard_context["scope"],
+                        before=guard_context["before"],
+                        after=after,
+                        snapshot_before=guard_context["snapshot_before"],
+                        exclude=review_guard_excludes,
+                        include_ignored=review_guard_include_ignored,
+                        session_id=str(guard_context["session_id"]),
+                        session_label=str(guard_context["session_label"]),
+                        session_details=guard_context["session_details"],
+                        turn_payload=turn_payload,
+                        paths=guard_context["paths"],
+                        plan_cache=plan_cache,
+                    )
             except Exception as guard_error:
                 error.add_note(
                     "post-turn workspace write guard failed while handling "
